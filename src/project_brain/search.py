@@ -286,6 +286,7 @@ def infer_scope(query: str, store: BrainStore):
 def _guard_index_freshness(db_path, store, brain_root) -> None:
     """§7 신선도 가드 — stale 색인을 명시 거부하고 rebuild 안내."""
     from project_brain.search_index import (
+        StaleIndexError,
         compute_corpus_fingerprint,
         read_meta_fingerprint,
     )
@@ -295,7 +296,7 @@ def _guard_index_freshness(db_path, store, brain_root) -> None:
         return  # 지문 없는 구버전 색인은 schema_version 가드가 이미 거부한다
     current = compute_corpus_fingerprint(store, brain_root)
     if indexed != current:
-        raise RuntimeError(
+        raise StaleIndexError(
             "색인이 코퍼스보다 오래됨(stale) — 객체 변경이 색인에 반영되지 않았다. "
             "`project-brain index rebuild`로 재생성 후 다시 검색하라."
         )

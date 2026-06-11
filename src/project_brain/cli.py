@@ -324,15 +324,16 @@ def _run_search(argv) -> int:
     args = parser.parse_args(argv)
 
     from project_brain.search import eval_recall
+    from project_brain.search_index import StaleIndexError
 
     embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
     try:
         resp = eval_recall(
             args.query, db_path=args.db, embedder=embedder, brain_root=args.brain_root
         )
-    # stale 색인(신선도 가드 RuntimeError)도 누락 색인과 같은 모양의 에러로 —
-    # 어시스턴트가 결과 JSON만 보고 rebuild가 해결책임을 알 수 있게(traceback 금지).
-    except (FileNotFoundError, RuntimeError) as exc:
+    # rebuild가 해결책인 오류(누락 색인·stale 색인 가드)만 정상 JSON 안내로 —
+    # 환경 장애(sqlite-vec 미설치·모델 로드 실패 등 RuntimeError)는 그대로 드러낸다.
+    except (FileNotFoundError, StaleIndexError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
     # raw 채널(§2.2): 청크 발췌에 신뢰 라벨을 항목마다 박는다 — 어시스턴트가 결과만

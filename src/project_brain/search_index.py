@@ -27,6 +27,11 @@ from project_brain.store import BrainStore
 from project_brain.surface import EXTRACTOR_VERSION, content_hash, extract_surface
 from project_brain.tokenize_ko import active_backend, tokenize
 
+
+class StaleIndexError(RuntimeError):
+    """색인이 코퍼스/엔진과 안 맞아 rebuild가 해결책인 오류 — cli가 정상 안내로 처리."""
+
+
 # 색인 스키마 자체의 버전(테이블 구조 변경 시 올린다 — meta 불일치 감지용).
 # v2: documents.row_id 컬럼 + documents_vec(vec0) 추가(슬라이스 3 벡터 색인).
 # v3: documents.surface_text 컬럼 + raw 청크 행(§2.2 raw 본문 색인 — raw 청크는
@@ -299,7 +304,7 @@ def _guard_schema_version(meta_row) -> None:
     에러나 무경고 빈 결과로 조용히 깨지지 않게 명확히 거부한다(2026-06-10 슬라이스 3
     리뷰 major 반영)."""
     if meta_row is not None and meta_row["schema_version"] != SCHEMA_VERSION:
-        raise RuntimeError(
+        raise StaleIndexError(
             f"색인 스키마 버전 불일치: 색인 v{meta_row['schema_version']} ≠ "
             f"코드 v{SCHEMA_VERSION} — `cli index rebuild`로 재구축 필요(§4)."
         )

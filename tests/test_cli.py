@@ -592,6 +592,22 @@ class TestCliSearch(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("rebuild", payload["error"])
 
+    def test_search_unrelated_runtime_error_escapes(self):
+        # 품질 리뷰(2026-06-11): 환경 장애(임베더 모델 로드 실패·sqlite-vec 미설치 등)의
+        # RuntimeError는 rebuild 안내 JSON으로 강등하면 안 된다 — 그대로 새어 나와
+        # 시끄럽게 실패해야 stale 색인과 다른 조치를 한다(StaleIndexError만 정상 안내).
+        # eval_recall은 _run_search가 함수 안에서 import하므로 search 모듈 쪽을 패치한다
+        # (검증 대상은 cli의 예외 라우팅이지 검색 스택이 아님).
+        argv = ["search", "레인", "--db", str(self.db),
+                "--brain-root", str(self.brain), "--stub-embedder"]
+        with mock.patch("project_brain.search.eval_recall",
+                        side_effect=RuntimeError("모델 로드 실패")), \
+             mock.patch("sys.argv", ["cli"] + argv), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError) as ctx:
+                cli.main()
+        self.assertIn("모델 로드 실패", str(ctx.exception))
+
 
 class TestCliInstallDoctor(unittest.TestCase):
     def test_install_subcommand_creates_artifacts(self):
