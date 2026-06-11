@@ -336,6 +336,74 @@ def _run_eval(argv) -> int:
     return 0 if report["ok"] else 1
 
 
+def _run_install(argv) -> int:
+    """프로젝트에 config + 스킬 2종을 멱등 설치 (installer.py — manifest 추적).
+
+    설치 직후 어시스턴트가 코퍼스를 보고 스킬 description 트리거 어휘를 맞춤
+    제안하는 단계는 사람·에이전트 몫이다 — CLI는 범용 템플릿 주입까지만."""
+    parser = argparse.ArgumentParser(prog="cli install")
+    parser.add_argument("--target", help="프로젝트 루트 (기본: cwd)")
+    parser.add_argument("--project", help="프로젝트 이름 (기본: target 디렉토리명)")
+    parser.add_argument("--brain-root", default="brain",
+                        help="코퍼스 상대 경로 (기본: brain)")
+    args = parser.parse_args(argv)
+
+    from project_brain.installer import install
+
+    target = Path(args.target) if args.target else Path.cwd()
+    project = args.project or target.resolve().name
+    report = install(target, project=project, brain_root=args.brain_root)
+    print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_doctor(argv) -> int:
+    """의존성·백엔드·프로젝트 상태 진단 (doctor.py). required 실패 시 rc=1."""
+    parser = argparse.ArgumentParser(prog="cli doctor")
+    parser.add_argument("--download", action="store_true",
+                        help="임베딩 실모델을 한 번 로드해 캐시를 채운다(시간 소요)")
+    args = parser.parse_args(argv)
+
+    from project_brain.doctor import diagnose
+
+    report = diagnose(download=args.download)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 1
+
+
+def _run_bootstrap(argv) -> int:
+    """install → (코퍼스 있으면) index rebuild → doctor 멱등 래퍼."""
+    parser = argparse.ArgumentParser(prog="cli bootstrap")
+    parser.add_argument("--project", help="프로젝트 이름 (기본: cwd 디렉토리명)")
+    parser.add_argument("--brain-root", default="brain")
+    parser.add_argument("--stub-embedder", action="store_true",
+                        help="색인 단계에서 실모델 대신 stub 사용")
+    args = parser.parse_args(argv)
+
+    from project_brain.config import load_config
+    from project_brain.installer import install
+
+    install_report = install(
+        Path.cwd(), project=args.project or Path.cwd().resolve().name,
+        brain_root=args.brain_root,
+    )
+    cfg = load_config()
+    rebuilt = None
+    if cfg is not None and (cfg["brain_root"] / "objects").exists():
+        embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
+        rebuilt = index_rebuild(cfg["brain_root"], cfg["db"], embedder=embedder)
+        rebuilt = {"indexed": rebuilt["indexed"], "raw_chunks": rebuilt["raw_chunks"]}
+
+    from project_brain.doctor import diagnose
+
+    doctor_report = diagnose()
+    print(json.dumps(
+        {"ok": doctor_report["ok"], "install": install_report, "index": rebuilt,
+         "doctor": doctor_report["checks"]},
+        ensure_ascii=False, indent=2))
+    return 0 if doctor_report["ok"] else 1
+
+
 def main() -> int:
     argv = sys.argv[1:]
     try:
@@ -352,6 +420,12 @@ def main() -> int:
             return _run_promote_auto(argv[1:])
         if argv and argv[0] == "promote":
             return _run_promote(argv[1:])
+        if argv and argv[0] == "install":
+            return _run_install(argv[1:])
+        if argv and argv[0] == "doctor":
+            return _run_doctor(argv[1:])
+        if argv and argv[0] == "bootstrap":
+            return _run_bootstrap(argv[1:])
         return _run_query(argv)
     except ConfigError as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.

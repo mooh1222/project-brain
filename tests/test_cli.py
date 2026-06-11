@@ -570,5 +570,35 @@ class TestCliSearch(unittest.TestCase):
         self.assertIn("index rebuild", payload["error"])
 
 
+class TestCliInstallDoctor(unittest.TestCase):
+    def test_install_subcommand_creates_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = ["install", "--target", td, "--project", "demo"]
+            out = io.StringIO()
+            with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+                rc = cli.main()
+            self.assertEqual(rc, 0)
+            payload = json.loads(out.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["config"], "created")
+            target = Path(td)
+            self.assertTrue((target / ".project-brain.json").exists())
+            self.assertTrue(
+                (target / ".claude" / "skills" / "demo-brain-recall" / "SKILL.md").exists()
+            )
+
+    def test_doctor_subcommand_runs(self):
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli", "doctor"]), redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        # 이 venv에는 필수 의존성이 전부 있다 — required 통과 → rc 0.
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        names = {c["name"] for c in payload["checks"]}
+        self.assertIn("sqlite-vec", names)
+        self.assertIn("fts5", names)
+
+
 if __name__ == "__main__":
     unittest.main()

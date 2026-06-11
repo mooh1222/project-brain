@@ -13,8 +13,16 @@ class BrainStore:
 
     @classmethod
     def load(cls, brain_root: Path) -> "BrainStore":
+        # 객체 디렉토리(_KIND_DIR)만 스캔한다 — brain root에는 비객체 JSON
+        # (eval_scenarios.json, raw/sources/ 자료 등)이 같이 살 수 있고, 객체는
+        # 항상 save_object가 _KIND_DIR 아래에 쓰므로 스캔도 같은 경계를 따른다.
+        paths: list[Path] = []
+        for rel in set(cls._KIND_DIR.values()):
+            d = Path(brain_root) / rel
+            if d.is_dir():
+                paths.extend(d.rglob("*.json"))
         objects: dict[str, dict[str, Any]] = {}
-        for path in sorted(brain_root.rglob("*.json")):
+        for path in sorted(paths):
             payload = json.loads(path.read_text(encoding="utf-8"))
             object_id = payload["id"]
             objects[object_id] = payload
