@@ -626,6 +626,36 @@ class CorpusFingerprintTest(unittest.TestCase):
             b = compute_corpus_fingerprint(store, brain_root)
             self.assertEqual(a, b)
 
+    def test_fingerprint_excludes_rows_that_tokenize_empty(self):
+        # rebuild는 표면이 비-None이어도 토큰화가 []인 행은 색인하지 않는다(두 번째
+        # 필터). 지문도 같은 필터여야 한다 — 안 그러면 색인엔 없는 객체의 변경이
+        # 지문만 바꿔 Task 5 가드가 멀쩡한 색인을 낡았다고 오판한다(거짓 양성).
+        # 한자 표면은 mecab-ko·정규식 폴백 양쪽에서 빈 토큰(실측 2026-06-11).
+        from project_brain.search_index import compute_corpus_fingerprint
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            BrainStore.save_object(brain_root, self._make_candidate_obj())
+            cjk1 = glossary_term("g.t.cjk", term="一二三", definition="四五六",
+                                 status="candidate", context_id="context.t")
+            BrainStore.save_object(brain_root, cjk1)
+            # 전제 확인: rebuild는 빈 토큰 객체를 색인하지 않는다(일반 객체 1행만).
+            stats = rebuild(brain_root=brain_root, db_path=brain_root / "idx.db")
+            self.assertEqual(stats["indexed"], 1)
+            store = BrainStore.load(brain_root)
+            fp_with = compute_corpus_fingerprint(store, brain_root)
+
+            # 빈 토큰 객체의 내용만 바꿔도(여전히 빈 토큰) 지문 불변.
+            cjk2 = glossary_term("g.t.cjk", term="一二三", definition="七八九",
+                                 status="candidate", context_id="context.t")
+            BrainStore.save_object(brain_root, cjk2)
+            store2 = BrainStore.load(brain_root)
+            self.assertEqual(fp_with, compute_corpus_fingerprint(store2, brain_root))
+
+            # 더 강하게: 그 객체가 아예 없는 코퍼스와도 지문이 같다(색인 집합 동치).
+            (brain_root / "objects" / "domain" / "g.t.cjk.json").unlink()
+            store3 = BrainStore.load(brain_root)
+            self.assertEqual(fp_with, compute_corpus_fingerprint(store3, brain_root))
+
 
 class RebuildConfigFallbackTest(unittest.TestCase):
     def test_rebuild_without_args_resolves_from_config(self):

@@ -259,14 +259,21 @@ def compute_corpus_fingerprint(store, brain_root) -> str:
     청크)을 같은 규칙으로 직렬화해 sha256. 색인에 반영 안 되는 변경(예: 색인
     제외 kind의 필드)은 지문도 안 바뀐다 — 가드는 "색인이 코퍼스의 색인 대상
     내용과 일치하나"만 묻는다.
+
+    rebuild의 두 필터를 모두 거울처럼 적용한다: 표면 None 제외 + 토큰화가 빈
+    행 제외(스펙 리뷰 반영 — 빈 토큰 행을 지문에 넣으면 색인엔 없는 객체의
+    변경이 지문만 바꿔 가드가 거짓 양성을 낸다). 지문은 이제 토큰화 비용을
+    포함한다(rebuild와 같은 필터 — 색인 집합과 동치 보장).
     """
     rows = []
     for obj in store.all():
         surface = extract_surface(obj, store)
-        if surface is None:
+        if surface is None or not tokenize(surface):
             continue
         rows.append(f"{obj['kind']}\t{obj['id']}\t{obj.get('status', '')}\t{surface}")
     for ch in iter_raw_sources(Path(brain_root)):
+        if not tokenize(ch["text"]):
+            continue
         rows.append(f"{RAW_KIND}\t{ch['chunk_id']}\t{RAW_STATUS}\t{ch['text']}")
     payload = "\n".join(sorted(rows))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
