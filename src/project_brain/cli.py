@@ -264,6 +264,48 @@ def _run_index(argv) -> int:
     return 0
 
 
+def _run_session(argv) -> int:
+    """세션 transcript 스캔·처리 마킹 (스펙 §7) — (다) 과거 세션 추출의 CLI 보조.
+
+    `session list [--unprocessed] [--project <substr>] [--transcript-root <p>] [--brain-root <p>]`
+    `session mark-processed <uuid> [--note <text>] [--brain-root <p>]`
+
+    추출 판단은 스킬(Claude) 몫 — 여기는 결정론 스캔·마킹만(경계 불변).
+    """
+    parser = argparse.ArgumentParser(prog="cli session")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--unprocessed", action="store_true",
+                        help="처리 마킹 없는 세션만")
+    p_list.add_argument("--project", help="cwd 부분 문자열 필터 (예: bb2_client)")
+    p_list.add_argument("--transcript-root", help="기본: ~/.claude/projects")
+    p_list.add_argument("--brain-root", help="brain root (마킹 대조, 기본: config)")
+
+    p_mark = sub.add_parser("mark-processed")
+    p_mark.add_argument("uuid")
+    p_mark.add_argument("--note", help="비고 (예: '미합의 2건' — 스펙 §4)")
+    p_mark.add_argument("--brain-root", help="brain root (기본: config)")
+
+    args = parser.parse_args(argv)
+    from project_brain.session import mark_processed, scan_sessions
+
+    brain_root = resolve_brain_root(args.brain_root)
+    if args.action == "list":
+        sessions = scan_sessions(
+            transcript_root=args.transcript_root,
+            project_filter=args.project,
+            brain_root=brain_root,
+        )
+        if args.unprocessed:
+            sessions = [s for s in sessions if not s["processed"]]
+        print(json.dumps({"ok": True, "sessions": sessions}, ensure_ascii=False, indent=2))
+        return 0
+    record = mark_processed(args.uuid, brain_root=brain_root, note=args.note)
+    print(json.dumps({"ok": True, "record": record}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_search(argv) -> int:
     """의미 회상 명령 (스펙 §7) — 어시스턴트가 직접 쓰는 회상 진입점.
 
@@ -412,6 +454,8 @@ def main() -> int:
             return _run_ingest(argv[1:])
         if argv and argv[0] == "index":
             return _run_index(argv[1:])
+        if argv and argv[0] == "session":
+            return _run_session(argv[1:])
         if argv and argv[0] == "search":
             return _run_search(argv[1:])
         if argv and argv[0] == "eval":

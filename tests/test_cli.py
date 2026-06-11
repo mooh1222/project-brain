@@ -600,5 +600,56 @@ class TestCliInstallDoctor(unittest.TestCase):
         self.assertIn("fts5", names)
 
 
+class CliSessionTest(unittest.TestCase):
+    def _run_cli(self, argv):
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def test_session_list_outputs_json_with_processed_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "t"
+            proj = root / "p"
+            proj.mkdir(parents=True)
+            (proj / "abc.jsonl").write_text(
+                '{"type": "user", "cwd": "/x/bb2", "timestamp": "2026-06-11T01:00:00Z"}\n',
+                encoding="utf-8",
+            )
+            brain_root = Path(td) / "brain"
+            out = self._run_cli(["session", "list", "--transcript-root", str(root),
+                                 "--brain-root", str(brain_root)])
+            payload = json.loads(out)
+            self.assertEqual(payload["sessions"][0]["uuid"], "abc")
+            self.assertFalse(payload["sessions"][0]["processed"])
+
+    def test_session_list_unprocessed_filters_marked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "t"
+            proj = root / "p"
+            proj.mkdir(parents=True)
+            (proj / "abc.jsonl").write_text(
+                '{"type": "user", "cwd": "/x", "timestamp": "t"}\n', encoding="utf-8")
+            (proj / "def.jsonl").write_text(
+                '{"type": "user", "cwd": "/x", "timestamp": "t"}\n', encoding="utf-8")
+            brain_root = Path(td) / "brain"
+            self._run_cli(["session", "mark-processed", "abc",
+                           "--brain-root", str(brain_root)])
+            out = self._run_cli(["session", "list", "--transcript-root", str(root),
+                                 "--brain-root", str(brain_root), "--unprocessed"])
+            payload = json.loads(out)
+            self.assertEqual([s["uuid"] for s in payload["sessions"]], ["def"])
+
+    def test_session_mark_processed_writes_note(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain_root = Path(td)
+            out = self._run_cli(["session", "mark-processed", "abc",
+                                 "--brain-root", str(brain_root), "--note", "미합의 1건"])
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["record"]["note"], "미합의 1건")
+
+
 if __name__ == "__main__":
     unittest.main()
