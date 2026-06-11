@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from project_brain.session import scan_sessions
+from project_brain.session import is_processed, mark_processed, scan_sessions
 
 
 def _write_jsonl(path: Path, lines: list[dict]) -> None:
@@ -96,6 +96,48 @@ class ScanSessionsTest(unittest.TestCase):
 
             hits = scan_sessions(transcript_root=root, project_filter="bb2_client")
             self.assertEqual([s["uuid"] for s in hits], ["a"])
+
+
+class MarkProcessedTest(unittest.TestCase):
+    def test_mark_then_is_processed_roundtrip(self):
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            self.assertFalse(is_processed("abc-123", brain_root=brain_root))
+
+            record = mark_processed("abc-123", brain_root=brain_root, note="미합의 2건")
+
+            self.assertTrue(is_processed("abc-123", brain_root=brain_root))
+            on_disk = json.loads(
+                (brain_root / ".brain-local" / "sessions" / "abc-123.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(on_disk["uuid"], "abc-123")
+            self.assertEqual(on_disk["note"], "미합의 2건")
+            self.assertIn("processed_at", on_disk)
+            self.assertEqual(record["uuid"], "abc-123")
+
+    def test_mark_is_idempotent_overwrite(self):
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            mark_processed("abc-123", brain_root=brain_root)
+            mark_processed("abc-123", brain_root=brain_root, note="재실행")
+            on_disk = json.loads(
+                (brain_root / ".brain-local" / "sessions" / "abc-123.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(on_disk["note"], "재실행")
+
+    def test_scan_annotates_processed_flag(self):
+        with TemporaryDirectory() as td:
+            root = Path(td) / "transcripts"
+            proj = root / "p"
+            proj.mkdir(parents=True)
+            _write_jsonl(proj / "abc-123.jsonl", SESSION_LINES)
+            brain_root = Path(td) / "brain"
+            mark_processed("abc-123", brain_root=brain_root)
+
+            s = scan_sessions(transcript_root=root, brain_root=brain_root)[0]
+            self.assertTrue(s["processed"])
 
 
 if __name__ == "__main__":
