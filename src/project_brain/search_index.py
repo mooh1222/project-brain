@@ -279,6 +279,21 @@ def compute_corpus_fingerprint(store, brain_root) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def read_meta_fingerprint(db_path) -> "str | None":
+    """색인 meta의 코퍼스 지문. 색인/meta/컬럼이 없으면 None."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        row = _read_meta(conn)
+        return row["corpus_fingerprint"] if row else None
+    except (sqlite3.OperationalError, KeyError, IndexError):
+        return None
+    finally:
+        conn.close()
+
+
 def _guard_schema_version(meta_row) -> None:
     """§4 "불일치 감지 시 rebuild 안내" — stale 색인(예: 구버전 DDL)이 원시 sqlite
     에러나 무경고 빈 결과로 조용히 깨지지 않게 명확히 거부한다(2026-06-10 슬라이스 3

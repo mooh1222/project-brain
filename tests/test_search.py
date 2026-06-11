@@ -1004,5 +1004,38 @@ class RawGatePassTest(unittest.TestCase):
         self.assertTrue(_gate_pass(0.02, sig_over, channel="raw"))
 
 
+class IndexFreshnessGuardTest(unittest.TestCase):
+    def _seed_and_build(self, brain_root, db):
+        obj = glossary_term("g.t.a", term="용어", status="candidate",
+                            context_id="context.t")
+        BrainStore.save_object(brain_root, obj)
+        rebuild(brain_root=brain_root, db_path=db, embedder=StubEmbedder())
+
+    def test_recall_raises_on_stale_index(self):
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            db = brain_root / "idx.db"
+            self._seed_and_build(brain_root, db)
+
+            # 색인 빌드 후 객체 변경(status 플립) → 색인이 stale
+            obj2 = glossary_term("g.t.a", term="용어", status="reviewed",
+                                 context_id="context.t")
+            BrainStore.save_object(brain_root, obj2)
+
+            with self.assertRaises(RuntimeError) as ctx:
+                recall("용어", db_path=db, brain_root=brain_root,
+                       embedder=StubEmbedder())
+            self.assertIn("rebuild", str(ctx.exception))  # 해결책이 담긴 메시지
+
+    def test_recall_passes_on_fresh_index(self):
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            db = brain_root / "idx.db"
+            self._seed_and_build(brain_root, db)
+            results = recall("용어", db_path=db, brain_root=brain_root,
+                             embedder=StubEmbedder())
+            self.assertIsInstance(results, list)  # 신선하면 기존 동작 그대로
+
+
 if __name__ == "__main__":
     unittest.main()

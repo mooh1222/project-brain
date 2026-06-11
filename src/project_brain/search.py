@@ -283,6 +283,24 @@ def infer_scope(query: str, store: BrainStore):
     return None
 
 
+def _guard_index_freshness(db_path, store, brain_root) -> None:
+    """§7 신선도 가드 — stale 색인을 명시 거부하고 rebuild 안내."""
+    from project_brain.search_index import (
+        compute_corpus_fingerprint,
+        read_meta_fingerprint,
+    )
+
+    indexed = read_meta_fingerprint(db_path)
+    if indexed is None:
+        return  # 지문 없는 구버전 색인은 schema_version 가드가 이미 거부한다
+    current = compute_corpus_fingerprint(store, brain_root)
+    if indexed != current:
+        raise RuntimeError(
+            "색인이 코퍼스보다 오래됨(stale) — 객체 변경이 색인에 반영되지 않았다. "
+            "`project-brain index rebuild`로 재생성 후 다시 검색하라."
+        )
+
+
 def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
            store=None) -> list[dict]:
     """BM25 + 벡터를 RRF로 융합해 §3 결과 계약 리스트를 돌려준다(슬라이스 3·4).
@@ -303,7 +321,9 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
                 필요하다 — ★recall 호출당 1회만 로드★(과업 2번). surface 원문 승급에도 쓴다.
     store: 이미 로드한 BrainStore를 주면 brain_root 로드를 건너뛴다(후속 b — 장수
            라우터가 질의마다 코퍼스를 다시 읽지 않게 self.store 재사용). brain_root와
-           같은 코퍼스여야 한다(호출자 책임 — 이때 brain_root는 해석하지 않는다).
+           같은 코퍼스여야 한다(호출자 책임). brain_root는 store 주입 여부와 무관하게
+           항상 해석한다 — 신선도 가드(§7)가 현재 코퍼스 지문 계산에 resolved_root를
+           사용하므로 생략 불가.
 
     원소: {object_id, kind, status, context_id, score, matched_via, surface, linked,
           graph_reached, graph_hits, graph_support}. matched_via = "bm25"|"vector"|"both".
@@ -312,9 +332,14 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     db_path = resolve_db_path(db_path)
 
     # store는 scope 추론·그래프 1-hop·surface 승급이 같이 쓴다 — ★호출당 1회만 로드★,
-    # 주입받았으면(후속 b) 그마저 생략(brain_root 해석도 불필요).
+    # 주입받았으면(후속 b) 로드 생략. brain_root 해석은 신선도 가드(raw 지문)에도 필요.
+    resolved_root = resolve_brain_root(brain_root)
     if store is None:
-        store = BrainStore.load(resolve_brain_root(brain_root))
+        store = BrainStore.load(resolved_root)
+    # 신선도 가드(§7): 색인 meta의 코퍼스 지문 vs 현재 store 지문. stale 색인은
+    # superseded 객체를 옛 status로 회상하는 침묵 오답을 만든다 — 스키마 버전
+    # 가드와 같은 철학으로 시끄럽게 거부하고 해결책(rebuild)을 안내한다.
+    _guard_index_freshness(db_path, store, resolved_root)
     if scope is None:
         scope = infer_scope(query, store)
 
