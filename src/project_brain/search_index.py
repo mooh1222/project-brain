@@ -31,8 +31,11 @@ from project_brain.tokenize_ko import active_backend, tokenize
 # v2: documents.row_id 컬럼 + documents_vec(vec0) 추가(슬라이스 3 벡터 색인).
 # v3: documents.surface_text 컬럼 + raw 청크 행(§2.2 raw 본문 색인 — raw 청크는
 #     store에 없는 행이라 "원문 발췌"용 원문을 색인이 직접 운반해야 한다).
+# v4: meta.corpus_fingerprint 추가 — 신선도 가드 1/2(§7). rebuild 시점의
+#     색인 대상 전체(객체 표면 + raw 청크)를 sha256으로 기록해 두고, Task 5에서
+#     검색 시점에 비교해 낡은 색인을 명확히 거부한다.
 # (EMBED_DIM은 embedder.py와 일치해야 한다 — vec0 FLOAT[1024].)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # 벡터 거리값 반올림 자릿수(§5 결정론 가드 — top-K 경계 흔들림 완화).
 _DISTANCE_ROUND = 6
@@ -90,9 +93,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         f"CREATE VIRTUAL TABLE documents_vec USING vec0(embedding FLOAT[{EMBED_DIM}])"
     )
     # meta: 단일 행. embed_model은 embedder 주입 시 모델명, 없으면 빈 값.
+    # corpus_fingerprint(v4): 색인 대상 전체(객체 표면 + raw 청크) sha256 — §7 신선도 가드.
     conn.execute(
         "CREATE TABLE meta ("
-        "schema_version INTEGER, embed_model TEXT, tokenizer TEXT, extractor_version INTEGER)"
+        "schema_version INTEGER, embed_model TEXT, tokenizer TEXT, "
+        "extractor_version INTEGER, corpus_fingerprint TEXT)"
     )
 
 
@@ -124,11 +129,6 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
     conn = _connect(db_path)
     try:
         _create_schema(conn)
-        conn.execute(
-            "INSERT INTO meta (schema_version, embed_model, tokenizer, extractor_version) "
-            "VALUES (?, ?, ?, ?)",
-            (SCHEMA_VERSION, embed_model, tokenizer, EXTRACTOR_VERSION),
-        )
 
         # 색인 대상을 먼저 모은다(임베딩은 배치라 표면 원문을 따로 보관). row_id는
         # 등장 순서대로 1부터 부여 — store.all()은 dict 삽입 순서라 결정론(멱등).
@@ -197,6 +197,13 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                 [(row_id, _serialize(v))
                  for (row_id, _), v in zip(pending_vectors, vectors)],
             )
+        # 지문은 색인 대상을 모두 INSERT한 뒤 계산해 meta 단일 행에 기록한다(§7).
+        fingerprint = compute_corpus_fingerprint(store, Path(brain_root))
+        conn.execute(
+            "INSERT INTO meta (schema_version, embed_model, tokenizer, "
+            "extractor_version, corpus_fingerprint) VALUES (?, ?, ?, ?, ?)",
+            (SCHEMA_VERSION, embed_model, tokenizer, EXTRACTOR_VERSION, fingerprint),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -235,13 +242,34 @@ def _escape_token(token: str) -> str:
 
 def _read_meta(conn: sqlite3.Connection) -> dict | None:
     row = conn.execute(
-        "SELECT schema_version, embed_model, tokenizer, extractor_version "
-        "FROM meta LIMIT 1"
+        "SELECT schema_version, embed_model, tokenizer, extractor_version, "
+        "corpus_fingerprint FROM meta LIMIT 1"
     ).fetchone()
     if row is None:
         return None
     return {"schema_version": row[0], "embed_model": row[1],
-            "tokenizer": row[2], "extractor_version": row[3]}
+            "tokenizer": row[2], "extractor_version": row[3],
+            "corpus_fingerprint": row[4]}
+
+
+def compute_corpus_fingerprint(store, brain_root) -> str:
+    """색인 대상 전체(객체 표면 + raw 청크)의 결정론 지문 — 신선도 가드(§7)용.
+
+    rebuild가 색인하는 것과 같은 입력(extract_surface 표면 + iter_raw_sources
+    청크)을 같은 규칙으로 직렬화해 sha256. 색인에 반영 안 되는 변경(예: 색인
+    제외 kind의 필드)은 지문도 안 바뀐다 — 가드는 "색인이 코퍼스의 색인 대상
+    내용과 일치하나"만 묻는다.
+    """
+    rows = []
+    for obj in store.all():
+        surface = extract_surface(obj, store)
+        if surface is None:
+            continue
+        rows.append(f"{obj['kind']}\t{obj['id']}\t{obj.get('status', '')}\t{surface}")
+    for ch in iter_raw_sources(Path(brain_root)):
+        rows.append(f"{RAW_KIND}\t{ch['chunk_id']}\t{RAW_STATUS}\t{ch['text']}")
+    payload = "\n".join(sorted(rows))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _guard_schema_version(meta_row) -> None:

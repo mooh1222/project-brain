@@ -112,7 +112,8 @@ class RebuildTest(unittest.TestCase):
         conn = sqlite3.connect(str(self.db))
         try:
             row = conn.execute(
-                "SELECT schema_version, embed_model, tokenizer, extractor_version FROM meta"
+                "SELECT schema_version, embed_model, tokenizer, extractor_version, "
+                "corpus_fingerprint FROM meta"
             ).fetchone()
         finally:
             conn.close()
@@ -120,6 +121,9 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(row[1], "")  # embedder=None(FTS 전용 rebuild)이라 빈 값
         self.assertEqual(row[2], tokenize_ko.active_backend())
         self.assertEqual(row[3], EXTRACTOR_VERSION)
+        # v4: corpus_fingerprint가 64자리 sha256 hex로 기록됨(§7 신선도 가드).
+        self.assertIsNotNone(row[4])
+        self.assertEqual(len(row[4]), 64)
 
     def test_rebuild_deletes_and_recreates_db(self):
         # 첫 빌드 → 객체 줄여 재빌드하면 옛 행이 남지 않는다(DB 삭제 후 재생성, §4)
@@ -345,10 +349,11 @@ class TokenizerMismatchWarningTest(unittest.TestCase):
 
 
 class SchemaVersionTest(unittest.TestCase):
-    def test_schema_version_is_3(self):
+    def test_schema_version_is_4(self):
         # v2: 벡터 테이블 추가(슬라이스 3). v3: documents.surface_text 컬럼(raw 본문
         # 색인 — raw 청크는 store에 없는 행이라 원문을 색인이 직접 운반, §2.2).
-        self.assertEqual(SCHEMA_VERSION, 3)
+        # v4: meta.corpus_fingerprint 추가(§7 신선도 가드 1/2).
+        self.assertEqual(SCHEMA_VERSION, 4)
 
 
 class RawIndexTest(unittest.TestCase):
@@ -569,6 +574,57 @@ class FtsRegressionWithVecTableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CorpusFingerprintTest(unittest.TestCase):
+    def _make_candidate_obj(self):
+        return glossary_term("g.t.a", term="용어", definition="정의",
+                             status="candidate", context_id="context.t")
+
+    def test_rebuild_writes_corpus_fingerprint(self):
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            BrainStore.save_object(brain_root, self._make_candidate_obj())
+            db = brain_root / "idx.db"
+
+            rebuild(brain_root=brain_root, db_path=db)
+
+            conn = sqlite3.connect(db)
+            fp = conn.execute("SELECT corpus_fingerprint FROM meta").fetchone()[0]
+            conn.close()
+            self.assertTrue(fp)  # 64자리 sha256 hex
+            self.assertEqual(len(fp), 64)
+
+    def test_fingerprint_changes_when_object_changes(self):
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            BrainStore.save_object(brain_root, self._make_candidate_obj())
+            db = brain_root / "idx.db"
+            rebuild(brain_root=brain_root, db_path=db)
+            conn = sqlite3.connect(db)
+            fp1 = conn.execute("SELECT corpus_fingerprint FROM meta").fetchone()[0]
+            conn.close()
+
+            # status 플립 = supersede 계열 변경 — 지문도 달라져야 한다.
+            obj2 = glossary_term("g.t.a", term="용어", definition="정의",
+                                 status="reviewed", context_id="context.t")
+            BrainStore.save_object(brain_root, obj2)
+            rebuild(brain_root=brain_root, db_path=db)
+            conn = sqlite3.connect(db)
+            fp2 = conn.execute("SELECT corpus_fingerprint FROM meta").fetchone()[0]
+            conn.close()
+
+            self.assertNotEqual(fp1, fp2)
+
+    def test_compute_fingerprint_is_deterministic(self):
+        from project_brain.search_index import compute_corpus_fingerprint
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            BrainStore.save_object(brain_root, self._make_candidate_obj())
+            store = BrainStore.load(brain_root)
+            a = compute_corpus_fingerprint(store, brain_root)
+            b = compute_corpus_fingerprint(store, brain_root)
+            self.assertEqual(a, b)
 
 
 class RebuildConfigFallbackTest(unittest.TestCase):
