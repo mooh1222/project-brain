@@ -49,11 +49,15 @@ class InstallTest(unittest.TestCase):
         recall = self._skill("bb2-brain-recall").read_text(encoding="utf-8")
         self.assertIn("name: bb2-brain-recall", recall)
         self.assertTrue(self._skill("bb2-brain-ingest").exists())
-        # manifest에 심은 파일 기록
+        # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성:
+        # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다)
         manifest = json.loads(
             (self.target / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         self.assertEqual(len(manifest["files"]), 2)
+        for key in manifest["files"]:
+            self.assertFalse(Path(key).is_absolute(), key)
+            self.assertTrue((self.target / key).exists(), key)
         self.assertEqual(report["config"], "created")
         self.assertEqual(len(report["created"]), 2)
 

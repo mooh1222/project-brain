@@ -64,14 +64,14 @@ def install(target, *, project: str, brain_root: str = "brain") -> dict:
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    # 3. 스킬 주입(파일 단위 보존).
+    # 3. 스킬 주입(파일 단위 보존). manifest 키는 target 기준 상대 경로 —
+    # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다.
     for name in _TEMPLATES:
         _, suffix = _TEMPLATES[name]
-        skill_path = (
-            target / ".claude" / "skills" / f"{project}-{suffix}" / "SKILL.md"
-        )
+        rel_key = str(Path(".claude") / "skills" / f"{project}-{suffix}" / "SKILL.md")
+        skill_path = target / rel_key
         rendered = render_template(name, project=project, brain_root=brain_root)
-        recorded = manifest["files"].get(str(skill_path))
+        recorded = manifest["files"].get(rel_key)
         if skill_path.exists():
             on_disk = _sha256(skill_path.read_text(encoding="utf-8"))
             if recorded != on_disk:
@@ -84,7 +84,7 @@ def install(target, *, project: str, brain_root: str = "brain") -> dict:
             skill_path.parent.mkdir(parents=True, exist_ok=True)
             skill_path.write_text(rendered, encoding="utf-8")
             report["created"].append(str(skill_path))
-        manifest["files"][str(skill_path)] = _sha256(rendered)
+        manifest["files"][rel_key] = _sha256(rendered)
 
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
