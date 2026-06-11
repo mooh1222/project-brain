@@ -246,10 +246,22 @@ def _escape_token(token: str) -> str:
 
 
 def _read_meta(conn: sqlite3.Connection) -> dict | None:
-    row = conn.execute(
-        "SELECT schema_version, embed_model, tokenizer, extractor_version, "
-        "corpus_fingerprint FROM meta LIMIT 1"
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT schema_version, embed_model, tokenizer, extractor_version, "
+            "corpus_fingerprint FROM meta LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # 구버전(v3 이하) meta는 corpus_fingerprint 컬럼 자체가 없어 SELECT가
+        # 버전 가드보다 먼저 터진다(2026-06-11 실사고). 버전만 읽어 돌려주면
+        # _guard_schema_version이 rebuild 안내로 거부한다. meta 테이블 자체가
+        # 없는 DB는 여기서도 OperationalError — 기존 동작 그대로 둔다.
+        row = conn.execute("SELECT schema_version FROM meta LIMIT 1").fetchone()
+        if row is None:
+            return None
+        return {"schema_version": row[0], "embed_model": None,
+                "tokenizer": None, "extractor_version": None,
+                "corpus_fingerprint": None}
     if row is None:
         return None
     return {"schema_version": row[0], "embed_model": row[1],

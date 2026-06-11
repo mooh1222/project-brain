@@ -17,6 +17,7 @@ from project_brain.embedder import EMBED_DIM, StubEmbedder
 from project_brain.objbase import base
 from project_brain.search_index import (
     SCHEMA_VERSION,
+    StaleIndexError,
     rebuild,
     search_bm25,
     search_vector,
@@ -251,6 +252,34 @@ class MetaGuardTest(unittest.TestCase):
             search_bm25(self.db, "레이스")
         self.assertIn("rebuild", str(ctx.exception))
         with self.assertRaises(RuntimeError) as ctx:
+            search_vector(self.db, "레이스", embedder=StubEmbedder())
+        self.assertIn("rebuild", str(ctx.exception))
+
+    def test_v3_meta_without_fingerprint_column_raises_rebuild_guidance(self):
+        # 진짜 v3 색인은 meta에 corpus_fingerprint 컬럼 자체가 없다(2026-06-11
+        # 4701 세션 실사고 모양). 버전 값 불일치보다 먼저 SELECT가 OperationalError로
+        # 터지면 가드가 도달 불가 — 이 경우도 StaleIndexError + rebuild 안내여야 한다.
+        rebuild(self.brain, self.db, embedder=StubEmbedder())
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute("ALTER TABLE meta RENAME TO meta_v4")
+            conn.execute(
+                "CREATE TABLE meta (schema_version INTEGER, embed_model TEXT, "
+                "tokenizer TEXT, extractor_version INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO meta SELECT schema_version, embed_model, tokenizer, "
+                "extractor_version FROM meta_v4"
+            )
+            conn.execute("UPDATE meta SET schema_version = 3")
+            conn.execute("DROP TABLE meta_v4")
+            conn.commit()
+        finally:
+            conn.close()
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
+        with self.assertRaises(StaleIndexError) as ctx:
             search_vector(self.db, "레이스", embedder=StubEmbedder())
         self.assertIn("rebuild", str(ctx.exception))
 
