@@ -569,3 +569,32 @@ class FtsRegressionWithVecTableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RebuildConfigFallbackTest(unittest.TestCase):
+    def test_rebuild_without_args_resolves_from_config(self):
+        # 분리 후 실사용 경로: 인자 없이 rebuild() → config(.project-brain.json)
+        # 해석. raw 소스 순회까지 resolve된 brain_root를 써야 한다(2026-06-11
+        # 실전 첫 실행에서 raw 순회가 원래 인자 None을 받아 죽은 회귀).
+        import json as _json
+        import os
+
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            (root / ".project-brain.json").write_text("{}", encoding="utf-8")
+            brain = root / "brain"
+            build_store_dir(brain, [
+                glossary_term("g.cfg", term="설정폴백", definition="정의"),
+            ])
+            src = brain / "raw" / "sources" / "feature-x"
+            src.mkdir(parents=True)
+            (src / "spec.md").write_text("# 개요\n설정 폴백 검증 본문.", encoding="utf-8")
+            prev = os.getcwd()
+            os.chdir(root)
+            try:
+                stats = rebuild()
+            finally:
+                os.chdir(prev)
+            self.assertEqual(stats["indexed"] - stats["raw_chunks"], 1)
+            self.assertGreaterEqual(stats["raw_chunks"], 1)
+            self.assertTrue((brain / ".brain-local" / "index.db").exists())

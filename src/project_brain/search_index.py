@@ -114,7 +114,10 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
     if db_path.exists():
         db_path.unlink()
 
-    store = BrainStore.load(resolve_brain_root(brain_root))
+    # resolve 결과를 양쪽(store 로드 + raw 소스 순회)이 같이 쓴다 — 원래 인자
+    # (None일 수 있음)를 raw 순회에 흘리면 안 된다.
+    brain_root = resolve_brain_root(brain_root)
+    store = BrainStore.load(brain_root)
     tokenizer = active_backend()
     embed_model = embedder.model_name if embedder is not None else ""
 
