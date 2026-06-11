@@ -569,6 +569,29 @@ class TestCliSearch(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("index rebuild", payload["error"])
 
+    def test_search_stale_index_errors_clean_json(self):
+        # 스펙 리뷰 관찰(2026-06-11): 신선도 가드(RuntimeError)는 정상 흐름(적재 후
+        # rebuild 누락)에서 터진다 — traceback이 아니라 누락 색인과 같은 모양의
+        # JSON 에러(ok=False, error에 해결책 rebuild)로 나와야 한다.
+        from tests.test_search import glossary_term
+        self._build_index([
+            glossary_term("g.stale", term="레인", definition="레인 영역 배치",
+                          status="candidate"),
+        ])
+        # 색인 빌드 후 객체 변경(status 플립) → 색인이 stale, rebuild는 안 함
+        BrainStore.save_object(
+            self.brain,
+            glossary_term("g.stale", term="레인", definition="레인 영역 배치"))
+        argv = ["search", "레인", "--db", str(self.db),
+                "--brain-root", str(self.brain), "--stub-embedder"]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 1)
+        payload = json.loads(out.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertIn("rebuild", payload["error"])
+
 
 class TestCliInstallDoctor(unittest.TestCase):
     def test_install_subcommand_creates_artifacts(self):
