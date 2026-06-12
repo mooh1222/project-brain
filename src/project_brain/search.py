@@ -265,22 +265,39 @@ def infer_scope(query: str, store: BrainStore):
     내용 토큰이 **전부** 질의 토큰에 들어 있는가 — 일부 토큰 겹침("클리어"만)으로는
     특정하지 않는다(공유 어휘 오탐 방지, s1 회귀의 골자).
 
-    0개 매칭(기능 언급 없음) 또는 2개 이상 매칭(여러 기능 언급)이면 None — 하드 필터는
-    단일 특정일 때만 걸고, 나머지는 전체 검색의 연관도에 맡긴다(보수).
+    ★구체 표면 우선(2026-06-12, 시스템 도메인 적재 선행)★: 시스템 컨텍스트 표면("방해버블")이
+    기능 컨텍스트 표면("고슴도치 방해버블")의 진부분집합이 되면, 핀포인트 질의("고슴도치
+    방해버블 상태")가 둘 다 매칭해 scope를 잃는다(s1 회귀 재노출). 이를 막기 위해 매칭된
+    컨텍스트 중 그 매칭 표면이 **다른 매칭의 진부분집합인 것**을 제거하고(maximal만 남김) 센다
+    — 더 구체적인 기능 컨텍스트가 일반 시스템 컨텍스트를 이긴다. 일반 질의("방해버블 점수")는
+    시스템 표면만 매칭하므로 시스템으로 간다. 한 컨텍스트의 여러 표면 중에서는 질의에 전부
+    포함된 최대 집합을 그 컨텍스트의 매칭 표면으로 본다.
+
+    0개 매칭(기능 언급 없음) 또는 maximal 2개 이상(여러 기능 언급·동률)이면 None — 하드
+    필터는 단일 특정일 때만 걸고, 나머지는 전체 검색의 연관도에 맡긴다(보수).
     """
     query_tokens = set(tokenize(query))
     if not query_tokens:
         return None
-    matched = []
+    matched = []  # (context_id, 매칭 표면 토큰 집합)
     for obj in store.all():
         if obj.get("kind") != "DomainContext":
             continue
+        best = None
         for token_set in _context_surface_token_sets(obj):
-            if token_set <= query_tokens:
-                matched.append(obj["id"])
-                break
-    if len(matched) == 1:
-        return matched[0]
+            if token_set <= query_tokens and (best is None or len(token_set) > len(best)):
+                best = token_set
+        if best is not None:
+            matched.append((obj["id"], best))
+    if not matched:
+        return None
+    # 구체 표면 우선: 매칭 표면이 다른 매칭 표면의 진부분집합이면 제거(maximal만 남김).
+    maximal = [
+        cid for i, (cid, ts) in enumerate(matched)
+        if not any(ts < other for j, (_, other) in enumerate(matched) if i != j)
+    ]
+    if len(maximal) == 1:
+        return maximal[0]
     return None
 
 

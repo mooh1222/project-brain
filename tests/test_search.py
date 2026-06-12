@@ -329,6 +329,42 @@ class InferScopeTest(unittest.TestCase):
         self.assertIsNone(
             infer_scope("카누 레이스 중에 클리어 토큰 쓰면 어떻게 돼", store))
 
+    def test_specific_surface_wins_over_subset_surface(self):
+        # 구체 표면 우선(§3 결정 2): 시스템 컨텍스트 표면 {방해버블}이 기능 컨텍스트
+        # 표면 {고슴도치,방해버블}의 진부분집합이면, 더 구체적인 기능 컨텍스트가 단일
+        # 특정된다. 기존 규칙은 둘 다 매칭→다중→None이라 핀포인트 질의가 scope 보호를
+        # 잃었다(s1 회귀 재노출). maximal(다른 매칭의 진부분집합이 아닌 것)만 남긴다.
+        store = self._store([
+            scoped_context("context.hedgehog", display_name="고슴도치 방해버블",
+                           title="고슴도치 방해버블 도메인", context_key="disturb-hedgehog"),
+            scoped_context("context.system", display_name="방해버블",
+                           title="방해버블 도메인", context_key="disturb-bubble-system"),
+        ])
+        self.assertEqual(
+            infer_scope("고슴도치 방해버블 상태", store), "context.hedgehog")
+
+    def test_only_subset_surface_matched_is_single_scope(self):
+        # 일반 질의(고유명 토큰 없음)는 시스템 컨텍스트 표면 {방해버블}만 매칭 → 시스템으로.
+        store = self._store([
+            scoped_context("context.hedgehog", display_name="고슴도치 방해버블",
+                           title="고슴도치 방해버블 도메인", context_key="disturb-hedgehog"),
+            scoped_context("context.system", display_name="방해버블",
+                           title="방해버블 도메인", context_key="disturb-bubble-system"),
+        ])
+        self.assertEqual(infer_scope("방해버블 점수 처리", store), "context.system")
+
+    def test_two_maximal_surfaces_returns_none(self):
+        # maximal 표면이 2개(비포함 관계)면 여전히 None — 두 기능을 동시에 언급한 질의.
+        store = self._store([
+            scoped_context("context.hedgehog", display_name="고슴도치 방해버블",
+                           title="고슴도치 방해버블 도메인", context_key="disturb-hedgehog"),
+            scoped_context("context.drone", display_name="드론 방해버블",
+                           title="드론 방해버블 도메인", context_key="disturb-drone"),
+            scoped_context("context.system", display_name="방해버블",
+                           title="방해버블 도메인", context_key="disturb-bubble-system"),
+        ])
+        self.assertIsNone(infer_scope("고슴도치 드론 방해버블 비교", store))
+
     def test_recall_auto_scope_filters_other_context(self):
         # recall(scope=None)이 질의 표면에서 컨텍스트를 단일 특정하면 하드 필터 적용.
         td = TemporaryDirectory()
