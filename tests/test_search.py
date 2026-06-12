@@ -29,7 +29,7 @@ from project_brain.search import (
     recall,
     rrf_fuse,
 )
-from project_brain.search_index import rebuild
+from project_brain.search_index import rebuild, search_bm25_scoped
 from project_brain.store import BrainStore
 
 T = "2026-06-04T00:00:00Z"
@@ -1035,6 +1035,72 @@ class IndexFreshnessGuardTest(unittest.TestCase):
             results = recall("용어", db_path=db, brain_root=brain_root,
                              embedder=StubEmbedder())
             self.assertIsInstance(results, list)  # 신선하면 기존 동작 그대로
+
+
+class ScopedBm25WiringTest(unittest.TestCase):
+    """recall — scope가 정해지면 객체 레인 BM25가 scoped 재계산으로 바뀐다(§3.2).
+
+    s1 회귀(2026-06-12)의 recall 차원 가드: 벡터 채널은 문서별 독립이라 원래
+    면역 — BM25 채널이 scoped로 바뀌면 객체 레인 전체가 scope 밖 적재에 면역.
+    """
+
+    def _base_objs(self):
+        return [
+            scoped_context("context.a", display_name="카누 레이스",
+                           title="카누 레이스 도메인", context_key="canoe-race"),
+            glossary_term("g.d1", term="알림 팝업", context_id="context.a"),
+            glossary_term("g.d2", term="클리어 팝업", context_id="context.a"),
+            glossary_term("g.d3", term="알림 안내", context_id="context.a"),
+        ]
+
+    def _setup_corpus(self, objs):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        brain = Path(td.name) / "brain"
+        db = Path(td.name) / "index.db"
+        embedder = StubEmbedder()
+        build_store_dir(brain, objs)
+        rebuild(brain, db, embedder=embedder)
+        return brain, db, embedder
+
+    def test_recall_uses_scoped_bm25_when_scope_resolved(self):
+        # 배선 가드: 질의가 컨텍스트를 단일 특정하면 search_bm25_scoped가 불린다.
+        brain, db, embedder = self._setup_corpus(self._base_objs())
+        with mock.patch("project_brain.search.search_bm25_scoped",
+                        wraps=search_bm25_scoped) as spy:
+            recall("카누 레이스 알림 클리어", db_path=db, embedder=embedder,
+                   brain_root=brain)
+        spy.assert_called_once()
+
+    def test_recall_no_scope_does_not_use_scoped_bm25(self):
+        # scope 미특정(컨텍스트 언급 없음) 질의는 기존 전역 경로 그대로.
+        brain, db, embedder = self._setup_corpus(self._base_objs())
+        with mock.patch("project_brain.search.search_bm25_scoped",
+                        wraps=search_bm25_scoped) as spy:
+            recall("알림 클리어", db_path=db, embedder=embedder, brain_root=brain)
+        spy.assert_not_called()
+
+    def test_recall_object_lane_immune_to_out_of_scope_ingest(self):
+        # 행동 불변식: context.b 어휘 중첩 적재 전후, scope 추론 질의의 recall
+        # 결과 순서(객체 레인)가 동일해야 한다 — s1 회귀의 합성 재현.
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        brain = Path(td.name) / "brain"
+        db = Path(td.name) / "index.db"
+        embedder = StubEmbedder()
+        build_store_dir(brain, self._base_objs())
+        rebuild(brain, db, embedder=embedder)
+        query = "카누 레이스 알림 클리어"
+        before = [h["object_id"] for h in
+                  recall(query, db_path=db, embedder=embedder, brain_root=brain)]
+        build_store_dir(brain, [
+            glossary_term(f"g.n{i}", term="클리어 보상", context_id="context.b")
+            for i in range(4)
+        ])
+        rebuild(brain, db, embedder=embedder)
+        after = [h["object_id"] for h in
+                 recall(query, db_path=db, embedder=embedder, brain_root=brain)]
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

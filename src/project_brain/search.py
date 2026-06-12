@@ -39,6 +39,7 @@ from project_brain.config import resolve_brain_root, resolve_db_path
 from project_brain.raw_chunks import RAW_KIND, RAW_STATUS
 from project_brain.search_index import (
     search_bm25,
+    search_bm25_scoped,
     search_vector,
 )
 from project_brain.store import BrainStore
@@ -314,6 +315,8 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     scope: 주면 벡터 채널은 over-fetch 후 context_id로 거르고(search_vector 구현),
            융합 결과도 context_id로 한 번 더 거른다(BM25 채널 적중 포함) — top30
            절단 전에 거르므로 scope 밖 적중이 자리를 차지하지 않는다.
+           ★scope가 확정되면 객체 레인 BM25는 search_bm25_scoped(후보 집합 내
+           df 재계산)로 바뀐다 — scope 밖 적재 면역(§3.2 scoped 레인, 2026-06-12).★
            ★None이면 질의 표면에서 자동 추론한다(infer_scope, P2 3번) — 질의가
            기능명을 단일 특정하면 그 컨텍스트로 하드 필터, 아니면 전체 검색.★
     db_path: None이면 config(.project-brain.json)의 db.
@@ -352,7 +355,16 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     vector_all = search_vector(
         db_path, query, top_n=fetch_n, scope=scope, embedder=embedder
     )["results"]
-    bm25 = [r for r in bm25_all if r.get("kind") != RAW_KIND][:CHANNEL_TOP_N]
+    if scope is not None:
+        # §3.2 scoped 레인(2026-06-12 s1 회귀 해법): scope가 단일 특정되면 객체
+        # 레인 BM25는 후보 집합 안에서 df·avgdl을 재계산한다 — scope 밖 적재가
+        # scope 안 순위를 못 흔든다(전역 FTS5 df 오염 면역). raw 레인은 아래
+        # 전역 결과(bm25_all)에서 그대로 추출한다(발췌 보조 채널 — §2.2, 정밀
+        # 순위 비대상. 전역 호출 1회가 raw 레인용으로 남는 비용은 무시 가능).
+        bm25 = search_bm25_scoped(db_path, query, scope,
+                                  top_n=CHANNEL_TOP_N)["results"]
+    else:
+        bm25 = [r for r in bm25_all if r.get("kind") != RAW_KIND][:CHANNEL_TOP_N]
     vector = [r for r in vector_all if r.get("kind") != RAW_KIND][:CHANNEL_TOP_N]
     raw_bm25 = [r for r in bm25_all if r.get("kind") == RAW_KIND][:CHANNEL_TOP_N]
     raw_vector = [r for r in vector_all if r.get("kind") == RAW_KIND][:CHANNEL_TOP_N]
