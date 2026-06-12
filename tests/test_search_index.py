@@ -18,8 +18,10 @@ from project_brain.objbase import base
 from project_brain.search_index import (
     SCHEMA_VERSION,
     StaleIndexError,
+    _bm25_rank_scoped,
     rebuild,
     search_bm25,
+    search_bm25_scoped,
     search_vector,
 )
 from project_brain.store import BrainStore
@@ -713,3 +715,116 @@ class RebuildConfigFallbackTest(unittest.TestCase):
             self.assertEqual(stats["indexed"] - stats["raw_chunks"], 1)
             self.assertGreaterEqual(stats["raw_chunks"], 1)
             self.assertTrue((brain / ".brain-local" / "index.db").exists())
+
+
+class ScopedBm25PureTest(unittest.TestCase):
+    """_bm25_rank_scoped 순수 함수 — BM25 성질(tf·idf 단조성, 결정론)을 손꼽이 코퍼스로 검증."""
+
+    def test_higher_tf_scores_higher(self):
+        # 같은 토큰을 더 많이 가진 문서가 위 (길이 보정 후에도 tf 2 > tf 1).
+        docs = [("d1", ["알림", "팝업"]), ("d2", ["클리어", "팝업", "팝업"])]
+        ranked = dict(_bm25_rank_scoped(docs, {"팝업"}))
+        self.assertGreater(ranked["d2"], ranked["d1"])
+
+    def test_rarer_token_scores_higher(self):
+        # 후보 집합 안에서 "클리어" df=1 < "알림" df=2 → 희소 토큰 매칭 문서가 위.
+        docs = [
+            ("d1", ["알림", "팝업"]),
+            ("d2", ["클리어", "팝업"]),
+            ("d3", ["알림", "안내"]),
+        ]
+        ranked = dict(_bm25_rank_scoped(docs, {"알림", "클리어"}))
+        self.assertGreater(ranked["d2"], ranked["d1"])
+
+    def test_unmatched_docs_excluded_and_tiebreak_by_object_id(self):
+        # 질의 토큰 미포함 문서는 제외, 동점은 object_id 오름차순(§5 결정론).
+        docs = [("d.b", ["팝업"]), ("d.a", ["팝업"]), ("d.x", ["무관"])]
+        ranked = _bm25_rank_scoped(docs, {"팝업"})
+        self.assertEqual([oid for oid, _ in ranked], ["d.a", "d.b"])
+
+    def test_empty_docs_returns_empty(self):
+        self.assertEqual(_bm25_rank_scoped([], {"팝업"}), [])
+
+
+class ScopedBm25SearchTest(unittest.TestCase):
+    """search_bm25_scoped — ★scope 밖 적재 면역 불변식★(s1 회귀 2026-06-12의 가드).
+
+    FTS5 bm25()는 전역 df 기반이라 scope 밖 적재가 scope 안 순위를 흔든다(대조
+    테스트가 그 현상을 박제). scoped 재계산은 같은 상황에서 결과(id·score)가
+    완전 불변이어야 한다.
+    """
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        # context.a: 질의 "알림 클리어" 기준 a 내부 df가 알림=2(d1·d3)·클리어=1(d2)
+        # → scoped에선 희소한 "클리어"를 가진 d2가 d1보다 항상 위.
+        self.base_objs = [
+            glossary_term("g.d1", term="알림 팝업", context_id="context.a"),
+            glossary_term("g.d2", term="클리어 팝업", context_id="context.a"),
+            glossary_term("g.d3", term="알림 안내", context_id="context.a"),
+        ]
+        # scope 밖(context.b) 어휘 중첩 — 전역 df(클리어)를 1→5로 역전시킨다.
+        self.noise_objs = [
+            glossary_term(f"g.n{i}", term="클리어 보상", context_id="context.b")
+            for i in range(4)
+        ]
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _rebuild(self, objs):
+        # brain root에 객체를 누적 저장 후 전체 재색인(FTS만 — scoped는 임베더 불필요).
+        build_store_dir(self.brain, objs)
+        rebuild(self.brain, self.db)
+
+    def test_scoped_results_immune_to_out_of_scope_ingest(self):
+        # ★핵심 불변식★: context.b 적재 전후 scoped 결과(id·score)가 완전 동일.
+        self._rebuild(self.base_objs)
+        before = search_bm25_scoped(self.db, "알림 클리어", scope="context.a")["results"]
+        self.assertTrue(before)
+        self._rebuild(self.noise_objs)
+        after = search_bm25_scoped(self.db, "알림 클리어", scope="context.a")["results"]
+        self.assertEqual(before, after)
+
+    def test_global_fts_bm25_shifts_with_out_of_scope_ingest(self):
+        # 대조 박제: 같은 합성에서 기존 전역 search_bm25는 a 내부 순위가 뒤집힌다
+        # (초기 전역 df: 클리어1 < 알림2 → d2 우위 / b 추가 후: 클리어5 > 알림2 →
+        #  d1 우위). 이 현상이 s1 회귀의 원인이고 scoped 레인의 존재 이유다.
+        def a_rank(results):
+            return [r["object_id"] for r in results
+                    if r["object_id"] in ("g.d1", "g.d2")]
+
+        self._rebuild(self.base_objs)
+        before = a_rank(search_bm25(self.db, "알림 클리어")["results"])
+        self._rebuild(self.noise_objs)
+        after = a_rank(search_bm25(self.db, "알림 클리어")["results"])
+        self.assertEqual(before, ["g.d2", "g.d1"])
+        self.assertEqual(after, ["g.d1", "g.d2"])
+
+    def test_scope_excludes_other_context_and_raw(self):
+        # scope 행만 후보 — 다른 컨텍스트·raw 청크는 결과에도 df에도 안 들어간다.
+        build_store_dir(self.brain, self.base_objs + [
+            glossary_term("g.out", term="알림 팝업", context_id="context.b"),
+        ])
+        src = self.brain / "raw" / "sources" / "a"
+        src.mkdir(parents=True)
+        (src / "spec.md").write_text("# 개요\n알림 팝업 클리어 서술.", encoding="utf-8")
+        rebuild(self.brain, self.db)
+        results = search_bm25_scoped(self.db, "알림 팝업", scope="context.a")["results"]
+        ids = {r["object_id"] for r in results}
+        self.assertIn("g.d1", ids)
+        self.assertNotIn("g.out", ids)
+        self.assertTrue(all(r["kind"] != "raw_chunk" for r in results))
+
+    def test_deterministic(self):
+        self._rebuild(self.base_objs)
+        a = search_bm25_scoped(self.db, "알림 클리어 팝업", scope="context.a")
+        b = search_bm25_scoped(self.db, "알림 클리어 팝업", scope="context.a")
+        self.assertEqual(a, b)
+
+    def test_no_tokens_returns_empty(self):
+        self._rebuild(self.base_objs)
+        self.assertEqual(
+            search_bm25_scoped(self.db, "", scope="context.a")["results"], [])

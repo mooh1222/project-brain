@@ -17,6 +17,7 @@ object_id로 되짚는다. embedder가 주어질 때만 벡터를 색인한다(e
 """
 
 import hashlib
+import math
 import sqlite3
 from pathlib import Path
 
@@ -320,6 +321,104 @@ def _guard_schema_version(meta_row) -> None:
             f"색인 스키마 버전 불일치: 색인 v{meta_row['schema_version']} ≠ "
             f"코드 v{SCHEMA_VERSION} — `cli index rebuild`로 재구축 필요(§4)."
         )
+
+
+# BM25 표준 계수(scoped 재계산 — Okapi 표준값. FTS5 bm25() 기본값과 동일 계열).
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+
+
+def _bm25_rank_scoped(doc_token_lists, query_tokens):
+    """후보 집합 안에서만 df·avgdl을 계산하는 표준 BM25 — 순수 함수(단위 테스트용).
+
+    doc_token_lists: [(object_id, [token, ...]), ...] — 후보 전체(매칭 여부 무관).
+    query_tokens: 질의 토큰 집합(중복 제거).
+    반환: 질의 토큰을 1개 이상 포함한 문서만 [(object_id, score)] —
+          점수 내림차순 → 동점 object_id 오름차순(§5 결정론), 점수 6자리 반올림.
+
+    IDF는 ln(1 + (N - df + 0.5)/(df + 0.5)) — 항상 양수인 Lucene 형태. FTS5
+    bm25()(Okapi 원형, df > N/2면 음수)와 식이 달라도 무방하다: recall은 채널
+    결과의 ★순서만★ 소비한다(RRF가 rank만 씀).
+    """
+    n_docs = len(doc_token_lists)
+    if n_docs == 0:
+        return []
+    avgdl = sum(len(toks) for _, toks in doc_token_lists) / n_docs
+    df = {t: 0 for t in query_tokens}
+    for _, toks in doc_token_lists:
+        tok_set = set(toks)
+        for t in query_tokens:
+            if t in tok_set:
+                df[t] += 1
+    scored = []
+    for object_id, toks in doc_token_lists:
+        tf: dict[str, int] = {}
+        for tok in toks:
+            if tok in query_tokens:
+                tf[tok] = tf.get(tok, 0) + 1
+        if not tf:
+            continue
+        dl = len(toks)
+        score = 0.0
+        for t, freq in tf.items():
+            idf = math.log(1.0 + (n_docs - df[t] + 0.5) / (df[t] + 0.5))
+            score += idf * (freq * (_BM25_K1 + 1.0)) / (
+                freq + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * dl / avgdl))
+        scored.append((object_id, round(score, 6)))
+    scored.sort(key=lambda pair: (-pair[1], pair[0]))
+    return scored
+
+
+def search_bm25_scoped(db_path, query: str, scope: str, top_n: int = 50) -> dict:
+    """scope 후보(context_id=scope, raw 제외) 안에서만 BM25를 재계산한다(§3.2 scoped 레인).
+
+    s1 회귀(2026-06-12)의 근본 해법: FTS5 bm25()는 전역 df 기반이라 scope 밖
+    적재가 scope 안 순위를 흔든다. 후보 집합의 tokenized_text로 df·avgdl을 그
+    안에서만 계산하면 scope 밖에 무엇이 적재되든 결과가 수학적으로 불변이다
+    (불변식 테스트가 가드). 후보는 컨텍스트당 수백 행 — 파이썬 직접 계산으로
+    충분하고 FTS5 색인 구조는 읽지도 않는다(documents 테이블만 조회).
+
+    반환 형태는 search_bm25와 대칭({results, warnings}). ★점수 방향이 다르다★ —
+    여기는 클수록 좋음(표준 BM25), search_bm25는 FTS5 그대로(작을수록 좋음).
+    recall은 채널 결과의 순서만 소비하므로(RRF가 rank만 씀) 영향 없다.
+    """
+    db_path = Path(db_path)
+    tokens = tokenize(query)
+    warnings: list[str] = []
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        meta_row = _read_meta(conn)
+        _guard_schema_version(meta_row)
+        indexed_tokenizer = meta_row["tokenizer"] if meta_row else None
+        query_tokenizer = active_backend()
+        if indexed_tokenizer is not None and indexed_tokenizer != query_tokenizer:
+            warnings.append(
+                f"tokenizer 비대칭: 색인={indexed_tokenizer} 쿼리={query_tokenizer} "
+                "— 색인과 쿼리 토크나이저가 달라 형태소 매칭 품질이 떨어질 수 있음(§6)"
+            )
+        if not tokens:
+            return {"results": [], "warnings": warnings}
+        rows = conn.execute(
+            "SELECT object_id, kind, status, context_id, tokenized_text, surface_text "
+            "FROM documents WHERE context_id = ? AND kind != ? ORDER BY object_id",
+            (scope, RAW_KIND),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    doc_token_lists = [(r[0], (r[4] or "").split()) for r in rows]
+    ranked = _bm25_rank_scoped(doc_token_lists, set(tokens))
+
+    meta_by_id = {r[0]: r for r in rows}
+    results = []
+    for object_id, score in ranked[:top_n]:
+        r = meta_by_id[object_id]
+        results.append({
+            "object_id": object_id, "kind": r[1], "status": r[2],
+            "context_id": r[3], "score": score, "surface_text": r[5],
+        })
+    return {"results": results, "warnings": warnings}
 
 
 def search_bm25(db_path, query: str, top_n: int = 50) -> dict:
