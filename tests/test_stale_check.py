@@ -57,3 +57,48 @@ class ComputeClosureTest(unittest.TestCase):
         store = _store(code_locator("code.lonely", path="a/Y.cpp", commit_sha="SHA1"))
         self.assertEqual(compute_closure(store, "code.lonely"),
                          {"blocking": [], "nonblocking": []})
+
+
+class CoverageReportTest(unittest.TestCase):
+    def test_covered_vs_uncovered_with_reason_and_code_evref_flag(self):
+        from project_brain.objbase import base
+        from project_brain.stale_check import coverage_report
+        # code를 가리키는 EvidenceRef(ref_type=='code_locator')만 가진 uncovered 매핑.
+        code_evref = base({
+            "id": "evref.code", "kind": "EvidenceRef", "status": "reviewed",
+            "truth_role": "reference", "title": "code ref",
+            "evidence_manifest_id": "ev.m", "ref_type": "code_locator",
+            "locator": {"object_id": "code.z"}, "summary": "코드 근거",
+        }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
+        m_code_evref = domain_mapping("m.codeevref", code_locator_ids=[])
+        m_code_evref["evidence_refs"] = ["evref.code"]
+        store = _store(
+            code_locator("code.a", path="a/X.cpp", commit_sha="SHA1"),
+            domain_mapping("m.covered", code_locator_ids=["code.a"]),
+            domain_mapping("m.empty", code_locator_ids=[]),
+            code_evref, m_code_evref,
+        )
+        report = coverage_report(store)
+        self.assertEqual(report["covered_mappings"], ["m.covered"])
+        unc = {u["mapping_id"]: u for u in report["uncovered_mappings"]}
+        self.assertEqual(set(unc), {"m.empty", "m.codeevref"})
+        self.assertEqual(unc["m.empty"]["skipped_reason"], "no_code_locator_ids")
+        self.assertFalse(unc["m.empty"]["has_code_evidence_ref"])
+        # m.codeevref는 code_locator_ids는 없지만 code EvidenceRef를 가짐 → subset 가시화.
+        self.assertTrue(unc["m.codeevref"]["has_code_evidence_ref"])
+
+    def test_missing_code_locator_ids_field_is_uncovered(self):
+        from project_brain.objbase import base
+        from project_brain.stale_check import coverage_report
+        # code_locator_ids 키 자체가 없는 매핑도 uncovered(빈 것과 동급).
+        m = base({
+            "id": "m.nofield", "kind": "DomainMapping", "status": "reviewed",
+            "truth_role": "domain", "title": "t", "context_id": "context.x",
+            "mapping_key": "k", "canonical_summary": "s", "meaning": "m",
+            "boundary": "b", "glossary_term_ids": [], "decision_record_ids": [],
+            "evidence_refs": ["ev.x"],
+        }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
+        store = _store(m)
+        report = coverage_report(store)
+        self.assertEqual([u["mapping_id"] for u in report["uncovered_mappings"]], ["m.nofield"])
+        self.assertEqual(report["uncovered_mappings"][0]["skipped_reason"], "no_code_locator_ids")

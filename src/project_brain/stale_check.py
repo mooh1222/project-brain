@@ -28,3 +28,33 @@ def compute_closure(store, locator_id):
         else:
             nonblocking.append(m["id"])
     return {"blocking": blocking, "nonblocking": nonblocking}
+
+
+def _has_code_evidence_ref(store, mapping):
+    """매핑의 evidence_refs 중 코드를 가리키는 것(ref_type=='code_locator')이 있나."""
+    for rid in (mapping.get("evidence_refs") or []):
+        if store.has(rid) and store.get(rid).get("ref_type") == "code_locator":
+            return True
+    return False
+
+
+def coverage_report(store):
+    """매핑을 code_locator_ids 유무로 분류(spec §3·§6).
+
+    covered_mappings = code_locator_ids 비어있지 않음(stale-check 역추적 가능)의 id 목록.
+    uncovered_mappings = 비었거나 키 없음의 [{mapping_id, skipped_reason, has_code_evidence_ref}]
+      — "왜 사각인지"(skipped_reason)와 code EvidenceRef만 가진 부분집합
+      (has_code_evidence_ref)을 출력 계약에 박아 가시화한다. 자동 처리는 안 한다.
+    """
+    covered, uncovered = [], []
+    for m in store.by_kind("DomainMapping"):
+        if m.get("code_locator_ids"):
+            covered.append(m["id"])
+        else:
+            uncovered.append({
+                "mapping_id": m["id"],
+                "skipped_reason": "no_code_locator_ids",
+                "has_code_evidence_ref": _has_code_evidence_ref(store, m),
+            })
+    return {"covered_mappings": sorted(covered),
+            "uncovered_mappings": sorted(uncovered, key=lambda u: u["mapping_id"])}
