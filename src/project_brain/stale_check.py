@@ -7,6 +7,8 @@ git 호출은 git_runner 콜러블로 주입한다 — 로직 함수는 git을 �
 """
 from __future__ import annotations
 
+import subprocess
+
 
 def _mappings_referencing(store, locator_id):
     """code_locator_ids에 locator_id를 가진 DomainMapping 목록(id 정렬). compute_closure 전용 내부 헬퍼."""
@@ -58,3 +60,47 @@ def coverage_report(store):
             })
     return {"covered_mappings": sorted(covered),
             "uncovered_mappings": sorted(uncovered, key=lambda u: u["mapping_id"])}
+
+
+class GitError(RuntimeError):
+    pass
+
+
+def make_git_runner(repo_root, *, timeout=60):
+    """repo_root에서 git을 실행하는 runner를 만든다. 실패·타임아웃 시 GitError.
+
+    timeout: git 호출(특히 fetch)이 네트워크 행으로 무한 블로킹하지 않게 하는 상한(초).
+    """
+    def run(args):
+        try:
+            result = subprocess.run(
+                ["git"] + args, capture_output=True, text=True,
+                cwd=str(repo_root), timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"git {' '.join(args)} timed out after {timeout}s") from exc
+        if result.returncode != 0:
+            raise GitError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+        return result.stdout
+    return run
+
+
+def resolve_target_head(git_runner, *, fetch=True):
+    """origin/develop의 현재 sha. fetch=True면 먼저 origin develop을 가져온다.
+
+    brain 브랜치 워킹트리는 develop보다 구버전이라 비교 기준은 항상 origin/develop.
+    """
+    if fetch:
+        git_runner(["fetch", "origin", "develop"])
+    return git_runner(["rev-parse", "origin/develop"]).strip()
+
+
+def path_changed(git_runner, from_commit, target_head, path):
+    """from_commit 이후 target_head까지 path가 바뀌었으면 change_type(M/A/D/R…),
+    안 바뀌었으면 None. --name-status로 rename/delete 종류까지 사람이 보게 한다."""
+    out = git_runner(
+        ["diff", "--name-status", f"{from_commit}..{target_head}", "--", path]
+    ).strip()
+    if not out:
+        return None
+    # 첫 줄의 첫 탭 토큰이 status(rename은 R100 등) — 대표값 그대로 운반.
+    return out.splitlines()[0].split("\t")[0]

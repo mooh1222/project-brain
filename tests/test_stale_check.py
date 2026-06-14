@@ -8,6 +8,30 @@ import unittest
 from project_brain.store import BrainStore
 
 
+def fake_git_runner(target_head, changed):
+    """changed: {(from_commit, path): change_type}. 없는 키는 '안 바뀜'(빈 출력).
+
+    git diff args 형태: ["diff", "--name-status", "FROM..TARGET", "--", "PATH"].
+    """
+    calls = []
+
+    def run(args):
+        calls.append(args)
+        if args[:1] == ["fetch"]:
+            return ""
+        if args[:1] == ["rev-parse"]:
+            return target_head + "\n"
+        if args[:2] == ["diff", "--name-status"]:
+            from_commit = args[2].split("..")[0]
+            path = args[4]
+            ct = changed.get((from_commit, path))
+            return f"{ct}\t{path}\n" if ct else ""
+        raise AssertionError(f"unexpected git args: {args}")
+
+    run.calls = calls
+    return run
+
+
 def code_locator(cid, *, path, commit_sha, symbol="sym", line_start=10, line_end=20):
     from project_brain.objbase import base
     return base({
@@ -102,3 +126,35 @@ class CoverageReportTest(unittest.TestCase):
         report = coverage_report(store)
         self.assertEqual([u["mapping_id"] for u in report["uncovered_mappings"]], ["m.nofield"])
         self.assertEqual(report["uncovered_mappings"][0]["skipped_reason"], "no_code_locator_ids")
+
+
+class GitDetectionTest(unittest.TestCase):
+    def test_resolve_target_head_fetches_then_rev_parse(self):
+        from project_brain.stale_check import resolve_target_head
+        runner = fake_git_runner("TARGETSHA", {})
+        head = resolve_target_head(runner, fetch=True)
+        self.assertEqual(head, "TARGETSHA")
+        self.assertEqual(runner.calls[0], ["fetch", "origin", "develop"])
+        self.assertEqual(runner.calls[1], ["rev-parse", "origin/develop"])
+
+    def test_resolve_target_head_no_fetch_skips_fetch(self):
+        from project_brain.stale_check import resolve_target_head
+        runner = fake_git_runner("TARGETSHA", {})
+        resolve_target_head(runner, fetch=False)
+        self.assertEqual(runner.calls, [["rev-parse", "origin/develop"]])
+
+    def test_path_changed_returns_change_type_when_changed(self):
+        from project_brain.stale_check import path_changed
+        runner = fake_git_runner("TARGET", {("SHA1", "a/X.cpp"): "M"})
+        self.assertEqual(path_changed(runner, "SHA1", "TARGET", "a/X.cpp"), "M")
+
+    def test_path_changed_returns_none_when_unchanged(self):
+        from project_brain.stale_check import path_changed
+        runner = fake_git_runner("TARGET", {})
+        self.assertIsNone(path_changed(runner, "SHA1", "TARGET", "a/X.cpp"))
+
+    def test_path_changed_rename_returns_status_token(self):
+        # rename은 실제 git에서 R100\told\tnew 3컬럼이지만 path_changed는 첫 탭 토큰만 쓴다.
+        from project_brain.stale_check import path_changed
+        runner = fake_git_runner("TARGET", {("SHA1", "a/X.cpp"): "R100"})
+        self.assertEqual(path_changed(runner, "SHA1", "TARGET", "a/X.cpp"), "R100")
