@@ -3,8 +3,15 @@
 자기완결: 인라인 객체 빌더 + 가짜 git_runner만 쓴다(실 git·네트워크 없음).
 spec: docs/superpowers/specs/2026-06-14-bb2-brain-stale-check-design.md
 """
+import io
+import json
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
 
+from project_brain import cli
 from project_brain.store import BrainStore
 
 
@@ -222,3 +229,54 @@ class StaleCheckTest(unittest.TestCase):
         runner = fake_git_runner("TARGET", {})
         report = stale_check(store, git_runner=runner, target_head="TARGET")
         self.assertEqual(report["candidates"], [])  # 기준점 없는 locator는 건너뜀
+
+
+class CliStaleCheckTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, argv, runner):
+        out = io.StringIO()
+        # CLI가 make_git_runner로 만드는 실제 runner를 가짜로 바꿔치기.
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=runner), \
+             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        return rc, json.loads(out.getvalue())
+
+    def test_stale_check_outputs_candidates_and_coverage(self):
+        for obj in (
+            code_locator("code.changed", path="a/Changed.cpp", commit_sha="SHA1"),
+            domain_mapping("m.on_changed", code_locator_ids=["code.changed"]),
+            domain_mapping("m.uncovered", code_locator_ids=[]),
+        ):
+            BrainStore.save_object(self.root, obj)
+        runner = fake_git_runner("TARGET", {("SHA1", "a/Changed.cpp"): "M"})
+        rc, payload = self._run(
+            ["stale-check", "--brain-root", str(self.root), "--no-fetch"], runner)
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual([c["mapping_id"] for c in payload["candidates"]], ["m.on_changed"])
+        uncovered_ids = {u["mapping_id"] for u in payload["coverage"]["uncovered_mappings"]}
+        self.assertIn("m.uncovered", uncovered_ids)
+        self.assertEqual(payload["target_head"], "TARGET")
+        # 읽기 전용: locator의 commit_sha가 그대로다(stale-check는 갱신 안 함).
+        self.assertEqual(BrainStore.load(self.root).get("code.changed")["commit_sha"], "SHA1")
+
+    def test_stale_check_git_error_returns_rc1(self):
+        # --no-fetch 없이 실행 → resolve_target_head의 fetch 단계에서 GitError → rc=1.
+        BrainStore.save_object(
+            self.root, code_locator("code.a", path="a/X.cpp", commit_sha="SHA1"))
+
+        def boom(args):
+            from project_brain.stale_check import GitError
+            raise GitError("git rev-parse origin/develop failed: unknown revision")
+
+        rc, payload = self._run(
+            ["stale-check", "--brain-root", str(self.root)], boom)
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("failed", payload["error"])

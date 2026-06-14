@@ -449,6 +449,30 @@ def _run_bootstrap(argv) -> int:
     return 0 if doctor_report["ok"] else 1
 
 
+def _run_stale_check(argv) -> int:
+    """코드 변경 → 의미 갱신 대상 발견 (spec §3). 읽기 전용 — brain 데이터 불변."""
+    parser = argparse.ArgumentParser(prog="cli stale-check")
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config)")
+    parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모 — brain이 레포 루트 직하라 가정)")
+    parser.add_argument("--no-fetch", action="store_true",
+                        help="git fetch 생략(오프라인·테스트)")
+    args = parser.parse_args(argv)
+
+    from project_brain.stale_check import GitError, make_git_runner, stale_check
+
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
+    repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
+    git_runner = make_git_runner(repo_root)
+    try:
+        report = stale_check(store, git_runner=git_runner, fetch=not args.no_fetch)
+    except GitError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 1
+    print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main() -> int:
     argv = sys.argv[1:]
     try:
@@ -473,6 +497,8 @@ def main() -> int:
             return _run_doctor(argv[1:])
         if argv and argv[0] == "bootstrap":
             return _run_bootstrap(argv[1:])
+        if argv and argv[0] == "stale-check":
+            return _run_stale_check(argv[1:])
         return _run_query(argv)
     except ConfigError as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.
