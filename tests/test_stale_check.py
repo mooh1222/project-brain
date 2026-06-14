@@ -280,3 +280,90 @@ class CliStaleCheckTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
         self.assertIn("failed", payload["error"])
+
+
+class MarkCheckedTest(unittest.TestCase):
+    def _shared(self):
+        # code.shared를 reviewed 매핑 둘이 공유 + candidate 1 + superseded 1이 가리킴.
+        return _store(
+            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD",
+                         line_start=40, line_end=80),
+            domain_mapping("m.r1", code_locator_ids=["code.shared"]),
+            domain_mapping("m.r2", code_locator_ids=["code.shared"]),
+            domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
+            domain_mapping("m.sup", code_locator_ids=["code.shared"], status="superseded"),
+        )
+
+    def test_full_closure_updates_keeps_lines_warns_candidate_only(self):
+        from project_brain.stale_check import mark_checked
+        store = self._shared()
+        result = mark_checked(store, mapping_ids=["m.r1", "m.r2"],
+                              checked_head="NEW", current_head="NEW",
+                              now="2026-06-14T12:00:00Z")
+        self.assertTrue(result["ok"])
+        self.assertEqual([l["id"] for l in result["updated"]], ["code.shared"])
+        loc = result["updated"][0]
+        self.assertEqual(loc["commit_sha"], "NEW")
+        self.assertEqual(loc["verified_at"], "2026-06-14T12:00:00Z")
+        self.assertEqual(loc["updated_at"], "2026-06-14T12:00:00Z")
+        self.assertEqual(loc["line_start"], 40)  # line 불변
+        self.assertEqual(loc["line_end"], 80)
+        # warning은 candidate만 — superseded(m.sup)는 현재 사실 아니라 제외(spec §4).
+        self.assertEqual(result["warnings"],
+                         [{"locator_id": "code.shared", "candidate_mapping_ids": ["m.cand"]}])
+        # store 불변(저장은 CLI 책임) — 핵심 갱신 경로에서 원본 commit_sha가 안 바뀜.
+        self.assertEqual(store.get("code.shared")["commit_sha"], "OLD")
+
+    def test_partial_closure_blocks_and_does_not_update(self):
+        from project_brain.stale_check import mark_checked
+        result = mark_checked(self._shared(), mapping_ids=["m.r1"],
+                              checked_head="NEW", current_head="NEW",
+                              now="2026-06-14T12:00:00Z")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["updated"], [])  # m.r2가 빠져 갱신 안 함
+        self.assertEqual(result["blocked"],
+                         [{"locator_id": "code.shared", "missing_mapping_ids": ["m.r2"]}])
+
+    def test_head_moved_guard(self):
+        from project_brain.stale_check import mark_checked
+        result = mark_checked(self._shared(), mapping_ids=["m.r1", "m.r2"],
+                              checked_head="A", current_head="B",
+                              now="2026-06-14T12:00:00Z")
+        self.assertFalse(result["ok"])
+        self.assertIn("head moved", result["error"])
+        self.assertEqual(result["updated"], [])
+
+    def test_rejects_non_reviewed_inputs(self):
+        # blocker 방지(spec §4): 입력은 존재하는 reviewed DomainMapping만. candidate/
+        # superseded/unknown이 섞이면 ok:False로 거부 — candidate가 빈 reviewed closure를
+        # vacuous하게 통과시켜 commit_sha를 갱신하는 사각을 입력 단에서 막는다.
+        from project_brain.stale_check import mark_checked
+        result = mark_checked(self._shared(),
+                              mapping_ids=["m.r1", "m.cand", "m.sup", "m.nope"],
+                              checked_head="NEW", current_head="NEW",
+                              now="2026-06-14T12:00:00Z")
+        self.assertFalse(result["ok"])
+        reasons = {x["id"]: x["reason"] for x in result["invalid_inputs"]}
+        self.assertEqual(reasons["m.cand"], "status_candidate")
+        self.assertEqual(reasons["m.sup"], "status_superseded")
+        self.assertEqual(reasons["m.nope"], "unknown_id")
+        self.assertEqual(result["updated"], [])  # 거부 시 아무것도 안 건드림
+
+    def test_non_code_locator_id_in_code_locator_ids_skipped(self):
+        # future bad data 방어(재리뷰 major): code_locator_ids에 비-CodeLocator id가 섞여도
+        # commit_sha를 엉뚱한 kind 객체에 쓰지 않는다. reviewed 매핑이 GlossaryTerm을 잘못 가리킨 상황.
+        from project_brain.objbase import base
+        from project_brain.stale_check import mark_checked
+        not_a_loc = base({
+            "id": "g.notaloc", "kind": "GlossaryTerm", "status": "reviewed",
+            "truth_role": "domain", "title": "용어", "context_id": "context.x",
+            "term": "용어", "definition": "정의", "evidence_refs": ["ev.x"],
+        }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
+        store = _store(
+            domain_mapping("m.bad", code_locator_ids=["g.notaloc"]), not_a_loc)
+        result = mark_checked(store, mapping_ids=["m.bad"],
+                              checked_head="NEW", current_head="NEW",
+                              now="2026-06-14T12:00:00Z")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["updated"], [])  # 비-CodeLocator는 건너뜀
+        self.assertEqual(store.get("g.notaloc")["updated_at"], "2026-06-12T00:00:00Z")

@@ -164,3 +164,71 @@ def stale_check(store, *, git_runner, target_head=None, fetch=True):
         "locator_group": locator_group,
         "coverage": coverage_report(store),
     }
+
+
+def mark_checked(store, *, mapping_ids, checked_head, current_head, now):
+    """검토 완료 reviewed 매핑이 어떤 locator의 blocking closure를 전부 덮으면 갱신.
+
+    입력은 존재하는 reviewed DomainMapping만 허용한다(spec §4 'reviewed-only blocking').
+    unknown/candidate/superseded/non-mapping이 섞이면 ok:False로 거부한다 — candidate가
+    reviewed closure 빈 locator를 vacuous하게 통과시켜 commit_sha를 갱신하는 사각을 입력
+    단에서 차단한다. 그래서 후보 locator의 blocking은 항상 입력 매핑을 포함해 비지 않는다.
+
+    반환(체크 순서대로):
+      head 이동: {"ok": False, "error": "head moved", "checked_head", "current_head", ...빈}
+      거부: {"ok": False, "error": ..., "invalid_inputs": [{id, reason}...], updated/blocked/warnings 빈}
+      정상: {"ok": True, "updated": [갱신 locator 객체...],
+             "blocked": [{locator_id, missing_mapping_ids}...],
+             "warnings": [{locator_id, candidate_mapping_ids}...]}
+    저장은 호출자(CLI). line_* 불변. warnings는 candidate만(superseded 제외, spec §4).
+    """
+    empty = {"updated": [], "blocked": [], "warnings": []}
+    if checked_head != current_head:
+        return {"ok": False, "error": "head moved",
+                "checked_head": checked_head, "current_head": current_head, **empty}
+
+    # 입력 검증: 존재하는 reviewed DomainMapping만(spec §4 — vacuous pass 차단).
+    invalid_inputs = []
+    for mid in mapping_ids:
+        if not store.has(mid):
+            invalid_inputs.append({"id": mid, "reason": "unknown_id"})
+        elif store.get(mid).get("kind") != "DomainMapping":
+            invalid_inputs.append({"id": mid, "reason": "not_domain_mapping"})
+        elif store.get(mid).get("status") != "reviewed":
+            invalid_inputs.append(
+                {"id": mid, "reason": f"status_{store.get(mid).get('status')}"})
+    if invalid_inputs:
+        return {"ok": False, "error": "mappings must be existing reviewed DomainMapping",
+                "invalid_inputs": invalid_inputs, **empty}
+
+    input_set = set(mapping_ids)
+    candidate_locator_ids = set()
+    for mid in mapping_ids:
+        for lid in (store.get(mid).get("code_locator_ids") or []):
+            candidate_locator_ids.add(lid)
+
+    updated, blocked, warnings = [], [], []
+    for lid in sorted(candidate_locator_ids):
+        # 갱신 대상은 실제 CodeLocator만 — schema/lint는 code_locator_ids의 "존재"만 보고
+        # "CodeLocator인가"는 강제하지 않으므로(엔진 lint.py), future bad data에서 비-CodeLocator
+        # id가 섞여도 commit_sha/verified_at/updated_at를 엉뚱한 객체에 쓰지 않게 막는다.
+        if not store.has(lid) or store.get(lid).get("kind") != "CodeLocator":
+            continue
+        closure = compute_closure(store, lid)
+        missing = sorted(m for m in closure["blocking"] if m not in input_set)
+        if missing:
+            blocked.append({"locator_id": lid, "missing_mapping_ids": missing})
+            continue
+        # warning은 candidate만 — superseded는 현재 사실이 아니라 제외(spec §4).
+        # sorted로 명시(missing_mapping_ids와 일관 — _mappings_referencing 정렬에 암묵 의존하지 않음).
+        candidate_only = sorted(
+            m for m in closure["nonblocking"]
+            if store.get(m).get("status") == "candidate")
+        if candidate_only:
+            warnings.append({"locator_id": lid, "candidate_mapping_ids": candidate_only})
+        loc = dict(store.get(lid))
+        loc["commit_sha"] = checked_head
+        loc["verified_at"] = now
+        loc["updated_at"] = now
+        updated.append(loc)
+    return {"ok": True, "updated": updated, "blocked": blocked, "warnings": warnings}
