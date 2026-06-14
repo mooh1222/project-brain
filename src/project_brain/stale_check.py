@@ -104,3 +104,63 @@ def path_changed(git_runner, from_commit, target_head, path):
         return None
     # 첫 줄의 첫 탭 토큰이 status(rename은 R100 등) — 대표값 그대로 운반.
     return out.splitlines()[0].split("\t")[0]
+
+
+def stale_check(store, *, git_runner, target_head=None, fetch=True):
+    """바뀐 파일을 가리키는 매핑 후보 + locator_group + coverage + target_head.
+
+    target_head를 주면 git fetch/rev-parse를 건너뛴다(테스트·재실행). 읽기 전용 —
+    brain 데이터는 절대 안 건드린다. 구현 키는 (path, commit_sha) 쌍이다(같은 path를
+    commit_sha 다른 locator가 가리키면 각각 판정).
+    """
+    if target_head is None:
+        target_head = resolve_target_head(git_runner, fetch=fetch)
+
+    change_cache = {}  # (path, commit_sha) → change_type or None
+    locator_group = []
+    candidate_mapping_ids = set()
+    for loc in store.by_kind("CodeLocator"):
+        path = loc.get("path")
+        from_commit = loc.get("commit_sha")
+        if not path or not from_commit:
+            continue  # 기준점 없는 locator는 비교 불가 — 건너뜀
+        key = (path, from_commit)
+        if key not in change_cache:
+            change_cache[key] = path_changed(git_runner, from_commit, target_head, path)
+        change_type = change_cache[key]
+        if change_type is None:
+            continue
+        closure = compute_closure(store, loc["id"])
+        locator_group.append({
+            "locator_id": loc["id"],
+            "path": path,
+            "from_commit": from_commit,
+            "target_head": target_head,
+            "change_type": change_type,
+            "blocking_affected_mapping_ids": list(closure["blocking"]),
+            "nonblocking_affected_mapping_ids": list(closure["nonblocking"]),
+        })
+        candidate_mapping_ids.update(closure["blocking"])
+
+    locator_group.sort(key=lambda g: g["locator_id"])
+    candidates = []
+    for mid in sorted(candidate_mapping_ids):
+        m = store.get(mid)
+        locs = [g for g in locator_group
+                if mid in g["blocking_affected_mapping_ids"]]
+        candidates.append({
+            "mapping_id": mid,
+            "mapping_key": m.get("mapping_key"),
+            "stale_locators": [
+                {"locator_id": g["locator_id"], "path": g["path"],
+                 "change_type": g["change_type"], "from_commit": g["from_commit"]}
+                for g in locs
+            ],
+        })
+
+    return {
+        "target_head": target_head,
+        "candidates": candidates,
+        "locator_group": locator_group,
+        "coverage": coverage_report(store),
+    }

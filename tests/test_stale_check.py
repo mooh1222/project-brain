@@ -158,3 +158,67 @@ class GitDetectionTest(unittest.TestCase):
         from project_brain.stale_check import path_changed
         runner = fake_git_runner("TARGET", {("SHA1", "a/X.cpp"): "R100"})
         self.assertEqual(path_changed(runner, "SHA1", "TARGET", "a/X.cpp"), "R100")
+
+
+class StaleCheckTest(unittest.TestCase):
+    def _corpus(self):
+        return _store(
+            code_locator("code.changed", path="a/Changed.cpp", commit_sha="SHA1"),
+            code_locator("code.same", path="a/Same.cpp", commit_sha="SHA1"),
+            domain_mapping("m.on_changed", code_locator_ids=["code.changed"]),
+            domain_mapping("m.on_same", code_locator_ids=["code.same"]),
+            domain_mapping("m.uncovered", code_locator_ids=[]),
+        )
+
+    def test_only_changed_file_mappings_become_candidates(self):
+        from project_brain.stale_check import stale_check
+        runner = fake_git_runner("TARGET", {("SHA1", "a/Changed.cpp"): "M"})
+        report = stale_check(self._corpus(), git_runner=runner, fetch=True)
+        self.assertEqual(report["target_head"], "TARGET")
+        cand_ids = [c["mapping_id"] for c in report["candidates"]]
+        self.assertEqual(cand_ids, ["m.on_changed"])  # 안 바뀐 code.same 매핑은 제외
+
+    def test_locator_group_carries_closure_and_change_type(self):
+        from project_brain.stale_check import stale_check
+        runner = fake_git_runner("TARGET", {("SHA1", "a/Changed.cpp"): "M"})
+        report = stale_check(self._corpus(), git_runner=runner, fetch=True)
+        self.assertEqual(len(report["locator_group"]), 1)
+        g = report["locator_group"][0]
+        self.assertEqual(g["locator_id"], "code.changed")
+        self.assertEqual(g["change_type"], "M")
+        self.assertEqual(g["from_commit"], "SHA1")
+        self.assertEqual(g["target_head"], "TARGET")
+        self.assertEqual(g["blocking_affected_mapping_ids"], ["m.on_changed"])
+        self.assertEqual(g["nonblocking_affected_mapping_ids"], [])
+
+    def test_coverage_included(self):
+        from project_brain.stale_check import stale_check
+        runner = fake_git_runner("TARGET", {})
+        report = stale_check(self._corpus(), git_runner=runner, fetch=True)
+        uncovered_ids = {u["mapping_id"] for u in report["coverage"]["uncovered_mappings"]}
+        self.assertIn("m.uncovered", uncovered_ids)
+        self.assertEqual(report["candidates"], [])  # 아무것도 안 바뀌면 후보 0
+
+    def test_explicit_target_head_skips_resolve(self):
+        from project_brain.stale_check import stale_check
+        runner = fake_git_runner("UNUSED", {("SHA1", "a/Changed.cpp"): "M"})
+        report = stale_check(self._corpus(), git_runner=runner, target_head="GIVEN")
+        self.assertEqual(report["target_head"], "GIVEN")
+        # target_head 주면 fetch도 rev-parse도 안 함 — diff만 호출됨(회귀 방지로 둘 다 assert)
+        self.assertTrue(all(c[0] != "fetch" for c in runner.calls))
+        self.assertTrue(all(c[0] != "rev-parse" for c in runner.calls))
+
+    def test_locator_without_commit_sha_skipped(self):
+        from project_brain.stale_check import stale_check
+        from project_brain.objbase import base
+        loc_no_sha = base({
+            "id": "code.nosha", "kind": "CodeLocator", "status": "reviewed",
+            "truth_role": "reference", "title": "t", "repo": "bb2_client",
+            "path": "a/NoSha.cpp", "symbol": "s", "locator_source": "rg",
+            "verified_at": "2026-06-12T00:00:00Z", "evidence_refs": [],
+        }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
+        store = _store(loc_no_sha,
+                       domain_mapping("m.x", code_locator_ids=["code.nosha"]))
+        runner = fake_git_runner("TARGET", {})
+        report = stale_check(store, git_runner=runner, target_head="TARGET")
+        self.assertEqual(report["candidates"], [])  # 기준점 없는 locator는 건너뜀
