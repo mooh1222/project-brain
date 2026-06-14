@@ -215,6 +215,21 @@ class StaleCheckTest(unittest.TestCase):
         self.assertTrue(all(c[0] != "fetch" for c in runner.calls))
         self.assertTrue(all(c[0] != "rev-parse" for c in runner.calls))
 
+    def test_candidate_lists_multiple_stale_locators(self):
+        # 한 매핑이 여러 locator를 가리키고 둘 다 바뀌면 candidate.stale_locators에 둘 다.
+        from project_brain.stale_check import stale_check
+        store = _store(
+            code_locator("code.a", path="a/A.cpp", commit_sha="SHA1"),
+            code_locator("code.b", path="a/B.cpp", commit_sha="SHA1"),
+            domain_mapping("m.multi", code_locator_ids=["code.a", "code.b"]),
+        )
+        runner = fake_git_runner("TARGET",
+                                 {("SHA1", "a/A.cpp"): "M", ("SHA1", "a/B.cpp"): "M"})
+        report = stale_check(store, git_runner=runner, target_head="TARGET")
+        cand = next(c for c in report["candidates"] if c["mapping_id"] == "m.multi")
+        locs = {sl["locator_id"] for sl in cand["stale_locators"]}
+        self.assertEqual(locs, {"code.a", "code.b"})
+
     def test_locator_without_commit_sha_skipped(self):
         from project_brain.stale_check import stale_check
         from project_brain.objbase import base
@@ -432,6 +447,31 @@ class CliMarkCheckedTest(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("head moved", payload["error"])
         self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")
+
+    def test_mixed_update_and_block_in_one_call(self):
+        # 한 호출에서 X는 closure 완전(갱신), Y는 부분(blocked) — 독립 처리 + 디스크 반영.
+        for obj in (
+            code_locator("code.x", path="a/X2.cpp", commit_sha="OLD", line_start=1, line_end=5),
+            code_locator("code.y", path="a/Y2.cpp", commit_sha="OLD", line_start=1, line_end=5),
+            domain_mapping("m.x1", code_locator_ids=["code.x"]),
+            domain_mapping("m.x2", code_locator_ids=["code.x"]),
+            domain_mapping("m.y1", code_locator_ids=["code.y"]),
+            domain_mapping("m.y2", code_locator_ids=["code.y"]),
+        ):
+            BrainStore.save_object(self.root, obj)
+        runner = fake_git_runner("NEW", {})
+        # m.x1+m.x2로 code.x는 완전, m.y1만 줘 code.y는 m.y2가 빠져 blocked.
+        rc, payload = self._run(
+            ["mark-checked", "--brain-root", str(self.root),
+             "--mappings", "m.x1", "m.x2", "m.y1", "--checked-head", "NEW", "--no-fetch"],
+            runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["updated"], ["code.x"])
+        self.assertEqual(payload["blocked"],
+                         [{"locator_id": "code.y", "missing_mapping_ids": ["m.y2"]}])
+        loaded = BrainStore.load(self.root)
+        self.assertEqual(loaded.get("code.x")["commit_sha"], "NEW")  # 완전 → 갱신
+        self.assertEqual(loaded.get("code.y")["commit_sha"], "OLD")  # blocked → 불변
 
     def test_candidate_input_rejected_rc1_disk_unchanged(self):
         # candidate 매핑을 --mappings로 주면 입력 검증에서 거부(rc=1), locator 불변(blocker 방지).

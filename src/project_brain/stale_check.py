@@ -181,6 +181,11 @@ def mark_checked(store, *, mapping_ids, checked_head, current_head, now):
              "blocked": [{locator_id, missing_mapping_ids}...],
              "warnings": [{locator_id, candidate_mapping_ids}...]}
     저장은 호출자(CLI). line_* 불변. warnings는 candidate만(superseded 제외, spec §4).
+
+    staleness는 재확인하지 않는다 — 사람이 검토 선언한 매핑의 blocking closure 충족이
+    유일한 갱신 조건이다(이 함수는 git을 받지 않는다). 안 바뀐 locator라도 그 reviewed
+    closure가 입력에 전부 들어오면 commit_sha가 checked_head로 갱신되며, checked_head는
+    origin/develop ancestor라 무해하다(stale 여부 판정은 stale-check의 몫).
     """
     empty = {"updated": [], "blocked": [], "warnings": []}
     if checked_head != current_head:

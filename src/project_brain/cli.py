@@ -499,6 +499,9 @@ def _run_mark_checked(argv) -> int:
     store = BrainStore.load(brain_root)
     repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
     git_runner = make_git_runner(repo_root)
+    if args.no_fetch:
+        print("warning: --no-fetch는 checked_head 경합 가드를 로컬 origin/develop 기준으로 "
+              "약화시킨다(쓰기 명령 — 최신 develop 미반영 위험).", file=sys.stderr)
     try:
         current_head = resolve_target_head(git_runner, fetch=not args.no_fetch)
     except GitError as exc:
