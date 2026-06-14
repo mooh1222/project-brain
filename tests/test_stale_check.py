@@ -367,3 +367,80 @@ class MarkCheckedTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["updated"], [])  # 비-CodeLocator는 건너뜀
         self.assertEqual(store.get("g.notaloc")["updated_at"], "2026-06-12T00:00:00Z")
+
+
+class CliMarkCheckedTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        for obj in (
+            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD",
+                         line_start=40, line_end=80),
+            domain_mapping("m.r1", code_locator_ids=["code.shared"]),
+            domain_mapping("m.r2", code_locator_ids=["code.shared"]),
+            domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
+        ):
+            BrainStore.save_object(self.root, obj)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, argv, runner):
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=runner), \
+             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        return rc, json.loads(out.getvalue())
+
+    def test_full_closure_persists_updated_locator(self):
+        runner = fake_git_runner("NEW", {})  # 현재 develop = NEW
+        rc, payload = self._run(
+            ["mark-checked", "--brain-root", str(self.root),
+             "--mappings", "m.r1", "m.r2", "--checked-head", "NEW", "--no-fetch"],
+            runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["updated"], ["code.shared"])
+        # 디스크에 갱신 반영 — commit_sha=NEW, line 불변.
+        loc = BrainStore.load(self.root).get("code.shared")
+        self.assertEqual(loc["commit_sha"], "NEW")
+        self.assertEqual(loc["line_start"], 40)
+        self.assertEqual(loc["line_end"], 80)
+        # candidate가 같은 locator를 가리키므로 CLI 출력 warnings에 전달된다.
+        self.assertEqual(payload["warnings"],
+                         [{"locator_id": "code.shared", "candidate_mapping_ids": ["m.cand"]}])
+
+    def test_partial_closure_blocked_rc0_disk_unchanged(self):
+        runner = fake_git_runner("NEW", {})
+        rc, payload = self._run(
+            ["mark-checked", "--brain-root", str(self.root),
+             "--mappings", "m.r1", "--checked-head", "NEW", "--no-fetch"],
+            runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["updated"], [])
+        self.assertEqual(payload["blocked"],
+                         [{"locator_id": "code.shared", "missing_mapping_ids": ["m.r2"]}])
+        # 갱신 안 됐으니 commit_sha 그대로.
+        self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")
+
+    def test_head_moved_returns_rc1_disk_unchanged(self):
+        runner = fake_git_runner("NEW", {})  # 현재 develop은 NEW인데
+        rc, payload = self._run(
+            ["mark-checked", "--brain-root", str(self.root),
+             "--mappings", "m.r1", "m.r2", "--checked-head", "STALE", "--no-fetch"],
+            runner)
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("head moved", payload["error"])
+        self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")
+
+    def test_candidate_input_rejected_rc1_disk_unchanged(self):
+        # candidate 매핑을 --mappings로 주면 입력 검증에서 거부(rc=1), locator 불변(blocker 방지).
+        runner = fake_git_runner("NEW", {})
+        rc, payload = self._run(
+            ["mark-checked", "--brain-root", str(self.root),
+             "--mappings", "m.cand", "--checked-head", "NEW", "--no-fetch"],
+            runner)
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["invalid_inputs"][0]["reason"], "status_candidate")
+        self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")

@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from project_brain.config import ConfigError, resolve_brain_root, resolve_scenarios_path
@@ -473,6 +474,64 @@ def _run_stale_check(argv) -> int:
     return 0
 
 
+def _run_mark_checked(argv) -> int:
+    """검토 완료 매핑으로 locator closure를 mark (spec §4). 갱신 locator만 저장."""
+    parser = argparse.ArgumentParser(prog="cli mark-checked")
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config)")
+    parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모 — brain이 레포 루트 직하라 가정)")
+    parser.add_argument("--mappings", required=True, nargs="+",
+                        help="'의미 그대로'로 검토 완료한 매핑 id 목록")
+    parser.add_argument("--checked-head", required=True,
+                        help="검토 기준 develop sha (stale-check가 낸 target_head)")
+    parser.add_argument("--no-fetch", action="store_true",
+                        help="git fetch 생략(오프라인·테스트). 주의: write 명령이라 "
+                             "checked_head 경합 가드가 로컬 origin/develop 기준으로 약해진다")
+    args = parser.parse_args(argv)
+
+    from project_brain.stale_check import (
+        GitError,
+        make_git_runner,
+        mark_checked,
+        resolve_target_head,
+    )
+
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
+    repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
+    git_runner = make_git_runner(repo_root)
+    try:
+        current_head = resolve_target_head(git_runner, fetch=not args.no_fetch)
+    except GitError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 1
+
+    # 코퍼스 datetime 표준(...Z, microsecond 없음)에 맞춘다.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = mark_checked(store, mapping_ids=args.mappings,
+                          checked_head=args.checked_head, current_head=current_head, now=now)
+    if not result["ok"]:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1
+
+    # 쓰기 전 schema 검증 후에만 save(promote의 '쓰기 전 검증' 원칙). CodeLocator의
+    # commit_sha/verified_at/updated_at만 갱신해 관계가 안 바뀌므로 store lint는 불필요
+    # (promote는 관계를 바꿔 merged lint까지 하지만 여긴 해당 없음).
+    schema_errors = []
+    for loc in result["updated"]:
+        schema_errors.extend(validate_object(loc))
+    if schema_errors:
+        print(json.dumps({"ok": False, "error": "; ".join(schema_errors)},
+                         ensure_ascii=False, indent=2))
+        return 1
+    for loc in result["updated"]:
+        BrainStore.save_object(brain_root, loc)
+    print(json.dumps(
+        {"ok": True, "updated": [loc["id"] for loc in result["updated"]],
+         "blocked": result["blocked"], "warnings": result["warnings"]},
+        ensure_ascii=False, indent=2))
+    return 0
+
+
 def main() -> int:
     argv = sys.argv[1:]
     try:
@@ -499,6 +558,8 @@ def main() -> int:
             return _run_bootstrap(argv[1:])
         if argv and argv[0] == "stale-check":
             return _run_stale_check(argv[1:])
+        if argv and argv[0] == "mark-checked":
+            return _run_mark_checked(argv[1:])
         return _run_query(argv)
     except ConfigError as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.
