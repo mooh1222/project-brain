@@ -157,6 +157,28 @@ def candidate_mapping(mid="m.x", *, glossary_term_ids, mapping_key="key"):
     )
 
 
+def insight(iid="insight.x", *, insight_type="cross-cutting-risk",
+            source_object_ids=None, body="노출 게이트가 두 팝업에 이중구현돼 어긋난다",
+            status="reviewed", scope="스테이지 클리어 토큰 노출", code_locator_ids=None):
+    """중립 Insight 한 개(2026-06-15 신설 kind). A형(cross-cutting-risk) 기본 — source≥2."""
+    obj = {
+        "id": iid,
+        "kind": "Insight",
+        "status": status,
+        "truth_role": "synthesis",
+        "title": "인사이트: 노출 게이트 이중구현",
+        "body": body,
+        "source_object_ids": source_object_ids if source_object_ids is not None
+                             else ["m.a", "m.b"],
+        "scope": scope,
+    }
+    if insight_type is not None:
+        obj["insight_type"] = insight_type
+    if code_locator_ids is not None:
+        obj["code_locator_ids"] = code_locator_ids
+    return base(obj, tags=["neutral"], created_at=T, updated_at=T)
+
+
 class TestIngest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

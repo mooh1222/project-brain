@@ -94,5 +94,60 @@ class TestRefTypeEnum(unittest.TestCase):
         self.assertTrue(any("invalid ref_type" in e for e in errors))
 
 
+class TestInsightKind(unittest.TestCase):
+    """Insight kind(2026-06-15 신설) — truth_role=synthesis 재사용, insight_type A/B enum,
+    source_object_ids 개수 검사(공통 ≥1, A형 cross-cutting-risk ≥2)."""
+
+    def test_valid_cross_cutting_risk_passes(self):
+        from tests.test_ingest import insight
+        self.assertEqual(validate_object(insight()), [])
+
+    def test_valid_operational_lesson_passes(self):
+        from tests.test_ingest import insight
+        obj = insight("insight.b", insight_type="operational-lesson",
+                      source_object_ids=["ctx.a"])
+        self.assertEqual(validate_object(obj), [])
+
+    def test_truth_role_must_be_synthesis(self):
+        from tests.test_ingest import insight
+        obj = insight()
+        obj["truth_role"] = "domain"
+        errors = validate_object(obj)
+        self.assertTrue(any("invalid truth_role" in e for e in errors))
+
+    def test_invalid_insight_type_rejected(self):
+        from tests.test_ingest import insight
+        obj = insight()
+        obj["insight_type"] = "risk"
+        errors = validate_object(obj)
+        self.assertTrue(any("invalid insight_type" in e for e in errors))
+
+    def test_cross_cutting_risk_requires_two_sources(self):
+        from tests.test_ingest import insight
+        obj = insight(source_object_ids=["m.only"])
+        errors = validate_object(obj)
+        self.assertTrue(any(">=2 source_object_ids" in e for e in errors))
+
+    def test_no_type_requires_at_least_one_source(self):
+        from tests.test_ingest import insight
+        obj = insight(insight_type=None, source_object_ids=[])
+        errors = validate_object(obj)
+        self.assertTrue(any(">=1 source_object_ids" in e for e in errors))
+
+    def test_missing_body_reported(self):
+        from tests.test_ingest import insight
+        obj = insight()
+        del obj["body"]
+        errors = validate_object(obj)
+        self.assertTrue(any("Insight missing field 'body'" in e for e in errors))
+
+    def test_candidate_insight_rejected(self):
+        # 1차 제약(critic 검토 2): candidate Insight는 노출 통로가 없어 적재 거부.
+        from tests.test_ingest import insight
+        obj = insight(status="candidate")
+        errors = validate_object(obj)
+        self.assertTrue(any("candidate Insight not supported" in e for e in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

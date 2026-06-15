@@ -32,6 +32,7 @@ KIND_REQUIRED = {
                        "affected_context_ids", "spec_reflected"),
     "DomainMapping": ("context_id", "mapping_key", "canonical_summary", "meaning",
                       "boundary", "glossary_term_ids", "decision_record_ids"),
+    "Insight": ("body", "source_object_ids"),
 }
 
 TRUTH_ROLE_VALUES = frozenset({
@@ -56,6 +57,7 @@ KIND_TRUTH_ROLE = {
     "SlackThread": "source",
     "DecisionRecord": "event",
     "DomainMapping": "domain",
+    "Insight": "synthesis",
 }
 OBJECT_STATUS_VALUES = frozenset({"candidate", "reviewed", "superseded", "archived", "rejected"})
 POC_PRIORITY_VALUES = frozenset({"P0", "P1", "P2"})
@@ -101,6 +103,9 @@ REVIEW_SCOPE_VALUES = frozenset({"single_object", "mapping_bundle"})
 REVIEW_STATE_KEYS = frozenset({
     "meaning_reviewed", "evidence_reviewed", "implementation_reviewed", "projection_reviewed",
 })
+# spec(2026-06-15 Insight kind §4.2): A/B 두 결만 강제, 세부 분류는 연다.
+# insight_type은 필수가 아니되 값이 있으면 이 둘 중 하나여야 한다.
+INSIGHT_TYPE_VALUES = frozenset({"cross-cutting-risk", "operational-lesson"})
 
 
 class SchemaError(ValueError):
@@ -211,6 +216,26 @@ def validate_object(obj: dict) -> list[str]:
                         errors.append(f"{obj['id']}: DomainMapping review_state {rs_key!r} must be boolean")
         if obj.get("status") == "reviewed" and not obj.get("evidence_refs"):
             errors.append(f"{obj['id']}: reviewed DomainMapping requires non-empty evidence_refs")
+    elif kind == "Insight":
+        # 1차 제약(critic 검토 2, 2026-06-15): candidate Insight는 노출 통로가 없다
+        # (advisories는 reviewed만). candidate로 두면 회상 어디에도 안 떠 조용히 묻히므로
+        # 적재 자체를 거부한다. 후보 통로(promotable) 신설 시 이 블록을 제거한다.
+        if obj.get("status") == "candidate":
+            errors.append(
+                f"{obj['id']}: candidate Insight not supported (no recall channel — "
+                f"only reviewed surfaces via advisories; would be silently buried)")
+        # spec(2026-06-15) §4.2·§4.7: insight_type 값 enum + source 개수 검사.
+        # KIND_REQUIRED가 source_object_ids "존재"만 보므로(빈 리스트도 통과) 개수는 여기서.
+        insight_type = obj.get("insight_type")
+        if insight_type is not None and insight_type not in INSIGHT_TYPE_VALUES:
+            errors.append(f"{obj['id']}: Insight invalid insight_type {insight_type!r}")
+        source_ids = obj.get("source_object_ids")
+        if isinstance(source_ids, list):
+            min_required = 2 if insight_type == "cross-cutting-risk" else 1
+            if len(source_ids) < min_required:
+                errors.append(
+                    f"{obj['id']}: Insight requires >={min_required} source_object_ids "
+                    f"(insight_type={insight_type!r})")
     elif kind == "ReviewRecord":
         # 선택 필드(검증·강제 안 함, 버전 bump 없음, spec §4.5):
         #   vouched_by_mapping_ids: list[str] — auto:mapping-vouched 승격이 보증한 reviewed 매핑 id.
