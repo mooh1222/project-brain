@@ -230,6 +230,19 @@ def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[st
             if not store.has(target_id):
                 problems.append(f"{review['id']}: dangling target_object_ids {target_id}")
 
+    # 9) Insight dangling source_object_ids / code_locator_ids (spec 2026-06-15 §4.7).
+    #    "여러 객체를 가로지른다"가 본질이라 가리키는 근거가 사라지면 조용히 깨진다 —
+    #    DomainMapping(8a)·DecisionRecord(8b)와 동형으로 막는다.
+    for insight in store.by_kind("Insight"):
+        link_fields = (
+            ("source_object_ids", insight.get("source_object_ids") or []),
+            ("code_locator_ids", insight.get("code_locator_ids") or []),
+        )
+        for field_name, ids in link_fields:
+            for ref_id in ids:
+                if ref_id and not store.has(ref_id):
+                    problems.append(f"{insight['id']}: dangling {field_name} {ref_id}")
+
     if workspace_root is not None:
         problems.extend(_lint_generated_files_have_projection(store, Path(workspace_root)))
 

@@ -84,5 +84,32 @@ class TestUnpromotedVouchedTerms(unittest.TestCase):
         self.assertFalse(any("still candidate" in p for p in lint_store(store)))
 
 
+class TestInsightDangling(unittest.TestCase):
+    """Insight dangling 가드(spec 2026-06-15 §4.7) — 가리키는 근거 객체가 supersede/삭제되면
+    '가로지른다'는 본질이 조용히 깨지므로 DomainMapping 8a·DecisionRecord 8b와 동형으로 잡는다."""
+
+    def test_dangling_source_object_id_reported(self):
+        from tests.test_ingest import insight
+        ins = insight(source_object_ids=["m.gone", "m.gone2"])
+        problems = lint_store(store_of(ins))
+        self.assertTrue(any("dangling source_object_ids m.gone" in p for p in problems))
+
+    def test_dangling_code_locator_id_reported(self):
+        from tests.test_ingest import insight
+        ins = insight(code_locator_ids=["code.gone"])
+        problems = lint_store(store_of(ins))
+        self.assertTrue(any("dangling code_locator_ids code.gone" in p for p in problems))
+
+    def test_resolved_sources_no_dangling(self):
+        from tests.test_ingest import insight, context, candidate_mapping, candidate_term
+        g = candidate_term("g.x")
+        ctx = context(glossary_term_ids=["g.x"])
+        m1 = candidate_mapping("m.a", glossary_term_ids=["g.x"])
+        m2 = candidate_mapping("m.b", glossary_term_ids=["g.x"])
+        ins = insight(source_object_ids=["m.a", "m.b"])
+        problems = lint_store(store_of(g, ctx, m1, m2, ins))
+        self.assertFalse([p for p in problems if "insight.x" in p])
+
+
 if __name__ == "__main__":
     unittest.main()
