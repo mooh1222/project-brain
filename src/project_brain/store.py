@@ -51,6 +51,7 @@ class BrainStore:
         "DomainContext": "objects/domain",
         "GlossaryTerm": "objects/domain",
         "DomainMapping": "objects/mappings",
+        "Insight": "objects/insights",
         "DecisionRecord": "objects/decisions",
         "ContextProjection": "indexes/context_projections",
         "KnowledgePage": "views/knowledge",
