@@ -231,5 +231,27 @@ class ExtractorVersionTest(unittest.TestCase):
         self.assertGreaterEqual(EXTRACTOR_VERSION, 1)
 
 
+def insight(iid="insight.x", *, body="노출 게이트가 두 팝업에 이중구현돼 어긋난다",
+            scope="스테이지 클리어 토큰", status="reviewed"):
+    return _b({
+        "id": iid, "kind": "Insight", "status": status, "truth_role": "synthesis",
+        "title": "인사이트", "body": body, "scope": scope,
+        "source_object_ids": ["m.a", "m.b"], "insight_type": "cross-cutting-risk",
+    })
+
+
+class TestInsightSurface(unittest.TestCase):
+    """Insight 표면(2026-06-15) — body + scope만. source/code_locator는 그래프 동반(linked)."""
+
+    def test_surface_includes_body_and_scope(self):
+        s = extract_surface(insight(), store_of())
+        self.assertIn("이중구현", s)
+        self.assertIn("스테이지 클리어 토큰", s)
+
+    def test_extractor_version_bumped(self):
+        # Insight 추출기 추가 = 추출 로직 변경 → 색인 meta 불일치로 rebuild 트리거(§4).
+        self.assertGreaterEqual(EXTRACTOR_VERSION, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

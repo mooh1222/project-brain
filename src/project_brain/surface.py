@@ -21,8 +21,8 @@ content_hash는 객체 JSON 전체가 아니라 추출 표면 + status의 SHA-25
 
 from project_brain.hash_utils import sha256_text
 
-# 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거).
-EXTRACTOR_VERSION = 1
+# 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거). v2: Insight 추출기 추가(2026-06-15).
+EXTRACTOR_VERSION = 2
 
 # §2.1 색인 제외 kind. 이 목록에 든 kind는 extract_surface가 None을 돌려준다.
 # 표에 없는(미지원) kind도 None이 되도록, 추출은 _EXTRACTORS dispatch로만 한다.
@@ -144,6 +144,17 @@ def _surface_domain_context(obj, store) -> list[str]:
     return parts
 
 
+def _surface_insight(obj, store) -> list[str]:
+    # spec(2026-06-15 Insight kind): 자유 텍스트 본문 + 적용 범위가 검색 표면.
+    # source_object_ids/code_locator_ids는 linked(그래프 동반)로 따라가므로 표면에 안 넣는다.
+    parts: list[str] = []
+    for field in ("body", "scope"):
+        s = _norm_str(obj.get(field))
+        if s is not None:
+            parts.append(s)
+    return parts
+
+
 # kind → 표면 추출 함수. 여기 없는 kind는 extract_surface가 None.
 _EXTRACTORS = {
     "GlossaryTerm": _surface_glossary_term,
@@ -154,6 +165,7 @@ _EXTRACTORS = {
     "CurrentView": _surface_current_view,
     "CodeLocator": _surface_code_locator,
     "DomainContext": _surface_domain_context,
+    "Insight": _surface_insight,
 }
 
 
