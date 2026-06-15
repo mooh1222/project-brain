@@ -1101,6 +1101,19 @@ class InsightLaneTest(unittest.TestCase):
         locs = {c["object_id"] for c in ins_hit["linked"]["code_locators"]}
         self.assertIn("code.enter", locs)
 
+    def test_signals_anchor_df_excludes_insight_rows(self):
+        # 앵커 df 상한(30)은 객체 코퍼스 분포로 보정된 값(§8) — Insight 행이 분포를
+        # 흔들면 안 된다(C2 게이트층 누수). 같은 토큰의 Insight 40개가 있어도
+        # anchor_df는 객체 df(1)로 유지(_document_frequency가 Insight 제외).
+        objs = [glossary_term("g.race", term="레이스", definition="카누 경주")]
+        objs += [insight(f"insight.{i}", body=f"레이스 위험 서술 {i}") for i in range(40)]
+        build_store_dir(self.brain, objs)
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        hits = recall("레이스", db_path=self.db, embedder=self.embedder,
+                      brain_root=self.brain)
+        signals = compute_query_signals("레이스", hits, self.db)
+        self.assertEqual(signals["anchor_df"], 1)
+
 
 class RawGatePassTest(unittest.TestCase):
     def test_raw_channel_uses_candidate_floor_and_skips_anchor(self):

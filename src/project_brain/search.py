@@ -520,6 +520,7 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
             ins_vector_ids.append(r["object_id"])
             ins_meta.setdefault(r["object_id"], r)
         ins_fused = rrf_fuse([ins_bm25_ids, ins_vector_ids])
+        # scope 필터 없음: Insight는 context_id가 없어 raw처럼 context_id==scope를 걸면 전멸(위 블록 주석 참조).
         ins_bm25_set = set(ins_bm25_ids)
         ins_vector_set = set(ins_vector_ids)
         for object_id, score in ins_fused[:RAW_FUSED_TOP_N]:
@@ -556,14 +557,16 @@ def _document_frequency(conn: sqlite3.Connection, token: str) -> int:
 
     search_bm25와 같은 토큰 인용 규칙(개별 "..." 인용, prefix 없음)을 쓴다 — 색인·쿼리
     토큰화가 같은 tokenize()를 공유하므로 색인측 토큰과 그대로 대조된다(§6).
-    ★raw 청크 행은 제외★(2026-06-11) — 앵커 df 상한(_ANCHOR_DF_MAX=30)은 객체
-    코퍼스 분포로 보정된 값(§8)이라, 기획서 청크가 분포를 흔들면 보정이 깨진다.
+    ★raw 청크·Insight 행은 제외★(2026-06-11·2026-06-15) — 앵커 df 상한(_ANCHOR_DF_MAX=30)은
+    객체 코퍼스 분포로 보정된 값(§8)이라, 둘 다 자유 텍스트 다토큰이라 분포를 흔들면 보정이
+    깨진다(Insight가 31개 이상 쌓이면 공유 토큰 df가 상한을 넘겨 객체 게이트를 닫는 C2 누수).
     """
     expr = '"' + token.replace('"', '""') + '"'
     return conn.execute(
         "SELECT COUNT(*) FROM documents_fts f "
         "JOIN documents d ON d.object_id = f.object_id "
-        "WHERE documents_fts MATCH ? AND d.kind != ?", (expr, RAW_KIND)
+        "WHERE documents_fts MATCH ? AND d.kind NOT IN (?, ?)",
+        (expr, RAW_KIND, INSIGHT_KIND)
     ).fetchone()[0]
 
 
