@@ -32,6 +32,7 @@ ASSERTION_KEYS = {
     "no_answer",           # 게이트 작동: needs_clarification=True + results 0건
     "raw_top5_prefix_any",  # raw_excerpts top-5에 프리픽스 일치 id ≥1 (§2.2 raw 채널 —
                             # 청크 id는 청커 산출이라 정확 id 대신 프리픽스로 판정)
+    "advisories_top5_any",  # advisories(reviewed Insight) top-5에 ≥1 적중 (§4.6)
 }
 
 
@@ -65,6 +66,7 @@ def expected_object_ids(scenarios) -> set[str]:
         expect = sc["expect"]
         ids.update(expect.get("top5_any") or [])
         ids.update(expect.get("any_channel_top5_any") or [])
+        ids.update(expect.get("advisories_top5_any") or [])
         for group in expect.get("linked_any_groups") or []:
             ids.update(group)
     return ids
@@ -169,6 +171,13 @@ def evaluate(recall_fn, scenarios) -> dict:
                        if any(oid and oid.startswith(p) for oid in raw_top5)]
             checks["raw_top5_prefix_any"] = {
                 "passed": bool(matched), "matched": matched, "top5_raw": raw_top5,
+            }
+
+        if "advisories_top5_any" in expect:
+            adv_top5 = _hit_ids(response.get("advisories") or [], 5)
+            matched = [oid for oid in expect["advisories_top5_any"] if oid in adv_top5]
+            checks["advisories_top5_any"] = {
+                "passed": bool(matched), "matched": matched, "top5_advisories": adv_top5,
             }
 
         if expect.get("no_answer"):

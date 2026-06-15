@@ -269,5 +269,32 @@ class TestCliEval(unittest.TestCase):
             self.assertEqual(report["missing"], [])
 
 
+class TestAdvisoriesAssertion(unittest.TestCase):
+    """advisories_top5_any 판정 키(spec 2026-06-15) — advisories 채널 top-5에 ≥1 적중."""
+
+    def test_advisories_top5_any_passes(self):
+        scenarios = [{"id": "adv", "query": "q",
+                      "expect": {"advisories_top5_any": ["insight.gate"]}}]
+        def fake_recall(q):
+            return {"results": [], "candidates": [], "raw_excerpts": [],
+                    "advisories": [{"object_id": "insight.gate"}],
+                    "needs_clarification": True}
+        report = evaluate(fake_recall, scenarios)
+        self.assertTrue(report["ok"])
+
+    def test_advisories_top5_any_fails_when_absent(self):
+        scenarios = [{"id": "adv", "query": "q",
+                      "expect": {"advisories_top5_any": ["insight.gate"]}}]
+        def fake_recall(q):
+            return {"results": [], "candidates": [], "raw_excerpts": [],
+                    "advisories": [], "needs_clarification": True}
+        report = evaluate(fake_recall, scenarios)
+        self.assertFalse(report["ok"])
+
+    def test_advisories_key_is_known_assertion(self):
+        # load_scenarios가 미지 키로 거부하지 않는다(ASSERTION_KEYS 등록 확인).
+        self.assertIn("advisories_top5_any", ASSERTION_KEYS)
+
+
 if __name__ == "__main__":
     unittest.main()
