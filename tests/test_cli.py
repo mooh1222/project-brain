@@ -118,6 +118,34 @@ class TestCli(unittest.TestCase):
         self.assertTrue(payload["embed_model"].startswith("stub:"))
         self.assertTrue(db.exists())
 
+    def test_cli_lint_clean_store_ok(self):
+        # 깨끗한 store(서로 참조 정상) → lint ok=true, problems 0 (test_lint.py와 동일 조합)
+        for obj in (manifest(), evidence_ref(), candidate_term()):
+            BrainStore.save_object(self.root, obj)
+        argv = ["lint", "--brain-root", str(self.root)]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        report = json.loads(out.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["problems"], [])
+
+    def test_cli_lint_reports_dangling(self):
+        # 근거 객체가 없는 Insight → dangling source_object_ids 보고 + rc=1
+        from tests.test_ingest import insight
+        BrainStore.save_object(
+            self.root, insight(source_object_ids=["m.gone", "m.gone2"]))
+        argv = ["lint", "--brain-root", str(self.root)]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 1)
+        report = json.loads(out.getvalue())
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("dangling source_object_ids" in p for p in report["problems"]))
+
 
 def candidate_term_with_evidence(tid="g.x", term="갈고리"):
     """근거(ev.ref) 보유 candidate GlossaryTerm. promote 후 §6.4(reviewed 근거 필수)를 통과한다."""

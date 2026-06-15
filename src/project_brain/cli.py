@@ -382,6 +382,20 @@ def _run_eval(argv) -> int:
     return 0 if report["ok"] else 1
 
 
+def _run_lint(argv) -> int:
+    """코퍼스 무결성 검사 (lint.py lint_store) — 가리키는 대상이 없는 끊긴 참조를
+    보고한다. ingest는 부분 배치라 적재 시점엔 자동 실행하지 않는다(나중에 채울
+    참조를 끊긴 것으로 오판). 한 묶음 적재가 끝난 뒤 전체를 점검하는 독립 명령."""
+    parser = argparse.ArgumentParser(prog="cli lint")
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    args = parser.parse_args(argv)
+    store = BrainStore.load(resolve_brain_root(args.brain_root))
+    problems = lint_store(store)
+    print(json.dumps({"ok": not problems, "problems": problems},
+                     ensure_ascii=False, indent=2))
+    return 0 if not problems else 1
+
+
 def _run_install(argv) -> int:
     """프로젝트에 config + 스킬 2종을 멱등 설치 (installer.py — manifest 추적).
 
@@ -549,6 +563,8 @@ def main() -> int:
             return _run_search(argv[1:])
         if argv and argv[0] == "eval":
             return _run_eval(argv[1:])
+        if argv and argv[0] == "lint":
+            return _run_lint(argv[1:])
         if argv and argv[0] == "promote-auto":
             return _run_promote_auto(argv[1:])
         if argv and argv[0] == "promote":
