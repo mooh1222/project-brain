@@ -401,6 +401,27 @@ class QueryRouter:
                                    if object_ids else "Semantic recall",
                     })
 
+        # advisories(spec 2026-06-15 §4.6): reviewed Insight를 별도 통로로 곁들인다.
+        # recall이 켜졌을 때만(색인 있음) 채워지고, 없으면 빈 리스트. needs_clarification에는
+        # 영향 주지 않는다(곁들임 — eval_recall이 advisories를 needs_clarification 식에서 제외).
+        advisories: list[dict] = []
+        recalled = self._recall(canonical)
+        if recalled is not None:
+            for hit in recalled.get("advisories", []):
+                oid = hit["object_id"]
+                if not self.store.has(oid):
+                    continue
+                obj = self.store.get(oid)
+                advisories.append({
+                    "id": oid,
+                    "insight_type": obj.get("insight_type"),
+                    "surface": hit.get("surface", ""),
+                    "code_locators": hit.get("linked", {}).get("code_locators", []),
+                    # Insight 정체성("가로지름")은 source_object_ids 자체 — 공용 _build_linked가
+                    # 안 따라가는 필드라 여기서 직접 노출한다(critic 검토 4).
+                    "source_object_ids": obj.get("source_object_ids", []),
+                })
+
         return {
             "query": query,
             "canonical_query": classified.normalized.canonical_query,
@@ -410,6 +431,7 @@ class QueryRouter:
             "promotable_candidate_ids": sorted(set(promotable_ids)),
             "source_object_ids": sorted(set(source_ids)),
             "sections": sections,
+            "advisories": advisories,
             "warnings": warnings,
             "needs_clarification": (not source_ids) or clarification_needed,
         }

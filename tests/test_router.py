@@ -465,5 +465,67 @@ class TestRouterUnknownRecall(unittest.TestCase):
         self.assertEqual(unk["object_ids"], [])
 
 
+class TestRouterAdvisories(unittest.TestCase):
+    """answer() 반환에 advisories 키(spec 2026-06-15 §4.6) — recall이 켜지면 reviewed
+    Insight를 가공해 노출(id/insight_type/surface/code_locators). 색인 없으면 빈 리스트."""
+
+    def setUp(self):
+        from tempfile import TemporaryDirectory
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from project_brain.objbase import base
+        self._td = TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        from pathlib import Path
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+        T = "2026-06-04T00:00:00Z"
+        objs = [
+            base({"id": "g.token", "kind": "GlossaryTerm", "status": "reviewed",
+                  "truth_role": "domain", "title": "Term", "context_id": "context.neutral",
+                  "term": "클리어 토큰", "definition": "스테이지 클리어 토큰 노출",
+                  "evidence_refs": ["ev.x"]},
+                 tags=["n"], created_at=T, updated_at=T),
+            base({"id": "code.gate", "kind": "CodeLocator", "status": "reviewed",
+                  "truth_role": "reference", "title": "Code", "context_id": "context.neutral",
+                  "repo": "bb2_client", "path": "a/Enter.cpp", "symbol": "Enter::gate",
+                  "locator_source": "rg", "verified_at": T, "evidence_refs": []},
+                 tags=["n"], created_at=T, updated_at=T),
+            base({"id": "insight.gate", "kind": "Insight", "status": "reviewed",
+                  "truth_role": "synthesis", "title": "인사이트",
+                  "body": "클리어 토큰 노출 게이트가 두 팝업에 이중구현",
+                  "scope": "클리어 토큰", "insight_type": "cross-cutting-risk",
+                  "source_object_ids": ["g.token", "code.gate"],
+                  "code_locator_ids": ["code.gate"], "evidence_refs": []},
+                 tags=["n"], created_at=T, updated_at=T),
+        ]
+        for o in objs:
+            BrainStore.save_object(self.brain, o)
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        self.store = BrainStore.load(self.brain)
+
+    def _router(self):
+        return QueryRouter(self.store, db_path=self.db, embedder=self.embedder,
+                           brain_root=self.brain)
+
+    def test_advisories_key_present_and_populated(self):
+        resp = self._router().answer("클리어 토큰 노출 게이트 이중구현")
+        self.assertIn("advisories", resp)
+        ids = {a["id"] for a in resp["advisories"]}
+        self.assertIn("insight.gate", ids)
+        adv = next(a for a in resp["advisories"] if a["id"] == "insight.gate")
+        self.assertEqual(adv["insight_type"], "cross-cutting-risk")
+        self.assertIn("이중구현", adv["surface"])
+        self.assertIn("code.gate", {c["object_id"] for c in adv["code_locators"]})
+        # 가로지름(critic 검토 4): source_object_ids가 advisory에 직접 담긴다.
+        self.assertEqual(set(adv["source_object_ids"]), {"g.token", "code.gate"})
+
+    def test_advisories_empty_without_index(self):
+        # 색인 없는 라우터(db_path 미전달)는 recall 비활성 → advisories 빈 리스트.
+        resp = QueryRouter(self.store).answer("클리어 토큰 노출 게이트")
+        self.assertEqual(resp["advisories"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
