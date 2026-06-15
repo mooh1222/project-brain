@@ -254,6 +254,22 @@ class TestIngest(unittest.TestCase):
         self.assertTrue(store.has("m.x"))
         self.assertTrue(store.has("g.x"))
 
+    def _insight_bundle(self):
+        # Insight source 객체(m.a·m.b)를 store에 동봉해 dangling을 피한다.
+        return [
+            context(glossary_term_ids=["g.x"]),
+            candidate_term("g.x"),
+            candidate_mapping("m.a", glossary_term_ids=["g.x"]),
+            candidate_mapping("m.b", glossary_term_ids=["g.x"]),
+        ]
+
+    def test_ingest_insight_reviewed_idempotent(self):
+        from tests.test_ingest import insight
+        ingest(self.root, self._insight_bundle() + [insight()])
+        # 같은 reviewed Insight 재적재(멱등) — 기존 ingest 로직 그대로 성공.
+        ingest(self.root, [insight()])
+        self.assertEqual(BrainStore.load(self.root).get("insight.x")["status"], "reviewed")
+
 
 if __name__ == "__main__":
     unittest.main()
