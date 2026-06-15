@@ -1030,6 +1030,78 @@ class RawLaneTest(unittest.TestCase):
         self.assertEqual(raw_ctx, {"context.foo-ctx"})
 
 
+def insight(iid, *, body, scope="범위", status="reviewed",
+            source_object_ids=None, code_locator_ids=None,
+            insight_type="cross-cutting-risk"):
+    obj = {
+        "id": iid, "kind": "Insight", "status": status, "truth_role": "synthesis",
+        "title": f"인사이트: {iid}", "body": body, "scope": scope,
+        "source_object_ids": source_object_ids or ["m.a", "m.b"],
+        "insight_type": insight_type, "evidence_refs": [],
+    }
+    if code_locator_ids is not None:
+        obj["code_locator_ids"] = code_locator_ids
+    return _b(obj)
+
+
+class InsightLaneTest(unittest.TestCase):
+    """Insight 별도 레인(spec 2026-06-15 §4.6) — raw와 동형으로 객체 융합·그래프
+    재정렬을 흔들지 않고, hits 뒤에 별도로 붙는다. surface 승급·linked는 유지(advisory가
+    어느 코드와 관련인지 보여줘야 하므로). 전부 stub embedder."""
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_insight_appended_as_separate_lane_after_objects(self):
+        build_store_dir(self.brain, [
+            glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰"),
+            insight("insight.gate", body="클리어 토큰 노출 게이트가 두 팝업에 이중구현"),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        hits = recall("클리어 토큰 노출 게이트", db_path=self.db, embedder=self.embedder,
+                      brain_root=self.brain)
+        kinds = [h["kind"] for h in hits]
+        self.assertIn("Insight", kinds)
+        # Insight는 객체 뒤 별도 레인 — 첫 Insight 이후에 일반 객체가 나오지 않는다.
+        first_ins = kinds.index("Insight")
+        self.assertTrue(all(k in ("Insight", "raw_chunk") for k in kinds[first_ins:]))
+        ins_hit = next(h for h in hits if h["kind"] == "Insight")
+        self.assertEqual(ins_hit["status"], "reviewed")
+        self.assertIn("이중구현", ins_hit["surface"])  # 표면 승급(body)
+        self.assertEqual(ins_hit["graph_support"], 0)  # 재정렬 입력 아님
+
+    def test_insight_flood_does_not_crowd_object_lane(self):
+        # Insight 60개가 있어도 객체 적중(그래프 재정렬 입력)은 그대로 살아남는다(레인 분리).
+        objs = [glossary_term("g.race", term="레이스", definition="레이스 보상 지급")]
+        objs += [insight(f"insight.{i}", body="레이스 보상 지급 위험 서술") for i in range(60)]
+        build_store_dir(self.brain, objs)
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        hits = recall("레이스 보상 지급", db_path=self.db, embedder=self.embedder,
+                      brain_root=self.brain)
+        object_ids = [h["object_id"] for h in hits
+                      if h["kind"] not in ("Insight", "raw_chunk")]
+        self.assertIn("g.race", object_ids)
+
+    def test_insight_linked_carries_code_locators(self):
+        build_store_dir(self.brain, [
+            code_locator("code.enter", path="a/Enter.cpp", symbol="Enter::gate"),
+            insight("insight.gate", body="클리어 토큰 노출 게이트 이중구현",
+                    code_locator_ids=["code.enter"]),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        hits = recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
+                      embedder=self.embedder, brain_root=self.brain)
+        ins_hit = next(h for h in hits if h["kind"] == "Insight")
+        locs = {c["object_id"] for c in ins_hit["linked"]["code_locators"]}
+        self.assertIn("code.enter", locs)
+
+
 class RawGatePassTest(unittest.TestCase):
     def test_raw_channel_uses_candidate_floor_and_skips_anchor(self):
         # raw 채널 게이트 = 바닥(candidate 수준)만. 앵커 None/초과여도 통과한다.

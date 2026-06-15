@@ -83,6 +83,15 @@ _RAW_LANE_FETCH_FACTOR = 3
 # raw 레인 융합 절단 — eval 채널이 top-5만 노출하므로 여유분 포함 10이면 충분.
 RAW_FUSED_TOP_N = 10
 
+# ── Insight 별도 레인(spec 2026-06-15 §4.6) ──────────────────────────────────
+# Insight는 store 객체(RAW_KIND 아님)라 객체 레인에 남는다 — 자유 텍스트 다토큰이라
+# 융합 top-30의 객체 자리를 잠식해 그래프 재정렬을 약화시킨다(raw 청크 회귀와 동형).
+# raw처럼 별도 레인으로 빼되, store 객체라 surface 승급·linked는 유지한다. scope
+# 필터는 미적용 — "가로지르는" 객체라 단일 context_id가 없다.
+INSIGHT_KIND = "Insight"
+# 객체 레인에서 제외할 kind(별도 레인으로 빠지는 것들).
+_OBJECT_LANE_EXCLUDED = (RAW_KIND, INSIGHT_KIND)
+
 # RRF 융합 점수 반올림 자릿수(§3.4 결정론 비교 — 부동소수점 동점 흔들림 완화).
 _SCORE_ROUND = 6
 
@@ -381,10 +390,14 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
         bm25 = search_bm25_scoped(db_path, query, scope,
                                   top_n=CHANNEL_TOP_N)["results"]
     else:
-        bm25 = [r for r in bm25_all if r.get("kind") != RAW_KIND][:CHANNEL_TOP_N]
-    vector = [r for r in vector_all if r.get("kind") != RAW_KIND][:CHANNEL_TOP_N]
+        bm25 = [r for r in bm25_all
+                if r.get("kind") not in _OBJECT_LANE_EXCLUDED][:CHANNEL_TOP_N]
+    vector = [r for r in vector_all
+              if r.get("kind") not in _OBJECT_LANE_EXCLUDED][:CHANNEL_TOP_N]
     raw_bm25 = [r for r in bm25_all if r.get("kind") == RAW_KIND][:CHANNEL_TOP_N]
     raw_vector = [r for r in vector_all if r.get("kind") == RAW_KIND][:CHANNEL_TOP_N]
+    insight_bm25 = [r for r in bm25_all if r.get("kind") == INSIGHT_KIND][:CHANNEL_TOP_N]
+    insight_vector = [r for r in vector_all if r.get("kind") == INSIGHT_KIND][:CHANNEL_TOP_N]
 
     # 채널별 객체 메타를 모은다(첫 등장 우선 — 두 채널의 kind/status/context_id는 동일).
     meta: dict[str, dict] = {}
@@ -487,6 +500,43 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
                 "surface": m.get("surface_text") or "",
                 "linked": {"code_locators": [], "evidence_ref_ids": [],
                            "related_object_ids": []},
+                "graph_reached": False,
+                "graph_hits": 0,
+                "graph_support": 0,
+            })
+    # Insight 별도 레인(§4.6): 객체 적중 뒤에 붙인다. store 객체라 surface 승급·linked는
+    # 하되 그래프 재정렬 입력에선 빠진다(graph_support=0). ★linked.code_locators는 담기지만
+    # source_object_ids는 공용 _build_linked가 안 따라간다(critic 검토 4) — 가로지름은 router
+    # advisory가 source_object_ids로 직접 노출한다. scope 필터 미적용: Insight는 context_id가
+    # 없어 필터를 걸면 advisory가 항상 0이 된다(critic 검토 3).
+    if insight_bm25 or insight_vector:
+        ins_meta: dict[str, dict] = {}
+        ins_bm25_ids = []
+        for r in insight_bm25:
+            ins_bm25_ids.append(r["object_id"])
+            ins_meta.setdefault(r["object_id"], r)
+        ins_vector_ids = []
+        for r in insight_vector:
+            ins_vector_ids.append(r["object_id"])
+            ins_meta.setdefault(r["object_id"], r)
+        ins_fused = rrf_fuse([ins_bm25_ids, ins_vector_ids])
+        ins_bm25_set = set(ins_bm25_ids)
+        ins_vector_set = set(ins_vector_ids)
+        for object_id, score in ins_fused[:RAW_FUSED_TOP_N]:
+            in_b, in_v = object_id in ins_bm25_set, object_id in ins_vector_set
+            m = ins_meta[object_id]
+            surface = ""
+            if store.has(object_id):
+                surface = extract_surface(store.get(object_id), store) or ""
+            hits.append({
+                "object_id": object_id,
+                "kind": m.get("kind"),
+                "status": m.get("status"),
+                "context_id": m.get("context_id"),
+                "score": score,
+                "matched_via": "both" if (in_b and in_v) else ("bm25" if in_b else "vector"),
+                "surface": surface,
+                "linked": _build_linked(object_id, store),
                 "graph_reached": False,
                 "graph_hits": 0,
                 "graph_support": 0,
