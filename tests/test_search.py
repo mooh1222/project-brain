@@ -432,7 +432,8 @@ class EvalRecallChannelTest(unittest.TestCase):
         resp = eval_recall("레이스 보상", db_path=self.db, embedder=self.embedder,
                            brain_root=self.brain)
         self.assertEqual(set(resp.keys()),
-                         {"results", "candidates", "raw_excerpts", "needs_clarification"})
+                         {"results", "candidates", "raw_excerpts", "needs_clarification",
+                          "advisories"})
         result_ids = {h["object_id"] for h in resp["results"]}
         cand_ids = {h["object_id"] for h in resp["candidates"]}
         self.assertIn("g.race", result_ids)
@@ -1113,6 +1114,81 @@ class InsightLaneTest(unittest.TestCase):
                       brain_root=self.brain)
         signals = compute_query_signals("레이스", hits, self.db)
         self.assertEqual(signals["anchor_df"], 1)
+
+
+class EvalRecallAdvisoriesTest(unittest.TestCase):
+    """eval_recall advisories 채널(spec 2026-06-15 §4.6 C1) — reviewed Insight는
+    results에 안 섞이고 advisories로 가른다. candidate Insight는 1차 미노출."""
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_reviewed_insight_goes_to_advisories_not_results(self):
+        # g.token(reviewed 객체)이 질의 토큰 "클리어 토큰"을 제공해 anchor가 잡히고,
+        # reviewed Insight는 advisories로, results/candidates엔 안 섞인다.
+        build_store_dir(self.brain, [
+            glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
+            insight("insight.gate", body="클리어 토큰 노출 게이트가 두 팝업에 이중구현"),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        resp = eval_recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertIn("advisories", resp)
+        self.assertIn("insight.gate", {h["object_id"] for h in resp["advisories"]})
+        self.assertFalse([h for h in resp["results"] if h["kind"] == "Insight"])
+        self.assertFalse([h for h in resp["candidates"] if h["kind"] == "Insight"])
+
+    def test_candidate_insight_not_exposed_first_cut(self):
+        # candidate Insight는 validate가 적재를 막으므로(Task 1) save_object를 우회해
+        # 직접 파일로 써 store에 넣고, 검색층이 방어적으로 안 띄움을 확인(이중 안전망).
+        # g.token이 anchor를 제공해도 candidate Insight는 어느 채널에도 안 뜬다.
+        import json
+        build_store_dir(self.brain, [
+            glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
+        ])
+        cand = insight("insight.cand", body="클리어 토큰 노출 위험 후보", status="candidate")
+        ins_dir = self.brain / "objects" / "insights"
+        ins_dir.mkdir(parents=True, exist_ok=True)
+        (ins_dir / "insight.cand.json").write_text(
+            json.dumps(cand, ensure_ascii=False), encoding="utf-8")
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        resp = eval_recall("클리어 토큰 노출 위험", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertEqual(resp["advisories"], [])
+        self.assertFalse([h for h in resp["candidates"] if h["kind"] == "Insight"])
+
+    def test_advisories_capped_at_five(self):
+        # g.token이 anchor("클리어 토큰") 제공. reviewed Insight 7개 → advisories top-5.
+        objs = [glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰")]
+        objs += [insight(f"insight.{i}", body="클리어 토큰 노출 게이트 이중구현 위험")
+                 for i in range(7)]
+        build_store_dir(self.brain, objs)
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        resp = eval_recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertTrue(resp["advisories"])           # anchor 잡혀 advisory 나옴
+        self.assertLessEqual(len(resp["advisories"]), 5)
+
+    def test_advisories_do_not_affect_needs_clarification(self):
+        # advisories는 곁들임 — reviewed 객체 답(results)이 0이면 advisory가 있어도
+        # needs_clarification=True. candidate term g.cand가 anchor만 제공(results 아님).
+        build_store_dir(self.brain, [
+            glossary_term("g.cand", term="클리어 토큰", definition="스테이지 클리어 토큰",
+                          status="candidate"),
+            insight("insight.gate", body="클리어 토큰 노출 게이트 이중구현"),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        resp = eval_recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertTrue(resp["advisories"])      # reviewed Insight + anchor → 곁들임
+        self.assertEqual(resp["results"], [])    # reviewed 객체 답 없음(g.cand는 candidate)
+        self.assertTrue(resp["needs_clarification"])
 
 
 class RawGatePassTest(unittest.TestCase):

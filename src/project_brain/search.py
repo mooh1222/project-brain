@@ -641,11 +641,13 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     1회 계산(compute_query_signals)한 뒤 적중마다 _gate_pass로 채널별 게이트를 적용한다.
 
     반환(§7 산출식 + §2.2 raw 채널):
-      results            — ★게이트 통과★ reviewed 적중 top-5 (확신 채널)
-      candidates         — ★게이트 통과★ candidate 적중 top-5 (후보 채널 — 관대한 바닥)
+      results            — ★게이트 통과★ reviewed 적중 top-5 (확신 채널, Insight 제외)
+      candidates         — ★게이트 통과★ candidate 적중 top-5 (후보 채널 — 관대한 바닥, Insight 제외)
       raw_excerpts       — raw 청크 적중 top-5 ("원문 발췌(미검수)" — 바닥만, 앵커 미적용)
+      advisories         — reviewed Insight 적중 top-5 (가로지르는 위험/교훈 — 곁들임 채널.
+                            게이트는 reviewed 재사용 — 앵커 적용, 질의 토큰을 가진 객체가 있어야 뜸)
       needs_clarification — reviewed 게이트 통과 0건 bool ("no evidence → 없다" 보존,
-                            raw 발췌는 단정 답이 아니라 이 판정에 안 들어간다)
+                            raw 발췌·advisories는 단정 답이 아니라 이 판정에 안 들어간다)
 
     db_path 미지정 시 config(.project-brain.json)의 db를 쓰며, 색인이 없으면 명확한
     에러를 던진다 — 하네스(evaluate)가 per-scenario 실패로 기록한다. brain_root는
@@ -664,16 +666,29 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
 
     results = [h for h in hits
                if h.get("status") == "reviewed"
+               and h.get("kind") != INSIGHT_KIND
                and _gate_pass(h["score"], signals, channel="reviewed")][:EVAL_CHANNEL_TOP_K]
     candidates = [h for h in hits
                   if h.get("status") == "candidate"
+                  and h.get("kind") != INSIGHT_KIND
                   and _gate_pass(h["score"], signals, channel="candidate")][:EVAL_CHANNEL_TOP_K]
     raw_excerpts = [h for h in hits
                     if h.get("status") == RAW_STATUS
                     and _gate_pass(h["score"], signals, channel="raw")][:EVAL_CHANNEL_TOP_K]
+    # advisories(§4.6 C1): reviewed Insight를 별도 통로로. 게이트는 reviewed 재사용
+    # (앵커 적용) — 질의 토큰을 가진 객체가 코퍼스에 있어야 곁들임이 뜬다. anchor_df는
+    # 객체(Insight·raw 제외) df라, Insight만 있는 코퍼스(객체 0)는 anchor=None으로
+    # 닫힌다(비현실적 경우 — 실코퍼스는 매핑·용어가 풍부). candidate Insight는 1차
+    # 미노출(미룸 §7). 단정 답이 아니라 needs_clarification(results 기반)에는 안
+    # 들어간다(raw_excerpts와 동일).
+    advisories = [h for h in hits
+                  if h.get("kind") == INSIGHT_KIND
+                  and h.get("status") == "reviewed"
+                  and _gate_pass(h["score"], signals, channel="reviewed")][:EVAL_CHANNEL_TOP_K]
     return {
         "results": results,
         "candidates": candidates,
         "raw_excerpts": raw_excerpts,
+        "advisories": advisories,
         "needs_clarification": not results,
     }
