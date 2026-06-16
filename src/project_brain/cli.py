@@ -58,12 +58,18 @@ def _run_ingest(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli ingest")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--objects-file", required=True)
+    parser.add_argument("--preconditions-file",
+                        help="build 리포트 JSON (preconditions 키 — 저장 직전 낙관적 잠금 재검사)")
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
+    preconditions = None
+    if args.preconditions_file:
+        report = json.loads(Path(args.preconditions_file).read_text(encoding="utf-8"))
+        preconditions = report.get("preconditions", report)
     try:
-        ingest(brain_root, objects)
+        ingest(brain_root, objects, preconditions=preconditions)
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1

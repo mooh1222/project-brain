@@ -271,5 +271,64 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(BrainStore.load(self.root).get("insight.x")["status"], "reviewed")
 
 
+T0 = "2026-06-10T00:00:00Z"
+
+
+def _refs():
+    """mapping.ctx.x가 가리키는 context·evref·manifest를 닫는다(reviewed mapping은
+    evidence_refs 필수[schema], context_id·evidence_ref는 dangling 금지[lint])."""
+    manifest = {"id": "manifest.ctx.src", "kind": "EvidenceManifest", "status": "reviewed",
+                "truth_role": "source", "title": "src", "source_type": "session",
+                "locator": "...", "captured_at": T0, "captured_by": "user-statement",
+                "sensitivity": "internal", "acl": ["bb2-team"], "redaction_status": "approved",
+                "schema_version": "0.1", "poc_priority": "P2",
+                "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
+    evref = {"id": "evref.ctx.x", "kind": "EvidenceRef", "status": "reviewed",
+             "truth_role": "reference", "title": "e", "evidence_manifest_id": "manifest.ctx.src",
+             "ref_type": "session_turn", "locator": "...", "summary": "s",
+             "schema_version": "0.1", "poc_priority": "P2",
+             "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
+    context = {"id": "context.ctx", "kind": "DomainContext", "status": "reviewed",
+               "truth_role": "domain", "title": "C", "context_key": "ctx",
+               "project_id": "bb2_client", "display_name": "C", "boundary_summary": "b",
+               "in_scope": [], "out_of_scope": [],
+               "injection_profile": {"default_audience": "coding-agent"},
+               "glossary_term_ids": [], "schema_version": "0.1", "poc_priority": "P2",
+               "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
+    return [context, manifest, evref]
+
+
+def _mapping_obj(updated_at, **over):
+    o = {"id": "mapping.ctx.x", "kind": "DomainMapping", "status": "reviewed",
+         "truth_role": "domain", "title": "t", "context_id": "context.ctx",
+         "mapping_key": "x", "canonical_summary": "s", "meaning": "m", "boundary": "b",
+         "caveats": [], "glossary_term_ids": [], "decision_record_ids": [],
+         "code_locator_ids": [], "evidence_refs": ["evref.ctx.x"],
+         "schema_version": "0.1", "poc_priority": "P2",
+         "created_at": T0, "updated_at": updated_at, "tags": ["ctx"]}
+    o.update(over)
+    return o
+
+
+class PreconditionsTest(unittest.TestCase):
+    def test_precondition_mismatch_blocks_save(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            (brain / "objects").mkdir(parents=True)
+            ingest(brain, _refs() + [_mapping_obj("2026-06-15T00:00:00Z")])  # 현재 06-15
+            # 노트는 옛 시점(06-10)을 기대 → 그 사이 누가 06-15로 고침 → 거부
+            new = _mapping_obj("2026-06-16T00:00:00Z", meaning="새 의미")
+            with self.assertRaises(IngestError):
+                ingest(brain, [new], preconditions={"mapping.ctx.x": "2026-06-10T00:00:00Z"})
+
+    def test_precondition_match_allows_save(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            (brain / "objects").mkdir(parents=True)
+            ingest(brain, _refs() + [_mapping_obj("2026-06-15T00:00:00Z")])
+            new = _mapping_obj("2026-06-16T00:00:00Z", boundary="새 경계")
+            ingest(brain, [new], preconditions={"mapping.ctx.x": "2026-06-15T00:00:00Z"})  # 일치 → OK
+
+
 if __name__ == "__main__":
     unittest.main()
