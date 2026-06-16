@@ -96,6 +96,43 @@ def build_mappings(notes, refs_map, now):
     return out
 
 
+def build_manifests(notes, now):
+    """sources[] → EvidenceManifest. id는 노트에 직접 기입(컨벤션 manifest.<ctx>.<...>)."""
+    ctx = notes["context"]["key"]
+    out = []
+    for s in notes.get("sources", []):
+        obj = {
+            "id": s["id"], "kind": "EvidenceManifest", "status": "reviewed",
+            "truth_role": "source", "title": s["title"], "source_type": s["source_type"],
+            "locator": s["locator"], "captured_at": s.get("captured_at", now),
+            "captured_by": s.get("captured_by", "agent"),
+            "sensitivity": s.get("sensitivity", "internal"),
+            "acl": s.get("acl", ["bb2-team"]),
+            "redaction_status": s.get("redaction_status", "none"),
+        }
+        out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
+    return out
+
+
+def build_context(notes, now):
+    """노트 context에 display_name·boundary_summary가 있으면 신규 DomainContext 생성.
+    없으면(key·commit만) 빈 리스트 — 기존 컨텍스트 갱신은 updates[]가 담당."""
+    cx = notes["context"]
+    if "display_name" not in cx or "boundary_summary" not in cx:
+        return []
+    ctx = cx["key"]
+    obj = {
+        "id": f"context.{ctx}", "kind": "DomainContext", "status": "reviewed",
+        "truth_role": "domain", "title": cx["display_name"][:80], "context_key": ctx,
+        "project_id": cx.get("repo", "bb2_client"), "display_name": cx["display_name"],
+        "boundary_summary": cx["boundary_summary"], "in_scope": cx.get("in_scope", []),
+        "out_of_scope": cx.get("out_of_scope", []),
+        "injection_profile": {"default_audience": "coding-agent"},
+        "glossary_term_ids": cx.get("glossary_term_ids", []),
+    }
+    return [base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2")]
+
+
 def resolve_refs(notes, store):
     """refs 섹션의 로컬 키를 실제 id로 해소. id 직접 기입 + expect 검증.
 

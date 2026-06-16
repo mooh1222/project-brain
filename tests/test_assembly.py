@@ -1,6 +1,7 @@
 import unittest
 from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence, resolve_refs
 from project_brain.assembly import build_mappings
+from project_brain.assembly import build_manifests, build_context
 from project_brain.store import BrainStore
 
 NOW = "2026-06-16T00:00:00Z"
@@ -91,6 +92,30 @@ class BuildMappingsTest(unittest.TestCase):
         self.assertEqual(m["code_locator_ids"], ["code.ctx.hit-hook"])
         self.assertEqual(m["evidence_refs"], ["evref.ctx.hit-hook"])
         self.assertEqual(m["caveats"], ["history_coverage=unsearched"])
+
+
+class BuildManifestsContextTest(unittest.TestCase):
+    def test_source_becomes_manifest(self):
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+                 "sources": [{"id": "manifest.ctx.s", "source_type": "session",
+                              "title": "T", "locator": "...", "captured_by": "user-statement"}]}
+        objs = build_manifests(notes, NOW)
+        self.assertEqual(len(objs), 1)
+        m = objs[0]
+        self.assertEqual(m["id"], "manifest.ctx.s")
+        self.assertEqual(m["kind"], "EvidenceManifest")
+        self.assertEqual(m["truth_role"], "source")
+        self.assertEqual(m["redaction_status"], "none")  # default
+        self.assertEqual(m["acl"], ["bb2-team"])          # default
+
+    def test_context_built_only_with_display_fields(self):
+        base_cx = {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"}
+        self.assertEqual(build_context({"context": base_cx}, NOW), [])  # display_name 없으면 빈 리스트
+        rich = dict(base_cx, display_name="방해버블", boundary_summary="...")
+        objs = build_context({"context": rich}, NOW)
+        self.assertEqual(objs[0]["id"], "context.ctx")
+        self.assertEqual(objs[0]["kind"], "DomainContext")
+        self.assertEqual(objs[0]["truth_role"], "domain")
 
 
 class BuildGlossaryTest(unittest.TestCase):
