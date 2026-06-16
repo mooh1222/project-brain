@@ -70,6 +70,32 @@ def build_code_evidence(notes, now):
     return out
 
 
+def build_mappings(notes, refs_map, now):
+    """mappings[]를 DomainMapping으로. 신규 용어(glossary_keys) + 기존 용어(glossary_term_refs)
+    를 합쳐 glossary_term_ids로, code_evref_keys를 locator/evref로 연결한다."""
+    ctx = notes["context"]["key"]
+    out = []
+    for m in notes.get("mappings", []):
+        gids = [derive_id("GlossaryTerm", ctx, k) for k in m.get("glossary_keys", [])]
+        gids += [refs_map[r] for r in m.get("glossary_term_refs", [])]
+        code_ids = [derive_id("CodeLocator", ctx, k) for k in m.get("code_evref_keys", [])]
+        evref_ids = [derive_id("EvidenceRef", ctx, k) for k in m.get("code_evref_keys", [])]
+        obj = {
+            "id": derive_id("DomainMapping", ctx, m["key"]),
+            "kind": "DomainMapping", "status": "reviewed", "truth_role": "domain",
+            "title": m["canonical_summary"][:120], "context_id": f"context.{ctx}",
+            "mapping_key": m["key"], "canonical_summary": m["canonical_summary"],
+            "meaning": m["meaning"], "boundary": m["boundary"],
+            "caveats": m.get("caveats", ["history_coverage=unsearched"]),
+            "glossary_term_ids": sorted(set(gids)),
+            "decision_record_ids": [derive_id("DecisionRecord", ctx, k)
+                                    for k in m.get("decision_keys", [])],
+            "code_locator_ids": code_ids, "evidence_refs": evref_ids,
+        }
+        out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
+    return out
+
+
 def resolve_refs(notes, store):
     """refs 섹션의 로컬 키를 실제 id로 해소. id 직접 기입 + expect 검증.
 

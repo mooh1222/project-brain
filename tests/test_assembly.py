@@ -1,5 +1,6 @@
 import unittest
 from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence, resolve_refs
+from project_brain.assembly import build_mappings
 from project_brain.store import BrainStore
 
 NOW = "2026-06-16T00:00:00Z"
@@ -68,6 +69,28 @@ class ResolveRefsTest(unittest.TestCase):
                                             "expect": {"kind": "DomainMapping"}}}}}
         _, _, errors = resolve_refs(notes, store)
         self.assertTrue(any("expect" in e.lower() or "kind" in e.lower() for e in errors))
+
+
+class BuildMappingsTest(unittest.TestCase):
+    def test_mapping_links_new_and_ref_terms(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "bb2_client"},
+            "mappings": [{"key": "hit-trigger", "canonical_summary": "요약",
+                          "meaning": "의미", "boundary": "경계",
+                          "glossary_keys": ["hit"], "glossary_term_refs": ["near_pop_hook"],
+                          "code_evref_keys": ["hit-hook"]}],
+        }
+        refs_map = {"near_pop_hook": "g.ctx.do-disturb-on-near-bubble-pop"}
+        objs = build_mappings(notes, refs_map, NOW)
+        m = objs[0]
+        self.assertEqual(m["id"], "mapping.ctx.hit-trigger")
+        self.assertEqual(m["kind"], "DomainMapping")
+        self.assertEqual(m["status"], "reviewed")
+        self.assertEqual(sorted(m["glossary_term_ids"]),
+                         ["g.ctx.do-disturb-on-near-bubble-pop", "g.ctx.hit"])
+        self.assertEqual(m["code_locator_ids"], ["code.ctx.hit-hook"])
+        self.assertEqual(m["evidence_refs"], ["evref.ctx.hit-hook"])
+        self.assertEqual(m["caveats"], ["history_coverage=unsearched"])
 
 
 class BuildGlossaryTest(unittest.TestCase):
