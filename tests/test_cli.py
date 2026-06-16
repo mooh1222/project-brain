@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from project_brain import cli
+from project_brain.cli import _run_build
 from project_brain.store import BrainStore
 from tests.test_ingest import (
     candidate_term,
@@ -716,6 +717,44 @@ class CliSessionTest(unittest.TestCase):
             payload = json.loads(out)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["record"]["note"], "미합의 1건")
+
+
+class RunBuildTest(unittest.TestCase):
+    def test_build_writes_objects_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            notes_path = Path(td) / "notes.json"
+            out_path = Path(td) / "out.json"
+            brain = Path(td) / "brain"
+            (brain / "objects").mkdir(parents=True)
+            # reviewed GlossaryTerm은 evidence_refs가 필수(schema) → source+code_anchor로 닫는다
+            notes_path.write_text(json.dumps({
+                "context": {"key": "ctx", "commit": "abc",
+                            "now": "2026-06-16T00:00:00Z", "repo": "bb2_client"},
+                "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
+                             "title": "코드", "locator": "...", "captured_by": "agent"}],
+                "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
+                                  "line_start": 1, "line_end": 1, "quote": "q",
+                                  "manifest": "manifest.ctx.code"}],
+                "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
+                              "evidence_refs": ["evref.ctx.hit-hook"]}],
+            }), encoding="utf-8")
+            rc = _run_build(["--notes", str(notes_path), "--objects-file", str(out_path),
+                             "--brain-root", str(brain)])
+            self.assertEqual(rc, 0)
+            objs = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertTrue(any(o["id"] == "g.ctx.hit" for o in objs))
+
+    def test_build_errors_return_1_and_no_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            notes_path = Path(td) / "notes.json"
+            out_path = Path(td) / "out.json"
+            brain = Path(td) / "brain"
+            (brain / "objects").mkdir(parents=True)
+            notes_path.write_text(json.dumps({"glossary": []}), encoding="utf-8")  # context 없음
+            rc = _run_build(["--notes", str(notes_path), "--objects-file", str(out_path),
+                             "--brain-root", str(brain)])
+            self.assertEqual(rc, 1)
+            self.assertFalse(out_path.exists())
 
 
 if __name__ == "__main__":

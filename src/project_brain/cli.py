@@ -464,6 +464,41 @@ def _run_bootstrap(argv) -> int:
     return 0 if doctor_report["ok"] else 1
 
 
+def _run_build(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli build")
+    parser.add_argument("--notes", required=True, help="구조화 노트 JSON 경로")
+    parser.add_argument("--objects-file", required=True, help="조립 결과 객체 묶음 출력 경로")
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    args = parser.parse_args(argv)
+
+    from project_brain.assembly import build
+    from project_brain.store import BrainStore
+
+    brain_root = resolve_brain_root(args.brain_root)
+    notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
+    # now는 context.now에서만 받는다(top-level now는 validate_notes의 _VALID_SECTIONS 밖이라 거부됨).
+    now = notes.get("context", {}).get("now")
+    if not now:
+        print(json.dumps({"ok": False,
+                          "errors": ["노트: context.now 필수 (build 객체의 created_at/updated_at)"]},
+                         ensure_ascii=False, indent=2))
+        return 1
+    store = BrainStore.load(brain_root)
+    result = build(notes, store, now)
+    if result["errors"]:
+        print(json.dumps({"ok": False, "errors": result["errors"]},
+                         ensure_ascii=False, indent=2))
+        return 1
+    Path(args.objects_file).write_text(
+        json.dumps(result["objects"], ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"ok": True, "built": len(result["objects"]),
+                      "objects_file": args.objects_file, "diff": result["diff"],
+                      "resolved_refs": result["resolved_refs"],
+                      "preconditions": result["preconditions"]},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_stale_check(argv) -> int:
     """코드 변경 → 의미 갱신 대상 발견 (spec §3). 읽기 전용 — brain 데이터 불변."""
     parser = argparse.ArgumentParser(prog="cli stale-check")
@@ -553,6 +588,8 @@ def main() -> int:
     argv = sys.argv[1:]
     try:
         # 첫 인자가 서브커맨드면 해당 경로, 아니면 기존 query 경로 호환 유지(AC6)
+        if argv and argv[0] == "build":
+            return _run_build(argv[1:])
         if argv and argv[0] == "ingest":
             return _run_ingest(argv[1:])
         if argv and argv[0] == "index":
