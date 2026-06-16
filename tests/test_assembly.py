@@ -2,6 +2,7 @@ import unittest
 from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence, resolve_refs
 from project_brain.assembly import build_mappings
 from project_brain.assembly import build_manifests, build_context
+from project_brain.assembly import apply_updates
 from project_brain.store import BrainStore
 
 NOW = "2026-06-16T00:00:00Z"
@@ -136,3 +137,77 @@ class BuildGlossaryTest(unittest.TestCase):
         self.assertEqual(t["term"], "hit (직접 타격)")
         self.assertEqual(t["evidence_refs"], ["evref.ctx.hit-session"])
         self.assertIn("created_at", t)  # base() 적용 확인
+
+
+T0 = "2026-06-01T00:00:00Z"
+
+
+def _mapping(**over):
+    o = {"id": "mapping.ctx.hook", "kind": "DomainMapping", "status": "reviewed",
+         "truth_role": "domain", "title": "t", "context_id": "context.ctx",
+         "mapping_key": "hook", "canonical_summary": "s", "meaning": "옛 의미",
+         "boundary": "b", "caveats": [], "glossary_term_ids": ["g.ctx.a"],
+         "decision_record_ids": [], "code_locator_ids": [], "evidence_refs": ["evref.ctx.x"],
+         "schema_version": "0.1", "poc_priority": "P2", "created_at": T0, "updated_at": T0,
+         "tags": ["ctx"]}
+    o.update(over)
+    return o
+
+
+class ApplyUpdatesTest(unittest.TestCase):
+    def test_set_scalar_and_union_list(self):
+        # title(비-claim scalar) set + glossary_term_ids union — 둘 다 근거 동반 불필요.
+        # claim 필드(meaning·boundary 등)는 별도 테스트(test_claim_*)에서 근거 강제 검증.
+        store = _store(_mapping())
+        notes = {"updates": [{"id": "mapping.ctx.hook", "expected_updated_at": T0,
+                              "union": {"glossary_term_ids": ["g.ctx.b"]},
+                              "set": {"title": "새 제목"}}]}
+        objs, diffs, errors = apply_updates(notes, store, NOW)
+        self.assertEqual(errors, [])
+        m = objs[0]
+        self.assertEqual(sorted(m["glossary_term_ids"]), ["g.ctx.a", "g.ctx.b"])
+        self.assertEqual(m["title"], "새 제목")
+        self.assertEqual(m["updated_at"], NOW)
+        self.assertEqual(m["status"], "reviewed")  # 강등 없음
+
+    def test_claim_field_requires_evidence(self):
+        # meaning(claim) 수정인데 evidence 변경도 evidence_unchanged도 없으면 실패
+        store = _store(_mapping())
+        notes = {"updates": [{"id": "mapping.ctx.hook", "expected_updated_at": T0,
+                              "set": {"meaning": "새 의미"}}]}
+        _, _, errors = apply_updates(notes, store, NOW)
+        self.assertTrue(any("evidence" in e.lower() for e in errors))
+
+    def test_claim_with_evidence_unchanged_ok(self):
+        store = _store(_mapping())
+        notes = {"updates": [{"id": "mapping.ctx.hook", "expected_updated_at": T0,
+                              "set": {"meaning": "새 의미"}, "evidence_unchanged": True}]}
+        _, _, errors = apply_updates(notes, store, NOW)
+        self.assertEqual(errors, [])
+
+    def test_expected_updated_at_mismatch_fails(self):
+        store = _store(_mapping())
+        notes = {"updates": [{"id": "mapping.ctx.hook", "expected_updated_at": "2099-01-01T00:00:00Z",
+                              "set": {"boundary": "x"}}]}
+        _, _, errors = apply_updates(notes, store, NOW)
+        self.assertTrue(any("expected_updated_at" in e for e in errors))
+
+    def test_field_not_in_allowlist_fails(self):
+        store = _store(_mapping())
+        notes = {"updates": [{"id": "mapping.ctx.hook", "expected_updated_at": T0,
+                              "set": {"status": "candidate"}}]}
+        _, _, errors = apply_updates(notes, store, NOW)
+        self.assertTrue(any("allowlist" in e.lower() or "status" in e for e in errors))
+
+    def test_per_kind_allowlist_rejects_foreign_field(self):
+        # GlossaryTerm에 DomainMapping 전용 scalar(meaning)를 set → GlossaryTerm allowlist 밖
+        term = {"id": "g.ctx.t", "kind": "GlossaryTerm", "status": "reviewed",
+                "truth_role": "domain", "title": "t", "context_id": "context.ctx",
+                "term": "용어", "definition": "정의", "evidence_refs": ["evref.ctx.x"],
+                "schema_version": "0.1", "poc_priority": "P2",
+                "created_at": T0, "updated_at": T0, "tags": ["ctx"]}
+        store = _store(term)
+        notes = {"updates": [{"id": "g.ctx.t", "expected_updated_at": T0,
+                              "set": {"meaning": "엉뚱"}}]}
+        _, _, errors = apply_updates(notes, store, NOW)
+        self.assertTrue(any("allowlist" in e.lower() for e in errors))
