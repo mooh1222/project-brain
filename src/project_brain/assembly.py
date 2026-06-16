@@ -68,3 +68,32 @@ def build_code_evidence(notes, now):
         out.append(base(loc, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
         out.append(base(ev, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
     return out
+
+
+def resolve_refs(notes, store):
+    """refs 섹션의 로컬 키를 실제 id로 해소. id 직접 기입 + expect 검증.
+
+    반환: (refs_map {로컬키: 실제id}, report {로컬키: 실제id}, errors[]).
+    id가 store에 없거나 expect(kind/status)가 어긋나면 errors에 담는다.
+    """
+    refs_map, report, errors = {}, {}, []
+    refs = notes.get("refs", {})
+    for _section, entries in refs.items():
+        for local_key, spec in entries.items():
+            obj_id = spec.get("id")
+            if obj_id is None:
+                errors.append(f"refs.{local_key}: id 미기입 (1차는 id 직접 기입만)")
+                continue
+            if not store.has(obj_id):
+                errors.append(f"refs.{local_key}: {obj_id} store에 없음")
+                continue
+            obj = store.get(obj_id)
+            expect = spec.get("expect", {})
+            for field, want in expect.items():
+                if obj.get(field) != want:
+                    errors.append(
+                        f"refs.{local_key}: {obj_id} expect {field}={want!r} "
+                        f"but got {obj.get(field)!r}")
+            refs_map[local_key] = obj_id
+            report[local_key] = obj_id
+    return refs_map, report, errors

@@ -1,5 +1,6 @@
 import unittest
-from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence
+from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence, resolve_refs
+from project_brain.store import BrainStore
 
 NOW = "2026-06-16T00:00:00Z"
 
@@ -38,6 +39,35 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(ev["evidence_manifest_id"], "manifest.ctx.code-v2")
         self.assertEqual(ev["ref_type"], "code_locator")
         self.assertEqual(ev["locator"], "DisturbObject.h:206")
+
+
+def _store(*objs):
+    return BrainStore({o["id"]: o for o in objs})
+
+
+class ResolveRefsTest(unittest.TestCase):
+    def test_id_direct_passthrough(self):
+        store = _store({"id": "g.ctx.x", "kind": "GlossaryTerm"})
+        notes = {"refs": {"terms": {"loc": {"id": "g.ctx.x",
+                                            "expect": {"kind": "GlossaryTerm"}}}}}
+        refs_map, report, errors = resolve_refs(notes, store)
+        self.assertEqual(errors, [])
+        self.assertEqual(refs_map["loc"], "g.ctx.x")
+        self.assertIn("g.ctx.x", report.values())
+
+    def test_missing_id_is_error(self):
+        store = _store()
+        notes = {"refs": {"terms": {"loc": {"id": "g.ctx.missing",
+                                            "expect": {"kind": "GlossaryTerm"}}}}}
+        _, _, errors = resolve_refs(notes, store)
+        self.assertTrue(any("g.ctx.missing" in e for e in errors))
+
+    def test_expect_kind_mismatch_is_error(self):
+        store = _store({"id": "g.ctx.x", "kind": "GlossaryTerm", "status": "reviewed"})
+        notes = {"refs": {"terms": {"loc": {"id": "g.ctx.x",
+                                            "expect": {"kind": "DomainMapping"}}}}}
+        _, _, errors = resolve_refs(notes, store)
+        self.assertTrue(any("expect" in e.lower() or "kind" in e.lower() for e in errors))
 
 
 class BuildGlossaryTest(unittest.TestCase):
