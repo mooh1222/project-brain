@@ -89,6 +89,14 @@ class GetEmbedderTest(unittest.TestCase):
             if saved is not None:
                 os.environ[STUB_ENV_FLAG] = saved
 
+    def test_caches_instance_per_setting(self):
+        # ★단일 인스턴스 캐시★: 같은 설정이면 같은 인스턴스를 재사용해 모델 중복 로딩을
+        # 막는다(eval이 시나리오 8개마다 모델을 새로 올려 ~56s 낭비하던 회귀 방지).
+        # 설정(stub True/False)이 다르면 별개 인스턴스.
+        self.assertIs(get_embedder(stub=True), get_embedder(stub=True))
+        self.assertIs(get_embedder(stub=False), get_embedder(stub=False))
+        self.assertIsNot(get_embedder(stub=True), get_embedder(stub=False))
+
 
 class RealEmbedderLazyTest(unittest.TestCase):
     def test_construct_does_not_load_model(self):

@@ -105,11 +105,19 @@ class RealEmbedder:
         return [row.astype(np.float32) for row in arr]
 
 
+_EMBEDDER_CACHE: dict[bool, object] = {}
+
+
 def get_embedder(stub: bool | None = None):
     """임베더 팩토리 — 색인 빌드와 쿼리가 같은 경로를 쓰게 하는 단일 진입점(§5).
 
     stub: None이면 환경 플래그(BB2_BRAIN_EMBEDDER=stub)로 판정, True/False면 명시 선택.
+    같은 설정(stub True/False)이면 인스턴스를 캐시해 재사용한다 — 임베더는 stateless이고
+    실모델 로딩이 ~8s라, 한 프로세스에서 여러 번 부르는 eval이 시나리오마다 모델을 새로
+    올리던 낭비(~56s)를 없앤다. 모델 적재 자체는 RealEmbedder의 lazy 로드가 그대로 담당한다.
     """
     if stub is None:
         stub = os.environ.get(STUB_ENV_FLAG, "").strip().lower() == "stub"
-    return StubEmbedder() if stub else RealEmbedder()
+    if stub not in _EMBEDDER_CACHE:
+        _EMBEDDER_CACHE[stub] = StubEmbedder() if stub else RealEmbedder()
+    return _EMBEDDER_CACHE[stub]
