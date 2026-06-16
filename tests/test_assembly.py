@@ -1,5 +1,5 @@
 import unittest
-from project_brain.assembly import derive_id, build_glossary_terms
+from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence
 
 NOW = "2026-06-16T00:00:00Z"
 
@@ -15,6 +15,29 @@ class DeriveIdTest(unittest.TestCase):
     def test_code_and_evref_id(self):
         self.assertEqual(derive_id("CodeLocator", "ctx", "a"), "code.ctx.a")
         self.assertEqual(derive_id("EvidenceRef", "ctx", "a"), "evref.ctx.a")
+
+
+class BuildCodeEvidenceTest(unittest.TestCase):
+    def test_anchor_expands_to_locator_and_evref(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "bb2_client"},
+            "code_anchors": [{"key": "hit-hook", "path": "DisturbObject.h",
+                              "symbol": "DisturbObject::_doDisturbOnPop", "line_start": 206,
+                              "line_end": 206, "quote": "virtual void _doDisturbOnPop(...){};",
+                              "manifest": "manifest.ctx.code-v2"}],
+        }
+        objs = build_code_evidence(notes, NOW)
+        kinds = {o["kind"]: o for o in objs}
+        self.assertEqual(set(kinds), {"CodeLocator", "EvidenceRef"})
+        loc, ev = kinds["CodeLocator"], kinds["EvidenceRef"]
+        self.assertEqual(loc["id"], "code.ctx.hit-hook")
+        self.assertEqual(loc["path"], "DisturbObject.h")
+        self.assertEqual(loc["commit_sha"], "abc123")
+        self.assertEqual(loc["repo"], "bb2_client")
+        self.assertEqual(ev["id"], "evref.ctx.hit-hook")
+        self.assertEqual(ev["evidence_manifest_id"], "manifest.ctx.code-v2")
+        self.assertEqual(ev["ref_type"], "code_locator")
+        self.assertEqual(ev["locator"], "DisturbObject.h:206")
 
 
 class BuildGlossaryTest(unittest.TestCase):

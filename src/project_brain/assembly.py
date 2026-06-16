@@ -40,3 +40,31 @@ def build_glossary_terms(notes, now):
         }
         out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
     return out
+
+
+def build_code_evidence(notes, now):
+    """code_anchors[] 각 항목을 CodeLocator + EvidenceRef 쌍으로 펼친다."""
+    cx = notes["context"]
+    ctx, commit, repo = cx["key"], cx["commit"], cx.get("repo", "bb2_client")
+    out = []
+    for a in notes.get("code_anchors", []):
+        key = a["key"]
+        quote = a.get("quote") or a["symbol"]
+        loc = {
+            "id": derive_id("CodeLocator", ctx, key),
+            "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
+            "title": quote[:120], "repo": repo, "path": a["path"], "symbol": a["symbol"],
+            "line_start": a["line_start"], "line_end": a["line_end"],
+            "locator_source": a.get("locator_source", "rg"),
+            "commit_sha": commit, "verified_at": now,
+        }
+        ev = {
+            "id": derive_id("EvidenceRef", ctx, key),
+            "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
+            "title": quote[:120], "evidence_manifest_id": a["manifest"],
+            "ref_type": "code_locator", "locator": f"{a['path']}:{a['line_start']}",
+            "summary": quote[:500],
+        }
+        out.append(base(loc, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
+        out.append(base(ev, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
+    return out
