@@ -211,3 +211,128 @@ class ApplyUpdatesTest(unittest.TestCase):
                               "set": {"meaning": "엉뚱"}}]}
         _, _, errors = apply_updates(notes, store, NOW)
         self.assertTrue(any("allowlist" in e.lower() for e in errors))
+
+
+from project_brain.assembly import validate_notes, build
+
+
+def _ref_objs(ctx="ctx"):
+    """_mapping()이 가리키는 참조 대상을 닫는 최소 객체들 — build의 lint를 통과시키려면
+    evidence_refs(evref)·context_id(context)가 store에 실존해야 한다."""
+    manifest = {"id": f"manifest.{ctx}.src", "kind": "EvidenceManifest", "status": "reviewed",
+                "truth_role": "source", "title": "src", "source_type": "session",
+                "locator": "...", "captured_at": T0, "captured_by": "user-statement",
+                "sensitivity": "internal", "acl": ["bb2-team"], "redaction_status": "approved",
+                "schema_version": "0.1", "poc_priority": "P2",
+                "created_at": T0, "updated_at": T0, "tags": [ctx], "evidence_refs": []}
+    evref = {"id": f"evref.{ctx}.x", "kind": "EvidenceRef", "status": "reviewed",
+             "truth_role": "reference", "title": "e", "evidence_manifest_id": f"manifest.{ctx}.src",
+             "ref_type": "session_turn", "locator": "...", "summary": "s",
+             "schema_version": "0.1", "poc_priority": "P2",
+             "created_at": T0, "updated_at": T0, "tags": [ctx], "evidence_refs": []}
+    context = {"id": f"context.{ctx}", "kind": "DomainContext", "status": "reviewed",
+               "truth_role": "domain", "title": "C", "context_key": ctx,
+               "project_id": "bb2_client", "display_name": "C", "boundary_summary": "b",
+               "in_scope": [], "out_of_scope": [],
+               "injection_profile": {"default_audience": "coding-agent"},
+               "glossary_term_ids": [], "schema_version": "0.1", "poc_priority": "P2",
+               "created_at": T0, "updated_at": T0, "tags": [ctx], "evidence_refs": []}
+    return [manifest, evref, context]
+
+
+class ValidateNotesTest(unittest.TestCase):
+    def test_unknown_section_fails(self):
+        errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
+                                 "bogus_section": []})
+        self.assertTrue(any("bogus_section" in e for e in errors))
+
+    def test_missing_context_fails(self):
+        errors = validate_notes({"glossary": []})
+        self.assertTrue(any("context" in e for e in errors))
+
+    def test_remove_operation_rejected(self):
+        # set/union 외 연산 키(remove 등)는 미지원 — 거부
+        errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
+                                 "updates": [{"id": "x", "expected_updated_at": NOW,
+                                              "remove": {"caveats": ["old"]}}]})
+        self.assertTrue(any("remove" in e for e in errors))
+
+    def test_section_wrong_type_rejected(self):
+        # glossary는 list여야 — dict면 실패
+        errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
+                                 "glossary": {"not": "a list"}})
+        self.assertTrue(any("glossary" in e for e in errors))
+
+    def test_item_missing_required_field_rejected(self):
+        # glossary 항목에 definition 누락 → 1층에서 잡음
+        errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
+                                 "glossary": [{"key": "hit", "term": "hit"}]})
+        self.assertTrue(any("definition" in e for e in errors))
+
+    def test_glossary_empty_evidence_rejected(self):
+        # reviewed로 만들어질 glossary가 빈 evidence_refs면 1층에서 잡힌다(2층 schema 전에)
+        errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
+                                 "glossary": [{"key": "h", "term": "h", "definition": "d",
+                                               "evidence_refs": []}]})
+        self.assertTrue(any("evidence_refs" in e for e in errors))
+
+
+class BuildIntegrationTest(unittest.TestCase):
+    def test_build_new_objects_bundle(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "bb2_client"},
+            "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
+                         "title": "코드", "locator": "...", "captured_by": "agent"}],
+            "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
+                              "line_start": 1, "line_end": 1, "quote": "q",
+                              "manifest": "manifest.ctx.code-v2"}],
+            "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
+                          "evidence_refs": ["evref.ctx.hit-hook"]}],
+        }
+        result = build(notes, _store(), NOW)
+        self.assertEqual(result["errors"], [])
+        ids = {o["id"] for o in result["objects"]}
+        self.assertIn("g.ctx.hit", ids)
+        self.assertIn("code.ctx.hit-hook", ids)
+        self.assertIn("evref.ctx.hit-hook", ids)
+
+    def test_build_dangling_ref_caught(self):
+        # glossary가 없는 evref를 가리키면 2층(dangling)이 잡는다
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+                 "glossary": [{"key": "x", "term": "x", "definition": "d",
+                               "evidence_refs": ["evref.ctx.nonexistent"]}]}
+        result = build(notes, _store(), NOW)
+        self.assertTrue(result["errors"])
+
+    def test_build_evref_dangling_manifest_caught(self):
+        # extra_objects로 들어온 EvidenceRef가 없는 manifest를 가리키면 build 2층이 잡는다
+        # (lint는 EvidenceRef→manifest를 안 보므로 build가 직접 검사)
+        evref = {"id": "evref.ctx.x", "kind": "EvidenceRef", "status": "reviewed",
+                 "truth_role": "reference", "title": "e",
+                 "evidence_manifest_id": "manifest.ctx.missing", "ref_type": "session_turn",
+                 "locator": "...", "summary": "s", "schema_version": "0.1", "poc_priority": "P2",
+                 "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+                 "extra_objects": [evref]}
+        result = build(notes, _store(), NOW)
+        self.assertTrue(any("evidence_manifest_id" in e for e in result["errors"]))
+
+    def test_build_union_target_missing_caught(self):
+        # DomainContext.glossary_term_ids union 대상이 store·묶음 어디에도 없으면 build가 잡는다
+        # (lint는 DomainMapping 링크만 봐서 DomainContext union은 사각지대)
+        store = _store(*_ref_objs())  # context.ctx 포함
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+                 "updates": [{"id": "context.ctx", "expected_updated_at": T0,
+                              "union": {"glossary_term_ids": ["g.ctx.nonexistent"]}}]}
+        result = build(notes, store, NOW)
+        self.assertTrue(any("g.ctx.nonexistent" in e for e in result["errors"]))
+
+    def test_build_emits_preconditions_for_updates(self):
+        # title(비-claim) set + 참조 닫힌 픽스처 → errors 없이 preconditions 방출
+        store = _store(_mapping(glossary_term_ids=[]), *_ref_objs())
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+                 "updates": [{"id": "mapping.ctx.hook", "expected_updated_at": T0,
+                              "set": {"title": "새 제목"}}]}
+        result = build(notes, store, NOW)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["preconditions"], {"mapping.ctx.hook": T0})

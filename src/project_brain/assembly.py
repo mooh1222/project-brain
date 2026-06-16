@@ -7,6 +7,9 @@
 import copy
 
 from project_brain.objbase import base
+from project_brain.schema import validate_object
+from project_brain.lint import lint_store
+from project_brain.store import BrainStore
 
 # id 파생 규칙 (kind → prefix). 컨벤션: g.<ctx>.<key> / mapping.<ctx>.<key> 등.
 _ID_PREFIX = {
@@ -236,3 +239,129 @@ def apply_updates(notes, store, now):
         diffs.append({"id": oid, "changes": changes,
                       "before_updated_at": cur.get("updated_at")})
     return out, diffs, errors
+
+
+_VALID_SECTIONS = {"context", "sources", "glossary", "code_anchors", "mappings",
+                   "refs", "updates", "extra_objects"}  # decisions는 2차(Task 4 노트 참고)
+_LIST_SECTIONS = {"sources", "glossary", "code_anchors", "mappings", "updates", "extra_objects"}
+_DICT_SECTIONS = {"context", "refs"}
+_UPDATE_KEYS = {"id", "expected_updated_at", "set", "union", "evidence_unchanged"}
+# 섹션 항목별 필수 필드(중첩 검증). 변환 함수가 default 채우는 필드는 여기 안 넣는다.
+_ITEM_REQUIRED = {
+    # glossary는 항상 reviewed로 만들어지므로 evidence_refs 필수(2층 schema가 막는 걸 1층에서 친절히).
+    "glossary": ("key", "term", "definition", "evidence_refs"),
+    "code_anchors": ("key", "path", "symbol", "line_start", "line_end", "manifest"),
+    "mappings": ("key", "canonical_summary", "meaning", "boundary"),
+    "sources": ("id", "source_type", "title", "locator"),
+}
+
+
+def validate_notes(notes):
+    """1층: 노트 형식 검증. 모르는 섹션·필수 누락·잘못된 타입·미지원 연산은 경고가 아니라 실패."""
+    errors = []
+    for section, value in notes.items():
+        if section not in _VALID_SECTIONS:
+            errors.append(f"노트: 알 수 없는 섹션 {section!r} (허용: {sorted(_VALID_SECTIONS)})")
+            continue
+        if section in _LIST_SECTIONS and not isinstance(value, list):
+            errors.append(f"노트: 섹션 {section!r}는 list여야 함 (현재 {type(value).__name__})")
+        if section in _DICT_SECTIONS and not isinstance(value, dict):
+            errors.append(f"노트: 섹션 {section!r}는 object여야 함 (현재 {type(value).__name__})")
+    cx = notes.get("context")
+    if not isinstance(cx, dict) or "key" not in cx or "commit" not in cx:
+        errors.append("노트: context.key·context.commit 필수")
+    # 섹션 항목 중첩 필수 필드
+    for section, required in _ITEM_REQUIRED.items():
+        value = notes.get(section)
+        if not isinstance(value, list):
+            continue
+        for i, item in enumerate(value):
+            if not isinstance(item, dict):
+                errors.append(f"노트: {section}[{i}]는 object여야 함")
+                continue
+            for field in required:
+                if field not in item:
+                    errors.append(f"노트: {section}[{i}] 필수 필드 {field!r} 누락")
+    # glossary는 reviewed로 생성되므로 evidence_refs가 비어 있어도 안 됨(2층 schema:186을 1층에서 친절히).
+    # _ITEM_REQUIRED는 키 존재만 보므로 빈 리스트는 여기서 별도로 잡는다.
+    glossary = notes.get("glossary")
+    for i, g in enumerate(glossary if isinstance(glossary, list) else []):
+        if isinstance(g, dict) and "evidence_refs" in g and not g["evidence_refs"]:
+            errors.append(f"노트: glossary[{i}] evidence_refs가 비어 있음 (reviewed 용어는 근거 필수)")
+    # updates: 연산 키 화이트리스트(remove·조건·계산 차단) + 타입
+    updates = notes.get("updates")
+    for up in updates if isinstance(updates, list) else []:
+        if not isinstance(up, dict):
+            errors.append("노트: updates 항목은 object여야 함")
+            continue
+        for key in up:
+            if key not in _UPDATE_KEYS:
+                errors.append(f"updates {up.get('id')}: 미지원 연산 키 {key!r} "
+                              f"(허용: {sorted(_UPDATE_KEYS)} — remove·조건·계산 없음)")
+        if "expected_updated_at" not in up:
+            errors.append(f"updates {up.get('id')}: expected_updated_at 필수")
+        if not (up.get("set") or up.get("union")):
+            errors.append(f"updates {up.get('id')}: set 또는 union 중 하나 필요")
+        for op in ("set", "union"):
+            if op in up and not isinstance(up[op], dict):
+                errors.append(f"updates {up.get('id')}: {op}은 object여야 함")
+    return errors
+
+
+def build(notes, store, now):
+    """노트 → 완성 객체 묶음 + diff + preconditions. 저장은 안 한다.
+
+    반환 dict: objects[], diff[], resolved_refs{}, preconditions{id: expected_updated_at},
+               errors[]. errors가 비어야 안전하게 ingest 가능.
+    """
+    errors = list(validate_notes(notes))
+    if errors:
+        return {"objects": [], "diff": [], "resolved_refs": {},
+                "preconditions": {}, "errors": errors}
+
+    refs_map, resolved, ref_errors = resolve_refs(notes, store)
+    errors += ref_errors
+
+    new_objs = []
+    new_objs += build_manifests(notes, now)        # Task 4 Step 6
+    new_objs += build_code_evidence(notes, now)    # Task 2
+    new_objs += build_glossary_terms(notes, now)   # Task 1
+    new_objs += build_mappings(notes, refs_map, now)  # Task 4
+    new_objs += build_context(notes, now)          # Task 4 Step 6 (신규 context)
+    new_objs += list(notes.get("extra_objects", []))  # 탈출구: 완성 객체 직접
+
+    upd_objs, diffs, upd_errors = apply_updates(notes, store, now)
+    errors += upd_errors
+    preconditions = {up["id"]: up["expected_updated_at"] for up in notes.get("updates", [])}
+
+    all_objs = new_objs + upd_objs
+
+    # 2층: 객체 스키마 + dangling + merged lint
+    for o in all_objs:
+        errors += validate_object(o)
+    merged = {o["id"]: o for o in store.all()}
+    for o in all_objs:
+        merged[o["id"]] = o
+
+    # EvidenceRef → EvidenceManifest dangling (lint.py 사각지대 — lint는 EvidenceRef가
+    # 가리키는 manifest 실존을 안 본다. _source_type_for_evidence_ref는 None만 반환).
+    for o in all_objs:
+        if o.get("kind") == "EvidenceRef":
+            mid = o.get("evidence_manifest_id")
+            if mid and mid not in merged:
+                errors.append(f"{o['id']}: dangling evidence_manifest_id {mid}")
+
+    # updates union 대상 id 실존 (lint.py 사각지대 — lint는 DomainMapping 링크만 보므로
+    # DomainContext.glossary_term_ids 등은 직접 검사. id 리스트 필드만, 자유텍스트 list 제외).
+    for up in notes.get("updates", []):
+        for f, vs in (up.get("union") or {}).items():
+            if f.endswith("_ids") or f == "evidence_refs":
+                for v in vs:
+                    if v not in merged:
+                        errors.append(f"updates {up.get('id')}: union {f} 대상 {v} 없음 "
+                                      f"(store·이번 묶음 어디에도)")
+
+    errors += lint_store(BrainStore(merged))
+
+    return {"objects": all_objs, "diff": diffs, "resolved_refs": resolved,
+            "preconditions": preconditions, "errors": errors}
