@@ -89,8 +89,10 @@ RAW_FUSED_TOP_N = 10
 # raw처럼 별도 레인으로 빼되, store 객체라 surface 승급·linked는 유지한다. scope
 # 필터는 미적용 — "가로지르는" 객체라 단일 context_id가 없다.
 INSIGHT_KIND = "Insight"
+# ContextProjection 별도 레인(2026-06-17 projection reuse layer).
+PROJECTION_KIND = "ContextProjection"
 # 객체 레인에서 제외할 kind(별도 레인으로 빠지는 것들).
-_OBJECT_LANE_EXCLUDED = (RAW_KIND, INSIGHT_KIND)
+_OBJECT_LANE_EXCLUDED = (RAW_KIND, INSIGHT_KIND, PROJECTION_KIND)
 
 # RRF 융합 점수 반올림 자릿수(§3.4 결정론 비교 — 부동소수점 동점 흔들림 완화).
 _SCORE_ROUND = 6

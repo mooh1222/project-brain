@@ -26,8 +26,9 @@ EXTRACTOR_VERSION = 2
 
 # §2.1 색인 제외 kind. 이 목록에 든 kind는 extract_surface가 None을 돌려준다.
 # 표에 없는(미지원) kind도 None이 되도록, 추출은 _EXTRACTORS dispatch로만 한다.
+# ContextProjection은 별도 레인(projection_reuse)으로 색인되므로 제외 목록에서 뺐다(2026-06-17).
 EXCLUDED_KINDS = frozenset({
-    "EvidenceManifest", "EvidenceRef", "ReviewRecord", "ContextProjection",
+    "EvidenceManifest", "EvidenceRef", "ReviewRecord",
 })
 
 
@@ -155,6 +156,18 @@ def _surface_insight(obj, store) -> list[str]:
     return parts
 
 
+def _surface_context_projection(obj, store) -> list[str]:
+    # prompt_payload 재사용 projection만 검색 표면을 가진다. context_md 덤프는 None.
+    if obj.get("format") != "prompt_payload":
+        return []
+    parts: list[str] = []
+    for field in ("title", "reuse_payload"):
+        s = _norm_str(obj.get(field))
+        if s is not None:
+            parts.append(s)
+    return parts
+
+
 # kind → 표면 추출 함수. 여기 없는 kind는 extract_surface가 None.
 _EXTRACTORS = {
     "GlossaryTerm": _surface_glossary_term,
@@ -166,6 +179,7 @@ _EXTRACTORS = {
     "CodeLocator": _surface_code_locator,
     "DomainContext": _surface_domain_context,
     "Insight": _surface_insight,
+    "ContextProjection": _surface_context_projection,
 }
 
 

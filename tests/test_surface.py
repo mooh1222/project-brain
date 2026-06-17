@@ -181,9 +181,15 @@ class ExtractOtherKindsTest(unittest.TestCase):
 
 class ExcludedKindTest(unittest.TestCase):
     def test_excluded_kinds_return_none(self):
-        for kind in ("EvidenceManifest", "EvidenceRef", "ReviewRecord", "ContextProjection"):
+        # ContextProjection은 EXCLUDED_KINDS에서 빠졌으나, format 없는(또는 context_md)
+        # projection은 추출기가 []를 반환해 None이 된다 — context_md 덤프는 표면 없음.
+        for kind in ("EvidenceManifest", "EvidenceRef", "ReviewRecord"):
             obj = {"id": f"x.{kind}", "kind": kind, "status": "reviewed", "summary": "텍스트"}
             self.assertIsNone(extract_surface(obj, None), kind)
+        # ContextProjection: format 미지정(=context_md 아닌 상태)도 None.
+        proj_no_format = {"id": "x.ContextProjection", "kind": "ContextProjection",
+                          "status": "reviewed", "summary": "텍스트"}
+        self.assertIsNone(extract_surface(proj_no_format, None), "ContextProjection no format")
 
     def test_unsupported_kind_returns_none(self):
         # §2.1 표에 없는 kind(예: KnowledgePage)는 None
@@ -251,6 +257,74 @@ class TestInsightSurface(unittest.TestCase):
     def test_extractor_version_bumped(self):
         # Insight 추출기 추가 = 추출 로직 변경 → 색인 meta 불일치로 rebuild 트리거(§4).
         self.assertGreaterEqual(EXTRACTOR_VERSION, 2)
+
+
+_MIN_PROJECTION_ID = "projection.neutral.req.reuse"
+
+
+def _min_projection():
+    """ContextProjection 최소 픽스처(format 오버라이드용 베이스)."""
+    return {
+        "id": _MIN_PROJECTION_ID,
+        "kind": "ContextProjection",
+        "context_id": "context.neutral",
+        "format": "prompt_payload",
+        "status": "candidate",
+        "title": "최소 재사용 브리핑",
+        "reuse_payload": "페이로드 텍스트",
+        "source_object_ids": [],
+        "source_content_hash": "x",
+        "projection_hash": "y",
+        "generated_at": "2026-06-17T00:00:00Z",
+        "generated_by": "test",
+        "stale_policy": "fail_on_manual_edit",
+        "schema_version": "0.1",
+        "poc_priority": "P0",
+        "created_at": "2026-06-17T00:00:00Z",
+        "updated_at": "2026-06-17T00:00:00Z",
+        "tags": [],
+        "evidence_refs": [],
+        "truth_role": "index",
+    }
+
+
+def _store_with(objs):
+    return BrainStore({o["id"]: o for o in objs})
+
+
+class TestContextProjectionSurface(unittest.TestCase):
+    """ContextProjection 표면 추출 (Task A1 — 2026-06-17)."""
+
+    def test_context_projection_prompt_payload_surface(self):
+        """prompt_payload projection은 title + reuse_payload가 표면."""
+        store = _store_with([{
+            "id": "projection.sally-canoe.result-popup-rank.reuse",
+            "kind": "ContextProjection",
+            "context_id": "context.sally-canoe",
+            "format": "prompt_payload",
+            "status": "candidate",
+            "title": "샐리 결과 팝업 순위 표시 착수 브리핑",
+            "reuse_payload": "데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
+            "source_object_ids": ["mapping.sally-canoe.race-end-result-achieve"],
+            "source_content_hash": "x", "projection_hash": "y",
+            "generated_at": "2026-06-17T00:00:00Z", "generated_by": "test",
+            "stale_policy": "fail_on_manual_edit",
+            "schema_version": "0.1", "poc_priority": "P0",
+            "created_at": "2026-06-17T00:00:00Z", "updated_at": "2026-06-17T00:00:00Z",
+            "tags": [], "evidence_refs": [], "truth_role": "index",
+        }])
+        obj = store.get("projection.sally-canoe.result-popup-rank.reuse")
+        surface = extract_surface(obj, store)
+        self.assertIsNotNone(surface)
+        self.assertIn("PopupSallyCanoeResult", surface)
+
+    def test_context_md_projection_has_no_surface(self):
+        """context_md 덤프 projection은 검색 표면 없음(None) — 재사용 레인 대상 아님."""
+        proj = dict(_min_projection())
+        proj["format"] = "context_md"
+        store = _store_with([proj])
+        result = extract_surface(store.get(_MIN_PROJECTION_ID), store)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
