@@ -597,16 +597,18 @@ def _document_frequency(conn: sqlite3.Connection, token: str) -> int:
 
     search_bm25와 같은 토큰 인용 규칙(개별 "..." 인용, prefix 없음)을 쓴다 — 색인·쿼리
     토큰화가 같은 tokenize()를 공유하므로 색인측 토큰과 그대로 대조된다(§6).
-    ★raw 청크·Insight 행은 제외★(2026-06-11·2026-06-15) — 앵커 df 상한(_ANCHOR_DF_MAX=30)은
-    객체 코퍼스 분포로 보정된 값(§8)이라, 둘 다 자유 텍스트 다토큰이라 분포를 흔들면 보정이
-    깨진다(Insight가 31개 이상 쌓이면 공유 토큰 df가 상한을 넘겨 객체 게이트를 닫는 C2 누수).
+    ★raw 청크·Insight·ContextProjection 행은 제외★(2026-06-11·2026-06-15·2026-06-17) —
+    앵커 df 상한(_ANCHOR_DF_MAX=30)은 객체 코퍼스 분포로 보정된 값(§8)이라, 셋 다 자유
+    텍스트 다토큰이라 분포를 흔들면 보정이 깨진다(Insight가 31개 이상 쌓이면 공유 토큰 df가
+    상한을 넘겨 객체 게이트를 닫는 C2 누수). projection은 정본 객체를 재서술한 본문이라
+    앵커 df에 섞이면 정본 회수를 잠식한다.
     """
     expr = '"' + token.replace('"', '""') + '"'
     return conn.execute(
         "SELECT COUNT(*) FROM documents_fts f "
         "JOIN documents d ON d.object_id = f.object_id "
-        "WHERE documents_fts MATCH ? AND d.kind NOT IN (?, ?)",
-        (expr, RAW_KIND, INSIGHT_KIND)
+        "WHERE documents_fts MATCH ? AND d.kind NOT IN (?, ?, ?)",
+        (expr, RAW_KIND, INSIGHT_KIND, PROJECTION_KIND)
     ).fetchone()[0]
 
 

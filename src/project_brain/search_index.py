@@ -399,10 +399,13 @@ def search_bm25_scoped(db_path, query: str, scope: str, top_n: int = 50) -> dict
             )
         if not tokens:
             return {"results": [], "warnings": warnings}
+        # RAW·ContextProjection 제외(2026-06-17) — raw 청크는 별도 발췌 레인,
+        # projection은 별도 재사용 레인이라 scope 객체 BM25 후보에 섞이면 안 된다.
+        # Insight는 객체라 의도적으로 scope 레인에 남긴다.
         rows = conn.execute(
             "SELECT object_id, kind, status, context_id, tokenized_text, surface_text "
-            "FROM documents WHERE context_id = ? AND kind != ? ORDER BY object_id",
-            (scope, RAW_KIND),
+            "FROM documents WHERE context_id = ? AND kind NOT IN (?, ?) ORDER BY object_id",
+            (scope, RAW_KIND, "ContextProjection"),
         ).fetchall()
     finally:
         conn.close()

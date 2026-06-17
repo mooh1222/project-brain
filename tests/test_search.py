@@ -8,6 +8,7 @@ spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md
 채널 분리·needs_clarification을 본다.
 """
 
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,6 +21,7 @@ from project_brain.search import (
     _ABS_SCORE_FLOOR_REVIEWED,
     _ANCHOR_DF_MAX,
     _GRAPH_SUPPORT_CAP,
+    _document_frequency,
     _gate_pass,
     _graph_signals_by_id,
     _rerank_by_support,
@@ -1171,6 +1173,29 @@ class ProjectionLaneTest(unittest.TestCase):
         self.assertIn("PopupSallyCanoeResult", proj_hit["surface"])
         self.assertEqual(proj_hit["linked"]["code_locators"], [])
         self.assertEqual(proj_hit["graph_support"], 0)
+
+    def test_projection_excluded_from_anchor_df(self):
+        # projection 본문에만 있는 희귀 토큰의 df가 0(존재 안 함)으로 잡힌다 —
+        # projection 행 미집계. raw/Insight df 제외와 동형(앵커 df는 객체 코퍼스
+        # 분포로 보정된 값이라 projection 자유 텍스트가 분포를 흔들면 안 됨).
+        # "reuseprobexyz"는 토크나이저가 쪼개지 않는 단일 보존 토큰이고 projection
+        # reuse_payload에만 있다 — 제외 안 되면 df=1로 새므로 제외를 직접 검증한다.
+        build_store_dir(self.brain, [
+            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            projection("projection.sally-canoe.result-popup-rank.reuse",
+                       context_id="context.sally-canoe",
+                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: reuseprobexyz recordMap.",
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"]),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        conn = sqlite3.connect(str(self.db))
+        try:
+            df = _document_frequency(conn, "reuseprobexyz")
+        finally:
+            conn.close()
+        self.assertEqual(df, 0)
 
 
 class EvalRecallAdvisoriesTest(unittest.TestCase):

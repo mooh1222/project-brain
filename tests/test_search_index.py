@@ -67,6 +67,21 @@ def review_record(rid):
     })
 
 
+def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
+               status="candidate"):
+    return _b({
+        "id": pid, "kind": "ContextProjection", "status": status, "truth_role": "index",
+        "title": title, "context_id": context_id,
+        "format": "prompt_payload", "reuse_payload": reuse_payload,
+        "output_locator": f"indexes/context_projections/{pid}.txt",
+        "source_object_ids": source_object_ids or ["g.d1"],
+        "source_content_hash": "x", "projection_hash": "y",
+        "generated_at": T, "generated_by": "test",
+        "stale_policy": "fail_on_manual_edit",
+        "evidence_refs": [],
+    })
+
+
 def build_store_dir(tmp: Path, objs) -> Path:
     for obj in objs:
         BrainStore.save_object(tmp, obj)
@@ -828,3 +843,17 @@ class ScopedBm25SearchTest(unittest.TestCase):
         self._rebuild(self.base_objs)
         self.assertEqual(
             search_bm25_scoped(self.db, "", scope="context.a")["results"], [])
+
+    def test_scoped_bm25_excludes_projection(self):
+        # scope 객체 레인(search_bm25_scoped)이 projection 행을 안 집는다 — 직접 검증.
+        # projection을 scope 안(context.a)에 두고 reuse_payload에 질의 토큰을 담아도
+        # 결과에 ContextProjection이 안 섞인다(projection은 별도 재사용 레인 소관).
+        self._rebuild(self.base_objs + [
+            projection("projection.a.reuse", context_id="context.a",
+                       title="알림 클리어 재사용 브리핑",
+                       reuse_payload="알림 클리어 팝업 재사용 착수 데이터"),
+        ])
+        out = search_bm25_scoped(self.db, "알림 클리어", scope="context.a")
+        self.assertTrue(out["results"])
+        self.assertTrue(
+            all(r.get("kind") != "ContextProjection" for r in out["results"]))
