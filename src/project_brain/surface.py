@@ -21,8 +21,8 @@ content_hash는 객체 JSON 전체가 아니라 추출 표면 + status의 SHA-25
 
 from project_brain.hash_utils import sha256_text
 
-# 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거). v2: Insight 추출기 추가(2026-06-15).
-EXTRACTOR_VERSION = 2
+# 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거). v2: Insight 추출기 추가(2026-06-15). v3: ContextProjection 추출기 추가(2026-06-17).
+EXTRACTOR_VERSION = 3
 
 # §2.1 색인 제외 kind. 이 목록에 든 kind는 extract_surface가 None을 돌려준다.
 # 표에 없는(미지원) kind도 None이 되도록, 추출은 _EXTRACTORS dispatch로만 한다.

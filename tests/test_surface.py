@@ -326,6 +326,10 @@ class TestContextProjectionSurface(unittest.TestCase):
         result = extract_surface(store.get(_MIN_PROJECTION_ID), store)
         self.assertIsNone(result)
 
+    def test_extractor_version_bumped_for_context_projection(self):
+        # ContextProjection 추출기 추가 = 추출 로직 변경 → 색인 meta 불일치로 rebuild 트리거(§4).
+        self.assertGreaterEqual(EXTRACTOR_VERSION, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
