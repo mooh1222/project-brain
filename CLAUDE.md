@@ -46,6 +46,6 @@ project-brain eval               # 골든셋 7종 (실모델)
 
 - `Date`·경로 하드코딩 금지 — 경로는 config(.project-brain.json) 해석
   (`src/project_brain/config.py`, 명시 인자 > config > ConfigError).
-- `context_projection.py`는 동결 보존 코드(소비자 없음) — 손대지 않는다.
+- `context_projection.py`는 context_md 빌더와 `build_reuse_projection`(재사용 projection 빌더)를 모두 담는 정본이다. projection 재사용층(별도 검색 레인)이 소비하며, cli `projection` 서브커맨드·`rebuild`·`lint`도 이 파일을 참조한다. "동결·소비자 없음"이 아님.
 - 스킬 템플릿(`src/project_brain/templates/`)을 바꾸면 install의 manifest 보존
   동작(사용자 수정 파일 skip)을 깨지 않는지 `tests/test_installer.py`로 확인.
