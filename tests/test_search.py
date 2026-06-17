@@ -1116,6 +1116,63 @@ class InsightLaneTest(unittest.TestCase):
         self.assertEqual(signals["anchor_df"], 1)
 
 
+def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
+               status="candidate", fmt="prompt_payload"):
+    return _b({
+        "id": pid, "kind": "ContextProjection", "status": status, "truth_role": "index",
+        "title": title, "context_id": context_id,
+        "format": fmt, "reuse_payload": reuse_payload,
+        "output_locator": f"indexes/context_projections/{pid}.txt",
+        "source_object_ids": source_object_ids or ["mapping.sally-canoe.race-end-result-achieve"],
+        "source_content_hash": "x", "projection_hash": "y",
+        "generated_at": T, "generated_by": "test",
+        "stale_policy": "fail_on_manual_edit",
+        "evidence_refs": [],
+    })
+
+
+class ProjectionLaneTest(unittest.TestCase):
+    """ContextProjection 재사용 레인(spec 2026-06-17 projection_reuse) — raw·Insight와
+    동형으로 객체 융합·그래프 재정렬을 흔들지 않고 hits 뒤에 별도로 붙는다. 전부 stub
+    embedder."""
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_projection_in_recall_after_objects(self):
+        build_store_dir(self.brain, [
+            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            projection("projection.sally-canoe.result-popup-rank.reuse",
+                       context_id="context.sally-canoe",
+                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"]),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        hits = recall("샐리 결과 팝업 순위 표시", db_path=self.db, embedder=self.embedder,
+                      brain_root=self.brain)
+        kinds = [h["kind"] for h in hits]
+        self.assertIn("ContextProjection", kinds)
+        # projection은 객체·raw·Insight 적중 뒤 별도 레인 — 첫 projection 이후엔
+        # 일반 객체가 나오지 않는다.
+        proj_idx = kinds.index("ContextProjection")
+        obj_idx = next(i for i, k in enumerate(kinds)
+                       if k not in ("ContextProjection", "raw_chunk", "Insight"))
+        self.assertLess(obj_idx, proj_idx)
+        proj_hit = next(h for h in hits if h["kind"] == "ContextProjection")
+        self.assertEqual(proj_hit["status"], "candidate")
+        self.assertIn("PopupSallyCanoeResult", proj_hit["surface"])
+        self.assertEqual(proj_hit["linked"]["code_locators"], [])
+        self.assertEqual(proj_hit["graph_support"], 0)
+
+
 class EvalRecallAdvisoriesTest(unittest.TestCase):
     """eval_recall advisories 채널(spec 2026-06-15 §4.6 C1) — reviewed Insight는
     results에 안 섞이고 advisories로 가른다. candidate Insight는 1차 미노출."""

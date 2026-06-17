@@ -400,6 +400,8 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     raw_vector = [r for r in vector_all if r.get("kind") == RAW_KIND][:CHANNEL_TOP_N]
     insight_bm25 = [r for r in bm25_all if r.get("kind") == INSIGHT_KIND][:CHANNEL_TOP_N]
     insight_vector = [r for r in vector_all if r.get("kind") == INSIGHT_KIND][:CHANNEL_TOP_N]
+    projection_bm25 = [r for r in bm25_all if r.get("kind") == PROJECTION_KIND][:CHANNEL_TOP_N]
+    projection_vector = [r for r in vector_all if r.get("kind") == PROJECTION_KIND][:CHANNEL_TOP_N]
 
     # 채널별 객체 메타를 모은다(첫 등장 우선 — 두 채널의 kind/status/context_id는 동일).
     meta: dict[str, dict] = {}
@@ -540,6 +542,42 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
                 "matched_via": "both" if (in_b and in_v) else ("bm25" if in_b else "vector"),
                 "surface": surface,
                 "linked": _build_linked(object_id, store),
+                "graph_reached": False,
+                "graph_hits": 0,
+                "graph_support": 0,
+            })
+    # ContextProjection 재사용 레인(2026-06-17 projection_reuse): raw·Insight와 동형으로
+    # 따로 융합해 객체·raw·Insight 적중 ★뒤에★ 붙인다. 원문은 색인의 surface_text가
+    # 운반하고, linked는 빈 구조(채널 분리·정본 results 제외는 eval_recall 몫).
+    if projection_bm25 or projection_vector:
+        proj_meta: dict[str, dict] = {}
+        proj_bm25_ids = []
+        for r in projection_bm25:
+            proj_bm25_ids.append(r["object_id"])
+            proj_meta.setdefault(r["object_id"], r)
+        proj_vector_ids = []
+        for r in projection_vector:
+            proj_vector_ids.append(r["object_id"])
+            proj_meta.setdefault(r["object_id"], r)
+        proj_fused = rrf_fuse([proj_bm25_ids, proj_vector_ids])
+        if scope is not None:
+            proj_fused = [(oid, s) for oid, s in proj_fused
+                          if proj_meta[oid].get("context_id") == scope]
+        proj_bm25_set = set(proj_bm25_ids)
+        proj_vector_set = set(proj_vector_ids)
+        for object_id, score in proj_fused[:RAW_FUSED_TOP_N]:
+            in_b, in_v = object_id in proj_bm25_set, object_id in proj_vector_set
+            m = proj_meta[object_id]
+            hits.append({
+                "object_id": object_id,
+                "kind": m.get("kind"),
+                "status": m.get("status"),
+                "context_id": m.get("context_id"),
+                "score": score,
+                "matched_via": "both" if (in_b and in_v) else ("bm25" if in_b else "vector"),
+                "surface": m.get("surface_text") or "",
+                "linked": {"code_locators": [], "evidence_ref_ids": [],
+                           "related_object_ids": []},
                 "graph_reached": False,
                 "graph_hits": 0,
                 "graph_support": 0,
