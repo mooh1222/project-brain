@@ -23,6 +23,7 @@ from pathlib import Path
 
 from project_brain.config import resolve_brain_root, resolve_db_path
 from project_brain.embedder import EMBED_DIM
+from project_brain.lint import projection_is_fresh
 from project_brain.raw_chunks import RAW_KIND, RAW_STATUS, iter_raw_sources
 from project_brain.store import BrainStore
 from project_brain.surface import EXTRACTOR_VERSION, content_hash, extract_surface
@@ -143,6 +144,10 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
         pending_vectors: list[tuple[int, str]] = []  # (row_id, 표면 원문)
         for obj in store.all():
             total += 1
+            # 낡은 ContextProjection(구성 객체가 바뀌어 source_content_hash 불일치)은
+            # 색인 제외 — 이전 착수 브리핑이 더는 정확하지 않다. fingerprint도 동일.
+            if obj.get("kind") == "ContextProjection" and not projection_is_fresh(store, obj):
+                continue
             surface = extract_surface(obj, store)
             if surface is None:
                 continue
@@ -285,6 +290,10 @@ def compute_corpus_fingerprint(store, brain_root) -> str:
     """
     rows = []
     for obj in store.all():
+        # rebuild와 동일하게 낡은 ContextProjection을 지문 입력에서도 뺀다 — 두 곳이
+        # 같은 입력을 봐야 신선도 가드가 어긋나지 않는다.
+        if obj.get("kind") == "ContextProjection" and not projection_is_fresh(store, obj):
+            continue
         surface = extract_surface(obj, store)
         if surface is None or not tokenize(surface):
             continue

@@ -21,6 +21,17 @@ def _compute_source_content_hash(store: BrainStore, source_object_ids: list[str]
     return _sha256_text("\n".join(parts))
 
 
+def projection_is_fresh(store: BrainStore, projection: dict) -> bool:
+    """ContextProjection의 저장 source_content_hash가 현재 store로 재계산한 값과 같은가.
+
+    구성 객체(source_object_ids)가 바뀌면 재계산 해시가 어긋나 False — 그 projection은
+    낡았다. rebuild·compute_corpus_fingerprint가 같은 판정으로 stale projection을
+    색인/지문에서 빼는 데 재사용한다(중복 구현 금지)."""
+    source_object_ids = projection.get("source_object_ids") or []
+    expected_hash = _compute_source_content_hash(store, source_object_ids)
+    return expected_hash == projection.get("source_content_hash")
+
+
 def _source_type_for_evidence_ref(store: BrainStore, ref_id: str) -> str | None:
     if not store.has(ref_id):
         return None

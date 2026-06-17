@@ -703,6 +703,108 @@ class CorpusFingerprintTest(unittest.TestCase):
             self.assertEqual(fp_with, compute_corpus_fingerprint(store3, brain_root))
 
 
+class StaleProjectionTest(unittest.TestCase):
+    """rebuild·fingerprint가 낡은(source_content_hash 불일치) projection을 색인/지문에서 뺀다.
+
+    구성 객체가 바뀌면(매핑 표면 변형) 저장된 source_content_hash가 재계산값과
+    어긋난다. 그런 projection은 이전 착수 브리핑이 더는 정확하지 않으므로 색인에서
+    빠져야 한다. fresh projection(해시 일치)은 그대로 색인된다.
+    rebuild와 compute_corpus_fingerprint가 같은 입력을 봐야 신선도 가드가 어긋나지 않는다.
+    """
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _fresh_hash(self, source_object_ids):
+        # 저장된 store 내용으로 source_content_hash를 재계산(lint 헬퍼 재사용).
+        from project_brain.lint import _compute_source_content_hash
+        store = BrainStore.load(self.brain)
+        return _compute_source_content_hash(store, source_object_ids)
+
+    def _index_object_ids_of_kind(self, kind):
+        conn = sqlite3.connect(str(self.db))
+        try:
+            return {
+                r[0] for r in conn.execute(
+                    "SELECT object_id FROM documents WHERE kind = ?", (kind,)
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+
+    def test_stale_projection_excluded_from_rebuild(self):
+        # 구성 용어를 적재 → fresh 해시로 projection 저장 → 그 용어의 표면을 바꿔
+        # source_content_hash 불일치 유발 → rebuild → projection이 색인에서 빠진다.
+        build_store_dir(self.brain, [
+            glossary_term("g.src", term="알림클리어", definition="알림 클리어 팝업"),
+        ])
+        fresh = self._fresh_hash(["g.src"])
+        proj = projection("projection.stale", context_id="context.neutral",
+                          title="알림 클리어 재사용 브리핑",
+                          reuse_payload="알림 클리어 팝업 재사용 착수 데이터",
+                          source_object_ids=["g.src"])
+        proj["source_content_hash"] = fresh
+        BrainStore.save_object(self.brain, proj)
+        # 구성 용어 변형 → source_content_hash 불일치(낡음).
+        BrainStore.save_object(self.brain, glossary_term(
+            "g.src", term="알림클리어", definition="완전히 다른 정의로 변경"))
+        rebuild(self.brain, self.db)
+        self.assertNotIn(
+            "projection.stale", self._index_object_ids_of_kind("ContextProjection"))
+
+    def test_fresh_projection_included_in_rebuild(self):
+        # 구성 용어를 적재 → fresh 해시로 projection 저장 → 변형 없이 rebuild →
+        # projection이 색인에 포함된다.
+        build_store_dir(self.brain, [
+            glossary_term("g.src", term="알림클리어", definition="알림 클리어 팝업"),
+        ])
+        fresh = self._fresh_hash(["g.src"])
+        proj = projection("projection.fresh", context_id="context.neutral",
+                          title="알림 클리어 재사용 브리핑",
+                          reuse_payload="알림 클리어 팝업 재사용 착수 데이터",
+                          source_object_ids=["g.src"])
+        proj["source_content_hash"] = fresh
+        BrainStore.save_object(self.brain, proj)
+        rebuild(self.brain, self.db)
+        self.assertIn(
+            "projection.fresh", self._index_object_ids_of_kind("ContextProjection"))
+
+    def test_stale_projection_excluded_from_fingerprint(self):
+        # rebuild와 지문이 같은 입력을 봐야 한다 — stale projection은 지문에서도 빠진다.
+        from project_brain.search_index import compute_corpus_fingerprint
+        build_store_dir(self.brain, [
+            glossary_term("g.src", term="알림클리어", definition="알림 클리어 팝업"),
+        ])
+        fresh = self._fresh_hash(["g.src"])
+        proj = projection("projection.fp", context_id="context.neutral",
+                          title="알림 클리어 재사용 브리핑",
+                          reuse_payload="알림 클리어 팝업 재사용 착수 데이터",
+                          source_object_ids=["g.src"])
+        proj["source_content_hash"] = fresh
+        BrainStore.save_object(self.brain, proj)
+        store_fresh = BrainStore.load(self.brain)
+        fp_with_fresh = compute_corpus_fingerprint(store_fresh, self.brain)
+
+        # projection을 낡게(해시 불일치) 만든다 — 색인 집합에서 빠지므로 지문 불변이어야.
+        proj_stale = dict(proj)
+        proj_stale["source_content_hash"] = "deadbeef"
+        BrainStore.save_object(self.brain, proj_stale)
+        store_stale = BrainStore.load(self.brain)
+        fp_with_stale = compute_corpus_fingerprint(store_stale, self.brain)
+
+        # projection 자체를 아예 지운 코퍼스의 지문과 stale 코퍼스의 지문이 같아야 한다.
+        (self.brain / "indexes" / "context_projections" / "projection.fp.json").unlink()
+        store_gone = BrainStore.load(self.brain)
+        fp_gone = compute_corpus_fingerprint(store_gone, self.brain)
+        self.assertEqual(fp_with_stale, fp_gone)
+        self.assertNotEqual(fp_with_fresh, fp_with_stale)
+
+
 class RebuildConfigFallbackTest(unittest.TestCase):
     def test_rebuild_without_args_resolves_from_config(self):
         # 분리 후 실사용 경로: 인자 없이 rebuild() → config(.project-brain.json)

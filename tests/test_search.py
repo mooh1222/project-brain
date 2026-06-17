@@ -1119,14 +1119,23 @@ class InsightLaneTest(unittest.TestCase):
 
 
 def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
-               status="candidate", fmt="prompt_payload"):
+               status="candidate", fmt="prompt_payload", source_objects=None):
+    sids = source_object_ids or ["mapping.sally-canoe.race-end-result-achieve"]
+    # source_objects(구성 객체 dict들)를 주면 fresh source_content_hash를 lint와
+    # 같은 공식으로 계산한다 — Task A6 신선도 가드가 색인에서 빼지 않도록. 안 주면
+    # 옛 placeholder("x")라 stale 취급된다(낡음 검사 자체를 보는 테스트용).
+    if source_objects is not None:
+        from project_brain.hash_utils import sha256_text as _sha, stable_json as _sj
+        content_hash = _sha("\n".join(_sj(o) for o in source_objects))
+    else:
+        content_hash = "x"
     return _b({
         "id": pid, "kind": "ContextProjection", "status": status, "truth_role": "index",
         "title": title, "context_id": context_id,
         "format": fmt, "reuse_payload": reuse_payload,
         "output_locator": f"indexes/context_projections/{pid}.txt",
-        "source_object_ids": source_object_ids or ["mapping.sally-canoe.race-end-result-achieve"],
-        "source_content_hash": "x", "projection_hash": "y",
+        "source_object_ids": sids,
+        "source_content_hash": content_hash, "projection_hash": "y",
         "generated_at": T, "generated_by": "test",
         "stale_policy": "fail_on_manual_edit",
         "evidence_refs": [],
@@ -1148,14 +1157,16 @@ class ProjectionLaneTest(unittest.TestCase):
         self._td.cleanup()
 
     def test_projection_in_recall_after_objects(self):
+        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
         build_store_dir(self.brain, [
-            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            src,
             projection("projection.sally-canoe.result-popup-rank.reuse",
                        context_id="context.sally-canoe",
                        title="샐리 결과 팝업 순위 표시 착수 브리핑",
                        reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"]),
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_objects=[src]),
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
         hits = recall("샐리 결과 팝업 순위 표시", db_path=self.db, embedder=self.embedder,
@@ -1180,14 +1191,16 @@ class ProjectionLaneTest(unittest.TestCase):
         # 분포로 보정된 값이라 projection 자유 텍스트가 분포를 흔들면 안 됨).
         # "reuseprobexyz"는 토크나이저가 쪼개지 않는 단일 보존 토큰이고 projection
         # reuse_payload에만 있다 — 제외 안 되면 df=1로 새므로 제외를 직접 검증한다.
+        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
         build_store_dir(self.brain, [
-            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            src,
             projection("projection.sally-canoe.result-popup-rank.reuse",
                        context_id="context.sally-canoe",
                        title="샐리 결과 팝업 순위 표시 착수 브리핑",
                        reuse_payload="데이터 출처: reuseprobexyz recordMap.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"]),
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_objects=[src]),
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
         conn = sqlite3.connect(str(self.db))
@@ -1219,14 +1232,16 @@ class EvalRecallProjectionReuseTest(unittest.TestCase):
 
     def test_eval_recall_projection_in_own_channel_not_results(self):
         # candidate projection도 results/candidates가 아니라 projection_reuse로만 나온다.
+        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
         self._build([
-            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            src,
             projection("projection.sally-canoe.result-popup-rank.reuse",
                        context_id="context.sally-canoe",
                        title="샐리 결과 팝업 순위 표시 착수 브리핑",
                        reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"]),
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_objects=[src]),
         ])
         resp = eval_recall("샐리 결과 팝업 순위 표시", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
@@ -1239,14 +1254,16 @@ class EvalRecallProjectionReuseTest(unittest.TestCase):
     def test_eval_recall_reviewed_projection_stays_in_reuse_channel(self):
         # 핵심 가드(codex 블로커): promote된(reviewed) projection도 results가 아니라
         # projection_reuse에 남는다 — 채널 이동 없음.
+        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
         self._build([
-            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            src,
             projection("projection.sally-canoe.result-popup-rank.reuse",
                        context_id="context.sally-canoe",
                        title="샐리 결과 팝업 순위 표시 착수 브리핑",
                        reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
                        source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_objects=[src],
                        status="reviewed"),
         ])
         resp = eval_recall("샐리 결과 팝업 순위 표시", db_path=self.db,

@@ -103,20 +103,23 @@ class TestCli(unittest.TestCase):
         from project_brain.embedder import StubEmbedder
         from project_brain.search_index import rebuild
         from tests.test_search import build_store_dir, domain_mapping, projection
+        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
         build_store_dir(self.root, [
-            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            src,
             projection("projection.sally-canoe.result-popup-rank.reviewed",
                        context_id="context.sally-canoe",
                        title="샐리 결과 팝업 순위 표시 착수 브리핑(검증)",
                        reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
                        source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_objects=[src],
                        status="reviewed"),
             projection("projection.sally-canoe.result-popup-rank.candidate",
                        context_id="context.sally-canoe",
                        title="샐리 결과 팝업 순위 표시 착수 브리핑(후보)",
                        reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
                        source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_objects=[src],
                        status="candidate"),
         ])
         db = self.input_dir / "index.db"
