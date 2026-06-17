@@ -111,5 +111,50 @@ class TestInsightDangling(unittest.TestCase):
         self.assertFalse([p for p in problems if "insight.x" in p])
 
 
+def _projection(pid="projection.x.req.reuse", *, source_object_ids, source_content_hash):
+    """ContextProjection 최소 픽스처(스키마 필수 필드 충족)."""
+    return base(
+        {
+            "id": pid, "kind": "ContextProjection", "status": "candidate", "truth_role": "index",
+            "title": "착수 브리핑", "context_id": "context.x",
+            "format": "prompt_payload", "reuse_payload": "재사용 본문",
+            "output_locator": f"indexes/context_projections/{pid}.txt",
+            "source_object_ids": source_object_ids,
+            "source_content_hash": source_content_hash, "projection_hash": "y",
+            "generated_at": T, "generated_by": "test",
+            "stale_policy": "fail_on_manual_edit",
+            "evidence_refs": [],
+        },
+        tags=["neutral"], created_at=T, updated_at=T,
+    )
+
+
+class TestContextProjectionDangling(unittest.TestCase):
+    """외부 리뷰 재현(Important 1): source_object_ids가 store에 없는 id를 가리키는 projection은
+    DomainMapping(8a)·DecisionRecord(8b)·Insight(9)와 동형으로 dangling을 보고해야 한다.
+    조용히 건너뛰면 근거 사라진 브리핑이 색인에 계속 남는다."""
+
+    def test_dangling_source_object_id_reported(self):
+        from project_brain.hash_utils import sha256_text
+        proj = _projection(source_object_ids=["missing.source"],
+                           source_content_hash=sha256_text(""))
+        problems = lint_store(store_of(proj))
+        self.assertTrue(
+            any("dangling source_object_id missing.source" in p for p in problems),
+            problems,
+        )
+
+    def test_all_sources_present_no_dangling(self):
+        # 회귀 가드: 모든 source가 store에 있으면 dangling 문제 없음.
+        from project_brain.hash_utils import sha256_text, stable_json
+        src = _drift_mapping("m.src", term_ids=[])
+        proj = _projection(
+            source_object_ids=["m.src"],
+            source_content_hash=sha256_text(stable_json(src)),
+        )
+        problems = lint_store(store_of(src, proj))
+        self.assertFalse([p for p in problems if "dangling source_object_id" in p], problems)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -144,5 +144,23 @@ class TestBuildReuseFreshnessRoundtrip(unittest.TestCase):
         self.assertFalse(projection_is_fresh(store, proj))
 
 
+class TestDanglingSourceMakesStale(unittest.TestCase):
+    """외부 리뷰 재현(Important 1): source_object_ids가 store에 없는 id를 가리키는데도
+    source_content_hash가 sha256("")(없는 id는 _compute_source_content_hash가 조용히 건너뜀)
+    이라 fresh=True로 통과해버리는 문제. dangling source는 stale로 판정해야 한다."""
+
+    def test_dangling_source_projection_is_stale(self):
+        from project_brain.hash_utils import sha256_text
+        store = BrainStore({})  # missing.source가 store에 없다
+        proj = {
+            "id": "projection.x.req.reuse",
+            "kind": "ContextProjection",
+            "source_object_ids": ["missing.source"],
+            "source_content_hash": sha256_text(""),  # 없는 id를 건너뛴 결과와 동일
+        }
+        # dangling source → fresh가 아니어야 함(rebuild/fingerprint가 색인에서 뺀다).
+        self.assertFalse(projection_is_fresh(store, proj))
+
+
 if __name__ == "__main__":
     unittest.main()

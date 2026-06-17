@@ -28,6 +28,11 @@ def projection_is_fresh(store: BrainStore, projection: dict) -> bool:
     낡았다. rebuild·compute_corpus_fingerprint가 같은 판정으로 stale projection을
     색인/지문에서 빼는 데 재사용한다(중복 구현 금지)."""
     source_object_ids = projection.get("source_object_ids") or []
+    # source가 store에서 사라졌으면(dangling) 근거가 없어진 것이라 stale로 본다.
+    # _compute_source_content_hash가 없는 id를 조용히 건너뛰므로, 여기서 막지 않으면
+    # 없는 source만 가리키는 projection이 sha256("")로 fresh 통과해 색인에 남는다.
+    if any(not store.has(oid) for oid in source_object_ids):
+        return False
     expected_hash = _compute_source_content_hash(store, source_object_ids)
     return expected_hash == projection.get("source_content_hash")
 
@@ -156,6 +161,11 @@ def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[st
         if projection.get("manual_edit_detected"):
             problems.append(f"{projection['id']}: manual_edit_detected is true")
         source_object_ids = projection.get("source_object_ids") or []
+        # dangling source_object_ids (DomainMapping 8a·DecisionRecord 8b·Insight 9와 동형):
+        # 가리키는 근거가 사라지면 브리핑이 조용히 깨진다.
+        for ref_id in source_object_ids:
+            if ref_id and not store.has(ref_id):
+                problems.append(f"{projection['id']}: dangling source_object_id {ref_id}")
         if source_object_ids:
             expected_hash = _compute_source_content_hash(store, source_object_ids)
             if expected_hash != projection.get("source_content_hash"):
