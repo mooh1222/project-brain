@@ -68,14 +68,23 @@ def review_record(rid):
 
 
 def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
-               status="candidate"):
+               status="candidate", source_objects=None):
+    sids = source_object_ids or ["g.d1"]
+    # source_objects(구성 객체 dict들)를 주면 fresh source_content_hash를 lint와
+    # 같은 공식으로 계산한다 — A6 신선도 가드가 색인에서 빼지 않도록. 안 주면 옛
+    # placeholder("x")라 stale 취급된다(낡음 검사 자체를 보는 테스트용).
+    if source_objects is not None:
+        from project_brain.hash_utils import sha256_text as _sha, stable_json as _sj
+        content_hash = _sha("\n".join(_sj(o) for o in source_objects))
+    else:
+        content_hash = "x"
     return _b({
         "id": pid, "kind": "ContextProjection", "status": status, "truth_role": "index",
         "title": title, "context_id": context_id,
         "format": "prompt_payload", "reuse_payload": reuse_payload,
         "output_locator": f"indexes/context_projections/{pid}.txt",
-        "source_object_ids": source_object_ids or ["g.d1"],
-        "source_content_hash": "x", "projection_hash": "y",
+        "source_object_ids": sids,
+        "source_content_hash": content_hash, "projection_hash": "y",
         "generated_at": T, "generated_by": "test",
         "stale_policy": "fail_on_manual_edit",
         "evidence_refs": [],
@@ -948,13 +957,26 @@ class ScopedBm25SearchTest(unittest.TestCase):
 
     def test_scoped_bm25_excludes_projection(self):
         # scope 객체 레인(search_bm25_scoped)이 projection 행을 안 집는다 — 직접 검증.
-        # projection을 scope 안(context.a)에 두고 reuse_payload에 질의 토큰을 담아도
-        # 결과에 ContextProjection이 안 섞인다(projection은 별도 재사용 레인 소관).
-        self._rebuild(self.base_objs + [
-            projection("projection.a.reuse", context_id="context.a",
-                       title="알림 클리어 재사용 브리핑",
-                       reuse_payload="알림 클리어 팝업 재사용 착수 데이터"),
-        ])
+        # projection을 scope 안(context.a)에 fresh source_content_hash로 두어 색인에
+        # ★실제로 들어간 상태★를 만들고(A6 신선도 가드 통과), reuse_payload에 질의
+        # 토큰을 담는다. 제외 SQL(kind NOT IN)이 없으면 results에 ContextProjection이
+        # 섞인다 — 그 제외를 직접 검증한다(projection은 별도 재사용 레인 소관).
+        src = self.base_objs[0]  # g.d1 (context.a, "알림 팝업")
+        proj = projection("projection.a.reuse", context_id="context.a",
+                          title="알림 클리어 재사용 브리핑",
+                          reuse_payload="알림 클리어 팝업 재사용 착수 데이터",
+                          source_object_ids=["g.d1"], source_objects=[src])
+        self._rebuild(self.base_objs + [proj])
+        # 전제: fresh hash라 projection이 색인 documents에 실제로 들어갔다.
+        conn = sqlite3.connect(str(self.db))
+        try:
+            indexed = conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE object_id = ? AND kind = ?",
+                ("projection.a.reuse", "ContextProjection"),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(indexed, 1)
         out = search_bm25_scoped(self.db, "알림 클리어", scope="context.a")
         self.assertTrue(out["results"])
         self.assertTrue(

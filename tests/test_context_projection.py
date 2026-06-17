@@ -8,6 +8,7 @@ candidate prompt_payload projection을 생성하고 스키마 검증(validate_ob
 import unittest
 
 from project_brain.context_projection import build_reuse_projection
+from project_brain.lint import projection_is_fresh
 from project_brain.objbase import base
 from project_brain.store import BrainStore
 
@@ -107,6 +108,40 @@ class TestBuildReuseProjection(unittest.TestCase):
     def test_stale_policy_is_fail_on_manual_edit(self):
         proj = self._make_proj()
         self.assertEqual(proj["stale_policy"], "fail_on_manual_edit")
+
+
+class TestBuildReuseFreshnessRoundtrip(unittest.TestCase):
+    """build_reuse_projection(생성식)이 박은 source_content_hash ↔ projection_is_fresh
+    (검사식, lint._compute_source_content_hash 경유)가 동치임을 고정한다. 두 해시 공식
+    중 한쪽만 직렬화가 바뀌어도 이 라운드트립이 깨져 잡힌다(현재 별도 미커버)."""
+
+    def _store_and_proj(self):
+        store = _store_with([
+            _context("context.sally-canoe", context_key="sally-canoe"),
+            _mapping("mapping.sally-canoe.race-end-result-achieve", "context.sally-canoe"),
+        ])
+        proj = build_reuse_projection(
+            store,
+            context_id="context.sally-canoe",
+            requirement_key="result-popup-rank",
+            source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+            reuse_payload="데이터 출처: RaceInfo recordMap...",
+            title="샐리 결과 팝업 순위 표시",
+            generated_at=T,
+            generated_by="bb2-brain-query",
+        )
+        return store, proj
+
+    def test_built_projection_is_fresh_against_same_store(self):
+        # 생성 직후, 구성 객체가 그대로인 store에서는 fresh=True.
+        store, proj = self._store_and_proj()
+        self.assertTrue(projection_is_fresh(store, proj))
+
+    def test_mutating_source_object_makes_projection_stale(self):
+        # 구성 객체(source mapping)를 변형하면 재계산 해시가 어긋나 fresh=False.
+        store, proj = self._store_and_proj()
+        store.get("mapping.sally-canoe.race-end-result-achieve")["meaning"] = "변형된 의미"
+        self.assertFalse(projection_is_fresh(store, proj))
 
 
 if __name__ == "__main__":
