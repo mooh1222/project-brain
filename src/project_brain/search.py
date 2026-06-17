@@ -688,8 +688,11 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
       raw_excerpts       — raw 청크 적중 top-5 ("원문 발췌(미검수)" — 바닥만, 앵커 미적용)
       advisories         — reviewed Insight 적중 top-5 (가로지르는 위험/교훈 — 곁들임 채널.
                             게이트는 reviewed 재사용 — 앵커 적용, 질의 토큰을 가진 객체가 있어야 뜸)
+      projection_reuse   — ContextProjection 적중 top-5 (이전 착수 브리핑 재사용 채널 —
+                            status 무관 한 통로, 게이트는 raw(바닥만, 앵커 미적용)라 어휘
+                            드리프트 요구를 막지 않는다. results/candidates에는 안 섞인다)
       needs_clarification — reviewed 게이트 통과 0건 bool ("no evidence → 없다" 보존,
-                            raw 발췌·advisories는 단정 답이 아니라 이 판정에 안 들어간다)
+                            raw 발췌·advisories·projection_reuse는 단정 답이 아니라 이 판정에 안 들어간다)
 
     db_path 미지정 시 config(.project-brain.json)의 db를 쓰며, 색인이 없으면 명확한
     에러를 던진다 — 하네스(evaluate)가 per-scenario 실패로 기록한다. brain_root는
@@ -709,10 +712,12 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     results = [h for h in hits
                if h.get("status") == "reviewed"
                and h.get("kind") != INSIGHT_KIND
+               and h.get("kind") != PROJECTION_KIND
                and _gate_pass(h["score"], signals, channel="reviewed")][:EVAL_CHANNEL_TOP_K]
     candidates = [h for h in hits
                   if h.get("status") == "candidate"
                   and h.get("kind") != INSIGHT_KIND
+                  and h.get("kind") != PROJECTION_KIND
                   and _gate_pass(h["score"], signals, channel="candidate")][:EVAL_CHANNEL_TOP_K]
     raw_excerpts = [h for h in hits
                     if h.get("status") == RAW_STATUS
@@ -727,10 +732,21 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
                   if h.get("kind") == INSIGHT_KIND
                   and h.get("status") == "reviewed"
                   and _gate_pass(h["score"], signals, channel="reviewed")][:EVAL_CHANNEL_TOP_K]
+    # projection_reuse(spec 2026-06-17 Task A5): ContextProjection을 별도 통로로 —
+    # candidate·reviewed status 무관 한 채널로(results/candidates에는 위에서 제외).
+    # 게이트는 raw 채널(바닥만, 앵커 미적용)로 통일한다. projection에 앵커를 걸면
+    # 객체 코퍼스에 없는 어휘 드리프트 요구("경주"≠"레이스")가 막혀 재사용 레인의
+    # 존재 이유(어휘 달라도 의미로 재사용 회수)가 깎인다. 라벨이 "미검증/검증됨"이라
+    # 부정확 노출의 해는 낮다(raw 면제 논리와 동형). needs_clarification(results 기반)
+    # 에는 안 들어간다(단정 답이 아니라 재사용 후보).
+    projection_reuse = [h for h in hits
+                        if h.get("kind") == PROJECTION_KIND
+                        and _gate_pass(h["score"], signals, channel="raw")][:EVAL_CHANNEL_TOP_K]
     return {
         "results": results,
         "candidates": candidates,
         "raw_excerpts": raw_excerpts,
         "advisories": advisories,
+        "projection_reuse": projection_reuse,
         "needs_clarification": not results,
     }

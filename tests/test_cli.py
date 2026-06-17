@@ -97,6 +97,43 @@ class TestCli(unittest.TestCase):
         self.assertTrue(store.has("ev.ref"))
         self.assertEqual(store.get("g.x")["status"], "candidate")
 
+    def test_cli_projection_label_split_by_status(self):
+        # spec 2026-06-17 Task A5: projection_reuse 채널의 신뢰 라벨이 status로 갈린다 —
+        # reviewed=재사용 브리핑(검증됨), candidate=재사용 후보(미검증). 채널은 공통.
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from tests.test_search import build_store_dir, domain_mapping, projection
+        build_store_dir(self.root, [
+            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            projection("projection.sally-canoe.result-popup-rank.reviewed",
+                       context_id="context.sally-canoe",
+                       title="샐리 결과 팝업 순위 표시 착수 브리핑(검증)",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       status="reviewed"),
+            projection("projection.sally-canoe.result-popup-rank.candidate",
+                       context_id="context.sally-canoe",
+                       title="샐리 결과 팝업 순위 표시 착수 브리핑(후보)",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       status="candidate"),
+        ])
+        db = self.input_dir / "index.db"
+        rebuild(self.root, db, embedder=StubEmbedder())
+        argv = ["search", "샐리 결과 팝업 순위 표시", "--brain-root", str(self.root),
+                "--db", str(db), "--stub-embedder"]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        answer = json.loads(out.getvalue())
+        self.assertIn("projection_reuse", answer)
+        labels = {h.get("status"): h["trust_label"] for h in answer["projection_reuse"]}
+        self.assertEqual(labels.get("reviewed"), "재사용 브리핑(검증됨)")
+        if "candidate" in labels:
+            self.assertEqual(labels["candidate"], "재사용 후보(미검증)")
+
     def test_cli_index_rebuild_subcommand(self):
         # argparse 와이어링 + JSON 출력 계약 (하부 rebuild()는 test_search_index가
         # 충실히 검증 — 여기는 CLI 레벨만, 리뷰 minor 반영).

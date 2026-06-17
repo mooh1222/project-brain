@@ -435,7 +435,7 @@ class EvalRecallChannelTest(unittest.TestCase):
                            brain_root=self.brain)
         self.assertEqual(set(resp.keys()),
                          {"results", "candidates", "raw_excerpts", "needs_clarification",
-                          "advisories"})
+                          "advisories", "projection_reuse"})
         result_ids = {h["object_id"] for h in resp["results"]}
         cand_ids = {h["object_id"] for h in resp["candidates"]}
         self.assertIn("g.race", result_ids)
@@ -1196,6 +1196,65 @@ class ProjectionLaneTest(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(df, 0)
+
+
+class EvalRecallProjectionReuseTest(unittest.TestCase):
+    """eval_recall projection_reuse 채널(spec 2026-06-17 Task A5) — ContextProjection은
+    status 무관 results/candidates에 안 섞이고 projection_reuse로만 나온다. 게이트는
+    raw 채널(바닥만, 앵커 미적용)이라 어휘 드리프트 요구를 막지 않는다. 전부 stub
+    embedder."""
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _build(self, objs):
+        build_store_dir(self.brain, objs)
+        rebuild(self.brain, self.db, embedder=self.embedder)
+
+    def test_eval_recall_projection_in_own_channel_not_results(self):
+        # candidate projection도 results/candidates가 아니라 projection_reuse로만 나온다.
+        self._build([
+            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            projection("projection.sally-canoe.result-popup-rank.reuse",
+                       context_id="context.sally-canoe",
+                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"]),
+        ])
+        resp = eval_recall("샐리 결과 팝업 순위 표시", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertIn("projection_reuse", resp)
+        self.assertTrue(all(h["kind"] != "ContextProjection" for h in resp["results"]))
+        self.assertTrue(all(h["kind"] != "ContextProjection" for h in resp["candidates"]))
+        self.assertTrue(any(h["kind"] == "ContextProjection"
+                            for h in resp["projection_reuse"]))
+
+    def test_eval_recall_reviewed_projection_stays_in_reuse_channel(self):
+        # 핵심 가드(codex 블로커): promote된(reviewed) projection도 results가 아니라
+        # projection_reuse에 남는다 — 채널 이동 없음.
+        self._build([
+            domain_mapping("mapping.sally-canoe.race-end-result-achieve",
+                           meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe"),
+            projection("projection.sally-canoe.result-popup-rank.reuse",
+                       context_id="context.sally-canoe",
+                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
+                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       status="reviewed"),
+        ])
+        resp = eval_recall("샐리 결과 팝업 순위 표시", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertTrue(all(h["kind"] != "ContextProjection" for h in resp["results"]))
+        self.assertTrue(any(h["kind"] == "ContextProjection"
+                            and h.get("status") == "reviewed"
+                            for h in resp["projection_reuse"]))
 
 
 class EvalRecallAdvisoriesTest(unittest.TestCase):

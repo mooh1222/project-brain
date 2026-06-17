@@ -347,10 +347,19 @@ def _run_search(argv) -> int:
     # 보고도 "검수 안 된 원문 발췌"임을 놓치지 않게(candidate 채널 라벨 규약과 동형).
     raw_excerpts = [{**h, "trust_label": "원문 발췌(미검수)"}
                     for h in resp.get("raw_excerpts", [])]
+    # projection_reuse 채널(spec 2026-06-17 Task A5): 이전 착수 브리핑 재사용 후보를
+    # 신뢰 라벨과 함께 낸다 — 채널은 candidate·reviewed 공통이고 라벨만 status로 가른다
+    # (reviewed=검증된 브리핑, candidate=미검증 후보). raw_excerpts 라벨 규약과 동형.
+    projection_reuse = [
+        {**h, "trust_label": ("재사용 브리핑(검증됨)" if h.get("status") == "reviewed"
+                              else "재사용 후보(미검증)")}
+        for h in resp.get("projection_reuse", [])
+    ]
     print(json.dumps(
         {"ok": True, "query": args.query,
          "results": resp["results"], "candidates": resp["candidates"],
          "raw_excerpts": raw_excerpts,
+         "projection_reuse": projection_reuse,
          "needs_clarification": resp["needs_clarification"]},
         ensure_ascii=False, indent=2))
     return 0
