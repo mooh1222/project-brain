@@ -3,8 +3,10 @@
 spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md §2.1·§4
 
 색인 대상 객체에서 "검색이 매칭할 텍스트"만 뽑아 하나의 문자열로 만든다(표면).
-색인 제외 kind(EvidenceManifest/EvidenceRef/ReviewRecord/ContextProjection 및
+색인 제외 kind(EvidenceManifest/EvidenceRef/ReviewRecord 및
 §2.1 표에 없는 kind)는 None을 돌려 색인에서 빠진다.
+ContextProjection은 prompt_payload면 별도 레인(projection_reuse)으로 색인되고,
+context_md 덤프는 표면이 None이다(2026-06-17).
 
 content_hash는 객체 JSON 전체가 아니라 추출 표면 + status의 SHA-256이다(§4).
 이렇게 하면 updated_at만 바뀌는 멱등 재저장은 해시가 안 바뀌어 재색인을 안 부르고,
