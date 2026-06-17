@@ -583,6 +583,18 @@ def _run_projection(argv) -> int:
              "error": f"{projection['id']} already exists — pass --replace to overwrite"},
             ensure_ascii=False, indent=2))
         return 1
+    # reviewed reuse projection은 --replace로도 재생성 막힘(정책 A: 재검증 강제, 스펙 §3.4).
+    # build-reuse는 항상 candidate를 만들고, ingest 후퇴 가드가 reviewed→candidate를 거부한다.
+    # 그 가드의 불친절한 IngestError 전에 길 안내를 준다 — 낡은 reviewed 브리핑은 같은 id
+    # 재생성이 아니라 query-skill §8 재조립으로 풀고, 갱신 메커니즘은 후속 과제(스펙 §7).
+    if store.has(projection["id"]) and store.get(projection["id"]).get("status") == "reviewed":
+        print(json.dumps(
+            {"ok": False,
+             "error": (f"{projection['id']} is reviewed; regeneration is intentionally blocked "
+                       "(re-review policy). If stale, reassemble via query-skill §8 instead of "
+                       "regenerating the same id. reviewed-projection update is a follow-up (spec §7).")},
+            ensure_ascii=False, indent=2))
+        return 1
     # ingest() 경유 저장: schema + merged lint + reviewed→candidate 후퇴 가드를 탄다.
     try:
         ingest(brain_root, [projection])

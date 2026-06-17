@@ -918,12 +918,30 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
         self.assertIn("--replace", payload["error"])
 
     def test_existing_id_with_replace_succeeds(self):
-        # --replace를 주면 같은 id 교체 허용.
+        # --replace를 주면 같은 id 교체 허용(기존이 candidate일 때).
         rc, _ = self._run("--write")
         self.assertEqual(rc, 0)
         rc2, payload = self._run("--write", "--replace")
         self.assertEqual(rc2, 0, payload)
         self.assertTrue(payload["ok"])
+
+    def test_reviewed_projection_regeneration_blocked_with_guidance(self):
+        # reviewed reuse projection은 --replace로도 재생성 막힘(정책 A: 재검증 강제, 스펙 §3.4).
+        # build-reuse는 항상 candidate를 만들고 reviewed→candidate는 후퇴라 거부된다.
+        # ingest 후퇴 가드의 불친절한 메시지 전에 길 안내를 주고 기존 reviewed를 보존한다.
+        rc, _ = self._run("--write")
+        self.assertEqual(rc, 0)
+        pid = "projection.neutral.result-popup-rank.reuse"
+        store = BrainStore.load(self.root)
+        reviewed = dict(store.get(pid))
+        reviewed["status"] = "reviewed"  # 사용 시점 promote 모사
+        BrainStore.save_object(self.root, reviewed)
+        rc2, payload = self._run("--write", "--replace")
+        self.assertEqual(rc2, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("intentionally blocked", payload["error"])
+        # 기존 reviewed가 candidate로 덮이지 않는다(보존).
+        self.assertEqual(BrainStore.load(self.root).get(pid)["status"], "reviewed")
 
 
 if __name__ == "__main__":
