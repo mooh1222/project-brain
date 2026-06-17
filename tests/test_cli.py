@@ -797,5 +797,134 @@ class RunBuildTest(unittest.TestCase):
             self.assertFalse(out_path.exists())
 
 
+class TestCliProjectionBuildReuse(unittest.TestCase):
+    """`projection build-reuse` 서브커맨드 (외부 리뷰 Important 3, codex 합의 A안).
+
+    수작업 JSON 대신 도구가 hash·source를 계산하고 ingest 경유로 저장하게 만든다.
+    store에 context(context_key=neutral)·candidate mapping을 둔 뒤, source가 다
+    존재하면 candidate prompt_payload projection을 만든다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._tmp_in = tempfile.TemporaryDirectory()
+        self.input_dir = Path(self._tmp_in.name)
+        # store에 context + 구성 객체(candidate mapping, evidence_refs 비어 dangling 없음)
+        from tests.test_search import domain_mapping
+        BrainStore.save_object(self.root, context("context.neutral"))
+        BrainStore.save_object(
+            self.root,
+            domain_mapping("mapping.neutral.race-end", meaning="경주 종료",
+                           status="candidate", context_id="context.neutral"))
+        self.payload_file = self.input_dir / "payload.txt"
+        self.payload_file.write_text("데이터 출처: RaceInfo recordMap. 확장 지점: PopupResult.",
+                                     encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        self._tmp_in.cleanup()
+
+    def _argv(self, *extra):
+        return [
+            "projection", "build-reuse",
+            "--brain-root", str(self.root),
+            "--context-id", "context.neutral",
+            "--requirement-key", "result-popup-rank",
+            "--source-object-ids", "mapping.neutral.race-end",
+            "--title", "결과 팝업 순위 표시 착수 브리핑",
+            "--payload-file", str(self.payload_file),
+            "--generated-by", "bb2-brain-query",
+            *extra,
+        ]
+
+    def _run(self, *extra):
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + self._argv(*extra)), redirect_stdout(out):
+            rc = cli.main()
+        return rc, json.loads(out.getvalue())
+
+    def test_write_ingests_projection_readable_from_store(self):
+        # (a) source 다 존재 시 --write로 ingest 경유 저장 → store에서 읽힘.
+        rc, payload = self._run("--write")
+        self.assertEqual(rc, 0, payload)
+        self.assertTrue(payload["ok"])
+        pid = "projection.neutral.result-popup-rank.reuse"
+        self.assertEqual(payload["id"], pid)
+        store = BrainStore.load(self.root)
+        self.assertTrue(store.has(pid))
+        proj = store.get(pid)
+        self.assertEqual(proj["kind"], "ContextProjection")
+        self.assertEqual(proj["format"], "prompt_payload")
+        self.assertEqual(proj["status"], "candidate")
+        self.assertEqual(proj["generated_by"], "bb2-brain-query")
+        self.assertTrue(proj["projection_hash"])
+        self.assertTrue(proj["source_content_hash"])
+
+    def test_dangling_source_errors_and_no_write(self):
+        # (b) source-object-ids에 store에 없는 id가 있으면 에러 종료, 저장 안 됨.
+        out = io.StringIO()
+        argv = [
+            "projection", "build-reuse",
+            "--brain-root", str(self.root),
+            "--context-id", "context.neutral",
+            "--requirement-key", "result-popup-rank",
+            "--source-object-ids", "mapping.neutral.race-end", "mapping.does-not-exist",
+            "--title", "결과 팝업 순위 표시 착수 브리핑",
+            "--payload-file", str(self.payload_file),
+            "--generated-by", "bb2-brain-query",
+            "--write",
+        ]
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("mapping.does-not-exist", payload["error"])
+        store = BrainStore.load(self.root)
+        self.assertFalse(store.has("projection.neutral.result-popup-rank.reuse"))
+
+    def test_hashes_computed_by_tool(self):
+        # (c) 사용자가 hash를 안 줘도 source_content_hash·projection_hash가 채워진다.
+        from project_brain.hash_utils import sha256_text, stable_json
+        rc, payload = self._run("--write")
+        self.assertEqual(rc, 0, payload)
+        proj = BrainStore.load(self.root).get("projection.neutral.result-popup-rank.reuse")
+        # projection_hash = payload 텍스트 sha256
+        self.assertEqual(
+            proj["projection_hash"],
+            sha256_text("데이터 출처: RaceInfo recordMap. 확장 지점: PopupResult."))
+        # source_content_hash = 구성 객체 직렬화 sha256 (lint 공식과 동일)
+        src = BrainStore.load(self.root).get("mapping.neutral.race-end")
+        self.assertEqual(proj["source_content_hash"], sha256_text(stable_json(src)))
+
+    def test_preview_only_without_write_does_not_save(self):
+        # (d) --write 없으면 생성될 projection JSON만 미리보기, 저장 안 함.
+        rc, payload = self._run()
+        self.assertEqual(rc, 0, payload)
+        # 미리보기는 생성될 projection을 담는다(저장 전).
+        self.assertEqual(payload["projection"]["id"],
+                         "projection.neutral.result-popup-rank.reuse")
+        self.assertEqual(payload["projection"]["status"], "candidate")
+        store = BrainStore.load(self.root)
+        self.assertFalse(store.has("projection.neutral.result-popup-rank.reuse"))
+
+    def test_existing_id_without_replace_fails(self):
+        # (e) 같은 id가 store에 이미 있으면 --replace 없이는 실패.
+        rc, _ = self._run("--write")
+        self.assertEqual(rc, 0)
+        rc2, payload = self._run("--write")  # 같은 id 재시도
+        self.assertEqual(rc2, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("--replace", payload["error"])
+
+    def test_existing_id_with_replace_succeeds(self):
+        # --replace를 주면 같은 id 교체 허용.
+        rc, _ = self._run("--write")
+        self.assertEqual(rc, 0)
+        rc2, payload = self._run("--write", "--replace")
+        self.assertEqual(rc2, 0, payload)
+        self.assertTrue(payload["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

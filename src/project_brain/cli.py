@@ -514,6 +514,85 @@ def _run_build(argv) -> int:
     return 0
 
 
+def _run_projection(argv) -> int:
+    """ContextProjection 빌드·저장 (외부 리뷰 Important 3, codex 합의 A안).
+
+    `projection build-reuse` — 요구 부분집합 재사용 브리핑(prompt_payload candidate
+    projection)을 도구가 만든다. hash·source_content_hash·projection_hash는 인자로
+    받지 않고 build_reuse_projection이 계산한다(수작업 JSON이 hash/source를 틀려
+    dangling을 만드는 것을 차단). --write면 ingest() 경유로 저장한다(schema+merged
+    lint+후퇴 가드를 타려고 save_object 직접 호출 금지). --write 없으면 미리보기만."""
+    parser = argparse.ArgumentParser(prog="cli projection")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    p_reuse = sub.add_parser("build-reuse")
+    p_reuse.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    p_reuse.add_argument("--context-id", required=True)
+    p_reuse.add_argument("--requirement-key", required=True)
+    p_reuse.add_argument("--source-object-ids", required=True, nargs="+",
+                         help="브리핑 근거가 된 객체 id 1개 이상(전부 store에 있어야 함)")
+    p_reuse.add_argument("--title", required=True)
+    p_reuse.add_argument("--payload-file", required=True,
+                         help="reuse_payload 본문(착수 브리핑 텍스트)을 읽을 파일 경로")
+    p_reuse.add_argument("--generated-by", required=True)
+    p_reuse.add_argument("--write", action="store_true",
+                         help="없으면 생성될 projection JSON 미리보기만(저장 안 함)")
+    p_reuse.add_argument("--replace", action="store_true",
+                         help="같은 projection id가 store에 이미 있을 때만 교체 허용")
+    args = parser.parse_args(argv)
+
+    from project_brain.context_projection import build_reuse_projection
+
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
+
+    # 생성 시점 dangling 차단(codex 합의): source가 하나라도 store에 없으면 멈춘다.
+    missing = [oid for oid in args.source_object_ids if not store.has(oid)]
+    if missing:
+        print(json.dumps({"ok": False, "error": f"unknown source-object-ids: {missing}"},
+                         ensure_ascii=False, indent=2))
+        return 1
+    if not store.has(args.context_id):
+        print(json.dumps({"ok": False, "error": f"unknown context-id: {args.context_id}"},
+                         ensure_ascii=False, indent=2))
+        return 1
+
+    payload = Path(args.payload_file).read_text(encoding="utf-8")
+    # mark-checked와 같은 방식의 현재 시각(코퍼스 datetime 표준 ...Z, microsecond 없음).
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    projection = build_reuse_projection(
+        store,
+        context_id=args.context_id,
+        requirement_key=args.requirement_key,
+        source_object_ids=args.source_object_ids,
+        reuse_payload=payload,
+        title=args.title,
+        generated_at=now,
+        generated_by=args.generated_by,
+    )
+
+    if not args.write:
+        print(json.dumps({"ok": True, "preview": True, "projection": projection},
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    # 같은 id가 이미 있으면 기본 거부 — --replace 줄 때만 교체(codex 합의).
+    if store.has(projection["id"]) and not args.replace:
+        print(json.dumps(
+            {"ok": False,
+             "error": f"{projection['id']} already exists — pass --replace to overwrite"},
+            ensure_ascii=False, indent=2))
+        return 1
+    # ingest() 경유 저장: schema + merged lint + reviewed→candidate 후퇴 가드를 탄다.
+    try:
+        ingest(brain_root, [projection])
+    except IngestError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 1
+    print(json.dumps({"ok": True, "id": projection["id"]}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_stale_check(argv) -> int:
     """코드 변경 → 의미 갱신 대상 발견 (spec §3). 읽기 전용 — brain 데이터 불변."""
     parser = argparse.ArgumentParser(prog="cli stale-check")
@@ -627,6 +706,8 @@ def main() -> int:
             return _run_doctor(argv[1:])
         if argv and argv[0] == "bootstrap":
             return _run_bootstrap(argv[1:])
+        if argv and argv[0] == "projection":
+            return _run_projection(argv[1:])
         if argv and argv[0] == "stale-check":
             return _run_stale_check(argv[1:])
         if argv and argv[0] == "mark-checked":
