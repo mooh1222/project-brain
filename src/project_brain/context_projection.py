@@ -137,3 +137,50 @@ def build_context_projection(
         "stale_policy": "fail_on_manual_edit",
     }
     return projection, content
+
+
+def build_reuse_projection(
+    store: BrainStore,
+    *,
+    context_id: str,
+    requirement_key: str,
+    source_object_ids: list,
+    reuse_payload: str,
+    title: str,
+    generated_at: str,
+    generated_by: str,
+) -> dict:
+    """요구 부분집합 prompt_payload candidate projection을 생성한다.
+
+    source_object_ids에 해당하는 객체들의 내용으로 source_content_hash를 계산하고,
+    reuse_payload 텍스트로 projection_hash를 계산한다. 두 해시 모두 필수 필드.
+    """
+    context = store.get(context_id)
+    source_content_hash = _sha256_text(
+        "\n".join(_stable_json(store.get(oid)) for oid in source_object_ids)
+    )
+    projection_hash = _sha256_text(reuse_payload)
+    ckey = context.get("context_key", context_id)
+    return {
+        "id": f"projection.{ckey}.{requirement_key}.reuse",
+        "kind": "ContextProjection",
+        "schema_version": SCHEMA_VERSION,
+        "status": "candidate",
+        "poc_priority": "P0",
+        "truth_role": "index",
+        "title": title,
+        "created_at": generated_at,
+        "updated_at": generated_at,
+        "tags": context.get("tags", []),
+        "evidence_refs": [],
+        "context_id": context_id,
+        "format": "prompt_payload",
+        "reuse_payload": reuse_payload,
+        "output_locator": f"indexes/context_projections/{ckey}.{requirement_key}.reuse.txt",
+        "source_object_ids": list(source_object_ids),
+        "source_content_hash": source_content_hash,
+        "projection_hash": projection_hash,
+        "generated_at": generated_at,
+        "generated_by": generated_by,
+        "stale_policy": "fail_on_manual_edit",
+    }
