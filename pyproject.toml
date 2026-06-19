@@ -1,0 +1,25 @@
+[project]
+name = "project-brain"
+version = "0.1.0"
+description = "프로젝트 도메인 지식 brain — 검수된 객체 코퍼스 + 한국어 하이브리드 검색(FTS5+벡터+RRF+그래프 재정렬) + 회상 CLI"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "sqlite-vec",
+    "sentence-transformers",
+    "kiwipiepy",
+]
+
+[project.optional-dependencies]
+# mecab-python3는 시스템 mecab-ko 사전 설치를 전제한다(없으면 kiwipiepy 폴백).
+mecab = ["mecab-python3"]
+
+[project.scripts]
+project-brain = "project_brain.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
