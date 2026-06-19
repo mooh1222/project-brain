@@ -2,7 +2,7 @@
 
 프로젝트 도메인 지식 brain 엔진 — 검수 상태·근거가 붙은 객체 코퍼스 + 한국어
 하이브리드 검색(FTS5 BM25 + bge-m3 벡터 + RRF 융합 + 그래프 상호지지 재정렬) +
-회상 CLI.
+조회 CLI.
 
 한 프로젝트의 내부 도구로 개발되다 2026-06에 범용 엔진으로 분리됐다.
 
@@ -36,12 +36,12 @@ uv tool install -e ./project-brain
 
 ```bash
 cd <프로젝트 루트>
-project-brain install --project <이름>   # config + 회상/적재 스킬 주입(manifest 추적)
+project-brain install --project <이름>   # config + 스킬 3종(조회/적재/세션) 주입(manifest 추적)
 project-brain doctor                      # 환경·프로젝트 상태 진단
 project-brain bootstrap                   # install → 색인 재구축 → doctor 한번에
 ```
 
-`install`은 `.claude/skills/<이름>-brain-recall|ingest/SKILL.md`를 범용 템플릿에서
+`install`은 `.claude/skills/<이름>-brain-{query,ingest,session-ingest}/SKILL.md`를 범용 템플릿에서
 렌더해 심는다. 설치 직후 어시스턴트(Claude 등)가 코퍼스를 보고 description 트리거
 어휘를 프로젝트 어휘로 맞춤 제안하는 단계까지가 온보딩이다 — 맞춤된 스킬 파일은
 사용자 소유가 되고, 이후 `install` 재실행은 그 파일을 덮지 않는다(manifest 해시

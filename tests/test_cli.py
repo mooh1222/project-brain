@@ -692,7 +692,7 @@ class TestCliInstallDoctor(unittest.TestCase):
             target = Path(td)
             self.assertTrue((target / ".project-brain.json").exists())
             self.assertTrue(
-                (target / ".claude" / "skills" / "demo-brain-recall" / "SKILL.md").exists()
+                (target / ".claude" / "skills" / "demo-brain-query" / "SKILL.md").exists()
             )
 
     def test_doctor_subcommand_runs(self):

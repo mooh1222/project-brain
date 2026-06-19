@@ -2,7 +2,7 @@
 
 산출물:
   1. .project-brain.json — 없으면 생성(project·brain_root 기록), 있으면 보존.
-  2. .claude/skills/<project>-brain-recall/SKILL.md, <project>-brain-ingest/SKILL.md
+  2. .claude/skills/<project>-brain-{query,ingest,session-ingest}/SKILL.md
      — templates/를 {{PROJECT}}/{{BRAIN_ROOT}} 치환해 주입.
   3. .project-brain-manifest.json — 심은 파일 경로+sha256.
 
@@ -23,8 +23,9 @@ MANIFEST_FILENAME = ".project-brain-manifest.json"
 
 # 템플릿 이름 → (파일명, 스킬 디렉토리 접미)
 _TEMPLATES = {
-    "recall": ("recall.md", "brain-recall"),
+    "query": ("query.md", "brain-query"),
     "ingest": ("ingest.md", "brain-ingest"),
+    "session-ingest": ("session-ingest.md", "brain-session-ingest"),
 }
 
 

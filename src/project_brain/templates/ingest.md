@@ -78,6 +78,43 @@ description: |
 raw 원문은 `{{BRAIN_ROOT}}/raw/sources/<context-slug>/`에 텍스트만 보관한다.
 **파괴적 일괄 작업(promote-auto 등) 전 커밋 먼저** — 되돌릴 기준을 만든 뒤 돌린다.
 
+## CLI 호출 상세 — ingest / promote
+
+엔진(`project-brain`)은 도메인을 모른다. 받은 객체 묶음을 검증·저장만 한다. 레포 안 어느
+디렉토리에서든 실행 가능하다 — 루트 `.project-brain.json` config가 brain root를 해석한다
+(`--brain-root`로 덮어쓸 수 있음).
+
+### ingest
+
+```bash
+project-brain ingest --objects-file <묶음.json>
+```
+
+- `--objects-file`: 객체 dict들의 **JSON 배열** 한 파일. 필수 필드·enum은 엔진
+  `src/project_brain/schema.py`가 단일 진실 — ingest가 `validate_object`로 위반을 거부한다.
+- 성공 시 `{"ok": true, "ingested": N}`, 실패 시 `{"ok": false, "error": "..."}` + 종료코드 1.
+- 게이트 3개를 원자적으로 묶는다 — per-object 스키마 검증 → 병합 store 연결무결성 lint(없는 id를
+  가리키는 dangling 링크 거부) → 저장. 어느 게이트든 실패하면 아무것도 안 쓴다.
+- 멱등: 같은 id를 다시 ingest하면 덮어쓴다. 단 reviewed→candidate 후퇴는 거부한다.
+
+### promote — 사용 시점 단건 확정 / 묶음 승격
+
+candidate를 reviewed로 올린다. 승격 객체 + 검토 기록을 둘 다 저장하고, 쓰기 전 일괄 schema 검증·사후
+lint까지 한 번에 한다.
+
+```bash
+project-brain promote \
+  --ids <승격할 id...> --reviewer <reviewer> --reviewed-at <ISO8601> \
+  [--scope mapping_bundle --bundle-key bundle.<도메인>.domain-mapping]
+```
+
+- `--scope`는 기본 `single_object`(단건 독립 승격). 여러 매핑을 한 검토 묶음으로면
+  `mapping_bundle` + `--bundle-key`(없으면 거부).
+- 성공 시 `{"ok": true, "promoted": [...], "reviews": [...]}`, 근거 부재·dangling 등은
+  `{"ok": false, ...}` + 종료코드 1.
+- `--ids`는 여러 인자를 받는다(`--ids a b c`). 셸 변수로 넘길 때 단어분리에 주의(zsh는 비따옴표
+  변수를 분리하지 않는다 — 리터럴 나열이나 배열로).
+
 ## 적재 후 확인 (4단계)
 
 ```bash
@@ -86,6 +123,11 @@ project-brain eval --check-ids     # 골든셋 기대 id 실존 가드
 project-brain eval                 # 골든셋 회귀 (실모델)
 project-brain search "<새 적재 내용 질문>"   # 새 store가 스스로 답하는지 실연
 ```
+
+eval/search 출력은 `2>/dev/null | jq`로 읽는다(eval 통과수=`.summary`, search 적중=`.results`).
+stdout은 깨끗한 JSON이고 노이즈는 stderr로 나가므로 `2>&1` 손파싱을 하지 마라.
+
+적재로 색인 행 수가 변하면 실측(real-corpus) 가드 수치를 **의식적으로 갱신**하고 같은 커밋에 포함한다.
 
 ## Common Mistakes
 
