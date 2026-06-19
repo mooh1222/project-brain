@@ -1,6 +1,6 @@
 """surface.extract_surface / content_hash 결정론 검증.
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md §2.1·§4
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md §2.1·§4
 
 합성 객체(objbase.base 픽스처 패턴 — test_ingest/test_router 참고)로 kind별 추출·
 제외·해시 불변성(updated_at 변경 무영향 / status 변경 시 변경)을 결정론 검증한다.
@@ -71,7 +71,7 @@ def decision_record(did="d.x", *, summary="결정 요약", decision="결정 상�
 def code_locator(cid="code.x", *, path="path/to/File.cpp", symbol="Foo::bar"):
     return _b({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
-        "title": "코드", "repo": "bb2_client", "path": path, "symbol": symbol,
+        "title": "코드", "repo": "demoapp", "path": path, "symbol": symbol,
         "locator_source": "rg", "verified_at": T,
     })
 
@@ -97,9 +97,9 @@ def temporal_fact(fid="t.x", *, subject="주어", predicate="술어", value="값
 
 class ExtractGlossaryTermTest(unittest.TestCase):
     def test_term_and_definition(self):
-        surface = extract_surface(glossary_term(term="레이스", definition="카누 경주"), None)
+        surface = extract_surface(glossary_term(term="레이스", definition="카약 경주"), None)
         self.assertIn("레이스", surface)
-        self.assertIn("카누 경주", surface)
+        self.assertIn("카약 경주", surface)
 
     def test_synonyms_aliases_avoid_boundary_included_when_present(self):
         obj = glossary_term(
@@ -139,13 +139,13 @@ class ExtractDomainMappingTest(unittest.TestCase):
 
     def test_referenced_term_aliases_not_delegated(self):
         # 매핑 표면 위임은 term+synonyms만 — aliases는 포함 안 함(router.py:379-397)
-        t = glossary_term("g.ref", term="카누", definition="d",
-                          aliases=["샐리의카누별칭"], status="reviewed",
+        t = glossary_term("g.ref", term="카약", definition="d",
+                          aliases=["미나의카약별칭"], status="reviewed",
                           synonyms=[])
         m = domain_mapping(glossary_term_ids=["g.ref"])
         surface = extract_surface(m, store_of(t, m))
-        self.assertIn("카누", surface)
-        self.assertNotIn("샐리의카누별칭", surface)
+        self.assertIn("카약", surface)
+        self.assertNotIn("미나의카약별칭", surface)
 
     def test_missing_referenced_id_skipped(self):
         # store에 없는 term_id는 건너뜀(KeyError 안 남)
@@ -168,8 +168,8 @@ class ExtractOtherKindsTest(unittest.TestCase):
 
     def test_domain_context(self):
         surface = extract_surface(
-            domain_context(display_name="샐리 카누", boundary_summary="경계요약txt"), None)
-        self.assertIn("샐리 카누", surface)
+            domain_context(display_name="미나 카약", boundary_summary="경계요약txt"), None)
+        self.assertIn("미나 카약", surface)
         self.assertIn("경계요약txt", surface)
 
     def test_temporal_fact(self):
@@ -298,14 +298,14 @@ class TestContextProjectionSurface(unittest.TestCase):
     def test_context_projection_prompt_payload_surface(self):
         """prompt_payload projection은 title + reuse_payload가 표면."""
         store = _store_with([{
-            "id": "projection.sally-canoe.result-popup-rank.reuse",
+            "id": "projection.mina-kayak.result-popup-rank.reuse",
             "kind": "ContextProjection",
-            "context_id": "context.sally-canoe",
+            "context_id": "context.mina-kayak",
             "format": "prompt_payload",
             "status": "candidate",
-            "title": "샐리 결과 팝업 순위 표시 착수 브리핑",
-            "reuse_payload": "데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-            "source_object_ids": ["mapping.sally-canoe.race-end-result-achieve"],
+            "title": "미나 결과 팝업 순위 표시 착수 브리핑",
+            "reuse_payload": "데이터 출처: RaceInfo recordMap. 확장 지점: PopupMinaKayakResult.",
+            "source_object_ids": ["mapping.mina-kayak.race-end-result-achieve"],
             "source_content_hash": "x", "projection_hash": "y",
             "generated_at": "2026-06-17T00:00:00Z", "generated_by": "test",
             "stale_policy": "fail_on_manual_edit",
@@ -313,10 +313,10 @@ class TestContextProjectionSurface(unittest.TestCase):
             "created_at": "2026-06-17T00:00:00Z", "updated_at": "2026-06-17T00:00:00Z",
             "tags": [], "evidence_refs": [], "truth_role": "index",
         }])
-        obj = store.get("projection.sally-canoe.result-popup-rank.reuse")
+        obj = store.get("projection.mina-kayak.result-popup-rank.reuse")
         surface = extract_surface(obj, store)
         self.assertIsNotNone(surface)
-        self.assertIn("PopupSallyCanoeResult", surface)
+        self.assertIn("PopupMinaKayakResult", surface)
 
     def test_context_md_projection_has_no_surface(self):
         """context_md 덤프 projection은 검색 표면 없음(None) — 재사용 레인 대상 아님."""

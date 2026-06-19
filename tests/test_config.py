@@ -66,13 +66,13 @@ class LoadConfigTest(unittest.TestCase):
                 "brain_root": "data/brain",
                 "db": "data/index.db",
                 "scenarios": "data/golden.json",
-                "project": "bb2",
+                "project": "demo",
             })
             cfg = load_config(start=root)
             self.assertEqual(cfg["brain_root"], root / "data" / "brain")
             self.assertEqual(cfg["db"], root / "data" / "index.db")
             self.assertEqual(cfg["scenarios"], root / "data" / "golden.json")
-            self.assertEqual(cfg["project"], "bb2")
+            self.assertEqual(cfg["project"], "demo")
 
     def test_db_default_follows_explicit_brain_root(self):
         with TemporaryDirectory() as td:

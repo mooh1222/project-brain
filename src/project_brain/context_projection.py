@@ -2,7 +2,7 @@ from project_brain.hash_utils import sha256_text as _sha256_text
 from project_brain.hash_utils import stable_json as _stable_json
 from project_brain.store import BrainStore
 
-GENERATED_HEADER = "GENERATED FROM BB2 BRAIN - DO NOT EDIT"
+GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
 SCHEMA_VERSION = "0.1"
 
 

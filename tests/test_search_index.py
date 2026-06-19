@@ -1,6 +1,6 @@
 """FTS 색인 빌드 + BM25 검색 검증 (스펙 §4·§6, 슬라이스 2).
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 합성 객체(test_surface.py 헬퍼 패턴)를 tmp brain root에 BrainStore.save_object로
 적재 → rebuild → search_bm25로 한국어/심볼 질의 적중·결정론·멱등·색인 제외를
@@ -53,7 +53,7 @@ def glossary_term(tid, *, term, definition="정의", status="reviewed", synonyms
 def code_locator(cid, *, path, symbol):
     return _b({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
-        "title": "코드", "repo": "bb2_client", "path": path, "symbol": symbol,
+        "title": "코드", "repo": "demoapp", "path": path, "symbol": symbol,
         "locator_source": "rg", "verified_at": T,
     })
 
@@ -108,7 +108,7 @@ class RebuildTest(unittest.TestCase):
 
     def test_rebuild_indexes_only_supported_kinds(self):
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주"),
+            glossary_term("g.race", term="레이스", definition="카약 경주"),
             code_locator("code.foo", path="a/b/C.cpp", symbol="onClickNewRace"),
             review_record("review.x"),  # 색인 제외
         ])
@@ -173,7 +173,7 @@ class RebuildTest(unittest.TestCase):
     def test_rebuild_idempotent(self):
         # 두 번 rebuild → 같은 documents 행 집합(멱등)
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주"),
+            glossary_term("g.race", term="레이스", definition="카약 경주"),
             code_locator("code.foo", path="a/b/C.cpp", symbol="onClickNewRace"),
         ])
         rebuild(self.brain, self.db)
@@ -199,9 +199,9 @@ class SearchBM25Test(unittest.TestCase):
         self.brain = Path(self._td.name) / "brain"
         self.db = Path(self._td.name) / "index.db"
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주 진행"),
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
             glossary_term("g.reward", term="보상", definition="레이스 종료 보상 지급"),
-            code_locator("code.new", path="main/map/SallyCanoe.cpp",
+            code_locator("code.new", path="main/map/MinaKayak.cpp",
                          symbol="onClickNewRace"),
             review_record("review.x"),
         ])
@@ -211,7 +211,7 @@ class SearchBM25Test(unittest.TestCase):
         self._td.cleanup()
 
     def test_korean_query_hits(self):
-        out = search_bm25(self.db, "카누 경주 보상")
+        out = search_bm25(self.db, "카약 경주 보상")
         ids = {r["object_id"] for r in out["results"]}
         self.assertIn("g.race", ids)
         self.assertIn("g.reward", ids)
@@ -247,7 +247,7 @@ class SearchBM25Test(unittest.TestCase):
         self.assertEqual(out["results"], [])
 
     def test_top_n_limit(self):
-        out = search_bm25(self.db, "레이스 보상 카누", top_n=1)
+        out = search_bm25(self.db, "레이스 보상 카약", top_n=1)
         self.assertLessEqual(len(out["results"]), 1)
 
 
@@ -346,7 +346,7 @@ class RegexFallbackTest(unittest.TestCase):
         tokenize_ko._KOREAN_SPLITTER = tokenize_ko._regex_splitter
         self.addCleanup(self._restore_backend)
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주"),
+            glossary_term("g.race", term="레이스", definition="카약 경주"),
             code_locator("code.new", path="a/b/C.cpp", symbol="onClickNewRace"),
         ])
         rebuild(self.brain, self.db)
@@ -422,7 +422,7 @@ class RawIndexTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         self.embedder = StubEmbedder()
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주 진행"),
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
         ])
         src = self.brain / "raw" / "sources" / "foo-ctx"
         src.mkdir(parents=True)
@@ -484,9 +484,9 @@ class VectorIndexTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         self.embedder = StubEmbedder()
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주 진행"),
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
             glossary_term("g.reward", term="보상", definition="레이스 종료 보상 지급"),
-            code_locator("code.new", path="main/map/SallyCanoe.cpp", symbol="onClickNewRace"),
+            code_locator("code.new", path="main/map/MinaKayak.cpp", symbol="onClickNewRace"),
             review_record("review.x"),  # 색인 제외
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
@@ -519,7 +519,7 @@ class VectorIndexTest(unittest.TestCase):
 
     def test_knn_returns_indexed_object(self):
         # stub은 의미를 못 담지만, 같은 텍스트 임베딩은 자기 자신을 거리 0 근처로 찾는다.
-        out = search_vector(self.db, "카누 경주 진행", embedder=self.embedder)
+        out = search_vector(self.db, "카약 경주 진행", embedder=self.embedder)
         ids = [r["object_id"] for r in out["results"]]
         self.assertIn("g.race", ids)
         # g.race가 자기 표면과 동일 임베딩이라 거리 최소(맨 앞).
@@ -577,7 +577,7 @@ class VectorScopeTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         self.embedder = StubEmbedder()
         build_store_dir(self.brain, [
-            glossary_term("g.a", term="레이스", context_id="context.canoe"),
+            glossary_term("g.a", term="레이스", context_id="context.kayak"),
             glossary_term("g.b", term="레이스", context_id="context.other"),
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
@@ -586,12 +586,12 @@ class VectorScopeTest(unittest.TestCase):
         self._td.cleanup()
 
     def test_scope_filters_to_matching_context(self):
-        out = search_vector(self.db, "레이스", scope="context.canoe", embedder=self.embedder)
+        out = search_vector(self.db, "레이스", scope="context.kayak", embedder=self.embedder)
         ids = {r["object_id"] for r in out["results"]}
         self.assertIn("g.a", ids)
         self.assertNotIn("g.b", ids)
         for r in out["results"]:
-            self.assertEqual(r["context_id"], "context.canoe")
+            self.assertEqual(r["context_id"], "context.kayak")
 
     def test_no_scope_returns_both(self):
         out = search_vector(self.db, "레이스", embedder=self.embedder)
@@ -608,7 +608,7 @@ class FtsRegressionWithVecTableTest(unittest.TestCase):
         self.brain = Path(self._td.name) / "brain"
         self.db = Path(self._td.name) / "index.db"
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주"),
+            glossary_term("g.race", term="레이스", definition="카약 경주"),
             code_locator("code.new", path="a/b/C.cpp", symbol="onClickNewRace"),
         ])
         rebuild(self.brain, self.db, embedder=StubEmbedder())

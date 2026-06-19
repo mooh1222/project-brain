@@ -285,7 +285,7 @@ def _run_session(argv) -> int:
     p_list = sub.add_parser("list")
     p_list.add_argument("--unprocessed", action="store_true",
                         help="처리 마킹 없는 세션만")
-    p_list.add_argument("--project", help="cwd 부분 문자열 필터 (예: bb2_client)")
+    p_list.add_argument("--project", help="cwd 부분 문자열 필터 (예: demoapp)")
     p_list.add_argument("--transcript-root", help="기본: ~/.claude/projects")
     p_list.add_argument("--brain-root", help="brain root (마킹 대조, 기본: config)")
 

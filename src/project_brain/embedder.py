@@ -1,6 +1,6 @@
 """임베더 (스펙 §3.3·§5, 슬라이스 3).
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 표면 텍스트를 1024차원 L2 정규화 벡터로 만든다. 색인 빌드와 쿼리가 ★같은
 임베더 경로★를 써야 매칭이 성립하므로 get_embedder() 팩토리 하나로만 만든다.
@@ -111,7 +111,7 @@ _EMBEDDER_CACHE: dict[bool, object] = {}
 def get_embedder(stub: bool | None = None):
     """임베더 팩토리 — 색인 빌드와 쿼리가 같은 경로를 쓰게 하는 단일 진입점(§5).
 
-    stub: None이면 환경 플래그(BB2_BRAIN_EMBEDDER=stub)로 판정, True/False면 명시 선택.
+    stub: None이면 환경 플래그(PROJECT_BRAIN_EMBEDDER=stub)로 판정, True/False면 명시 선택.
     같은 설정(stub True/False)이면 인스턴스를 캐시해 재사용한다 — 임베더는 stateless이고
     실모델 로딩이 ~8s라, 한 프로세스에서 여러 번 부르는 eval이 시나리오마다 모델을 새로
     올리던 낭비(~56s)를 없앤다. 모델 적재 자체는 RealEmbedder의 lazy 로드가 그대로 담당한다.

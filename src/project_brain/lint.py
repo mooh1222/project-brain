@@ -11,7 +11,7 @@ from project_brain.router import _conflicting_fact_groups
 from project_brain.schema import validate_object
 from project_brain.store import BrainStore
 
-GENERATED_HEADER = "GENERATED FROM BB2 BRAIN - DO NOT EDIT"
+GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
 LEGACY_SOURCE_TYPES = {"context", "wiki"}
 
 

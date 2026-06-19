@@ -1,6 +1,6 @@
 """kind별 객체 텍스트 표면 추출 + content_hash (검색 색인 입력).
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md §2.1·§4
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md §2.1·§4
 
 색인 대상 객체에서 "검색이 매칭할 텍스트"만 뽑아 하나의 문자열로 만든다(표면).
 색인 제외 kind(EvidenceManifest/EvidenceRef/ReviewRecord 및
@@ -128,7 +128,7 @@ def _surface_current_view(obj, store) -> list[str]:
 
 
 def _surface_code_locator(obj, store) -> list[str]:
-    # spec §2.1: path + symbol (예: "SallyCanoePopups SallyCanoeEventAlertPopup::init").
+    # spec §2.1: path + symbol (예: "MinaKayakPopups MinaKayakEventAlertPopup::init").
     parts: list[str] = []
     for field in ("path", "symbol"):
         s = _norm_str(obj.get(field))

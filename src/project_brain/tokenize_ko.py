@@ -59,8 +59,8 @@ def _build_mecab_splitter():
 
     def split(text: str) -> list[str]:
         # mecab 출력은 "표면\t품질,..." 줄들 + 마지막 EOS. 표면(surface)만 취한다.
-        # ★전체 문맥을 한 번에 넘긴다★ — "샐리의"만 떼서 주면 동사 읽기로 오분석되지만
-        # "샐리의 카누 ..." 전체를 주면 인명+조사로 바르게 쪼갠다(형태소 중의성, 실측).
+        # ★전체 문맥을 한 번에 넘긴다★ — "미나의"만 떼서 주면 동사 읽기로 오분석되지만
+        # "미나의 카약 ..." 전체를 주면 인명+조사로 바르게 쪼갠다(형태소 중의성, 실측).
         tokens: list[str] = []
         for line in tagger.parse(text).splitlines():
             if line == "EOS" or not line:
@@ -151,10 +151,10 @@ def _split_symbol(segment: str) -> list[str]:
     """심볼 세그먼트를 의미 토큰으로 쪼개고 ★원형 토큰도 보존★한다 (스펙 §6).
 
     처리 대상: camelCase(`onClickNewRace`) / snake_case·대문자 약어
-    (`SALLY_CANOE_RACE_STATUS`) / `::`(`A::b`) / 경로·확장자(`a/b/c.cpp`).
+    (`MINA_KAYAK_RACE_STATUS`) / `::`(`A::b`) / 경로·확장자(`a/b/c.cpp`).
     구분자로 나뉜 각 조각은 다시 camelCase로 쪼개고, 분리가 실제로 일어났으면
     구분자 조각의 소문자 원형(`getracestatus`)과 세그먼트 전체 원형
-    (`sally_canoe_race_status`)을 함께 더한다.
+    (`mina_kayak_race_status`)을 함께 더한다.
     """
     tokens: list[str] = []
     parts = [p for p in _SYMBOL_SEP.split(segment) if p]

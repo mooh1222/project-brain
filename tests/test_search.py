@@ -1,6 +1,6 @@
 """RRF 융합 + recall() + eval_recall 어댑터 (스펙 §3.4·§3 결과 계약, 슬라이스 3 마무리).
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 전부 stub embedder + tmp 색인으로 결정론 검증한다(과업 명세 — 실모델 테스트 없음.
 실코퍼스·실모델 측정은 cli eval/슬라이스 3.5 몫). RRF 수식은 손계산 기대값으로
@@ -57,7 +57,7 @@ def code_locator(cid, *, path, symbol, context_id="context.neutral"):
     return _b({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
         "title": f"Code: {symbol}", "context_id": context_id,
-        "repo": "bb2_client", "path": path, "symbol": symbol,
+        "repo": "demoapp", "path": path, "symbol": symbol,
         "locator_source": "rg", "verified_at": T,
         "evidence_refs": ["ev.code"],
     })
@@ -143,7 +143,7 @@ class RecallTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         self.embedder = StubEmbedder()
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주 진행"),
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
             glossary_term("g.reward", term="보상", definition="레이스 종료 보상 지급"),
             glossary_term("g.cand", term="에러코드", definition="보상 미지급 에러",
                           status="candidate"),
@@ -180,7 +180,7 @@ class RecallTest(unittest.TestCase):
 
     def test_matched_via_both_when_in_both_channels(self):
         # "레이스"는 BM25(표면 토큰)와 벡터(stub은 자기 표면 임베딩) 양쪽에서 g.race 적중.
-        hits = recall("카누 경주 진행", db_path=self.db, embedder=self.embedder,
+        hits = recall("카약 경주 진행", db_path=self.db, embedder=self.embedder,
                       brain_root=self.brain)
         by_id = {h["object_id"]: h for h in hits}
         self.assertIn("g.race", by_id)
@@ -196,9 +196,9 @@ class RecallTest(unittest.TestCase):
         self.assertEqual(scores, sorted(scores, reverse=True))
 
     def test_deterministic(self):
-        a = recall("레이스 보상 카누", db_path=self.db, embedder=self.embedder,
+        a = recall("레이스 보상 카약", db_path=self.db, embedder=self.embedder,
                    brain_root=self.brain)
-        b = recall("레이스 보상 카누", db_path=self.db, embedder=self.embedder,
+        b = recall("레이스 보상 카약", db_path=self.db, embedder=self.embedder,
                    brain_root=self.brain)
         self.assertEqual(a, b)
 
@@ -215,11 +215,11 @@ class RecallTest(unittest.TestCase):
         brain = Path(td.name) / "brain"
         db = Path(td.name) / "index.db"
         build_store_dir(brain, [
-            glossary_term(f"g.{i:02d}", term="레이스", definition="카누 경주")
+            glossary_term(f"g.{i:02d}", term="레이스", definition="카약 경주")
             for i in range(31)
         ])
         rebuild(brain, db, embedder=self.embedder)
-        hits = recall("레이스 카누 경주", db_path=db, embedder=self.embedder,
+        hits = recall("레이스 카약 경주", db_path=db, embedder=self.embedder,
                       brain_root=brain)
         self.assertLessEqual(len(hits), 30)
 
@@ -297,24 +297,24 @@ class InferScopeTest(unittest.TestCase):
 
     def test_single_match_by_title_prefix(self):
         store = self._store([
-            scoped_context("context.a", display_name="카누 레이스 이벤트",
-                           title="카누 레이스 도메인", context_key="canoe-race"),
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
         ])
         self.assertEqual(
-            infer_scope("카누 레이스 보상이 안 들어왔대", store), "context.a")
+            infer_scope("카약 레이스 보상이 안 들어왔대", store), "context.a")
 
     def test_no_surface_match_returns_none(self):
         store = self._store([
-            scoped_context("context.a", display_name="카누 레이스 이벤트",
-                           title="카누 레이스 도메인", context_key="canoe-race"),
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
         ])
         self.assertIsNone(infer_scope("보상 지급 기준이 뭐야", store))
 
     def test_partial_surface_tokens_do_not_match(self):
         # 표면 토큰 일부만 있으면 비매칭 — "클리어"만으로 "클리어 토큰"을 특정하지 않는다
-        # (s1 회귀의 골자: 샐리 질의의 '스테이지 클리어'가 토큰 컨텍스트를 끌면 안 됨).
+        # (s1 회귀의 골자: 미나 질의의 '스테이지 클리어'가 토큰 컨텍스트를 끌면 안 됨).
         store = self._store([
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
@@ -323,49 +323,49 @@ class InferScopeTest(unittest.TestCase):
 
     def test_multi_context_match_returns_none(self):
         store = self._store([
-            scoped_context("context.a", display_name="카누 레이스 이벤트",
-                           title="카누 레이스 도메인", context_key="canoe-race"),
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
         ])
         self.assertIsNone(
-            infer_scope("카누 레이스 중에 클리어 토큰 쓰면 어떻게 돼", store))
+            infer_scope("카약 레이스 중에 클리어 토큰 쓰면 어떻게 돼", store))
 
     def test_specific_surface_wins_over_subset_surface(self):
-        # 구체 표면 우선(§3 결정 2): 시스템 컨텍스트 표면 {방해버블}이 기능 컨텍스트
-        # 표면 {고슴도치,방해버블}의 진부분집합이면, 더 구체적인 기능 컨텍스트가 단일
+        # 구체 표면 우선(§3 결정 2): 시스템 컨텍스트 표면 {함정}이 기능 컨텍스트
+        # 표면 {가시,함정}의 진부분집합이면, 더 구체적인 기능 컨텍스트가 단일
         # 특정된다. 기존 규칙은 둘 다 매칭→다중→None이라 핀포인트 질의가 scope 보호를
         # 잃었다(s1 회귀 재노출). maximal(다른 매칭의 진부분집합이 아닌 것)만 남긴다.
         store = self._store([
-            scoped_context("context.hedgehog", display_name="고슴도치 방해버블",
-                           title="고슴도치 방해버블 도메인", context_key="disturb-hedgehog"),
-            scoped_context("context.system", display_name="방해버블",
-                           title="방해버블 도메인", context_key="disturb-bubble-system"),
+            scoped_context("context.spike", display_name="가시 함정",
+                           title="가시 함정 도메인", context_key="trap-spike"),
+            scoped_context("context.system", display_name="함정",
+                           title="함정 도메인", context_key="trap-bubble-system"),
         ])
         self.assertEqual(
-            infer_scope("고슴도치 방해버블 상태", store), "context.hedgehog")
+            infer_scope("가시 함정 상태", store), "context.spike")
 
     def test_only_subset_surface_matched_is_single_scope(self):
-        # 일반 질의(고유명 토큰 없음)는 시스템 컨텍스트 표면 {방해버블}만 매칭 → 시스템으로.
+        # 일반 질의(고유명 토큰 없음)는 시스템 컨텍스트 표면 {함정}만 매칭 → 시스템으로.
         store = self._store([
-            scoped_context("context.hedgehog", display_name="고슴도치 방해버블",
-                           title="고슴도치 방해버블 도메인", context_key="disturb-hedgehog"),
-            scoped_context("context.system", display_name="방해버블",
-                           title="방해버블 도메인", context_key="disturb-bubble-system"),
+            scoped_context("context.spike", display_name="가시 함정",
+                           title="가시 함정 도메인", context_key="trap-spike"),
+            scoped_context("context.system", display_name="함정",
+                           title="함정 도메인", context_key="trap-bubble-system"),
         ])
-        self.assertEqual(infer_scope("방해버블 점수 처리", store), "context.system")
+        self.assertEqual(infer_scope("함정 점수 처리", store), "context.system")
 
     def test_two_maximal_surfaces_returns_none(self):
         # maximal 표면이 2개(비포함 관계)면 여전히 None — 두 기능을 동시에 언급한 질의.
         store = self._store([
-            scoped_context("context.hedgehog", display_name="고슴도치 방해버블",
-                           title="고슴도치 방해버블 도메인", context_key="disturb-hedgehog"),
-            scoped_context("context.drone", display_name="드론 방해버블",
-                           title="드론 방해버블 도메인", context_key="disturb-drone"),
-            scoped_context("context.system", display_name="방해버블",
-                           title="방해버블 도메인", context_key="disturb-bubble-system"),
+            scoped_context("context.spike", display_name="가시 함정",
+                           title="가시 함정 도메인", context_key="trap-spike"),
+            scoped_context("context.bomb", display_name="폭탄 함정",
+                           title="폭탄 함정 도메인", context_key="trap-bomb"),
+            scoped_context("context.system", display_name="함정",
+                           title="함정 도메인", context_key="trap-bubble-system"),
         ])
-        self.assertIsNone(infer_scope("고슴도치 드론 방해버블 비교", store))
+        self.assertIsNone(infer_scope("가시 폭탄 함정 비교", store))
 
     def test_recall_auto_scope_filters_other_context(self):
         # recall(scope=None)이 질의 표면에서 컨텍스트를 단일 특정하면 하드 필터 적용.
@@ -374,8 +374,8 @@ class InferScopeTest(unittest.TestCase):
         brain = Path(td.name) / "brain"
         db = Path(td.name) / "index.db"
         build_store_dir(brain, [
-            scoped_context("context.a", display_name="카누 레이스 이벤트",
-                           title="카누 레이스 도메인", context_key="canoe-race"),
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
             glossary_term("g.in", term="보상", context_id="context.a"),
@@ -383,7 +383,7 @@ class InferScopeTest(unittest.TestCase):
         ])
         embedder = StubEmbedder()
         rebuild(brain, db, embedder=embedder)
-        hits = recall("카누 레이스 보상 기준", db_path=db, embedder=embedder,
+        hits = recall("카약 레이스 보상 기준", db_path=db, embedder=embedder,
                       brain_root=brain)
         ids = {h["object_id"] for h in hits}
         self.assertIn("g.in", ids)
@@ -396,8 +396,8 @@ class InferScopeTest(unittest.TestCase):
         brain = Path(td.name) / "brain"
         db = Path(td.name) / "index.db"
         build_store_dir(brain, [
-            scoped_context("context.a", display_name="카누 레이스 이벤트",
-                           title="카누 레이스 도메인", context_key="canoe-race"),
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
             glossary_term("g.in", term="보상", context_id="context.a"),
@@ -405,7 +405,7 @@ class InferScopeTest(unittest.TestCase):
         ])
         embedder = StubEmbedder()
         rebuild(brain, db, embedder=embedder)
-        hits = recall("카누 레이스 보상 기준", scope="context.b", db_path=db,
+        hits = recall("카약 레이스 보상 기준", scope="context.b", db_path=db,
                       embedder=embedder, brain_root=brain)
         ids = {h["object_id"] for h in hits}
         self.assertIn("g.out", ids)
@@ -421,7 +421,7 @@ class EvalRecallChannelTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         self.embedder = StubEmbedder()
         build_store_dir(self.brain, [
-            glossary_term("g.race", term="레이스", definition="카누 경주 진행"),
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
             glossary_term("g.cand", term="보상에러", definition="레이스 보상 미지급",
                           status="candidate"),
         ])
@@ -453,12 +453,12 @@ class EvalRecallChannelTest(unittest.TestCase):
         self.addCleanup(td.cleanup)
         brain = Path(td.name) / "brain"
         db = Path(td.name) / "index.db"
-        objs = [glossary_term(f"g.r{i}", term="레이스", definition="카누 경주") for i in range(7)]
-        objs += [glossary_term(f"g.c{i}", term="레이스보상", definition="카누 경주 보상",
+        objs = [glossary_term(f"g.r{i}", term="레이스", definition="카약 경주") for i in range(7)]
+        objs += [glossary_term(f"g.c{i}", term="레이스보상", definition="카약 경주 보상",
                                status="candidate") for i in range(7)]
         build_store_dir(brain, objs)
         rebuild(brain, db, embedder=self.embedder)
-        resp = eval_recall("레이스 카누 경주 보상", db_path=db, embedder=self.embedder,
+        resp = eval_recall("레이스 카약 경주 보상", db_path=db, embedder=self.embedder,
                            brain_root=brain)
         self.assertLessEqual(len(resp["results"]), 5)
         self.assertLessEqual(len(resp["candidates"]), 5)
@@ -470,10 +470,10 @@ class EvalRecallChannelTest(unittest.TestCase):
         brain = Path(td.name) / "brain"
         db = Path(td.name) / "index.db"
         build_store_dir(brain, [
-            glossary_term("g.only", term="레이스", definition="카누 경주", status="candidate"),
+            glossary_term("g.only", term="레이스", definition="카약 경주", status="candidate"),
         ])
         rebuild(brain, db, embedder=self.embedder)
-        resp = eval_recall("레이스 카누", db_path=db, embedder=self.embedder, brain_root=brain)
+        resp = eval_recall("레이스 카약", db_path=db, embedder=self.embedder, brain_root=brain)
         self.assertEqual(resp["results"], [])
         self.assertTrue(resp["needs_clarification"])
 
@@ -811,7 +811,7 @@ class ComputeQuerySignalsTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         self.embedder = StubEmbedder()
         # '레이스'를 5개 문서에 심고, '보상'을 1개에만 → df로 희소/흔함 갈림.
-        objs = [glossary_term(f"g.race{i}", term="레이스", definition="카누 경주 진행")
+        objs = [glossary_term(f"g.race{i}", term="레이스", definition="카약 경주 진행")
                 for i in range(5)]
         objs.append(glossary_term("g.reward", term="보상", definition="레이스 종료 보상"))
         build_store_dir(self.brain, objs)
@@ -888,7 +888,7 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
     def test_anchored_query_passes_gate_to_results(self):
         # 희소 토큰 present(앵커 있음) → reviewed 적중이 게이트를 통과해 results로.
         brain, db = self._build([
-            glossary_term("g.race", term="레이스", definition="카누 경주 진행"),
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
         ])
         resp = eval_recall("레이스", db_path=db, embedder=self.embedder, brain_root=brain)
         self.assertIn("g.race", {h["object_id"] for h in resp["results"]})
@@ -982,7 +982,7 @@ class RawLaneTest(unittest.TestCase):
         # 흔들면 안 된다. 같은 토큰의 raw 문서 40개가 있어도 anchor_df는 객체 df(1).
         big = "\n\n".join(f"# 섹션 {i}\n레이스 서술 {i}." for i in range(40))
         self._write_raw("foo-ctx", "spec", big)
-        self._build([glossary_term("g.race", term="레이스", definition="카누 경주")])
+        self._build([glossary_term("g.race", term="레이스", definition="카약 경주")])
         hits = recall("레이스", db_path=self.db, embedder=self.embedder,
                       brain_root=self.brain)
         signals = compute_query_signals("레이스", hits, self.db)
@@ -1009,7 +1009,7 @@ class RawLaneTest(unittest.TestCase):
         # raw 발췌는 나온다(reviewed/candidate는 앵커 부재로 차단 — "없다" 보존).
         self._write_raw("foo-ctx", "spec",
                         "# 연출 기획\n버블 발사 연출은 무지개색 궤적으로 표현한다.\n")
-        self._build([glossary_term("g.x", term="레이스", definition="카누 경주")])
+        self._build([glossary_term("g.x", term="레이스", definition="카약 경주")])
         resp = eval_recall("버블 발사 연출 무지개색 궤적", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
         self.assertEqual(resp["results"], [])
@@ -1017,7 +1017,7 @@ class RawLaneTest(unittest.TestCase):
         self.assertTrue(resp["raw_excerpts"])
 
     def test_no_raw_dir_keeps_empty_channel(self):
-        self._build([glossary_term("g.race", term="레이스", definition="카누 경주")])
+        self._build([glossary_term("g.race", term="레이스", definition="카약 경주")])
         resp = eval_recall("레이스", db_path=self.db, embedder=self.embedder,
                            brain_root=self.brain)
         self.assertEqual(resp["raw_excerpts"], [])
@@ -1026,7 +1026,7 @@ class RawLaneTest(unittest.TestCase):
         # raw 행도 context_id 행 메타를 가지므로 scope 하드 필터를 그대로 받는다.
         self._write_raw("foo-ctx", "spec", "# 보상\n레이스 보상 서술.\n")
         self._write_raw("bar-ctx", "spec", "# 보상\n레이스 보상 다른 기능 서술.\n")
-        self._build([glossary_term("g.race", term="레이스", definition="카누 경주")])
+        self._build([glossary_term("g.race", term="레이스", definition="카약 경주")])
         hits = recall("레이스 보상 서술", scope="context.foo-ctx", db_path=self.db,
                       embedder=self.embedder, brain_root=self.brain)
         raw_ctx = {h["context_id"] for h in hits if h["kind"] == "raw_chunk"}
@@ -1108,7 +1108,7 @@ class InsightLaneTest(unittest.TestCase):
         # 앵커 df 상한(30)은 객체 코퍼스 분포로 보정된 값(§8) — Insight 행이 분포를
         # 흔들면 안 된다(C2 게이트층 누수). 같은 토큰의 Insight 40개가 있어도
         # anchor_df는 객체 df(1)로 유지(_document_frequency가 Insight 제외).
-        objs = [glossary_term("g.race", term="레이스", definition="카누 경주")]
+        objs = [glossary_term("g.race", term="레이스", definition="카약 경주")]
         objs += [insight(f"insight.{i}", body=f"레이스 위험 서술 {i}") for i in range(40)]
         build_store_dir(self.brain, objs)
         rebuild(self.brain, self.db, embedder=self.embedder)
@@ -1120,7 +1120,7 @@ class InsightLaneTest(unittest.TestCase):
 
 def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
                status="candidate", fmt="prompt_payload", source_objects=None):
-    sids = source_object_ids or ["mapping.sally-canoe.race-end-result-achieve"]
+    sids = source_object_ids or ["mapping.mina-kayak.race-end-result-achieve"]
     # source_objects(구성 객체 dict들)를 주면 fresh source_content_hash를 lint와
     # 같은 공식으로 계산한다 — Task A6 신선도 가드가 색인에서 빼지 않도록. 안 주면
     # 옛 placeholder("x")라 stale 취급된다(낡음 검사 자체를 보는 테스트용).
@@ -1157,19 +1157,19 @@ class ProjectionLaneTest(unittest.TestCase):
         self._td.cleanup()
 
     def test_projection_in_recall_after_objects(self):
-        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
+        src = domain_mapping("mapping.mina-kayak.race-end-result-achieve",
+                             meaning="미나 결과 팝업 순위 표시", context_id="context.mina-kayak")
         build_store_dir(self.brain, [
             src,
-            projection("projection.sally-canoe.result-popup-rank.reuse",
-                       context_id="context.sally-canoe",
-                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
-                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+            projection("projection.mina-kayak.result-popup-rank.reuse",
+                       context_id="context.mina-kayak",
+                       title="미나 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupMinaKayakResult.",
+                       source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                        source_objects=[src]),
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
-        hits = recall("샐리 결과 팝업 순위 표시", db_path=self.db, embedder=self.embedder,
+        hits = recall("미나 결과 팝업 순위 표시", db_path=self.db, embedder=self.embedder,
                       brain_root=self.brain)
         kinds = [h["kind"] for h in hits]
         self.assertIn("ContextProjection", kinds)
@@ -1181,7 +1181,7 @@ class ProjectionLaneTest(unittest.TestCase):
         self.assertLess(obj_idx, proj_idx)
         proj_hit = next(h for h in hits if h["kind"] == "ContextProjection")
         self.assertEqual(proj_hit["status"], "candidate")
-        self.assertIn("PopupSallyCanoeResult", proj_hit["surface"])
+        self.assertIn("PopupMinaKayakResult", proj_hit["surface"])
         self.assertEqual(proj_hit["linked"]["code_locators"], [])
         self.assertEqual(proj_hit["graph_support"], 0)
 
@@ -1191,15 +1191,15 @@ class ProjectionLaneTest(unittest.TestCase):
         # 분포로 보정된 값이라 projection 자유 텍스트가 분포를 흔들면 안 됨).
         # "reuseprobexyz"는 토크나이저가 쪼개지 않는 단일 보존 토큰이고 projection
         # reuse_payload에만 있다 — 제외 안 되면 df=1로 새므로 제외를 직접 검증한다.
-        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
+        src = domain_mapping("mapping.mina-kayak.race-end-result-achieve",
+                             meaning="미나 결과 팝업 순위 표시", context_id="context.mina-kayak")
         build_store_dir(self.brain, [
             src,
-            projection("projection.sally-canoe.result-popup-rank.reuse",
-                       context_id="context.sally-canoe",
-                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
+            projection("projection.mina-kayak.result-popup-rank.reuse",
+                       context_id="context.mina-kayak",
+                       title="미나 결과 팝업 순위 표시 착수 브리핑",
                        reuse_payload="데이터 출처: reuseprobexyz recordMap.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+                       source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                        source_objects=[src]),
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
@@ -1232,18 +1232,18 @@ class EvalRecallProjectionReuseTest(unittest.TestCase):
 
     def test_eval_recall_projection_in_own_channel_not_results(self):
         # candidate projection도 results/candidates가 아니라 projection_reuse로만 나온다.
-        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
+        src = domain_mapping("mapping.mina-kayak.race-end-result-achieve",
+                             meaning="미나 결과 팝업 순위 표시", context_id="context.mina-kayak")
         self._build([
             src,
-            projection("projection.sally-canoe.result-popup-rank.reuse",
-                       context_id="context.sally-canoe",
-                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
-                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+            projection("projection.mina-kayak.result-popup-rank.reuse",
+                       context_id="context.mina-kayak",
+                       title="미나 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupMinaKayakResult.",
+                       source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                        source_objects=[src]),
         ])
-        resp = eval_recall("샐리 결과 팝업 순위 표시", db_path=self.db,
+        resp = eval_recall("미나 결과 팝업 순위 표시", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
         self.assertIn("projection_reuse", resp)
         self.assertTrue(all(h["kind"] != "ContextProjection" for h in resp["results"]))
@@ -1254,19 +1254,19 @@ class EvalRecallProjectionReuseTest(unittest.TestCase):
     def test_eval_recall_reviewed_projection_stays_in_reuse_channel(self):
         # 핵심 가드(codex 블로커): promote된(reviewed) projection도 results가 아니라
         # projection_reuse에 남는다 — 채널 이동 없음.
-        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
+        src = domain_mapping("mapping.mina-kayak.race-end-result-achieve",
+                             meaning="미나 결과 팝업 순위 표시", context_id="context.mina-kayak")
         self._build([
             src,
-            projection("projection.sally-canoe.result-popup-rank.reuse",
-                       context_id="context.sally-canoe",
-                       title="샐리 결과 팝업 순위 표시 착수 브리핑",
-                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+            projection("projection.mina-kayak.result-popup-rank.reuse",
+                       context_id="context.mina-kayak",
+                       title="미나 결과 팝업 순위 표시 착수 브리핑",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupMinaKayakResult.",
+                       source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                        source_objects=[src],
                        status="reviewed"),
         ])
-        resp = eval_recall("샐리 결과 팝업 순위 표시", db_path=self.db,
+        resp = eval_recall("미나 결과 팝업 순위 표시", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
         self.assertTrue(all(h["kind"] != "ContextProjection" for h in resp["results"]))
         self.assertTrue(any(h["kind"] == "ContextProjection"
@@ -1401,8 +1401,8 @@ class ScopedBm25WiringTest(unittest.TestCase):
 
     def _base_objs(self):
         return [
-            scoped_context("context.a", display_name="카누 레이스",
-                           title="카누 레이스 도메인", context_key="canoe-race"),
+            scoped_context("context.a", display_name="카약 레이스",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
             glossary_term("g.d1", term="알림 팝업", context_id="context.a"),
             glossary_term("g.d2", term="클리어 팝업", context_id="context.a"),
             glossary_term("g.d3", term="알림 안내", context_id="context.a"),
@@ -1423,7 +1423,7 @@ class ScopedBm25WiringTest(unittest.TestCase):
         brain, db, embedder = self._setup_corpus(self._base_objs())
         with mock.patch("project_brain.search.search_bm25_scoped",
                         wraps=search_bm25_scoped) as spy:
-            recall("카누 레이스 알림 클리어", db_path=db, embedder=embedder,
+            recall("카약 레이스 알림 클리어", db_path=db, embedder=embedder,
                    brain_root=brain)
         spy.assert_called_once()
 
@@ -1445,7 +1445,7 @@ class ScopedBm25WiringTest(unittest.TestCase):
         embedder = StubEmbedder()
         build_store_dir(brain, self._base_objs())
         rebuild(brain, db, embedder=embedder)
-        query = "카누 레이스 알림 클리어"
+        query = "카약 레이스 알림 클리어"
         before = [h["object_id"] for h in
                   recall(query, db_path=db, embedder=embedder, brain_root=brain)]
         build_store_dir(brain, [

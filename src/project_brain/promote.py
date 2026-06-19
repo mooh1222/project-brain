@@ -1,6 +1,6 @@
 """candidate 객체를 reviewed로 승격하는 generic promote — 도메인 무지.
 
-폐기 ingest_sally_canoe_source.build_reviewed_terms(single_object)의 변환을 흡수한다.
+폐기 ingest_mina_kayak_source.build_reviewed_terms(single_object)의 변환을 흡수한다.
 GlossaryTerm 전용 title 문구("Reviewed term: ")는 흡수하지 않는다(spec §3.2) — title은
 caller가 bundle에 미리 박는다. reviewer/reviewed_at은 caller 주입(도메인/시점 상수 0).
 

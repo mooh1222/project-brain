@@ -1,6 +1,6 @@
 """임베더 검증 (스펙 §5, 슬라이스 3).
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 전부 stub embedder(결정론)로만 검증한다 — 실모델 테스트는 만들지 않는다(슬라이스
 3.5에서 컨트롤러가 골든셋으로 실측, §5·§10). stub 결정론(같은 텍스트=같은 벡터,
@@ -43,7 +43,7 @@ class StubEmbedderTest(unittest.TestCase):
 
     def test_dimension(self):
         e = StubEmbedder()
-        v = e.embed("샐리 카누")
+        v = e.embed("미나 카약")
         self.assertEqual(v.shape, (EMBED_DIM,))
         self.assertEqual(v.dtype, np.float32)
 

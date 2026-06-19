@@ -1,6 +1,6 @@
 """FTS 색인 + 벡터 색인 빌드 + BM25/벡터 검색 (스펙 §3.3·§4·§6, 슬라이스 2·3).
 
-spec: docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md
+spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 색인 DB는 SQLite. brain/ 객체에서 표면(surface.extract_surface)을 뽑아 토큰화
 (tokenize_ko.tokenize)한 뒤, 사전 형태소 분리된 공백 결합 텍스트를 FTS5(unicode61)에

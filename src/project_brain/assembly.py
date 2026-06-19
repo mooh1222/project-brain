@@ -50,7 +50,7 @@ def build_glossary_terms(notes, now):
 def build_code_evidence(notes, now):
     """code_anchors[] 각 항목을 CodeLocator + EvidenceRef 쌍으로 펼친다."""
     cx = notes["context"]
-    ctx, commit, repo = cx["key"], cx["commit"], cx.get("repo", "bb2_client")
+    ctx, commit, repo = cx["key"], cx["commit"], cx.get("repo", "demoapp")
     out = []
     for a in notes.get("code_anchors", []):
         key = a["key"]
@@ -112,7 +112,7 @@ def build_manifests(notes, now):
             "locator": s["locator"], "captured_at": s.get("captured_at", now),
             "captured_by": s.get("captured_by", "agent"),
             "sensitivity": s.get("sensitivity", "internal"),
-            "acl": s.get("acl", ["bb2-team"]),
+            "acl": s.get("acl", ["demo-team"]),
             "redaction_status": s.get("redaction_status", "none"),
         }
         out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
@@ -129,7 +129,7 @@ def build_context(notes, now):
     obj = {
         "id": f"context.{ctx}", "kind": "DomainContext", "status": "reviewed",
         "truth_role": "domain", "title": cx["display_name"][:80], "context_key": ctx,
-        "project_id": cx.get("repo", "bb2_client"), "display_name": cx["display_name"],
+        "project_id": cx.get("repo", "demoapp"), "display_name": cx["display_name"],
         "boundary_summary": cx["boundary_summary"], "in_scope": cx.get("in_scope", []),
         "out_of_scope": cx.get("out_of_scope", []),
         "injection_profile": {"default_audience": "coding-agent"},

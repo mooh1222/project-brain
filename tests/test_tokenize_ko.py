@@ -24,23 +24,23 @@ class SymbolSplitTest(unittest.TestCase):
         self.assertIn("onclicknewrace", toks)
 
     def test_snake_case_and_upper_abbrev_split_and_keep_original(self):
-        toks = tokenize("SALLY_CANOE_RACE_STATUS")
-        for piece in ("sally", "canoe", "race", "status"):
+        toks = tokenize("MINA_KAYAK_RACE_STATUS")
+        for piece in ("mina", "kayak", "race", "status"):
             self.assertIn(piece, toks)
-        self.assertIn("sally_canoe_race_status", toks)
+        self.assertIn("mina_kayak_race_status", toks)
 
     def test_double_colon_separator_splits(self):
-        toks = tokenize("SallyCanoeViewData::getRaceStatus")
-        for piece in ("sally", "canoe", "view", "data", "get", "race", "status"):
+        toks = tokenize("MinaKayakViewData::getRaceStatus")
+        for piece in ("mina", "kayak", "view", "data", "get", "race", "status"):
             self.assertIn(piece, toks)
         # :: 양쪽 원형도 보존
-        self.assertIn("sallycanoeviewdata", toks)
+        self.assertIn("minakayakviewdata", toks)
         self.assertIn("getracestatus", toks)
 
     def test_path_separators_split_into_meaning_tokens(self):
         # CodeLocator path 형태 — /, . 가 의미 토큰으로 쪼개진다
-        toks = tokenize("main/map/SallyCanoePopupEnterRaceInfoNode.cpp")
-        for piece in ("main", "map", "sally", "canoe", "popup", "enter", "race", "info", "node"):
+        toks = tokenize("main/map/MinaKayakPopupEnterRaceInfoNode.cpp")
+        for piece in ("main", "map", "mina", "kayak", "popup", "enter", "race", "info", "node"):
             self.assertIn(piece, toks)
         # 확장자도 토큰
         self.assertIn("cpp", toks)
@@ -67,8 +67,8 @@ class RegexFallbackTest(unittest.TestCase):
 
     def test_regex_backend_splits_korean_run(self):
         # 정규식 폴백은 한글 연속을 하나의 토큰으로 (형태소 분리 안 함)
-        toks = tokenize("샐리의카누", backend="regex")
-        self.assertIn("샐리의카누", toks)
+        toks = tokenize("미나의카약", backend="regex")
+        self.assertIn("미나의카약", toks)
 
     def test_regex_backend_separates_korean_and_symbol(self):
         toks = tokenize("onClickNewRace 레이스", backend="regex")
@@ -78,8 +78,8 @@ class RegexFallbackTest(unittest.TestCase):
         self.assertIn("race", toks)
 
     def test_regex_backend_korean_blocks_separated_by_space(self):
-        toks = tokenize("카누 레이스 보상", backend="regex")
-        self.assertIn("카누", toks)
+        toks = tokenize("카약 레이스 보상", backend="regex")
+        self.assertIn("카약", toks)
         self.assertIn("레이스", toks)
         self.assertIn("보상", toks)
 
@@ -88,13 +88,13 @@ class IndexQuerySymmetryTest(unittest.TestCase):
     """단일 공유 함수가 색인·쿼리 대칭을 보장한다 (스펙 §6 핵심)."""
 
     def test_same_function_same_input_same_output(self):
-        text = "SallyCanoeViewData::getRaceStatus 레이스 보상"
+        text = "MinaKayakViewData::getRaceStatus 레이스 보상"
         # 같은 백엔드면 색인 호출과 쿼리 호출이 동일 결과
         self.assertEqual(tokenize(text), tokenize(text))
 
     def test_symbol_query_overlaps_indexed_symbol_tokens(self):
         # 영문 약어로 색인하고 한국어/심볼 혼합 질의해도 분리 토큰이 겹친다
-        indexed = set(tokenize("SALLY_CANOE_RACE_STATUS", backend="regex"))
+        indexed = set(tokenize("MINA_KAYAK_RACE_STATUS", backend="regex"))
         query = set(tokenize("race status 보상", backend="regex"))
         self.assertTrue(indexed & query)
         self.assertIn("race", indexed & query)
@@ -113,10 +113,10 @@ class MecabMorphemeTest(unittest.TestCase):
     """mecab-ko 활성 환경에서만 한국어 형태소 분리 결과를 단언한다."""
 
     def test_josa_separated_from_noun(self):
-        # "샐리의" → 샐리 + 의(조사) 로 분리되어야 한다
-        toks = tokenize("샐리의 카누 레이스 보상")
-        self.assertIn("샐리", toks)
-        self.assertIn("카누", toks)
+        # "미나의" → 미나 + 의(조사) 로 분리되어야 한다
+        toks = tokenize("미나의 카약 레이스 보상")
+        self.assertIn("미나", toks)
+        self.assertIn("카약", toks)
         self.assertIn("레이스", toks)
         self.assertIn("보상", toks)
 

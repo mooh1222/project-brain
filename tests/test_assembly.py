@@ -10,8 +10,8 @@ NOW = "2026-06-16T00:00:00Z"
 
 class DeriveIdTest(unittest.TestCase):
     def test_glossary_id(self):
-        self.assertEqual(derive_id("GlossaryTerm", "disturb-bubble-system", "hit"),
-                         "g.disturb-bubble-system.hit")
+        self.assertEqual(derive_id("GlossaryTerm", "trap-bubble-system", "hit"),
+                         "g.trap-bubble-system.hit")
 
     def test_mapping_id(self):
         self.assertEqual(derive_id("DomainMapping", "ctx", "k"), "mapping.ctx.k")
@@ -24,10 +24,10 @@ class DeriveIdTest(unittest.TestCase):
 class BuildCodeEvidenceTest(unittest.TestCase):
     def test_anchor_expands_to_locator_and_evref(self):
         notes = {
-            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "bb2_client"},
-            "code_anchors": [{"key": "hit-hook", "path": "DisturbObject.h",
-                              "symbol": "DisturbObject::_doDisturbOnPop", "line_start": 206,
-                              "line_end": 206, "quote": "virtual void _doDisturbOnPop(...){};",
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
+            "code_anchors": [{"key": "hit-hook", "path": "TrapObject.h",
+                              "symbol": "TrapObject::_doTrapOnPop", "line_start": 206,
+                              "line_end": 206, "quote": "virtual void _doTrapOnPop(...){};",
                               "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
@@ -35,13 +35,13 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(set(kinds), {"CodeLocator", "EvidenceRef"})
         loc, ev = kinds["CodeLocator"], kinds["EvidenceRef"]
         self.assertEqual(loc["id"], "code.ctx.hit-hook")
-        self.assertEqual(loc["path"], "DisturbObject.h")
+        self.assertEqual(loc["path"], "TrapObject.h")
         self.assertEqual(loc["commit_sha"], "abc123")
-        self.assertEqual(loc["repo"], "bb2_client")
+        self.assertEqual(loc["repo"], "demoapp")
         self.assertEqual(ev["id"], "evref.ctx.hit-hook")
         self.assertEqual(ev["evidence_manifest_id"], "manifest.ctx.code-v2")
         self.assertEqual(ev["ref_type"], "code_locator")
-        self.assertEqual(ev["locator"], "DisturbObject.h:206")
+        self.assertEqual(ev["locator"], "TrapObject.h:206")
 
 
 def _store(*objs):
@@ -76,20 +76,20 @@ class ResolveRefsTest(unittest.TestCase):
 class BuildMappingsTest(unittest.TestCase):
     def test_mapping_links_new_and_ref_terms(self):
         notes = {
-            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "bb2_client"},
+            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "mappings": [{"key": "hit-trigger", "canonical_summary": "요약",
                           "meaning": "의미", "boundary": "경계",
                           "glossary_keys": ["hit"], "glossary_term_refs": ["near_pop_hook"],
                           "code_evref_keys": ["hit-hook"]}],
         }
-        refs_map = {"near_pop_hook": "g.ctx.do-disturb-on-near-bubble-pop"}
+        refs_map = {"near_pop_hook": "g.ctx.do-trap-on-near-bubble-pop"}
         objs = build_mappings(notes, refs_map, NOW)
         m = objs[0]
         self.assertEqual(m["id"], "mapping.ctx.hit-trigger")
         self.assertEqual(m["kind"], "DomainMapping")
         self.assertEqual(m["status"], "reviewed")
         self.assertEqual(sorted(m["glossary_term_ids"]),
-                         ["g.ctx.do-disturb-on-near-bubble-pop", "g.ctx.hit"])
+                         ["g.ctx.do-trap-on-near-bubble-pop", "g.ctx.hit"])
         self.assertEqual(m["code_locator_ids"], ["code.ctx.hit-hook"])
         self.assertEqual(m["evidence_refs"], ["evref.ctx.hit-hook"])
         self.assertEqual(m["caveats"], ["history_coverage=unsearched"])
@@ -97,7 +97,7 @@ class BuildMappingsTest(unittest.TestCase):
 
 class BuildManifestsContextTest(unittest.TestCase):
     def test_source_becomes_manifest(self):
-        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "sources": [{"id": "manifest.ctx.s", "source_type": "session",
                               "title": "T", "locator": "...", "captured_by": "user-statement"}]}
         objs = build_manifests(notes, NOW)
@@ -107,12 +107,12 @@ class BuildManifestsContextTest(unittest.TestCase):
         self.assertEqual(m["kind"], "EvidenceManifest")
         self.assertEqual(m["truth_role"], "source")
         self.assertEqual(m["redaction_status"], "none")  # default
-        self.assertEqual(m["acl"], ["bb2-team"])          # default
+        self.assertEqual(m["acl"], ["demo-team"])          # default
 
     def test_context_built_only_with_display_fields(self):
-        base_cx = {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"}
+        base_cx = {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"}
         self.assertEqual(build_context({"context": base_cx}, NOW), [])  # display_name 없으면 빈 리스트
-        rich = dict(base_cx, display_name="방해버블", boundary_summary="...")
+        rich = dict(base_cx, display_name="함정", boundary_summary="...")
         objs = build_context({"context": rich}, NOW)
         self.assertEqual(objs[0]["id"], "context.ctx")
         self.assertEqual(objs[0]["kind"], "DomainContext")
@@ -122,7 +122,7 @@ class BuildManifestsContextTest(unittest.TestCase):
 class BuildGlossaryTest(unittest.TestCase):
     def test_builds_reviewed_term_with_evidence(self):
         notes = {
-            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "bb2_client"},
+            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "glossary": [{"key": "hit", "term": "hit (직접 타격)", "definition": "슈팅버블이…",
                           "evidence_refs": ["evref.ctx.hit-session"]}],
         }
@@ -222,7 +222,7 @@ def _ref_objs(ctx="ctx"):
     manifest = {"id": f"manifest.{ctx}.src", "kind": "EvidenceManifest", "status": "reviewed",
                 "truth_role": "source", "title": "src", "source_type": "session",
                 "locator": "...", "captured_at": T0, "captured_by": "user-statement",
-                "sensitivity": "internal", "acl": ["bb2-team"], "redaction_status": "approved",
+                "sensitivity": "internal", "acl": ["demo-team"], "redaction_status": "approved",
                 "schema_version": "0.1", "poc_priority": "P2",
                 "created_at": T0, "updated_at": T0, "tags": [ctx], "evidence_refs": []}
     evref = {"id": f"evref.{ctx}.x", "kind": "EvidenceRef", "status": "reviewed",
@@ -232,7 +232,7 @@ def _ref_objs(ctx="ctx"):
              "created_at": T0, "updated_at": T0, "tags": [ctx], "evidence_refs": []}
     context = {"id": f"context.{ctx}", "kind": "DomainContext", "status": "reviewed",
                "truth_role": "domain", "title": "C", "context_key": ctx,
-               "project_id": "bb2_client", "display_name": "C", "boundary_summary": "b",
+               "project_id": "demoapp", "display_name": "C", "boundary_summary": "b",
                "in_scope": [], "out_of_scope": [],
                "injection_profile": {"default_audience": "coding-agent"},
                "glossary_term_ids": [], "schema_version": "0.1", "poc_priority": "P2",
@@ -280,7 +280,7 @@ class ValidateNotesTest(unittest.TestCase):
 class BuildIntegrationTest(unittest.TestCase):
     def test_build_new_objects_bundle(self):
         notes = {
-            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "bb2_client"},
+            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
                          "title": "코드", "locator": "...", "captured_by": "agent"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
@@ -298,7 +298,7 @@ class BuildIntegrationTest(unittest.TestCase):
 
     def test_build_dangling_ref_caught(self):
         # glossary가 없는 evref를 가리키면 2층(dangling)이 잡는다
-        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "glossary": [{"key": "x", "term": "x", "definition": "d",
                                "evidence_refs": ["evref.ctx.nonexistent"]}]}
         result = build(notes, _store(), NOW)
@@ -312,7 +312,7 @@ class BuildIntegrationTest(unittest.TestCase):
                  "evidence_manifest_id": "manifest.ctx.missing", "ref_type": "session_turn",
                  "locator": "...", "summary": "s", "schema_version": "0.1", "poc_priority": "P2",
                  "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
-        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "extra_objects": [evref]}
         result = build(notes, _store(), NOW)
         self.assertTrue(any("evidence_manifest_id" in e for e in result["errors"]))
@@ -321,7 +321,7 @@ class BuildIntegrationTest(unittest.TestCase):
         # DomainContext.glossary_term_ids union 대상이 store·묶음 어디에도 없으면 build가 잡는다
         # (lint는 DomainMapping 링크만 봐서 DomainContext union은 사각지대)
         store = _store(*_ref_objs())  # context.ctx 포함
-        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "updates": [{"id": "context.ctx", "expected_updated_at": T0,
                               "union": {"glossary_term_ids": ["g.ctx.nonexistent"]}}]}
         result = build(notes, store, NOW)
@@ -330,7 +330,7 @@ class BuildIntegrationTest(unittest.TestCase):
     def test_build_emits_preconditions_for_updates(self):
         # title(비-claim) set + 참조 닫힌 픽스처 → errors 없이 preconditions 방출
         store = _store(_mapping(glossary_term_ids=[]), *_ref_objs())
-        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "bb2_client"},
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "updates": [{"id": "mapping.ctx.hook", "expected_updated_at": T0,
                               "set": {"title": "새 제목"}}]}
         result = build(notes, store, NOW)

@@ -4,9 +4,7 @@
 하이브리드 검색(FTS5 BM25 + bge-m3 벡터 + RRF 융합 + 그래프 상호지지 재정렬) +
 회상 CLI.
 
-LINE Bubble 2(bb2_client) 안에서 `scripts/bb2_brain`으로 개발되다 2026-06에
-범용 엔진으로 분리됐다(개발 히스토리는 bb2_client 브랜치
-`docs/bb2-brain-object-model`에 보존).
+한 프로젝트의 내부 도구로 개발되다 2026-06에 범용 엔진으로 분리됐다.
 
 ## 2-레포 모델: 엔진 / 데이터
 
@@ -23,8 +21,8 @@ LINE Bubble 2(bb2_client) 안에서 `scripts/bb2_brain`으로 개발되다 2026-
 전제는 [uv](https://docs.astral.sh/uv/) 하나다.
 
 ```bash
-git clone <this-repo> ~/Downloads/codes/project-brain
-uv tool install -e ~/Downloads/codes/project-brain
+git clone <this-repo> project-brain
+uv tool install -e ./project-brain
 ```
 
 편집 설치(-e)라 엔진 수정이 모든 프로젝트에 즉시 반영된다.

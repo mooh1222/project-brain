@@ -1,5 +1,5 @@
 """object-model 스키마의 kind별 필수 필드 검증 (첫 슬라이스 13종).
-spec: docs/superpowers/specs/2026-05-27-bb2-brain-object-model-design.md
+spec: docs/superpowers/specs/2026-05-27-project-brain-object-model-design.md
 router가 실제로 읽는 필드는 일부지만, 적재 무결성을 위해 spec 필수 필드 전체를 강제한다."""
 
 BASE_REQUIRED = (

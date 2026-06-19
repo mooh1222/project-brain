@@ -79,8 +79,8 @@ class TestCandidateExposure(unittest.TestCase):
 
     def test_alias_matches_candidate(self):
         store = store_of(context(glossary_term_ids=[]),
-                         candidate_term_inline("g.a", "카누 레이스", aliases=["샐리의 카누"]))
-        answer = QueryRouter(store).answer("샐리의 카누 용어 무슨 뜻?")
+                         candidate_term_inline("g.a", "카약 레이스", aliases=["미나의 카약"]))
+        answer = QueryRouter(store).answer("미나의 카약 용어 무슨 뜻?")
         gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
         self.assertIn("g.a", [c["id"] for c in gloss["candidate_terms"]])
 
@@ -489,7 +489,7 @@ class TestRouterAdvisories(unittest.TestCase):
                  tags=["n"], created_at=T, updated_at=T),
             base({"id": "code.gate", "kind": "CodeLocator", "status": "reviewed",
                   "truth_role": "reference", "title": "Code", "context_id": "context.neutral",
-                  "repo": "bb2_client", "path": "a/Enter.cpp", "symbol": "Enter::gate",
+                  "repo": "demoapp", "path": "a/Enter.cpp", "symbol": "Enter::gate",
                   "locator_source": "rg", "verified_at": T, "evidence_refs": []},
                  tags=["n"], created_at=T, updated_at=T),
             base({"id": "insight.gate", "kind": "Insight", "status": "reviewed",

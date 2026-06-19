@@ -1,7 +1,7 @@
 """stale-check / mark-checked 로직·CLI 테스트.
 
 자기완결: 인라인 객체 빌더 + 가짜 git_runner만 쓴다(실 git·네트워크 없음).
-spec: docs/superpowers/specs/2026-06-14-bb2-brain-stale-check-design.md
+spec: docs/superpowers/specs/2026-06-14-project-brain-stale-check-design.md
 """
 import io
 import json
@@ -43,7 +43,7 @@ def code_locator(cid, *, path, commit_sha, symbol="sym", line_start=10, line_end
     from project_brain.objbase import base
     return base({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
-        "title": f"Code: {symbol}", "repo": "bb2_client", "path": path, "symbol": symbol,
+        "title": f"Code: {symbol}", "repo": "demoapp", "path": path, "symbol": symbol,
         "line_start": line_start, "line_end": line_end,
         "locator_source": "rg", "verified_at": "2026-06-12T00:00:00Z",
         "commit_sha": commit_sha, "evidence_refs": [],
@@ -235,7 +235,7 @@ class StaleCheckTest(unittest.TestCase):
         from project_brain.objbase import base
         loc_no_sha = base({
             "id": "code.nosha", "kind": "CodeLocator", "status": "reviewed",
-            "truth_role": "reference", "title": "t", "repo": "bb2_client",
+            "truth_role": "reference", "title": "t", "repo": "demoapp",
             "path": "a/NoSha.cpp", "symbol": "s", "locator_source": "rg",
             "verified_at": "2026-06-12T00:00:00Z", "evidence_refs": [],
         }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")

@@ -1,18 +1,18 @@
-"""샐리 카누 새 추출 end-to-end 적재 (Task 6 + Task 7).
+"""미나 카약 새 추출 end-to-end 적재 (Task 6 + Task 7).
 
-폐기 도메인 스크립트 없이 generic ingest/promote/objbase 부품만으로 샐리 카누를
+폐기 도메인 스크립트 없이 generic ingest/promote/objbase 부품만으로 미나 카약를
 적재한다. 객체 값은 살아있는 소스를 직접 읽어 채운 것이다(추측 금지, 소스에 있는 것만):
-  - 기획서: ~/Desktop/vault/inbox/dumps/sally-canoe/spec-v8.md
+  - 기획서: mina-kayak 스펙 문서(spec-v8)
       기본 정보(L46-65 7명 그룹 레이스/제한시간/N스테이지 선착순 3위/단계 진행/
       반복 참여/쿨타임/완주 기준 3가지/반복 MAX), 더미 NPC(L184-185).
-  - develop 코드: LineBubble2/Classes/main/Event/SallyCanoe/
-      model/SallyCanoeEventModel.hpp:14-32  SALLY_CANOE_RACE_STATUS::Enum + strToEnum
+  - develop 코드: SampleGame2/Classes/main/Event/MinaKayak/
+      model/MinaKayakEventModel.hpp:14-32  MINA_KAYAK_RACE_STATUS::Enum + strToEnum
         (IDLE/RACING/RACE_END/COOLTIME/FINISHED 5개).
-      model/SallyCanoeEventModel.cpp:185-263  parse (ST/CL/PYN 서버 파싱).
-      model/SallyCanoeEventModel.cpp:158-174  getCurrentLevel (IDLE일 때 CL+1 매칭).
-      presenter/SallyCanoeViewData.hpp:38      State enum (READY/RACING/COOLDOWN/ENDED 4개).
-      presenter/SallyCanoeViewData.cpp:21-43   상태 접힘 switch (RACE_END·FINISHED 둘 다 →ENDED).
-      model/SallyCanoeEventManager.hpp:27-35   isCoolTime/isRaceEnd/isRaceFailure(선착순 ≤3).
+      model/MinaKayakEventModel.cpp:185-263  parse (ST/CL/PYN 서버 파싱).
+      model/MinaKayakEventModel.cpp:158-174  getCurrentLevel (IDLE일 때 CL+1 매칭).
+      presenter/MinaKayakViewData.hpp:38      State enum (READY/RACING/COOLDOWN/ENDED 4개).
+      presenter/MinaKayakViewData.cpp:21-43   상태 접힘 switch (RACE_END·FINISHED 둘 다 →ENDED).
+      model/MinaKayakEventManager.hpp:27-35   isCoolTime/isRaceEnd/isRaceFailure(선착순 ≤3).
 
 도메인 범위는 lifecycle/state spine으로 제한(레이스 단계·상태, 더미 NPC, 선착순
 달성/미달성, 쿨타임, 반복 참여). 단계1 candidate bundle 1회 ingest → 단계2
@@ -31,9 +31,9 @@ from project_brain.router import QueryRouter
 from project_brain.store import BrainStore
 
 T = "2026-06-04T00:00:00Z"
-REPO = "bb2_client"
-CTX = "context.sally-canoe"
-BUNDLE_KEY = "bundle.sally-canoe.domain-mapping"
+REPO = "demoapp"
+CTX = "context.mina-kayak"
+BUNDLE_KEY = "bundle.mina-kayak.domain-mapping"
 
 
 # ── 살아있는 소스에서 추출한 candidate bundle 빌더 ──────────────────────────────
@@ -55,7 +55,7 @@ def _manifest(mid, *, source_type, title, locator, captured_by):
             "acl": ["team"],
             "redaction_status": "none",
         },
-        tags=["sally-canoe"], created_at=T, updated_at=T,
+        tags=["mina-kayak"], created_at=T, updated_at=T,
     )
 
 
@@ -72,7 +72,7 @@ def _spec_ref(rid, *, manifest_id, summary, section):
             "locator": {"doc": "spec-v8.md", "section": section},
             "summary": summary,
         },
-        tags=["sally-canoe"], created_at=T, updated_at=T,
+        tags=["mina-kayak"], created_at=T, updated_at=T,
     )
 
 
@@ -92,7 +92,7 @@ def _code_locator(lid, *, path, symbol, line_start, line_end, title):
             "locator_source": "rg",
             "verified_at": T,
         },
-        tags=["sally-canoe"], created_at=T, updated_at=T,
+        tags=["mina-kayak"], created_at=T, updated_at=T,
     )
 
 
@@ -109,7 +109,7 @@ def _code_ref(rid, *, manifest_id, locator_id, summary):
             "locator": {"code_locator_id": locator_id},
             "summary": summary,
         },
-        tags=["sally-canoe"], created_at=T, updated_at=T,
+        tags=["mina-kayak"], created_at=T, updated_at=T,
     )
 
 
@@ -137,7 +137,7 @@ def _candidate_term(tid, *, term, definition, synonyms, candidate_state="ready_f
     # evidence_refs는 base() setdefault가 [] 안 덮도록 obj에 미리 박는다(caller field 보존).
     if evidence_refs is not None:
         obj["evidence_refs"] = evidence_refs
-    return base(obj, tags=["sally-canoe"], created_at=T, updated_at=T)
+    return base(obj, tags=["mina-kayak"], created_at=T, updated_at=T)
 
 
 def _decision(did, *, decision_type, summary, decision, source_object_ids, affected_mapping_ids=None):
@@ -156,7 +156,7 @@ def _decision(did, *, decision_type, summary, decision, source_object_ids, affec
     }
     if affected_mapping_ids is not None:
         obj["affected_mapping_ids"] = affected_mapping_ids
-    return base(obj, tags=["sally-canoe"], created_at=T, updated_at=T)
+    return base(obj, tags=["mina-kayak"], created_at=T, updated_at=T)
 
 
 def _candidate_mapping(mid, *, mapping_key, canonical_summary, meaning, boundary,
@@ -179,7 +179,7 @@ def _candidate_mapping(mid, *, mapping_key, canonical_summary, meaning, boundary
     }
     if evidence_refs is not None:
         obj["evidence_refs"] = evidence_refs
-    return base(obj, tags=["sally-canoe"], created_at=T, updated_at=T)
+    return base(obj, tags=["mina-kayak"], created_at=T, updated_at=T)
 
 
 def build_candidate_bundle():
@@ -191,15 +191,15 @@ def build_candidate_bundle():
     objs.append(_manifest(
         "ev.manifest.spec-v8",
         source_type="spec",
-        title="샐리 카누 기획서 v8",
-        locator="spec://sally-canoe/spec-v8.md",
+        title="미나 카약 기획서 v8",
+        locator="spec://mina-kayak/spec-v8.md",
         captured_by="game-planning",
     ))
     objs.append(_manifest(
         "ev.manifest.code",
         source_type="code_search",
-        title="develop SallyCanoe 코드",
-        locator="repo://bb2_client/LineBubble2/Classes/main/Event/SallyCanoe",
+        title="develop MinaKayak 코드",
+        locator="repo://demoapp/SampleGame2/Classes/main/Event/MinaKayak",
         captured_by="rg",
     ))
 
@@ -238,42 +238,42 @@ def build_candidate_bundle():
     # CodeLocator — develop 코드 앵커 (path + symbol + line_start/line_end)
     objs.append(_code_locator(
         "code.race-status-enum",
-        path="LineBubble2/Classes/main/Event/SallyCanoe/model/SallyCanoeEventModel.hpp",
-        symbol="SALLY_CANOE_RACE_STATUS::Enum / strToEnum",
+        path="SampleGame2/Classes/main/Event/MinaKayak/model/MinaKayakEventModel.hpp",
+        symbol="MINA_KAYAK_RACE_STATUS::Enum / strToEnum",
         line_start=14, line_end=32,
         title="서버 파싱용 레이스 상태 enum (IDLE/RACING/RACE_END/COOLTIME/FINISHED)",
     ))
     objs.append(_code_locator(
         "code.model-parse",
-        path="LineBubble2/Classes/main/Event/SallyCanoe/model/SallyCanoeEventModel.cpp",
-        symbol="SallyCanoeEventModel::parse",
+        path="SampleGame2/Classes/main/Event/MinaKayak/model/MinaKayakEventModel.cpp",
+        symbol="MinaKayakEventModel::parse",
         line_start=185, line_end=263,
         title="서버 응답 파싱 — ST(상태)/CL(현재 레이스 번호)/PYN(팝업 노출)",
     ))
     objs.append(_code_locator(
         "code.current-level",
-        path="LineBubble2/Classes/main/Event/SallyCanoe/model/SallyCanoeEventModel.cpp",
-        symbol="SallyCanoeEventModel::getCurrentLevel",
+        path="SampleGame2/Classes/main/Event/MinaKayak/model/MinaKayakEventModel.cpp",
+        symbol="MinaKayakEventModel::getCurrentLevel",
         line_start=158, line_end=174,
         title="IDLE 상태에서 다음 단계 매칭(CL+1) — 단계 진행 표시 로직",
     ))
     objs.append(_code_locator(
         "code.view-state-enum",
-        path="LineBubble2/Classes/main/Event/SallyCanoe/presenter/SallyCanoeViewData.hpp",
-        symbol="SallyCanoeViewData::State",
+        path="SampleGame2/Classes/main/Event/MinaKayak/presenter/MinaKayakViewData.hpp",
+        symbol="MinaKayakViewData::State",
         line_start=38, line_end=38,
         title="표시용 상태 enum (READY/RACING/COOLDOWN/ENDED)",
     ))
     objs.append(_code_locator(
         "code.state-fold",
-        path="LineBubble2/Classes/main/Event/SallyCanoe/presenter/SallyCanoeViewData.cpp",
-        symbol="SallyCanoeViewData::fromModel",
+        path="SampleGame2/Classes/main/Event/MinaKayak/presenter/MinaKayakViewData.cpp",
+        symbol="MinaKayakViewData::fromModel",
         line_start=21, line_end=43,
         title="상태 접힘 — RACE_END와 FINISHED 둘 다 ENDED로 매핑(5→4)",
     ))
     objs.append(_code_locator(
         "code.cooltime-manager",
-        path="LineBubble2/Classes/main/Event/SallyCanoe/model/SallyCanoeEventManager.hpp",
+        path="SampleGame2/Classes/main/Event/MinaKayak/model/MinaKayakEventManager.hpp",
         symbol="isCoolTime / isRaceEnd / isRaceFailure",
         line_start=27, line_end=35,
         title="쿨타임/레이스 종료/실패 판정 헬퍼(선착순 ≤3)",
@@ -416,11 +416,11 @@ def build_candidate_bundle():
             "kind": "DomainContext",
             "status": "reviewed",
             "truth_role": "domain",
-            "title": "샐리 카누 도메인",
-            "context_key": "sally-canoe",
-            "project_id": "bb2_client",
-            "display_name": "샐리 카누 레이스",
-            "boundary_summary": "카누 레이스 lifecycle/state — 레이스 단계·상태, 더미 NPC, 선착순, 쿨타임, 반복 참여.",
+            "title": "미나 카약 도메인",
+            "context_key": "mina-kayak",
+            "project_id": "demoapp",
+            "display_name": "미나 카약 레이스",
+            "boundary_summary": "카약 레이스 lifecycle/state — 레이스 단계·상태, 더미 NPC, 선착순, 쿨타임, 반복 참여.",
             "in_scope": ["레이스 상태", "단계 진행", "더미 NPC", "선착순", "쿨타임", "반복 참여"],
             "out_of_scope": ["UI 컴포넌트", "팝업 세부", "보상 아이템 상세"],
             "injection_profile": {"default_audience": "coding-agent"},
@@ -429,7 +429,7 @@ def build_candidate_bundle():
                 "g.finish-rank", "g.cooltime", "g.repeat-join",
             ],
         },
-        tags=["sally-canoe"], created_at=T, updated_at=T,
+        tags=["mina-kayak"], created_at=T, updated_at=T,
     ))
 
     return objs
@@ -445,7 +445,7 @@ MAPPING_IDS = ["mapping.state-fold", "mapping.dummy-npc", "mapping.cooltime"]
 PROMOTE_TERM_ID = "g.finish-rank"
 
 
-class SallyCanoeEndToEndTest(unittest.TestCase):
+class MinaKayakEndToEndTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -496,7 +496,7 @@ class SallyCanoeEndToEndTest(unittest.TestCase):
         """AC1: generic 부품(ingest/promote/objbase)의 실행 코드에 도메인 id가 없음.
 
         주석/docstring/문자열 리터럴을 AST로 떼어낸 코드 토큰만 검사한다 — promote.py
-        docstring은 흡수 출처로 폐기 스크립트 파일명(ingest_sally_canoe_source)을 적고
+        docstring은 흡수 출처로 폐기 스크립트 파일명(ingest_mina_kayak_source)을 적고
         있으나, 그건 도메인 데이터 상수가 아니라 출처 설명이라 AC1(부품 도메인 상수 0)을
         위반하지 않는다. 검사 단위는 식별자·이름 토큰이지 docstring 텍스트가 아니다."""
         import ast
@@ -520,7 +520,7 @@ class SallyCanoeEndToEndTest(unittest.TestCase):
                 elif isinstance(node, ast.arg):
                     names.add(node.arg.lower())
             joined = " ".join(names)
-            for needle in ("sally", "canoe"):
+            for needle in ("mina", "kayak"):
                 self.assertNotIn(
                     needle, joined, f"{name} code identifier contains domain id {needle!r}"
                 )
@@ -549,7 +549,7 @@ class SallyCanoeEndToEndTest(unittest.TestCase):
         self.assertEqual(lint_store(store), [])
 
     def test_e2e_cli_recall(self):
-        """AC6: 새로 적재한 store가 스스로 샐리 표면어를 회상한다.
+        """AC6: 새로 적재한 store가 스스로 미나 표면어를 회상한다.
         쿨타임 표면어로 질의 → reviewed mapping.cooltime이 source_object_ids에.
 
         ★명명 주의(§7)★: 여기서 "recall"은 옛 키워드 라우터(QueryRouter.answer의

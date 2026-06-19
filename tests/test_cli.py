@@ -103,28 +103,28 @@ class TestCli(unittest.TestCase):
         from project_brain.embedder import StubEmbedder
         from project_brain.search_index import rebuild
         from tests.test_search import build_store_dir, domain_mapping, projection
-        src = domain_mapping("mapping.sally-canoe.race-end-result-achieve",
-                             meaning="샐리 결과 팝업 순위 표시", context_id="context.sally-canoe")
+        src = domain_mapping("mapping.mina-kayak.race-end-result-achieve",
+                             meaning="미나 결과 팝업 순위 표시", context_id="context.mina-kayak")
         build_store_dir(self.root, [
             src,
-            projection("projection.sally-canoe.result-popup-rank.reviewed",
-                       context_id="context.sally-canoe",
-                       title="샐리 결과 팝업 순위 표시 착수 브리핑(검증)",
-                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+            projection("projection.mina-kayak.result-popup-rank.reviewed",
+                       context_id="context.mina-kayak",
+                       title="미나 결과 팝업 순위 표시 착수 브리핑(검증)",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupMinaKayakResult.",
+                       source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                        source_objects=[src],
                        status="reviewed"),
-            projection("projection.sally-canoe.result-popup-rank.candidate",
-                       context_id="context.sally-canoe",
-                       title="샐리 결과 팝업 순위 표시 착수 브리핑(후보)",
-                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupSallyCanoeResult.",
-                       source_object_ids=["mapping.sally-canoe.race-end-result-achieve"],
+            projection("projection.mina-kayak.result-popup-rank.candidate",
+                       context_id="context.mina-kayak",
+                       title="미나 결과 팝업 순위 표시 착수 브리핑(후보)",
+                       reuse_payload="데이터 출처: RaceInfo recordMap. 확장 지점: PopupMinaKayakResult.",
+                       source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                        source_objects=[src],
                        status="candidate"),
         ])
         db = self.input_dir / "index.db"
         rebuild(self.root, db, embedder=StubEmbedder())
-        argv = ["search", "샐리 결과 팝업 순위 표시", "--brain-root", str(self.root),
+        argv = ["search", "미나 결과 팝업 순위 표시", "--brain-root", str(self.root),
                 "--db", str(db), "--stub-embedder"]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -722,7 +722,7 @@ class CliSessionTest(unittest.TestCase):
             proj = root / "p"
             proj.mkdir(parents=True)
             (proj / "abc.jsonl").write_text(
-                '{"type": "user", "cwd": "/x/bb2", "timestamp": "2026-06-11T01:00:00Z"}\n',
+                '{"type": "user", "cwd": "/x/demo", "timestamp": "2026-06-11T01:00:00Z"}\n',
                 encoding="utf-8",
             )
             brain_root = Path(td) / "brain"
@@ -769,7 +769,7 @@ class RunBuildTest(unittest.TestCase):
             # reviewed GlossaryTerm은 evidence_refs가 필수(schema) → source+code_anchor로 닫는다
             notes_path.write_text(json.dumps({
                 "context": {"key": "ctx", "commit": "abc",
-                            "now": "2026-06-16T00:00:00Z", "repo": "bb2_client"},
+                            "now": "2026-06-16T00:00:00Z", "repo": "demoapp"},
                 "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
                              "title": "코드", "locator": "...", "captured_by": "agent"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
@@ -833,7 +833,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--source-object-ids", "mapping.neutral.race-end",
             "--title", "결과 팝업 순위 표시 착수 브리핑",
             "--payload-file", str(self.payload_file),
-            "--generated-by", "bb2-brain-query",
+            "--generated-by", "demo-brain-query",
             *extra,
         ]
 
@@ -856,7 +856,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
         self.assertEqual(proj["kind"], "ContextProjection")
         self.assertEqual(proj["format"], "prompt_payload")
         self.assertEqual(proj["status"], "candidate")
-        self.assertEqual(proj["generated_by"], "bb2-brain-query")
+        self.assertEqual(proj["generated_by"], "demo-brain-query")
         self.assertTrue(proj["projection_hash"])
         self.assertTrue(proj["source_content_hash"])
 
@@ -871,7 +871,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--source-object-ids", "mapping.neutral.race-end", "mapping.does-not-exist",
             "--title", "결과 팝업 순위 표시 착수 브리핑",
             "--payload-file", str(self.payload_file),
-            "--generated-by", "bb2-brain-query",
+            "--generated-by", "demo-brain-query",
             "--write",
         ]
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):

@@ -351,7 +351,7 @@ class QueryRouter:
                 source_ids.extend(section_ids)
                 sections.append({"intent": intent, "object_ids": section_ids, "summary": "Evidence provenance"})
             elif intent == "unknown":
-                # §7 일반 회상: 맥락만 던진 질의("bb2-brain은 너가 사용해서 알려주는거야",
+                # §7 일반 회상: 맥락만 던진 질의("project-brain은 너가 사용해서 알려주는거야",
                 # 06-09)를 의미 회상으로 답한다. 게이트 통과 reviewed=확신(source_ids),
                 # candidate=후보(promotable_ids + "확인 필요" 라벨, 기존 C 정책 계승).
                 # 색인이 없으면 recall=None → 기존 "No matching intent"로 폴백한다.

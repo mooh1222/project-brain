@@ -1,6 +1,6 @@
 """promote() single_object 모드 단위 테스트 (Task 2).
 새 중립 합성 데이터(인라인 dict)만 사용한다 — 삭제된 fixture/테스트/폐기 스크립트
-데이터 미참조. promote는 build_reviewed_terms(폐기 ingest_sally_canoe_source.py)의
+데이터 미참조. promote는 build_reviewed_terms(폐기 ingest_mina_kayak_source.py)의
 변환을 흡수하되 GlossaryTerm 전용 title 문구는 제외(spec §3.2)."""
 
 import unittest

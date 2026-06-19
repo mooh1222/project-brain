@@ -1,1 +1,1 @@
-"""Tests for local BB2 Brain prototype tools."""
+"""Tests for local Project Brain prototype tools."""

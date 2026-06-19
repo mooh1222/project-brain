@@ -10,12 +10,10 @@ promote)하고, 한국어 하이브리드 검색(FTS5 BM25 + bge-m3 벡터 + RRF
 
 ## 2-레포 모델 — 여기는 엔진만
 
-- **이 레포**: 엔진 코드 + 합성 데이터 테스트만. 실코퍼스(게임 도메인 데이터)는 없다.
-- **데이터 레포**: `~/Desktop/bb2_client`의 루트 `brain/` (BB2가 첫 소비자).
+- **이 레포**: 엔진 코드 + 합성 데이터 테스트만. 실코퍼스(프로젝트 도메인 데이터)는 없다.
+- **데이터 레포**: 소비 프로젝트의 루트 `brain/`.
   골든셋(`brain/eval_scenarios.json`)과 실측 가드(`brain/checks/`)는 그쪽 소유다.
-- 설계 정본: vault wiki `bb2-project-brain` / 검색층 스펙:
-  bb2_client `docs/superpowers/specs/2026-06-10-bb2-brain-search-layer-design.md`
-  (분리 전 개발 히스토리는 bb2_client 브랜치 `docs/bb2-brain-object-model`).
+- 설계·개발 히스토리는 원 개발 프로젝트에 보존(이 레포 밖).
 
 ## 개발 루프
 
@@ -36,7 +34,7 @@ uv sync --extra mecab                  # 개발 venv (최초 1회)
 돌려야 완료다:
 
 ```bash
-cd ~/Desktop/bb2_client
+cd <소비 프로젝트 루트>
 pytest brain/checks/ -q          # 실측 가드 (CLI 호출 — 빠름)
 project-brain index rebuild      # 색인 영향 변경 시 (실모델, 수십 초)
 project-brain eval               # 골든셋 7종 (실모델)

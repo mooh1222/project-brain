@@ -27,7 +27,7 @@ def scan_sessions(
     """transcript_root 아래 모든 세션 jsonl의 요약 목록.
 
     반환 원소: {uuid, path, cwd, started_at, message_count}.
-    project_filter: cwd에 이 부분 문자열이 포함된 세션만(예: "bb2_client").
+    project_filter: cwd에 이 부분 문자열이 포함된 세션만(예: "demoapp").
     brain_root: 지정하면 processed 플래그를 함께 반환한다.
     """
     root = Path(transcript_root) if transcript_root else DEFAULT_TRANSCRIPT_ROOT

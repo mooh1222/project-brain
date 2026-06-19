@@ -17,9 +17,9 @@ from project_brain.installer import MANIFEST_FILENAME, install, render_template
 
 class RenderTemplateTest(unittest.TestCase):
     def test_substitutes_project_and_brain_root(self):
-        text = render_template("recall", project="bb2", brain_root="brain")
-        self.assertIn("name: bb2-brain-recall", text)
-        self.assertIn("bb2-brain-ingest", text)  # 상대 스킬 참조도 치환
+        text = render_template("recall", project="demo", brain_root="brain")
+        self.assertIn("name: demo-brain-recall", text)
+        self.assertIn("demo-brain-ingest", text)  # 상대 스킬 참조도 치환
         self.assertNotIn("{{PROJECT}}", text)
         self.assertNotIn("{{BRAIN_ROOT}}", text)
 
@@ -40,15 +40,15 @@ class InstallTest(unittest.TestCase):
         return self.target / ".claude" / "skills" / name / "SKILL.md"
 
     def test_fresh_install_creates_config_skills_manifest(self):
-        report = install(self.target, project="bb2")
+        report = install(self.target, project="demo")
         # config 생성 + project 기록
         cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
-        self.assertEqual(cfg["project"], "bb2")
+        self.assertEqual(cfg["project"], "demo")
         self.assertEqual(cfg["brain_root"], "brain")
         # 스킬 2종 렌더 주입
-        recall = self._skill("bb2-brain-recall").read_text(encoding="utf-8")
-        self.assertIn("name: bb2-brain-recall", recall)
-        self.assertTrue(self._skill("bb2-brain-ingest").exists())
+        recall = self._skill("demo-brain-recall").read_text(encoding="utf-8")
+        self.assertIn("name: demo-brain-recall", recall)
+        self.assertTrue(self._skill("demo-brain-ingest").exists())
         # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성:
         # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다)
         manifest = json.loads(
@@ -62,8 +62,8 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(len(report["created"]), 2)
 
     def test_reinstall_is_idempotent(self):
-        install(self.target, project="bb2")
-        report = install(self.target, project="bb2")
+        install(self.target, project="demo")
+        report = install(self.target, project="demo")
         self.assertEqual(report["config"], "kept")
         # 동일 내용 재설치 — created가 아니라 updated(도구 소유 갱신)로 보고
         self.assertEqual(report["created"], [])
@@ -74,7 +74,7 @@ class InstallTest(unittest.TestCase):
             json.dumps({"project": "custom", "brain_root": "knowledge"}),
             encoding="utf-8",
         )
-        report = install(self.target, project="bb2")
+        report = install(self.target, project="demo")
         cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(cfg["project"], "custom")  # 기존 config 보존
         self.assertEqual(report["config"], "kept")
@@ -84,19 +84,19 @@ class InstallTest(unittest.TestCase):
         self.assertIn("knowledge", recall)
 
     def test_user_modified_skill_not_overwritten(self):
-        install(self.target, project="bb2")
-        skill = self._skill("bb2-brain-recall")
+        install(self.target, project="demo")
+        skill = self._skill("demo-brain-recall")
         skill.write_text("사용자 수정본", encoding="utf-8")
-        report = install(self.target, project="bb2")
+        report = install(self.target, project="demo")
         self.assertEqual(skill.read_text(encoding="utf-8"), "사용자 수정본")
         self.assertIn(str(skill), report["skipped"])
 
     def test_preexisting_user_skill_not_touched(self):
         # install 밖에서 만들어진(=manifest에 없는) 스킬은 사용자 소유 — 건드리지 않는다.
-        skill = self._skill("bb2-brain-recall")
+        skill = self._skill("demo-brain-recall")
         skill.parent.mkdir(parents=True)
         skill.write_text("기존 사용자 스킬", encoding="utf-8")
-        report = install(self.target, project="bb2")
+        report = install(self.target, project="demo")
         self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
         self.assertIn(str(skill), report["skipped"])
 

@@ -280,7 +280,7 @@ def _refs():
     manifest = {"id": "manifest.ctx.src", "kind": "EvidenceManifest", "status": "reviewed",
                 "truth_role": "source", "title": "src", "source_type": "session",
                 "locator": "...", "captured_at": T0, "captured_by": "user-statement",
-                "sensitivity": "internal", "acl": ["bb2-team"], "redaction_status": "approved",
+                "sensitivity": "internal", "acl": ["demo-team"], "redaction_status": "approved",
                 "schema_version": "0.1", "poc_priority": "P2",
                 "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
     evref = {"id": "evref.ctx.x", "kind": "EvidenceRef", "status": "reviewed",
@@ -290,7 +290,7 @@ def _refs():
              "created_at": T0, "updated_at": T0, "tags": ["ctx"], "evidence_refs": []}
     context = {"id": "context.ctx", "kind": "DomainContext", "status": "reviewed",
                "truth_role": "domain", "title": "C", "context_key": "ctx",
-               "project_id": "bb2_client", "display_name": "C", "boundary_summary": "b",
+               "project_id": "demoapp", "display_name": "C", "boundary_summary": "b",
                "in_scope": [], "out_of_scope": [],
                "injection_profile": {"default_audience": "coding-agent"},
                "glossary_term_ids": [], "schema_version": "0.1", "poc_priority": "P2",

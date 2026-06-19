@@ -24,15 +24,15 @@ def _write_jsonl(path: Path, lines: list[dict]) -> None:
 SESSION_LINES = [
     {"type": "mode", "mode": "default", "timestamp": "2026-06-11T01:00:00.000Z"},
     {"type": "file-history-snapshot", "snapshot": {}, "timestamp": "2026-06-11T01:00:01.000Z"},
-    {"type": "attachment", "cwd": "/Users/x/Desktop/bb2_client",
+    {"type": "attachment", "cwd": "/Users/x/Desktop/demoapp",
      "timestamp": "2026-06-11T01:00:02.000Z"},
-    {"type": "user", "cwd": "/Users/x/Desktop/bb2_client",
+    {"type": "user", "cwd": "/Users/x/Desktop/demoapp",
      "message": {"role": "user", "content": "질문"},
      "timestamp": "2026-06-11T01:00:03.000Z"},
-    {"type": "assistant", "cwd": "/Users/x/Desktop/bb2_client",
+    {"type": "assistant", "cwd": "/Users/x/Desktop/demoapp",
      "message": {"role": "assistant", "content": []},
      "timestamp": "2026-06-11T01:00:04.000Z"},
-    {"type": "user", "cwd": "/Users/x/Desktop/bb2_client",
+    {"type": "user", "cwd": "/Users/x/Desktop/demoapp",
      "message": {"role": "user", "content": "후속"},
      "timestamp": "2026-06-11T01:00:05.000Z"},
 ]
@@ -42,7 +42,7 @@ class ScanSessionsTest(unittest.TestCase):
     def test_scan_reads_cwd_from_first_line_having_cwd_not_first_line(self):
         with TemporaryDirectory() as td:
             root = Path(td)
-            proj = root / "-Users-x-Desktop-bb2-client"
+            proj = root / "-Users-x-Desktop-demoapp"
             proj.mkdir()
             _write_jsonl(proj / "abc-123.jsonl", SESSION_LINES)
 
@@ -52,7 +52,7 @@ class ScanSessionsTest(unittest.TestCase):
             s = sessions[0]
             self.assertEqual(s["uuid"], "abc-123")
             # 첫 줄(mode)이 아니라 cwd 키가 처음 등장한 라인의 cwd
-            self.assertEqual(s["cwd"], "/Users/x/Desktop/bb2_client")
+            self.assertEqual(s["cwd"], "/Users/x/Desktop/demoapp")
 
     def test_scan_counts_only_user_assistant_messages(self):
         with TemporaryDirectory() as td:
@@ -94,7 +94,7 @@ class ScanSessionsTest(unittest.TestCase):
                      for l in SESSION_LINES]
             _write_jsonl(proj / "b.jsonl", other)
 
-            hits = scan_sessions(transcript_root=root, project_filter="bb2_client")
+            hits = scan_sessions(transcript_root=root, project_filter="demoapp")
             self.assertEqual([s["uuid"] for s in hits], ["a"])
 
 

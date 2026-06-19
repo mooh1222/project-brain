@@ -7,7 +7,7 @@
 없이 완전 결정론이라 같은 입력이면 항상 같은 청크(재생성 가능 색인의 전제, §4).
 
 청크 행 메타(§2.2): kind="raw_chunk", status="raw", context_id="context.<디렉토리명>"
-(실코퍼스 규약 — raw/sources/sally-canoe ↔ context.sally-canoe), id는
+(실코퍼스 규약 — raw/sources/mina-kayak ↔ context.mina-kayak), id는
 "raw.<context디렉토리>.<파일stem>#<순번:03d>" — brain 객체 id와 네임스페이스 분리.
 """
 

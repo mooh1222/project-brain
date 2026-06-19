@@ -1,6 +1,6 @@
 """코드 변경 → 의미 갱신 대상 발견 (stale-check) 로직.
 
-spec: docs/superpowers/specs/2026-06-14-bb2-brain-stale-check-design.md
+spec: docs/superpowers/specs/2026-06-14-project-brain-stale-check-design.md
 git 호출은 git_runner 콜러블로 주입한다 — 로직 함수는 git을 모른다(테스트는
 합성 입력으로 대체, 네트워크·실레포 무관). 기계는 "어느 파일이 바뀌어 어느
 매핑이 영향권인가"까지 찾고, "의미가 진짜 낡았나"는 사람이 판정한다.
