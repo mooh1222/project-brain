@@ -6,6 +6,9 @@
 
 한 프로젝트의 내부 도구로 개발되다 2026-06에 범용 엔진으로 분리됐다.
 
+색인·임베딩·검색의 코드 기준 동작은 [docs/search-internals.md](docs/search-internals.md),
+설계 근거는 [docs/design-canonical.md](docs/design-canonical.md)를 본다.
+
 ## 2-레포 모델: 엔진 / 데이터
 
 - **엔진(이 레포)**: 스키마·적재(ingest/promote)·lint·색인·검색·라우터·평가 하네스.
