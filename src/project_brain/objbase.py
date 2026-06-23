@@ -4,6 +4,15 @@
 헬퍼로 모은다. status default는 빼서(spec §3.3) generic 부품이 도메인/시점에
 무지하게 한다. ReviewRecord 조립도 헬퍼화한다.
 """
+from datetime import datetime, timedelta, timezone
+
+# 코퍼스 datetime 표준 타임존 — KST(+09:00, 서머타임 없이 고정).
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> str:
+    """현재 시각을 KST(+09:00) ISO8601 문자열로 — microsecond 없이, 오프셋은 콜론 표기."""
+    return datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
 
 def base(obj, *, tags, created_at, updated_at, schema_version="0.1", poc_priority="P0"):

@@ -244,6 +244,20 @@ class TestCliPromote(unittest.TestCase):
         from project_brain.lint import lint_store
         self.assertEqual(lint_store(store), [])
 
+    def test_promote_reviewed_at_defaults_to_kst_when_omitted(self):
+        # --reviewed-at 생략 시 엔진이 현재 KST(+09:00)를 박는다(시점은 caller 주입이 아니라 엔진 자동).
+        self._ingest()
+        argv = [
+            "promote", "--brain-root", str(self.root),
+            "--ids", "g.x", "--reviewer", "user-confirmed",
+        ]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        rr = BrainStore.load(self.root).get("review.g.x")
+        self.assertTrue(rr["reviewed_at"].endswith("+09:00"), rr["reviewed_at"])
+
     def test_promote_missing_id_returns_error(self):
         self._ingest()
         argv = [

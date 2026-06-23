@@ -2,8 +2,9 @@
 새 중립 합성 데이터(인라인 dict)만 사용한다 — 삭제된 fixture/테스트 미참조."""
 
 import unittest
+from datetime import datetime
 
-from project_brain.objbase import base, review_record
+from project_brain.objbase import base, now_kst, review_record
 from project_brain.schema import validate_object
 
 T = "2026-06-04T00:00:00Z"
@@ -41,6 +42,15 @@ class TestReviewRecord(unittest.TestCase):
         self.assertEqual(rr["kind"], "ReviewRecord")
         self.assertEqual(rr["truth_role"], "review")
         self.assertEqual(rr["status"], "reviewed")
+
+
+class TestNowKst(unittest.TestCase):
+    def test_now_kst_is_kst_offset_without_microsecond(self):
+        s = now_kst()
+        self.assertTrue(s.endswith("+09:00"), s)
+        dt = datetime.fromisoformat(s)
+        self.assertEqual(dt.utcoffset().total_seconds(), 9 * 3600)
+        self.assertEqual(dt.microsecond, 0)
 
 
 if __name__ == "__main__":

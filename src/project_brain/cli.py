@@ -1,7 +1,6 @@
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 from project_brain.config import ConfigError, resolve_brain_root, resolve_scenarios_path
@@ -13,6 +12,7 @@ from project_brain.eval_harness import (
 )
 from project_brain.ingest import IngestError, ingest
 from project_brain.lint import lint_store, _has_only_legacy_evidence
+from project_brain.objbase import now_kst
 from project_brain.promote import (
     promote,
     backfill_evidence,
@@ -82,7 +82,7 @@ def _run_promote(argv) -> int:
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--ids", required=True, nargs="+")
     parser.add_argument("--reviewer", required=True)
-    parser.add_argument("--reviewed-at", required=True)
+    parser.add_argument("--reviewed-at", help="생략 시 현재 KST를 엔진이 자동으로 박는다")
     parser.add_argument("--scope", default="single_object",
                         choices=["single_object", "mapping_bundle"])
     parser.add_argument("--bundle-key")
@@ -120,7 +120,7 @@ def _run_promote(argv) -> int:
     try:
         promoted, records = promote(
             objects, args.ids, args.scope,
-            bundle_key=args.bundle_key, reviewer=args.reviewer, reviewed_at=args.reviewed_at,
+            bundle_key=args.bundle_key, reviewer=args.reviewer, reviewed_at=args.reviewed_at or now_kst(),
             review_extra_by_id=review_extra_by_id,
         )
     except (ValueError, KeyError) as exc:
@@ -157,7 +157,7 @@ def _run_promote_auto(argv) -> int:
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--ids", required=True, nargs="+",
                         help="배치 커버리지 검증 워크플로우가 산출한 pass 용어 id 목록(§4.2b)")
-    parser.add_argument("--reviewed-at", required=True)
+    parser.add_argument("--reviewed-at", help="생략 시 현재 KST를 엔진이 자동으로 박는다")
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
@@ -204,7 +204,7 @@ def _run_promote_auto(argv) -> int:
         try:
             promoted, records = promote(
                 objects, eligible, "single_object",
-                reviewer="auto:mapping-vouched", reviewed_at=args.reviewed_at,
+                reviewer="auto:mapping-vouched", reviewed_at=args.reviewed_at or now_kst(),
                 review_extra_by_id=review_extra,
             )
         except (ValueError, KeyError) as exc:
@@ -491,13 +491,9 @@ def _run_build(argv) -> int:
 
     brain_root = resolve_brain_root(args.brain_root)
     notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
-    # now는 context.now에서만 받는다(top-level now는 validate_notes의 _VALID_SECTIONS 밖이라 거부됨).
-    now = notes.get("context", {}).get("now")
-    if not now:
-        print(json.dumps({"ok": False,
-                          "errors": ["노트: context.now 필수 (build 객체의 created_at/updated_at)"]},
-                         ensure_ascii=False, indent=2))
-        return 1
+    # 객체 created_at/updated_at/verified_at 시점. 노트에 context.now를 적으면 그 값을
+    # 쓰고(소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
+    now = notes.get("context", {}).get("now") or now_kst()
     store = BrainStore.load(brain_root)
     result = build(notes, store, now)
     if result["errors"]:
@@ -558,8 +554,8 @@ def _run_projection(argv) -> int:
         return 1
 
     payload = Path(args.payload_file).read_text(encoding="utf-8")
-    # mark-checked와 같은 방식의 현재 시각(코퍼스 datetime 표준 ...Z, microsecond 없음).
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # mark-checked와 같은 방식의 현재 시각(코퍼스 datetime 표준 KST +09:00, microsecond 없음).
+    now = now_kst()
     projection = build_reuse_projection(
         store,
         context_id=args.context_id,
@@ -663,8 +659,8 @@ def _run_mark_checked(argv) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
 
-    # 코퍼스 datetime 표준(...Z, microsecond 없음)에 맞춘다.
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # 코퍼스 datetime 표준(KST +09:00, microsecond 없음)에 맞춘다.
+    now = now_kst()
     result = mark_checked(store, mapping_ids=args.mappings,
                           checked_head=args.checked_head, current_head=current_head, now=now)
     if not result["ok"]:

@@ -12,8 +12,9 @@ type ∈ {user, assistant} 라인 기준으로 산출한다.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
+
+from project_brain.objbase import now_kst
 
 DEFAULT_TRANSCRIPT_ROOT = Path.home() / ".claude" / "projects"
 _MESSAGE_TYPES = {"user", "assistant"}
@@ -57,7 +58,7 @@ def mark_processed(uuid: str, brain_root, note: str | None = None) -> dict:
     d.mkdir(parents=True, exist_ok=True)
     record = {
         "uuid": uuid,
-        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "processed_at": now_kst(),
         "note": note,
     }
     (d / f"{uuid}.json").write_text(
