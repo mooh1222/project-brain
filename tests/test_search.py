@@ -543,9 +543,12 @@ class GraphOneHopTest(unittest.TestCase):
         # glossary_term_ids → related_object_ids. dangling(g.dangling) 건너뜀.
         by_id = self._by_id("시작 팝업 스테이지 개수 안내")
         related = by_id["m.popup"]["linked"]["related_object_ids"]
-        self.assertIn("g.target", related)
-        self.assertIn("g.popup", related)
-        self.assertNotIn("g.dangling", related)
+        by_rel = {r["object_id"]: r for r in related}
+        self.assertIn("g.target", by_rel)
+        self.assertIn("g.popup", by_rel)
+        self.assertNotIn("g.dangling", by_rel)
+        # 이웃 dict에 제목 동반(C-2) — id만으론 무엇인지 가늠 어려움.
+        self.assertEqual(by_rel["g.popup"]["title"], "Term: 시작 팝업")
 
     def test_linked_evidence_ref_ids_display_only(self):
         # evidence_refs는 표시 전용으로 동반(랭킹 입력 아님 — 여기선 동반 여부만 확인).
@@ -614,8 +617,9 @@ class GraphOneHopTest(unittest.TestCase):
         by_id = {h["object_id"]: h for h in hits}
         self.assertIn("dec.switch", by_id)
         related = by_id["dec.switch"]["linked"]["related_object_ids"]
-        self.assertIn("g.next", related)
-        self.assertIn("m.join", related)
+        related_ids = {r["object_id"] for r in related}
+        self.assertIn("g.next", related_ids)
+        self.assertIn("m.join", related_ids)
 
     def test_deterministic_with_graph(self):
         a = recall("시작 팝업 스테이지 개수 안내", db_path=self.db,

@@ -8,7 +8,7 @@ BM25 채널(search_bm25)과 벡터 채널(search_vector)을 각각 top 50 받아
 §3 결과 계약 dict로 만든다.
 
 슬라이스 4(§3.5 그래프 1-hop): 융합 top-30 적중에서 참조 필드를 1-hop 따라 linked를
-채우고(code_locators는 {object_id, path, symbol} 객체형), top-30 적중집합 안의 상호
+채우고(code_locators는 {object_id, title, path, symbol} 객체형), top-30 적중집합 안의 상호
 연결 도달 횟수를 graph_reached(bool)·graph_hits(횟수)로 분리 기록한다. evidence_refs는
 표시 전용(linked.evidence_ref_ids)이라 랭킹·그래프 도달 계산에서 제외한다.
 
@@ -156,9 +156,10 @@ def rrf_fuse(rankings, k: int = RRF_K):
 def _build_linked(object_id: str, store: BrainStore) -> dict:
     """적중 객체의 참조 필드를 1-hop 따라 linked를 채운다(§3.5).
 
-    - code_locators: code_locator_ids가 가리키는 CodeLocator를 ★{object_id, path, symbol}
+    - code_locators: code_locator_ids가 가리키는 CodeLocator를 ★{object_id, title, path, symbol}
       객체로★ 동반(jira→코드 핀포인트 — id만으론 핀포인트가 아니다, 과업 1번).
-    - related_object_ids: 용어/결정/매핑 등 나머지 4종 엣지가 가리키는 연결 객체 id.
+    - related_object_ids: 용어/결정/매핑 등 나머지 4종 엣지가 가리키는 연결 객체를
+      {object_id, title}로 동반(이웃이 무엇인지 id만으론 가늠 어려워 제목 동반).
     - evidence_ref_ids: 해당 객체의 evidence_refs(★표시 전용 — 랭킹·그래프 입력 금지★).
     ★dangling id(store에 없는 참조)는 건너뛴다★.
     """
@@ -171,15 +172,18 @@ def _build_linked(object_id: str, store: BrainStore) -> dict:
         c = store.get(cid)
         code_locators.append({
             "object_id": cid,
+            "title": c.get("title"),
             "path": c.get("path"),
             "symbol": c.get("symbol"),
         })
 
-    related: list[str] = []
+    related: list[dict] = []
+    seen_related: set[str] = set()
     for field in _RELATED_EDGE_FIELDS:
         for rid in obj.get(field) or []:
-            if store.has(rid) and rid not in related:
-                related.append(rid)
+            if store.has(rid) and rid not in seen_related:
+                seen_related.add(rid)
+                related.append({"object_id": rid, "title": store.get(rid).get("title")})
 
     # evidence_refs는 객체에 박힌 EvidenceRef id 리스트 — store 존재 여부와 무관하게
     # 표시 전용으로 그대로 동반(랭킹·그래프 도달 계산에는 절대 안 들어간다).
