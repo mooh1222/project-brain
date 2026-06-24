@@ -39,12 +39,11 @@ def fake_git_runner(target_head, changed):
     return run
 
 
-def code_locator(cid, *, path, commit_sha, symbol="sym", line_start=10, line_end=20):
+def code_locator(cid, *, path, commit_sha, symbol="sym"):
     from project_brain.objbase import base
     return base({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
         "title": f"Code: {symbol}", "repo": "demoapp", "path": path, "symbol": symbol,
-        "line_start": line_start, "line_end": line_end,
         "locator_source": "rg", "verified_at": "2026-06-12T00:00:00Z",
         "commit_sha": commit_sha, "evidence_refs": [],
     }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
@@ -301,8 +300,7 @@ class MarkCheckedTest(unittest.TestCase):
     def _shared(self):
         # code.shared를 reviewed 매핑 둘이 공유 + candidate 1 + superseded 1이 가리킴.
         return _store(
-            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD",
-                         line_start=40, line_end=80),
+            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD"),
             domain_mapping("m.r1", code_locator_ids=["code.shared"]),
             domain_mapping("m.r2", code_locator_ids=["code.shared"]),
             domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
@@ -321,8 +319,6 @@ class MarkCheckedTest(unittest.TestCase):
         self.assertEqual(loc["commit_sha"], "NEW")
         self.assertEqual(loc["verified_at"], "2026-06-14T12:00:00Z")
         self.assertEqual(loc["updated_at"], "2026-06-14T12:00:00Z")
-        self.assertEqual(loc["line_start"], 40)  # line 불변
-        self.assertEqual(loc["line_end"], 80)
         # warning은 candidate만 — superseded(m.sup)는 현재 사실 아니라 제외(spec §4).
         self.assertEqual(result["warnings"],
                          [{"locator_id": "code.shared", "candidate_mapping_ids": ["m.cand"]}])
@@ -389,8 +385,7 @@ class CliMarkCheckedTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         for obj in (
-            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD",
-                         line_start=40, line_end=80),
+            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD"),
             domain_mapping("m.r1", code_locator_ids=["code.shared"]),
             domain_mapping("m.r2", code_locator_ids=["code.shared"]),
             domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
@@ -415,11 +410,9 @@ class CliMarkCheckedTest(unittest.TestCase):
             runner)
         self.assertEqual(rc, 0)
         self.assertEqual(payload["updated"], ["code.shared"])
-        # 디스크에 갱신 반영 — commit_sha=NEW, line 불변.
+        # 디스크에 갱신 반영 — commit_sha=NEW.
         loc = BrainStore.load(self.root).get("code.shared")
         self.assertEqual(loc["commit_sha"], "NEW")
-        self.assertEqual(loc["line_start"], 40)
-        self.assertEqual(loc["line_end"], 80)
         # candidate가 같은 locator를 가리키므로 CLI 출력 warnings에 전달된다.
         self.assertEqual(payload["warnings"],
                          [{"locator_id": "code.shared", "candidate_mapping_ids": ["m.cand"]}])
@@ -451,8 +444,8 @@ class CliMarkCheckedTest(unittest.TestCase):
     def test_mixed_update_and_block_in_one_call(self):
         # 한 호출에서 X는 closure 완전(갱신), Y는 부분(blocked) — 독립 처리 + 디스크 반영.
         for obj in (
-            code_locator("code.x", path="a/X2.cpp", commit_sha="OLD", line_start=1, line_end=5),
-            code_locator("code.y", path="a/Y2.cpp", commit_sha="OLD", line_start=1, line_end=5),
+            code_locator("code.x", path="a/X2.cpp", commit_sha="OLD"),
+            code_locator("code.y", path="a/Y2.cpp", commit_sha="OLD"),
             domain_mapping("m.x1", code_locator_ids=["code.x"]),
             domain_mapping("m.x2", code_locator_ids=["code.x"]),
             domain_mapping("m.y1", code_locator_ids=["code.y"]),

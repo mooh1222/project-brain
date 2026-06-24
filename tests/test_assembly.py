@@ -38,12 +38,12 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(loc["path"], "TrapObject.h")
         self.assertEqual(loc["commit_sha"], "abc123")
         self.assertEqual(loc["repo"], "demoapp")
+        self.assertNotIn("line_start", loc)
+        self.assertNotIn("line_end", loc)
         self.assertEqual(ev["id"], "evref.ctx.hit-hook")
         self.assertEqual(ev["evidence_manifest_id"], "manifest.ctx.code-v2")
         self.assertEqual(ev["ref_type"], "code_locator")
-        self.assertEqual(ev["locator"], {"path": "TrapObject.h",
-                                         "symbol": "TrapObject::_doTrapOnPop",
-                                         "line_start": 206, "line_end": 206})
+        self.assertEqual(ev["locator"], {"code_locator_id": "code.ctx.hit-hook"})
 
     def test_anchor_without_line_numbers(self):
         notes = {
@@ -54,9 +54,9 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         objs = build_code_evidence(notes, NOW)
         kinds = {o["kind"]: o for o in objs}
         loc, ev = kinds["CodeLocator"], kinds["EvidenceRef"]
-        self.assertIsNone(loc["line_start"])
-        self.assertIsNone(loc["line_end"])
-        self.assertEqual(ev["locator"], {"path": "Foo.cpp", "symbol": "Foo::bar"})
+        self.assertNotIn("line_start", loc)
+        self.assertNotIn("line_end", loc)
+        self.assertEqual(ev["locator"], {"code_locator_id": "code.ctx.no-line"})
 
 
 def _store(*objs):

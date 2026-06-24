@@ -60,20 +60,14 @@ def build_code_evidence(notes, now):
             "id": derive_id("CodeLocator", ctx, key),
             "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
             "title": quote[:120], "repo": repo, "path": a["path"], "symbol": a["symbol"],
-            "line_start": a.get("line_start"), "line_end": a.get("line_end"),
             "locator_source": a.get("locator_source", "rg"),
             "commit_sha": commit, "verified_at": now,
         }
-        locator = {"path": a["path"], "symbol": a["symbol"]}
-        if a.get("line_start") is not None:
-            locator["line_start"] = a["line_start"]
-        if a.get("line_end") is not None:
-            locator["line_end"] = a["line_end"]
         ev = {
             "id": derive_id("EvidenceRef", ctx, key),
             "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
             "title": quote[:120], "evidence_manifest_id": a["manifest"],
-            "ref_type": "code_locator", "locator": locator,
+            "ref_type": "code_locator", "locator": {"code_locator_id": loc["id"]},
             "summary": quote[:500],
         }
         out.append(base(loc, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
