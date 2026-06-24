@@ -685,12 +685,17 @@ def _run_projection(argv) -> int:
 
 
 def _run_graph(argv) -> int:
-    """그래프 분석 (읽기 전용 — store 변경 0). 현재 하위명령은 isolated만.
+    """그래프 분석 (읽기 전용 — store 변경 0). 하위명령: isolated · export.
 
     `graph isolated [--brain-root <path>] [--kind <Kind> ...]` — 코퍼스 전체에서
     인바운드 0(아무도 안 가리킴 = 고립)인 잎 객체 id를 JSON으로 낸다. 기본 점검 대상은
     '가리켜지려고 존재하는 잎' kind(CodeLocator·GlossaryTerm·EvidenceRef); --kind로 한정 가능.
-    발견 전용이라 차단하지 않는다 — 어디에 무엇을 연결할지는 사람·스킬 몫(C7)."""
+    발견 전용이라 차단하지 않는다 — 어디에 무엇을 연결할지는 사람·스킬 몫(C7).
+
+    `graph export <out.html> [--brain-root <path>]` — 코퍼스를 vis-network 단일 HTML로
+    써서 브라우저로 탐색한다. 엣지는 isolated와 같은 정본 정의(INBOUND_REF_FIELDS)라
+    어떤 잎이 왜 고립인지 화면에서 그대로 보인다. vis-network는 CDN에서 받으므로 볼 때
+    인터넷이 필요하다. 읽기 전용 — store는 불변, 출력 파일만 쓴다."""
     parser = argparse.ArgumentParser(prog="cli graph")
     sub = parser.add_subparsers(dest="action", required=True)
     p_iso = sub.add_parser("isolated")
@@ -699,11 +704,27 @@ def _run_graph(argv) -> int:
                        help="점검 대상 kind 한정 (기본: CodeLocator·GlossaryTerm·EvidenceRef 잎 kind). "
                             "주의: 기본 잎 밖 kind(예: SlideRef)는 인바운드 엣지(slide_refs 등)가 "
                             "INBOUND_REF_FIELDS에 없어 거짓 고립이 날 수 있다")
+    p_exp = sub.add_parser("export")
+    p_exp.add_argument("out", help="출력 HTML 경로")
+    p_exp.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     args = parser.parse_args(argv)
 
-    from project_brain.graph import find_isolated
-
     store = BrainStore.load(resolve_brain_root(args.brain_root))
+
+    if args.action == "export":
+        from project_brain.graph_viz import build_payload, payload_to_html
+        payload = build_payload(store)
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(payload_to_html(payload), encoding="utf-8")
+        print(json.dumps(
+            {"ok": True, "out": str(out_path),
+             "nodes": len(payload["nodes"]), "edges": len(payload["edges"]),
+             "kinds": dict(sorted(payload["kinds"].items(), key=lambda x: -x[1]))},
+            ensure_ascii=False, indent=2))
+        return 0
+
+    from project_brain.graph import find_isolated
     isolated = find_isolated(store, kinds=args.kind)
     by_kind: dict = {}
     for oid in isolated:

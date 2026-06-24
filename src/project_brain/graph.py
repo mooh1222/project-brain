@@ -66,6 +66,29 @@ def referenced_ids(store: BrainStore) -> set[str]:
     return referenced
 
 
+def edges(store: BrainStore) -> list[tuple[str, str]]:
+    """정본 INBOUND_REF_FIELDS 기준 from→to 엣지 목록을 정렬해 반환한다(읽기 전용).
+
+    referenced_ids와 같은 필드·self-ref 규칙을 공유하되, 양 끝이 store에 존재하는
+    엣지만 만든다(끊긴 참조는 그릴 노드가 없다). 한 객체가 같은 대상을 여러 필드로
+    가리켜도 엣지는 하나다. 시각화(graph export)가 isolated와 같은 엣지 정의를 쓰게
+    하는 단일 출처."""
+    ids = {obj["id"] for obj in store.all() if obj.get("id")}
+    result: set[tuple[str, str]] = set()
+    for obj in store.all():
+        oid = obj.get("id")
+        if oid not in ids:        # from도 store에 존재해야 한다(id 없는 객체 제외) — to 가드와 대칭
+            continue
+        for field in INBOUND_REF_FIELDS:
+            value = obj.get(field)
+            if value is None:
+                continue
+            for ref in _iter_ref_ids(value):
+                if ref != oid and ref in ids:
+                    result.add((oid, ref))
+    return sorted(result)
+
+
 def find_isolated(store: BrainStore, kinds=None) -> list[str]:
     """점검 대상 kind 중 인바운드 0(아무도 안 가리킴)인 객체 id를 정렬해 반환한다. 읽기 전용.
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from project_brain import cli
-from project_brain.graph import find_isolated, referenced_ids
+from project_brain.graph import edges, find_isolated, referenced_ids
 from project_brain.store import BrainStore
 
 
@@ -91,6 +91,57 @@ class TestFindIsolated(unittest.TestCase):
         self.assertEqual(refs, {"ctx", "c1", "c2"})
 
 
+class TestEdges(unittest.TestCase):
+    """graph.edges — 정본 INBOUND_REF_FIELDS 기준 from→to 엣지 목록(시각화용).
+
+    referenced_ids와 같은 필드·self-ref 규칙을 공유하되, 양 끝이 store에 존재하는
+    엣지만 만든다(끊긴 참조는 그릴 노드가 없다)."""
+
+    def test_edges_from_singular_and_plural_fields(self):
+        # 단수(context_id)·복수(code_locator_ids)를 모두 from→to 엣지로 편다. 정렬로 결정론.
+        store = _store(
+            _obj("m", "DomainMapping", context_id="ctx", code_locator_ids=["c1", "c2"]),
+            _obj("ctx", "DomainContext"),
+            _obj("c1", "CodeLocator"),
+            _obj("c2", "CodeLocator"),
+        )
+        self.assertEqual(edges(store), [("m", "c1"), ("m", "c2"), ("m", "ctx")])
+
+    def test_edges_exclude_dangling_and_self_ref(self):
+        # store에 없는 to(끊긴 참조)·자기 자신 참조는 엣지에서 뺀다.
+        store = _store(
+            _obj("m", "DomainMapping",
+                 code_locator_ids=["c1", "missing"], supersedes_mapping_ids=["m"]),
+            _obj("c1", "CodeLocator"),
+        )
+        self.assertEqual(edges(store), [("m", "c1")])
+
+    def test_edges_external_keys_not_edges(self):
+        # channel_id 등 외부 키는 INBOUND_REF_FIELDS 밖이라 엣지가 아니다(거짓 연결 방지).
+        store = _store(
+            _obj("slack.t", "SlackThread", channel_id="code.x"),
+            _obj("code.x", "CodeLocator"),
+        )
+        self.assertEqual(edges(store), [])
+
+    def test_edges_exclude_none_id_from(self):
+        # from 객체에 id가 없으면(None) 그 엣지는 안 만든다 — to 가드와 대칭, '양 끝 존재' 약속.
+        store = _store(
+            _obj(None, "DomainMapping", code_locator_ids=["c1"]),
+            _obj("c1", "CodeLocator"),
+        )
+        self.assertEqual(edges(store), [])
+
+    def test_edges_dedupe_same_pair(self):
+        # 한 객체가 같은 대상을 여러 필드로 가리켜도 엣지는 한 번만.
+        store = _store(
+            _obj("m", "DomainMapping",
+                 target_object_id="g", affected_glossary_term_ids=["g"]),
+            _obj("g", "GlossaryTerm"),
+        )
+        self.assertEqual(edges(store), [("m", "g")])
+
+
 class TestGraphIsolatedCli(unittest.TestCase):
     """`graph isolated` CLI — 읽기 전용 JSON 리포트(dispatch + 집계 배선 확인)."""
 
@@ -126,6 +177,47 @@ class TestGraphIsolatedCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         # GlossaryTerm만 점검 → CodeLocator 고립은 안 잡힌다.
         self.assertEqual(payload["isolated"], [])
+
+
+class TestGraphExportCli(unittest.TestCase):
+    """`graph export <out>` CLI — store를 vis-network HTML로 쓰고 요약을 JSON으로 낸다."""
+
+    def test_cli_graph_export_writes_html_and_summary(self):
+        from tests.test_search import code_locator, domain_mapping
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            BrainStore.save_object(root, code_locator("code.x", path="a/A.cpp", symbol="f"))
+            BrainStore.save_object(
+                root, domain_mapping("m.x", meaning="매핑", code_locator_ids=["code.x"]))
+            out_path = root / "graph.html"
+            out = io.StringIO()
+            argv = ["graph", "export", str(out_path), "--brain-root", str(root)]
+            with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+                rc = cli.main()
+            payload = json.loads(out.getvalue())
+            html = out_path.read_text(encoding="utf-8")
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["out"], str(out_path))
+        self.assertEqual(payload["nodes"], 2)
+        self.assertEqual(payload["edges"], 1)        # m.x → code.x
+        self.assertIn("vis-network", html)
+        self.assertIn("code.x", html)
+
+    def test_cli_graph_export_creates_missing_parent_dirs(self):
+        # 없는 부모 디렉터리로 내보내면 폴더를 만들어 쓴다(흔한 케이스 — 트레이스백 금지).
+        from tests.test_search import code_locator
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            BrainStore.save_object(root, code_locator("code.x", path="a/A.cpp", symbol="f"))
+            out_path = root / "sub" / "deep" / "graph.html"   # 부모 미존재
+            out = io.StringIO()
+            argv = ["graph", "export", str(out_path), "--brain-root", str(root)]
+            with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+                rc = cli.main()
+            existed = out_path.exists()        # tmp 디렉터리 정리 전에 확인
+        self.assertEqual(rc, 0)
+        self.assertTrue(existed)
 
 
 if __name__ == "__main__":
