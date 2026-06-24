@@ -146,11 +146,13 @@ class TestContextProjectionDangling(unittest.TestCase):
 
     def test_all_sources_present_no_dangling(self):
         # 회귀 가드: 모든 source가 store에 있으면 dangling 문제 없음.
-        from project_brain.hash_utils import sha256_text, stable_json
+        # C2 이후 해시는 시각·버전 메타를 제외하므로 fixture도 정본 헬퍼로 fresh하게 만든다
+        # (옛 sha256_text(stable_json(src))는 stale가 돼 source_content_hash mismatch를 냈다).
+        from project_brain.hash_utils import source_content_hash
         src = _drift_mapping("m.src", term_ids=[])
         proj = _projection(
             source_object_ids=["m.src"],
-            source_content_hash=sha256_text(stable_json(src)),
+            source_content_hash=source_content_hash([src]),
         )
         problems = lint_store(store_of(src, proj))
         self.assertFalse([p for p in problems if "dangling source_object_id" in p], problems)

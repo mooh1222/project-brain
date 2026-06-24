@@ -1,5 +1,5 @@
 from project_brain.hash_utils import sha256_text as _sha256_text
-from project_brain.hash_utils import stable_json as _stable_json
+from project_brain.hash_utils import source_content_hash as _source_content_hash
 from project_brain.store import BrainStore
 
 GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
@@ -110,7 +110,7 @@ def build_context_projection(
     mappings = _reviewed_mappings_for_context(store, context_id)
     source_objects = [context] + terms + mappings
     source_object_ids = [obj["id"] for obj in source_objects]
-    source_content_hash = _sha256_text("\n".join(_stable_json(obj) for obj in source_objects))
+    source_content_hash = _source_content_hash(source_objects)
     content = render_context_markdown(store, context_id)
     projection_hash = _sha256_text(content)
     projection_id = f"projection.{context.get('context_key', context_id)}.context-md"
@@ -156,9 +156,7 @@ def build_reuse_projection(
     reuse_payload 텍스트로 projection_hash를 계산한다. 두 해시 모두 필수 필드.
     """
     context = store.get(context_id)
-    source_content_hash = _sha256_text(
-        "\n".join(_stable_json(store.get(oid)) for oid in source_object_ids)
-    )
+    source_content_hash = _source_content_hash(store.get(oid) for oid in source_object_ids)
     projection_hash = _sha256_text(reuse_payload)
     ckey = context.get("context_key", context_id)
     return {

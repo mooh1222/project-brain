@@ -25,8 +25,9 @@
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` |
 | L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 |
-| 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑을 `projection_reuse` 채널로 재회수 |
+| 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) | 읽기 전용 후보 제시·줄번호 갱신 아님 |
+| 그래프 무결성·고립 | ✅ `graph isolated` + build 비차단 경고 (2026-06-24) | 인바운드 0 잎 탐지(읽기 전용)·역인덱스 C1↔C8 공유 |
 | 공유 경계 | ✅ 엔진/데이터 2-레포 분리 (2026-06-11) | brain/ git 추적·색인만 로컬 |
 | L5 개인 메모리 | ⬜ 없음 | 설계상 자리만 (미뤄둠) |
 
@@ -90,6 +91,32 @@ CodeLocator commit_sha/verified_at 갱신). 목적은 줄번호 갱신이 아니
 의미가 낡았을 후보" 발견.
 
 - 설계: [stale-check](docs/specs/2026-06-14-bb2-brain-stale-check-design.md) · 계획: [stale-check(plan)](docs/plans/2026-06-14-bb2-brain-stale-check.md) · [update-mechanism-followup](docs/plans/2026-06-13-bb2-brain-update-mechanism-followup.md)
+
+### 그래프 고립 탐지 + projection 해시 정합 (2026-06-24)
+bb2_client 고립 노드 정비 4세션(2026-06-23)을 회고해 도출·검증한 엔진 보강. 진짜 버그
+하나와 빠진 도구 하나가 핵심. 독립 code-review PASS(무조건), 엔진 합성테스트 488 통과,
+데이터 레포 eval 10/10 복구.
+
+- **projection 해시 정합(C2+C3, 버그 수정)**: `source_content_hash`가 시각·버전 메타
+  (`created_at`/`updated_at`/`verified_at`/`captured_at`/`schema_version`)를 빼고 의미
+  내용만 해시한다. `_at` 일괄 변환(KST 표준화)이 의미 불변인데도 projection을 stale로
+  오판해 **eval 10→8 회귀**를 냈던 버그를 근원 수정. 생성식 2곳(context_projection)·검증식
+  1곳(lint)이 `hash_utils.source_content_hash` 단일 헬퍼를 공유(드리프트 차단).
+  `projection refresh [--ids]` CLI로 기존 코퍼스 해시를 전수 재계산(reviewed→reviewed 멱등
+  재적재 활용, dangling은 merged lint를 막으므로 빠른 실패).
+- **그래프 고립 탐지(C1, 빠진 도구)**: `graph isolated [--kind]` CLI — store 1회 순회
+  역인덱스로 "아무도 안 가리킴(인바운드 0)"인 잎 객체를 읽기 전용으로 보고. 무결성 검사가
+  그동안 아웃바운드(끊긴 참조=dangling)만 보던 단방향 비대칭을 해소. 인바운드 엣지 필드는
+  명시 allowlist(외부 키 `channel_id`·`project_id`·`jira_issue_ids` 제외, `evidence_refs`
+  포함), 점검 잎 kind 화이트리스트(CodeLocator·GlossaryTerm·EvidenceRef)로 구조적 인바운드0
+  kind(CurrentView·Insight 등) 폭주를 막는다. 발견은 엔진, "어디에 연결할지" 판정은 스킬·사람.
+- **build 사후 고립 경고(C8)** + **시점 자동기입 회귀 테스트(C4)** + **회귀 명령 문서 정정(C10)**.
+  C8은 C1의 역인덱스 헬퍼(`graph.referenced_ids`)·잎 kind를 공유, build report에 비차단
+  `warnings`로 신규 고립 잎을 담는다(차단 아님 — candidate 일시 고립은 정상).
+- 계획(작업 순서 단일 출처): [isolated-node-followup](docs/plans/2026-06-23-bb2-brain-isolated-node-followup.md)
+  · 상세 분석 근거는 같은 레포 `.snapshots/2026-06-23/`(git 미추적).
+- 남은 스킬 Task(C6·C7·C9 — 적재 후 고립 재점검·연결 정책 명문화 등)는 데이터 레포
+  `bb2_client`의 스킬 측에서 진행(엔진 밖).
 
 ---
 

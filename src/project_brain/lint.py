@@ -5,7 +5,7 @@
 from pathlib import Path
 
 from project_brain.hash_utils import sha256_text as _sha256_text
-from project_brain.hash_utils import stable_json as _stable_json
+from project_brain.hash_utils import source_content_hash as _source_content_hash
 from project_brain.promote import select_vouched_candidates
 from project_brain.router import _conflicting_fact_groups
 from project_brain.schema import validate_object
@@ -16,9 +16,10 @@ LEGACY_SOURCE_TYPES = {"context", "wiki"}
 
 
 def _compute_source_content_hash(store: BrainStore, source_object_ids: list[str]) -> str:
-    """source_object_ids 에 해당하는 현재 store 내용으로 source_content_hash 를 재계산한다."""
-    parts = [_stable_json(store.get(oid)) for oid in source_object_ids if store.has(oid)]
-    return _sha256_text("\n".join(parts))
+    """source_object_ids 에 해당하는 현재 store 내용으로 source_content_hash 를 재계산한다.
+
+    시각·버전 메타 제외는 hash_utils.source_content_hash가 담당한다(생성식과 단일 공식 공유)."""
+    return _source_content_hash(store.get(oid) for oid in source_object_ids if store.has(oid))
 
 
 def projection_is_fresh(store: BrainStore, projection: dict) -> bool:

@@ -505,8 +505,81 @@ def _run_build(argv) -> int:
     print(json.dumps({"ok": True, "built": len(result["objects"]),
                       "objects_file": args.objects_file, "diff": result["diff"],
                       "resolved_refs": result["resolved_refs"],
-                      "preconditions": result["preconditions"]},
+                      "preconditions": result["preconditions"],
+                      "warnings": result.get("warnings", [])},
                      ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_projection_refresh(args) -> int:
+    """저장된 ContextProjection의 source_content_hash를 현재 store로 재계산해 같은
+    status로 ingest() 경유 재저장한다 (C2 해시식 변경 후 전수 마이그레이션·일반 갱신).
+
+    dangling(구성 객체가 store에 없음)은 재계산으로도 못 고치고 store에 남아 ingest의
+    merged lint(전수)를 막으므로, skipped_dangling으로 보고하고 빠른 실패한다 — 먼저 누락
+    소스를 해소하라(전수 refresh는 코퍼스가 해시 외엔 lint-clean이어야 한다). 이미 신선한
+    projection은 건너뛴다(불필요한 쓰기 방지). 변경분은 한 번의 ingest로 배치 저장 —
+    마이그레이션 자가치유(한 개씩 ingest하면 아직 옛 해시인 나머지가 merged lint mismatch를
+    일으켜 깨진다). reviewed→reviewed 멱등 재적재는 ingest가 허용한다(promote의 가드와 달리)."""
+    from project_brain.lint import _compute_source_content_hash
+
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
+
+    if args.ids:
+        missing = [pid for pid in args.ids if not store.has(pid)]
+        if missing:
+            print(json.dumps({"ok": False, "error": f"unknown ids: {missing}"},
+                             ensure_ascii=False, indent=2))
+            return 1
+        targets = [store.get(pid) for pid in args.ids]
+        not_projection = [p["id"] for p in targets if p.get("kind") != "ContextProjection"]
+        if not_projection:
+            print(json.dumps({"ok": False, "error": f"not ContextProjection: {not_projection}"},
+                             ensure_ascii=False, indent=2))
+            return 1
+    else:
+        targets = list(store.by_kind("ContextProjection"))
+
+    refreshed, unchanged, skipped_dangling, to_ingest = [], [], [], []
+    for proj in targets:
+        sids = proj.get("source_object_ids") or []
+        if any(not store.has(oid) for oid in sids):
+            skipped_dangling.append(proj["id"])
+            continue
+        new_hash = _compute_source_content_hash(store, sids)
+        if new_hash == proj.get("source_content_hash"):
+            unchanged.append(proj["id"])
+            continue
+        updated = dict(proj)
+        updated["source_content_hash"] = new_hash
+        to_ingest.append(updated)
+        refreshed.append(proj["id"])
+
+    # dangling이 있으면 store에 남아 ingest의 merged lint(전수)를 막아 갱신 가능분까지 통째로
+    # 깨진다. 혼란스러운 IngestError 대신 여기서 명확히 빠른 실패 — skipped_dangling을 출력에
+    # 담고 누락 소스를 먼저 해소하라고 안내한다. (healthy 코퍼스면 skipped_dangling이 비어 통과.)
+    if skipped_dangling:
+        print(json.dumps(
+            {"ok": False,
+             "error": (f"{len(skipped_dangling)} dangling projection(s) block refresh — "
+                       "구성 객체가 store에 없어 merged lint를 막는다; 누락 소스를 먼저 해소하라"),
+             "skipped_dangling": skipped_dangling,
+             "refreshable": refreshed, "unchanged": unchanged},
+            ensure_ascii=False, indent=2))
+        return 1
+
+    if to_ingest:
+        try:
+            ingest(brain_root, to_ingest)
+        except IngestError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+
+    print(json.dumps(
+        {"ok": True, "refreshed": refreshed, "unchanged": unchanged,
+         "skipped_dangling": skipped_dangling},
+        ensure_ascii=False, indent=2))
     return 0
 
 
@@ -535,7 +608,17 @@ def _run_projection(argv) -> int:
                          help="없으면 생성될 projection JSON 미리보기만(저장 안 함)")
     p_reuse.add_argument("--replace", action="store_true",
                          help="같은 projection id가 store에 이미 있을 때만 교체 허용")
+
+    p_refresh = sub.add_parser(
+        "refresh",
+        help="저장 projection의 source_content_hash를 현재 store로 재계산해 재저장(C2 후 전수 마이그레이션)")
+    p_refresh.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    p_refresh.add_argument("--ids", nargs="+",
+                           help="대상 projection id (생략 시 전체 ContextProjection)")
     args = parser.parse_args(argv)
+
+    if args.action == "refresh":
+        return _run_projection_refresh(args)
 
     from project_brain.context_projection import build_reuse_projection
 
@@ -598,6 +681,38 @@ def _run_projection(argv) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
     print(json.dumps({"ok": True, "id": projection["id"]}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_graph(argv) -> int:
+    """그래프 분석 (읽기 전용 — store 변경 0). 현재 하위명령은 isolated만.
+
+    `graph isolated [--brain-root <path>] [--kind <Kind> ...]` — 코퍼스 전체에서
+    인바운드 0(아무도 안 가리킴 = 고립)인 잎 객체 id를 JSON으로 낸다. 기본 점검 대상은
+    '가리켜지려고 존재하는 잎' kind(CodeLocator·GlossaryTerm·EvidenceRef); --kind로 한정 가능.
+    발견 전용이라 차단하지 않는다 — 어디에 무엇을 연결할지는 사람·스킬 몫(C7)."""
+    parser = argparse.ArgumentParser(prog="cli graph")
+    sub = parser.add_subparsers(dest="action", required=True)
+    p_iso = sub.add_parser("isolated")
+    p_iso.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    p_iso.add_argument("--kind", nargs="+",
+                       help="점검 대상 kind 한정 (기본: CodeLocator·GlossaryTerm·EvidenceRef 잎 kind). "
+                            "주의: 기본 잎 밖 kind(예: SlideRef)는 인바운드 엣지(slide_refs 등)가 "
+                            "INBOUND_REF_FIELDS에 없어 거짓 고립이 날 수 있다")
+    args = parser.parse_args(argv)
+
+    from project_brain.graph import find_isolated
+
+    store = BrainStore.load(resolve_brain_root(args.brain_root))
+    isolated = find_isolated(store, kinds=args.kind)
+    by_kind: dict = {}
+    for oid in isolated:
+        by_kind[store.get(oid).get("kind")] = by_kind.get(store.get(oid).get("kind"), 0) + 1
+    print(json.dumps(
+        {"ok": True, "isolated_count": len(isolated),
+         "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
+         "isolated": isolated},
+        ensure_ascii=False, indent=2))
     return 0
 
 
@@ -716,6 +831,8 @@ def main() -> int:
             return _run_bootstrap(argv[1:])
         if argv and argv[0] == "projection":
             return _run_projection(argv[1:])
+        if argv and argv[0] == "graph":
+            return _run_graph(argv[1:])
         if argv and argv[0] == "stale-check":
             return _run_stale_check(argv[1:])
         if argv and argv[0] == "mark-checked":

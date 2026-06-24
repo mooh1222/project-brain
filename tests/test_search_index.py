@@ -74,8 +74,8 @@ def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
     # 같은 공식으로 계산한다 — A6 신선도 가드가 색인에서 빼지 않도록. 안 주면 옛
     # placeholder("x")라 stale 취급된다(낡음 검사 자체를 보는 테스트용).
     if source_objects is not None:
-        from project_brain.hash_utils import sha256_text as _sha, stable_json as _sj
-        content_hash = _sha("\n".join(_sj(o) for o in source_objects))
+        from project_brain.hash_utils import source_content_hash as _sch
+        content_hash = _sch(source_objects)
     else:
         content_hash = "x"
     return _b({

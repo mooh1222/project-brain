@@ -143,6 +143,21 @@ class TestBuildReuseFreshnessRoundtrip(unittest.TestCase):
         store.get("mapping.mina-kayak.race-end-result-achieve")["meaning"] = "변형된 의미"
         self.assertFalse(projection_is_fresh(store, proj))
 
+    def test_mutating_only_timestamp_keeps_projection_fresh(self):
+        # 의미는 그대로 두고 updated_at(자동 갱신 시각)만 바꾸면 해시가 불변이라 fresh 유지.
+        # _at 일괄 변환(KST 표준화)이 projection을 stale로 오판해 eval 10→8 회귀를 냈던
+        # 버그(C2)의 회귀 가드 — 시각 필드는 source_content_hash 계산에서 제외돼야 한다.
+        store, proj = self._store_and_proj()
+        store.get("mapping.mina-kayak.race-end-result-achieve")["updated_at"] = "2099-01-01T00:00:00+09:00"
+        self.assertTrue(projection_is_fresh(store, proj))
+
+    def test_mutating_schema_version_keeps_projection_fresh(self):
+        # schema_version 제외는 _at 버그 범위를 넘는 의도적 확장(C2 Step 3) — 스키마
+        # 버전 bump마다 전 projection이 stale로 폭주하는 것을 막는다. 의도를 별도로 박는다.
+        store, proj = self._store_and_proj()
+        store.get("mapping.mina-kayak.race-end-result-achieve")["schema_version"] = "0.2"
+        self.assertTrue(projection_is_fresh(store, proj))
+
 
 class TestDanglingSourceMakesStale(unittest.TestCase):
     """외부 리뷰 재현(Important 1): source_object_ids가 store에 없는 id를 가리키는데도

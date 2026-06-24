@@ -9,6 +9,7 @@ import copy
 from project_brain.objbase import base
 from project_brain.schema import validate_object
 from project_brain.lint import lint_store
+from project_brain.graph import ISOLATION_LEAF_KINDS, referenced_ids
 from project_brain.store import BrainStore
 
 # id 파생 규칙 (kind → prefix). 컨벤션: g.<ctx>.<key> / mapping.<ctx>.<key> 등.
@@ -317,7 +318,7 @@ def build(notes, store, now):
     errors = list(validate_notes(notes))
     if errors:
         return {"objects": [], "diff": [], "resolved_refs": {},
-                "preconditions": {}, "errors": errors}
+                "preconditions": {}, "errors": errors, "warnings": []}
 
     refs_map, resolved, ref_errors = resolve_refs(notes, store)
     errors += ref_errors
@@ -361,7 +362,17 @@ def build(notes, store, now):
                         errors.append(f"updates {up.get('id')}: union {f} 대상 {v} 없음 "
                                       f"(store·이번 묶음 어디에도)")
 
-    errors += lint_store(BrainStore(merged))
+    merged_store = BrainStore(merged)
+    errors += lint_store(merged_store)
+
+    # C8: 이번 묶음 신규 잎 중 인바운드 0(아무도 안 가리킴)을 비차단 경고로 담는다 — 차단
+    # 아님(candidate 일시 고립은 정상). 역인덱스·점검 잎 kind는 graph.py를 C1과 공유.
+    referenced = referenced_ids(merged_store)
+    warnings = sorted(
+        f"{o['id']}: isolated {o['kind']} (no inbound reference; non-blocking)"
+        for o in all_objs
+        if o.get("kind") in ISOLATION_LEAF_KINDS and o["id"] not in referenced
+    )
 
     return {"objects": all_objs, "diff": diffs, "resolved_refs": resolved,
-            "preconditions": preconditions, "errors": errors}
+            "preconditions": preconditions, "errors": errors, "warnings": warnings}

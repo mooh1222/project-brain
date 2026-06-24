@@ -35,7 +35,7 @@ uv sync --extra mecab                  # 개발 venv (최초 1회)
 
 ```bash
 cd <소비 프로젝트 루트>
-pytest brain/checks/ -q          # 실측 가드 (CLI 호출 — 빠름)
+python3 -m unittest discover -s brain/checks -p "test_*.py"   # 실측 가드 (CLI 호출 — 빠름)
 project-brain index rebuild      # 색인 영향 변경 시 (실모델, 수십 초)
 project-brain eval               # 골든셋 7종 (실모델)
 ```

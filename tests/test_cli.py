@@ -810,6 +810,34 @@ class RunBuildTest(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertFalse(out_path.exists())
 
+    def test_build_auto_fills_now_kst_when_note_omits_now(self):
+        # C4 회귀: 노트 context에 now를 생략하면 엔진이 now_kst()로 created_at/updated_at을
+        # 자동 기입한다(cli.py `now = ... or now_kst()`). 폴백이 빠지면 now=None이라
+        # created_at이 빈 값/None이 돼 이 단언이 깨진다 — 시점 분산 재발 가드. 신규 코드 0줄.
+        with tempfile.TemporaryDirectory() as td:
+            notes_path = Path(td) / "notes.json"
+            out_path = Path(td) / "out.json"
+            brain = Path(td) / "brain"
+            (brain / "objects").mkdir(parents=True)
+            notes_path.write_text(json.dumps({
+                "context": {"key": "ctx", "commit": "abc", "repo": "demoapp"},  # now 생략
+                "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
+                             "title": "코드", "locator": "...", "captured_by": "agent"}],
+                "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
+                                  "line_start": 1, "line_end": 1, "quote": "q",
+                                  "manifest": "manifest.ctx.code"}],
+                "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
+                              "evidence_refs": ["evref.ctx.hit-hook"]}],
+            }), encoding="utf-8")
+            rc = _run_build(["--notes", str(notes_path), "--objects-file", str(out_path),
+                             "--brain-root", str(brain)])
+            self.assertEqual(rc, 0)
+            objs = json.loads(out_path.read_text(encoding="utf-8"))
+            term = next(o for o in objs if o["id"] == "g.ctx.hit")
+            # KST 표준(+09:00, microsecond 없음)으로 자동 기입, created_at == updated_at.
+            self.assertTrue(term["created_at"].endswith("+09:00"), term["created_at"])
+            self.assertEqual(term["created_at"], term["updated_at"])
+
 
 class TestCliProjectionBuildReuse(unittest.TestCase):
     """`projection build-reuse` 서브커맨드 (외부 리뷰 Important 3, codex 합의 A안).
@@ -899,7 +927,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
 
     def test_hashes_computed_by_tool(self):
         # (c) 사용자가 hash를 안 줘도 source_content_hash·projection_hash가 채워진다.
-        from project_brain.hash_utils import sha256_text, stable_json
+        from project_brain.hash_utils import sha256_text, source_content_hash
         rc, payload = self._run("--write")
         self.assertEqual(rc, 0, payload)
         proj = BrainStore.load(self.root).get("projection.neutral.result-popup-rank.reuse")
@@ -907,9 +935,9 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
         self.assertEqual(
             proj["projection_hash"],
             sha256_text("데이터 출처: RaceInfo recordMap. 확장 지점: PopupResult."))
-        # source_content_hash = 구성 객체 직렬화 sha256 (lint 공식과 동일)
+        # source_content_hash = 구성 객체 의미 직렬화 sha256 (시각·버전 메타 제외, lint 공식과 동일)
         src = BrainStore.load(self.root).get("mapping.neutral.race-end")
-        self.assertEqual(proj["source_content_hash"], sha256_text(stable_json(src)))
+        self.assertEqual(proj["source_content_hash"], source_content_hash([src]))
 
     def test_preview_only_without_write_does_not_save(self):
         # (d) --write 없으면 생성될 projection JSON만 미리보기, 저장 안 함.
@@ -956,6 +984,122 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
         self.assertIn("intentionally blocked", payload["error"])
         # 기존 reviewed가 candidate로 덮이지 않는다(보존).
         self.assertEqual(BrainStore.load(self.root).get(pid)["status"], "reviewed")
+
+
+class TestCliProjectionRefresh(unittest.TestCase):
+    """`projection refresh` (C3) — 저장 ContextProjection의 source_content_hash를 현재
+    store로 재계산해 같은 status로 ingest 경유 재저장한다. C2로 해시식이 바뀐 뒤 기존
+    projection이 전부 stale가 되므로 전수 마이그레이션 경로. reviewed도 갱신된다
+    (ingest는 reviewed→reviewed 멱등 재적재 허용 — promote의 idempotency 가드와 다름)."""
+
+    GEN_AT = "2026-06-17T00:00:00+09:00"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        from tests.test_search import domain_mapping
+        from project_brain.context_projection import build_reuse_projection
+        BrainStore.save_object(self.root, context("context.neutral"))
+        BrainStore.save_object(
+            self.root,
+            domain_mapping("mapping.neutral.race-end", meaning="경주 종료",
+                           status="candidate", context_id="context.neutral"))
+        store = BrainStore.load(self.root)
+        proj = build_reuse_projection(
+            store, context_id="context.neutral", requirement_key="rpr",
+            source_object_ids=["mapping.neutral.race-end"],
+            reuse_payload="착수 브리핑", title="브리핑",
+            generated_at=self.GEN_AT, generated_by="t")
+        self.pid = proj["id"]
+        # 일부러 stale: 저장 hash를 틀린 값으로(C2 이전 옛 해시·수작업 오류 모사).
+        proj["source_content_hash"] = "stale-wrong-hash"
+        BrainStore.save_object(self.root, proj)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_refresh(self, *extra):
+        out = io.StringIO()
+        argv = ["projection", "refresh", "--brain-root", str(self.root), *extra]
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        return rc, json.loads(out.getvalue())
+
+    def test_refresh_recomputes_stale_hash_and_lint_clean(self):
+        from project_brain.lint import lint_store, _compute_source_content_hash
+        store = BrainStore.load(self.root)
+        # 전제: 지금은 stale(저장 hash != 현재 store 재계산값).
+        self.assertNotEqual(
+            store.get(self.pid)["source_content_hash"],
+            _compute_source_content_hash(store, ["mapping.neutral.race-end"]))
+        rc, payload = self._run_refresh()
+        self.assertEqual(rc, 0, payload)
+        self.assertIn(self.pid, payload["refreshed"])
+        store2 = BrainStore.load(self.root)
+        # 재계산된 hash로 교정 → lint가 이 projection을 mismatch로 보고하지 않는다.
+        self.assertEqual(
+            store2.get(self.pid)["source_content_hash"],
+            _compute_source_content_hash(store2, ["mapping.neutral.race-end"]))
+        self.assertEqual([p for p in lint_store(store2) if self.pid in p], [])
+
+    def test_refresh_updates_reviewed_projection(self):
+        # reviewed projection도 갱신된다(plan C3 Step1 명시) — ingest 후퇴 가드는
+        # reviewed→candidate만 막고 reviewed→reviewed 멱등 재적재는 허용한다.
+        store = BrainStore.load(self.root)
+        proj = dict(store.get(self.pid))
+        proj["status"] = "reviewed"
+        proj["source_content_hash"] = "stale-wrong-hash"
+        BrainStore.save_object(self.root, proj)
+        rc, payload = self._run_refresh()
+        self.assertEqual(rc, 0, payload)
+        self.assertIn(self.pid, payload["refreshed"])
+        store2 = BrainStore.load(self.root)
+        self.assertEqual(store2.get(self.pid)["status"], "reviewed")
+        from project_brain.lint import _compute_source_content_hash
+        self.assertEqual(
+            store2.get(self.pid)["source_content_hash"],
+            _compute_source_content_hash(store2, ["mapping.neutral.race-end"]))
+
+    DANGLING_ID = "projection.neutral.dangling.reuse"
+
+    def _save_dangling(self):
+        # 구성 객체가 store에 없는(dangling) ContextProjection. schema는 통과(dangling은 lint 영역).
+        BrainStore.save_object(self.root, {
+            "id": self.DANGLING_ID, "kind": "ContextProjection",
+            "schema_version": "0.1", "status": "candidate", "poc_priority": "P0",
+            "truth_role": "index", "title": "끊긴 브리핑", "context_id": "context.neutral",
+            "format": "prompt_payload", "reuse_payload": "x",
+            "output_locator": "indexes/context_projections/dangling.txt",
+            "source_object_ids": ["mapping.does-not-exist"],
+            "source_content_hash": "whatever", "projection_hash": "y",
+            "generated_at": self.GEN_AT, "generated_by": "t",
+            "stale_policy": "fail_on_manual_edit",
+            "created_at": self.GEN_AT, "updated_at": self.GEN_AT, "tags": [], "evidence_refs": [],
+        })
+
+    def test_refresh_dangling_blocks_with_clear_error(self):
+        # dangling projection은 재계산해도 merged lint(전수)를 못 지나고 store에 남아 ingest를
+        # 막는다. 혼란스러운 IngestError 대신 명확히 빠른 실패하고 skipped_dangling을 출력에
+        # 담는다(먼저 dangling 소스를 해소하라는 안내).
+        self._save_dangling()
+        rc, payload = self._run_refresh("--ids", self.DANGLING_ID)
+        self.assertEqual(rc, 1, payload)
+        self.assertFalse(payload["ok"])
+        self.assertIn(self.DANGLING_ID, payload["skipped_dangling"])
+        self.assertIn("dangling", payload["error"])
+
+    def test_refresh_mixed_dangling_and_stale_fails_atomically(self):
+        # MEDIUM 회귀(code-review): 갱신 가능 stale(self.pid)과 dangling이 함께 있는 전수 실행
+        # (--ids 없이)에서, dangling이 lint를 막아 refresh가 통째로 막힌다. 빠른 실패로
+        # skipped_dangling을 출력에 담고, 갱신 가능분은 디스크에 쓰지 않는다(원자성).
+        self._save_dangling()
+        before = BrainStore.load(self.root).get(self.pid)["source_content_hash"]
+        rc, payload = self._run_refresh()  # --ids 없이 전수
+        self.assertEqual(rc, 1, payload)
+        self.assertIn(self.DANGLING_ID, payload["skipped_dangling"])
+        # 갱신 가능분(self.pid)은 안 쓰였다 — 여전히 stale(원자성).
+        after = BrainStore.load(self.root).get(self.pid)["source_content_hash"]
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

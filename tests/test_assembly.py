@@ -296,6 +296,28 @@ class BuildIntegrationTest(unittest.TestCase):
         self.assertIn("code.ctx.hit-hook", ids)
         self.assertIn("evref.ctx.hit-hook", ids)
 
+    def test_build_warns_isolated_new_leaf_non_blocking(self):
+        # C8: 이번 묶음 신규 잎 중 인바운드 0(아무도 안 가리킴)을 비차단 warnings로 보고한다.
+        # 매핑 없이 적재된 GlossaryTerm·CodeLocator는 고립 잎 → 경고. evref는 term의
+        # evidence_refs가 가리키므로 경고 아님(묶음 내 참조). 차단 아님(errors 비어야 함 —
+        # candidate 일시 고립은 정상). 점검 잎 kind·역인덱스는 C1(graph.py)과 공유.
+        notes = {
+            "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
+            "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
+                         "title": "코드", "locator": "...", "captured_by": "agent"}],
+            "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
+                              "line_start": 1, "line_end": 1, "quote": "q",
+                              "manifest": "manifest.ctx.code-v2"}],
+            "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
+                          "evidence_refs": ["evref.ctx.hit-hook"]}],
+        }
+        result = build(notes, _store(), NOW)
+        self.assertEqual(result["errors"], [])  # 비차단
+        warned = " ".join(result["warnings"])
+        self.assertIn("g.ctx.hit", warned)             # 고립 GlossaryTerm → 경고
+        self.assertIn("code.ctx.hit-hook", warned)     # 고립 CodeLocator → 경고
+        self.assertNotIn("evref.ctx.hit-hook", warned)  # term이 가리킴 → 고립 아님
+
     def test_build_dangling_ref_caught(self):
         # glossary가 없는 evref를 가리키면 2층(dangling)이 잡는다
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
