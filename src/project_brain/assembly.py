@@ -60,14 +60,15 @@ def build_code_evidence(notes, now):
             "id": derive_id("CodeLocator", ctx, key),
             "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
             "title": quote[:120], "repo": repo, "path": a["path"], "symbol": a["symbol"],
-            "line_start": a["line_start"], "line_end": a["line_end"],
+            "line_start": a.get("line_start"), "line_end": a.get("line_end"),
             "locator_source": a.get("locator_source", "rg"),
             "commit_sha": commit, "verified_at": now,
         }
-        locator = {
-            "path": a["path"], "symbol": a["symbol"],
-            "line_start": a["line_start"], "line_end": a["line_end"],
-        }
+        locator = {"path": a["path"], "symbol": a["symbol"]}
+        if a.get("line_start") is not None:
+            locator["line_start"] = a["line_start"]
+        if a.get("line_end") is not None:
+            locator["line_end"] = a["line_end"]
         ev = {
             "id": derive_id("EvidenceRef", ctx, key),
             "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
@@ -255,7 +256,7 @@ _UPDATE_KEYS = {"id", "expected_updated_at", "set", "union", "evidence_unchanged
 _ITEM_REQUIRED = {
     # glossary는 항상 reviewed로 만들어지므로 evidence_refs 필수(2층 schema가 막는 걸 1층에서 친절히).
     "glossary": ("key", "term", "definition", "evidence_refs"),
-    "code_anchors": ("key", "path", "symbol", "line_start", "line_end", "manifest"),
+    "code_anchors": ("key", "path", "symbol", "manifest"),
     "mappings": ("key", "canonical_summary", "meaning", "boundary"),
     "sources": ("id", "source_type", "title", "locator"),
 }

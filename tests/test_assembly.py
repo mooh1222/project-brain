@@ -45,6 +45,19 @@ class BuildCodeEvidenceTest(unittest.TestCase):
                                          "symbol": "TrapObject::_doTrapOnPop",
                                          "line_start": 206, "line_end": 206})
 
+    def test_anchor_without_line_numbers(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
+            "code_anchors": [{"key": "no-line", "path": "Foo.cpp", "symbol": "Foo::bar",
+                              "quote": "void bar();", "manifest": "manifest.ctx.code-v2"}],
+        }
+        objs = build_code_evidence(notes, NOW)
+        kinds = {o["kind"]: o for o in objs}
+        loc, ev = kinds["CodeLocator"], kinds["EvidenceRef"]
+        self.assertIsNone(loc["line_start"])
+        self.assertIsNone(loc["line_end"])
+        self.assertEqual(ev["locator"], {"path": "Foo.cpp", "symbol": "Foo::bar"})
+
 
 def _store(*objs):
     return BrainStore({o["id"]: o for o in objs})
@@ -277,6 +290,14 @@ class ValidateNotesTest(unittest.TestCase):
                                  "glossary": [{"key": "h", "term": "h", "definition": "d",
                                                "evidence_refs": []}]})
         self.assertTrue(any("evidence_refs" in e for e in errors))
+
+    def test_code_anchor_without_line_numbers_accepted(self):
+        # B안: code_anchor의 line_start/line_end는 선택값 — 없어도 1층 검증 통과
+        errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
+                                 "code_anchors": [{"key": "k", "path": "Foo.cpp",
+                                                   "symbol": "Foo::bar",
+                                                   "manifest": "manifest.c.code"}]})
+        self.assertEqual(errors, [])
 
 
 class BuildIntegrationTest(unittest.TestCase):
