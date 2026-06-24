@@ -31,7 +31,7 @@ def _run_query(argv) -> int:
         epilog=(
             "서브커맨드 (상세는 `project-brain <명령> --help`):\n"
             "  적재·검수   build  ingest  promote  promote-auto  session\n"
-            "  검색·색인   search  index  eval  projection\n"
+            "  검색·색인   search  show  index  eval  projection\n"
             "  그래프      graph (isolated · export)\n"
             "  점검·진단   lint  doctor  bootstrap  stale-check  mark-checked\n"
             "  설치        install\n"
@@ -375,6 +375,44 @@ def _run_search(argv) -> int:
          "projection_reuse": projection_reuse,
          "needs_clarification": resp["needs_clarification"]},
         ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_show(argv) -> int:
+    """단일 객체를 id로 펼쳐본다 — 본문 + 1-hop 이웃을 [종류] object_id — 제목 데이터로 낸다.
+
+    `show <id> [--brain-root <path>]` — 회상(search)으로 찾은 객체에서 그래프 연결을
+    손수 따라가 탐색하기 위한 입구(객체 JSON 파일을 직접 열던 것을 대체). 이웃은
+    객체의 어떤 필드든 ★저장소에 실존하는 참조 id★만 모은다 — 외부 식별자·라벨
+    문자열·끊긴 참조는 store에 없어 자연히 걸러진다. neighbors[*] = {edge(필드명),
+    object_id, kind, title}. 어시스턴트는 이를 `[kind] object_id — title`로 보여주면 된다.
+    """
+    parser = argparse.ArgumentParser(prog="cli show")
+    parser.add_argument("id", help="펼쳐볼 객체 id")
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    args = parser.parse_args(argv)
+    store = BrainStore.load(resolve_brain_root(args.brain_root))
+    if not store.has(args.id):
+        print(json.dumps({"ok": False, "error": f"object not found: {args.id}"},
+                         ensure_ascii=False, indent=2))
+        return 1
+    obj = store.get(args.id)
+    neighbors = []
+    seen = set()
+    for field, value in obj.items():
+        if field == "id":  # 자기 id는 이웃 아님
+            continue
+        for ref in (value if isinstance(value, list) else [value]):
+            if not isinstance(ref, str) or ref == args.id or ref in seen:
+                continue
+            if not store.has(ref):
+                continue
+            seen.add(ref)
+            n = store.get(ref)
+            neighbors.append({"edge": field, "object_id": ref,
+                              "kind": n.get("kind"), "title": n.get("title")})
+    print(json.dumps({"ok": True, "object": obj, "neighbors": neighbors},
+                     ensure_ascii=False, indent=2))
     return 0
 
 
@@ -849,6 +887,8 @@ def main() -> int:
             return _run_session(argv[1:])
         if argv and argv[0] == "search":
             return _run_search(argv[1:])
+        if argv and argv[0] == "show":
+            return _run_show(argv[1:])
         if argv and argv[0] == "eval":
             return _run_eval(argv[1:])
         if argv and argv[0] == "lint":

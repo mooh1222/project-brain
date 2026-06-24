@@ -1114,6 +1114,57 @@ class TestCliTopLevelHelp(unittest.TestCase):
         self.assertIn("graph", text)
         self.assertIn("ingest", text)
         self.assertIn("search", text)
+        # bare "show"는 "-h: show this help message"와 겹쳐 거짓통과 — 서브커맨드
+        # 목록 줄(검색·색인)에 실제로 실렸는지로 검사한다.
+        self.assertRegex(text, r"검색·색인.*\bshow\b")
+
+
+class TestCliShow(unittest.TestCase):
+    """cli show <id> — 단일 객체 본문 + 1-hop 이웃(저장소에 실존하는 참조만)을 종류·
+    제목과 함께 낸다(회상 결과에서 그래프 연결을 손수 따라가는 탐색 입구)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _show(self, oid):
+        argv = ["show", oid, "--brain-root", str(self.root)]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        return rc, json.loads(out.getvalue())
+
+    def test_show_object_with_neighbors(self):
+        from tests.test_search import (
+            build_store_dir, code_locator, domain_mapping, glossary_term,
+        )
+        build_store_dir(self.root, [
+            glossary_term("g.race", term="레이스"),
+            code_locator("code.x", path="a/Race.cpp", symbol="Race::start"),
+            domain_mapping("m.x", meaning="레이스 시작",
+                           glossary_term_ids=["g.race"], code_locator_ids=["code.x"]),
+        ])
+        rc, payload = self._show("m.x")
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["object"]["id"], "m.x")
+        by_nb = {n["object_id"]: n for n in payload["neighbors"]}
+        # 이웃은 저장소에 실존하는 참조만 — 종류·제목 동반.
+        self.assertEqual(by_nb["g.race"]["kind"], "GlossaryTerm")
+        self.assertEqual(by_nb["g.race"]["title"], "Term: 레이스")
+        self.assertEqual(by_nb["code.x"]["kind"], "CodeLocator")
+        # 끊긴 참조(evidence_refs=["ev.map"])·자기참조(id)는 이웃에 안 뜬다.
+        self.assertNotIn("ev.map", by_nb)
+        self.assertNotIn("m.x", by_nb)
+
+    def test_show_missing_id_errors(self):
+        rc, payload = self._show("nope.404")
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("nope.404", payload["error"])
 
 
 if __name__ == "__main__":
