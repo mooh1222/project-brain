@@ -25,7 +25,20 @@ from project_brain.store import BrainStore
 
 
 def _run_query(argv) -> int:
-    parser = argparse.ArgumentParser()
+    # 최상위 파서는 query 폴백을 겸한다(서브커맨드는 main에서 수동 분기). --help에서
+    # 서브커맨드를 발견할 수 있게 epilog로 목록을 싣는다 — 상세는 각 명령 --help.
+    parser = argparse.ArgumentParser(
+        epilog=(
+            "서브커맨드 (상세는 `project-brain <명령> --help`):\n"
+            "  적재·검수   build  ingest  promote  promote-auto  session\n"
+            "  검색·색인   search  index  eval  projection\n"
+            "  그래프      graph (isolated · export)\n"
+            "  점검·진단   lint  doctor  bootstrap  stale-check  mark-checked\n"
+            "  설치        install\n"
+            "인자로 준 자유 텍스트는 질의(query)로 처리됩니다."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--current-head")
     # 후속 c(2026-06-11): --db를 주면 라우터 recall(top-K·후보 채널)이 켜진다.

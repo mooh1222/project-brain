@@ -1102,5 +1102,19 @@ class TestCliProjectionRefresh(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class TestCliTopLevelHelp(unittest.TestCase):
+    """최상위 --help가 서브커맨드 목록을 보여준다(터미널에서 명령을 발견하는 경로)."""
+
+    def test_help_lists_subcommands_including_graph(self):
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli", "--help"]), redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                cli.main()
+        text = out.getvalue()
+        self.assertIn("graph", text)
+        self.assertIn("ingest", text)
+        self.assertIn("search", text)
+
+
 if __name__ == "__main__":
     unittest.main()

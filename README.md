@@ -61,7 +61,11 @@ project-brain promote --ids ...          # candidate → reviewed 승격 (검토
 project-brain eval                       # 골든셋 회귀 (실모델)
 project-brain eval --check-ids           # 골든셋 기대 id 실존 가드 (모델 불필요)
 project-brain doctor [--download]        # 진단
+project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (읽기 전용)
+project-brain graph export out.html      # 코퍼스를 vis-network 인터랙티브 HTML로 시각화
 ```
+
+전체 명령 목록은 `project-brain --help`, 각 명령 상세는 `project-brain <명령> --help`로 본다.
 
 ## 개발
 
