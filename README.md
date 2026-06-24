@@ -7,7 +7,8 @@
 한 프로젝트의 내부 도구로 개발되다 2026-06에 범용 엔진으로 분리됐다.
 
 색인·임베딩·검색의 코드 기준 동작은 [docs/search-internals.md](docs/search-internals.md),
-설계 근거는 [docs/design-canonical.md](docs/design-canonical.md)를 본다.
+설계 근거는 [docs/design-canonical.md](docs/design-canonical.md), 발전 단계·히스토리는
+[ROADMAP.md](ROADMAP.md)를 본다.
 
 ## 2-레포 모델: 엔진 / 데이터
 

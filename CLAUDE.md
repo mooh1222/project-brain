@@ -13,7 +13,9 @@ promote)하고, 한국어 하이브리드 검색(FTS5 BM25 + bge-m3 벡터 + RRF
 - **이 레포**: 엔진 코드 + 합성 데이터 테스트만. 실코퍼스(프로젝트 도메인 데이터)는 없다.
 - **데이터 레포**: 소비 프로젝트의 루트 `brain/`.
   골든셋(`brain/eval_scenarios.json`)과 실측 가드(`brain/checks/`)는 그쪽 소유다.
-- 설계·개발 히스토리는 원 개발 프로젝트에 보존(이 레포 밖).
+- 엔진 설계·로드맵·발전 히스토리는 이 레포에 있다: 히스토리 허브 [ROADMAP.md](ROADMAP.md)
+  (완료 단계·현황·미뤄둔 작업) + [docs/design-canonical.md](docs/design-canonical.md) +
+  `docs/specs/`·`docs/plans/`. 데이터·적재 이력만 데이터 레포(`brain/`)·vault task에 있다.
 
 ## 개발 루프
 
