@@ -33,6 +33,7 @@ project-brain search "<질문>"
 - **출력 읽기**: `project-brain`은 JSON을 stdout으로 내보내고 진행 로그·HF 경고는 stderr로 보낸다 →
   `project-brain search "<질문>" 2>/dev/null | jq` 로 읽는다(`2>&1`로 합쳐 손파싱하면 키 혼동·잔여줄로 깨짐).
   search 적중 배열 키는 `.results`(candidates·raw_excerpts·projection_reuse는 별도 채널), eval 요약은 `.summary`.
+  각 적중 원소의 객체 식별자 키는 `object_id`다(`id` 아님) — promote 등 후속 명령엔 이 값을 넘긴다.
 
 ## 2. 결과만으로 답한다
 
