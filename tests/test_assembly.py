@@ -41,7 +41,9 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(ev["id"], "evref.ctx.hit-hook")
         self.assertEqual(ev["evidence_manifest_id"], "manifest.ctx.code-v2")
         self.assertEqual(ev["ref_type"], "code_locator")
-        self.assertEqual(ev["locator"], "TrapObject.h:206")
+        self.assertEqual(ev["locator"], {"path": "TrapObject.h",
+                                         "symbol": "TrapObject::_doTrapOnPop",
+                                         "line_start": 206, "line_end": 206})
 
 
 def _store(*objs):

@@ -64,11 +64,15 @@ def build_code_evidence(notes, now):
             "locator_source": a.get("locator_source", "rg"),
             "commit_sha": commit, "verified_at": now,
         }
+        locator = {
+            "path": a["path"], "symbol": a["symbol"],
+            "line_start": a["line_start"], "line_end": a["line_end"],
+        }
         ev = {
             "id": derive_id("EvidenceRef", ctx, key),
             "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
             "title": quote[:120], "evidence_manifest_id": a["manifest"],
-            "ref_type": "code_locator", "locator": f"{a['path']}:{a['line_start']}",
+            "ref_type": "code_locator", "locator": locator,
             "summary": quote[:500],
         }
         out.append(base(loc, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
