@@ -9,7 +9,7 @@
 
 ## 확정된 결정 (decision log)
 
-1. **설계와 틀어져 있었음(확인됨).** 정본(spec §6.2)은 code 책갈피의 `locator`를 `code_locator_id` **참조**로 두려 했으나, `build`와 레거시 데이터가 좌표를 **복사**(문자열 `"path:line"` 또는 객체 `{path,symbol,line,line}`)하는 쪽으로 drift. 번호표화 = 설계 복원.
+1. **설계와 틀어져 있었음(확인됨).** 정본(spec §6.2)은 code 책갈피의 `locator`를 `code_locator_id` **참조**로 두려 했으나, `build`와 레거시 데이터가 좌표를 **복사**(문자열 `"path:line"` 또는 객체 `{path,symbol,line_start,line_end}`)하는 쪽으로 drift. 번호표화 = 설계 복원.
 2. **Part A(엔진), Part C(CLI) — 지금 구현.** route 판정 CLEAR + 검증 완료.
 3. **기존 데이터 일괄 변경(locator 번호표화 + 줄번호 제거) — 미룸.** 그 locator 내부는 색인·회상·랭킹·답변 어디서도 안 읽혀(검증됨) **실익 0**이고, Part A가 이미 신규 데이터의 drift를 발원지에서 막는다. 안 읽는 데이터를 일괄 편집할 이유가 없다. **착수 방아쇠: 그 칸을 실제로 읽는 기능(예: 답변에 출처 좌표 표시·점프)이 생길 때** 그때 한 번에 정비.
 

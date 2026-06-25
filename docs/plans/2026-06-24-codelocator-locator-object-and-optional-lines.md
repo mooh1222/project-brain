@@ -3,6 +3,7 @@
 > ⚠️ **SUPERSEDED (2026-06-24)** — 이 계획은 `2026-06-24-brain-code-evidence-cleanup.md`로 대체됨.
 > 검토 끝에 방향이 바뀜: locator를 `{path,symbol,line,line}` 객체가 아니라 `{code_locator_id}` 번호표(참조)로,
 > 줄번호는 선택값이 아니라 제거. 아래 내용(이미 커밋된 2개 작업)은 그 새 계획의 "배경/현재 상태"로만 참고.
+> **아래 'For agentic workers' 실행 지시와 본문 `- [ ]` 체크박스는 대체 전 원본의 잔재다 — 실행하지 말 것.** 실제 실행 대상은 `2026-06-24-brain-code-evidence-cleanup.md`(이미 완료).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
