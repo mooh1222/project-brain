@@ -121,12 +121,15 @@ class TestStaleAdvisory(unittest.TestCase):
 
     def test_stale_advisory_attached_to_mapping_when_in_stale_set(self):
         adv = {"m.boost": {"code_changed": True, "change_types": ["M"],
-                           "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"}}
+                           "paths": ["a/X.cpp"], "target_head": "T",
+                           "computed_at": "2026-06-25T15:00:00+09:00"}}
         answer = QueryRouter(self._store(), stale_advisories=adv).answer("강화폭탄 무슨 뜻?")
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
         m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
         self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
-        self.assertTrue(any("코드 변경" in w for w in answer["warnings"]))
+        # warning에 기준 시점(computed_at)이 들어가 펼치기 전에도 "언제 기준"인지 보인다(route 후속①).
+        self.assertTrue(any("코드 변경" in w and "2026-06-25T15:00:00+09:00" in w
+                            for w in answer["warnings"]))
 
     def test_no_stale_advisory_without_cache(self):
         answer = QueryRouter(self._store()).answer("강화폭탄 무슨 뜻?")

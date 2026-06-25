@@ -312,8 +312,11 @@ class QueryRouter:
                     # source_ids에 무조건 들어가(router.py:191-195) 실코퍼스에서도 source_ids는 안 빈다.
                     if not matched_mappings:
                         clarification_needed = True
-                if any("stale_advisory" in m for m in mapping_details):
-                    warnings.append("코드 변경 감지된 매핑 포함 — stale-check 기준 시점 확인 필요")
+                stale_mappings = [m for m in mapping_details if "stale_advisory" in m]
+                if stale_mappings:
+                    # 기준 시점(computed_at)을 문구에 넣어 advisory를 펼치기 전에도 "언제 기준"인지 보이게 한다.
+                    as_of = stale_mappings[0]["stale_advisory"].get("computed_at")
+                    warnings.append(f"코드 변경 감지된 매핑 포함 — stale-check 기준({as_of}) 확인 필요")
                 summary = "Glossary definition (reviewed mappings prioritized)" if matched_mappings else "Glossary definition"
                 # 검수/후보 구분은 키로: object_ids·mappings = 검수됨, candidate_terms = 후보(각 trust_label).
                 sections.append({
