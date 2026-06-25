@@ -26,7 +26,7 @@
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` |
 | L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
-| 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) |
+| 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
 | 공유 경계 | ✅ 엔진/데이터 2-레포 분리 (2026-06-11) | brain/ git 추적·색인만 로컬 |
 | L5 개인 메모리 | ⬜ 없음 | 설계상 자리만 (미뤄둠) |
@@ -152,6 +152,20 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
 
 - 계획(확정본·결정 로그·Part B 보류 근거): [code-evidence-cleanup](docs/plans/2026-06-24-brain-code-evidence-cleanup.md)
 
+### stale 자동화 Step 1·2 — 미머지 앵커 라벨 + query/show 노출 (2026-06-25)
+설계(보류했던 자동화, 미뤄둔 작업 §7)의 **엔진 부분만** 구현. Step 3(에이전트 diff 자동
+정리)은 실코퍼스 회귀가 필요해 보류 유지.
+- **Step 1 — 미머지 앵커 라벨**: `stale-check`이 `git merge-base`로 앵커 `commit_sha`가
+  origin/develop 조상인지 판정해, 조상 아니면(PR 머지 전 작업 브랜치 커밋) candidate에서 빼고
+  새 키 `unmerged_anchors`(차단 아니라 라벨)로 분리. bb2 실행에서 본 거짓 'D'(삭제) 신호를
+  근원 제거(머지되면 자동 해소). 약식 sha는 `base.startswith(from_commit)` prefix 비교로 처리.
+- **Step 2 — query/show 노출**: `stale-check --write-cache`가 stale-set을
+  `.brain-local/stale-set.json`(색인과 같은 재생성 파생물)에 떨구고, `query`/`show`가 읽어
+  매핑별 `stale_advisory`(코드 변경 감지 + 기준 시점)를 곁들인다. 파일 IO는 CLI, router는
+  주입된 dict만 소비(git·파일 모름 — `git_runner` 주입과 같은 패턴). 캐시 없으면 동작 불변.
+- 검증: 합성 519 통과(신규 9), 3렌즈 적대 검증 correctness·regression clean. 실코퍼스 회귀는
+  데이터 레포에서 별도(아래 주의). 계획: [stale-step1·2 impl](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
+
 ---
 
 ## 미뤄둔 작업 (최종 관리)
@@ -202,14 +216,16 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
    - 입력: pkm 비교(스킬 3 + install/init 슬래시) 참고.
 
 7. **stale 자동화 — B+C 검수 모델에 코드변경 트리거 잇기**
-   - 상태: 설계 확정·보류. 추출(`stale-check`)·해소(`mark-checked`)는 **이미 구현·실코퍼스
-     검증**(새 코드 없음). 남은 자동화 = B(에이전트가 diff 읽고 확실-불변 자동 갱신 / 변경은
-     supersede 초안) + query 시점 "확인 필요: 코드 변경" 노출(C). 정밀화는 엔진 파서 아니라
-     에이전트 몫(줄번호 제거로 엔진은 hunk→symbol 못 이음, bb2 84% 클러스터링 실측).
-   - 부수 요건(실코퍼스 발견): stale-check이 "앵커 커밋이 develop 조상 아님(미머지 적재)"을
-     삭제/변경과 구분 표시해야 거짓 stale를 안 낸다(bb2는 머지 커밋·직접 푸시 모두 원커밋 해시
-     보존=스쿼시/리베이스 아님이라 머지되면 자동 해소, commit_sha 정정 불필요).
-   - 트리거: stale 결과 수동 triage가 거슬리거나 query 노출이 필요해질 때.
-   - 설계 정본: [stale-automation-bc](docs/plans/2026-06-25-brain-stale-automation-bc.md).
+   - 상태: 설계 확정. 추출(`stale-check`)·해소(`mark-checked`)는 이미 구현·실코퍼스 검증.
+     **Step 1·2(엔진) ✅ 구현(2026-06-25, 완료 단계 참고)** — 미머지 앵커 라벨 + query/show
+     "코드 변경" 노출(C). **남은 것 = Step 3(B)**: 에이전트가 diff 읽고 확실-불변 자동 갱신 /
+     변경은 supersede 초안. 정밀화는 엔진 파서 아니라 에이전트 몫(줄번호 제거로 엔진은
+     hunk→symbol 못 이음, bb2 84% 클러스터링 실측) — 실코퍼스 회귀 필요라 보류.
+   - 부수 요건(실코퍼스 발견) ✅ 해결(Step 1): stale-check이 "앵커 커밋이 develop 조상 아님
+     (미머지 적재)"을 삭제/변경과 별개 `unmerged_anchors`로 구분 표시해 거짓 stale를 안 낸다
+     (bb2는 머지 커밋·직접 푸시 모두 원커밋 해시 보존=스쿼시/리베이스 아님이라 머지되면 자동 해소).
+   - Step 3 착수 트리거: stale 수동 triage가 실제로 거슬릴 때.
+   - 설계 정본: [stale-automation-bc](docs/plans/2026-06-25-brain-stale-automation-bc.md) ·
+     Step 1·2 계획: [stale-step1·2 impl](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
 
 미결 사항 상세는 [docs/design-canonical.md §4](docs/design-canonical.md)를 본다.

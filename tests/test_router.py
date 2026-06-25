@@ -107,6 +107,34 @@ class TestCandidateExposure(unittest.TestCase):
             self.assertNotIn("g.c", entry["fact_ids"])
 
 
+class TestStaleAdvisory(unittest.TestCase):
+    """Step 2: CLI가 주입한 stale_advisories를 glossary_meaning 매핑에 부착(코드 변경 노출).
+    색인 불필요 — _matched_mappings가 reviewed 매핑을 glossary term 표면으로 매칭한다."""
+
+    def _store(self):
+        from tests.test_search import domain_mapping, glossary_term
+        return store_of(
+            glossary_term("g.boost", term="강화폭탄"),
+            domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
+                           glossary_term_ids=["g.boost"]),
+        )
+
+    def test_stale_advisory_attached_to_mapping_when_in_stale_set(self):
+        adv = {"m.boost": {"code_changed": True, "change_types": ["M"],
+                           "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"}}
+        answer = QueryRouter(self._store(), stale_advisories=adv).answer("강화폭탄 무슨 뜻?")
+        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
+        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
+        self.assertTrue(any("코드 변경" in w for w in answer["warnings"]))
+
+    def test_no_stale_advisory_without_cache(self):
+        answer = QueryRouter(self._store()).answer("강화폭탄 무슨 뜻?")
+        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
+        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        self.assertNotIn("stale_advisory", m)
+
+
 def decision_record_inline(did, *, affected_term_ids, summary="결정"):
     """매칭된 용어를 affected_glossary_term_ids로 가리키는 reviewed DecisionRecord."""
     from project_brain.objbase import base

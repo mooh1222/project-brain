@@ -76,6 +76,27 @@ class TestCli(unittest.TestCase):
         self.assertGreaterEqual(len(loc["object_ids"]), 1)
         self.assertLessEqual(len(loc["object_ids"]), 5)
 
+    def test_cli_query_surfaces_stale_advisory_from_cache(self):
+        # Step 2: .brain-local/stale-set.json이 있으면 query가 읽어 매핑에 stale_advisory 부착.
+        from project_brain.stale_check import write_stale_set
+        from tests.test_search import domain_mapping, glossary_term
+        for obj in (glossary_term("g.boost", term="강화폭탄"),
+                    domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
+                                   glossary_term_ids=["g.boost"])):
+            BrainStore.save_object(self.root, obj)
+        write_stale_set(self.root, {
+            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.boost"],
+            "detail": {"m.boost": {"change_types": ["M"], "paths": ["a/X.cpp"]}}})
+        argv = ["--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        answer = json.loads(out.getvalue())
+        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
+        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
+
     def test_cli_ingest_subcommand_writes(self):
         bundle = [manifest(), evidence_ref(), candidate_term()]
         objects_file = self.input_dir / "bundle.json"
@@ -1159,6 +1180,32 @@ class TestCliShow(unittest.TestCase):
         # 끊긴 참조(evidence_refs=["ev.map"])·자기참조(id)는 이웃에 안 뜬다.
         self.assertNotIn("ev.map", by_nb)
         self.assertNotIn("m.x", by_nb)
+
+    def test_show_attaches_stale_advisory_for_stale_mapping(self):
+        # Step 2: show 대상이 stale-set에 들면 payload 최상위에 stale_advisory(객체 본문 불변).
+        from project_brain.stale_check import write_stale_set
+        from tests.test_search import build_store_dir, domain_mapping, glossary_term
+        build_store_dir(self.root, [
+            glossary_term("g.race", term="레이스"),
+            domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
+        ])
+        write_stale_set(self.root, {
+            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.x"],
+            "detail": {"m.x": {"change_types": ["M"], "paths": ["a/X.cpp"]}}})
+        rc, payload = self._show("m.x")
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["stale_advisory"]["change_types"], ["M"])
+        self.assertNotIn("stale_advisory", payload["object"])  # 객체 본문은 불변
+
+    def test_show_no_advisory_when_not_stale(self):
+        from tests.test_search import build_store_dir, domain_mapping, glossary_term
+        build_store_dir(self.root, [
+            glossary_term("g.race", term="레이스"),
+            domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
+        ])
+        rc, payload = self._show("m.x")  # 캐시 안 떨굼
+        self.assertEqual(rc, 0)
+        self.assertNotIn("stale_advisory", payload)
 
     def test_show_missing_id_errors(self):
         rc, payload = self._show("nope.404")

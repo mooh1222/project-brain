@@ -57,10 +57,15 @@ def _run_query(argv) -> int:
         parser.error("query is required")
     # embedder None이면 recall 층이 색인과 같은 팩토리(get_embedder)로 만든다.
     embedder = get_embedder(stub=True) if args.stub_embedder else None
+    # stale-set 캐시(.brain-local/stale-set.json)가 있으면 매핑id→advisory로 주입.
+    # 파일 IO는 CLI 책임 — router는 dict만 소비(git·파일 모름). 없으면 {}(동작 불변).
+    from project_brain.stale_check import advisories_by_mapping, load_stale_set
+    stale_advisories = advisories_by_mapping(load_stale_set(brain_root))
     router = QueryRouter(
         store, current_head=args.current_head,
         db_path=Path(args.db) if args.db else None,
         embedder=embedder, brain_root=brain_root,
+        stale_advisories=stale_advisories,
     )
     answer = router.answer(args.query)
     print(json.dumps(answer, ensure_ascii=False, indent=2))
@@ -391,7 +396,8 @@ def _run_show(argv) -> int:
     parser.add_argument("id", help="펼쳐볼 객체 id")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     args = parser.parse_args(argv)
-    store = BrainStore.load(resolve_brain_root(args.brain_root))
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
     if not store.has(args.id):
         print(json.dumps({"ok": False, "error": f"object not found: {args.id}"},
                          ensure_ascii=False, indent=2))
@@ -411,8 +417,13 @@ def _run_show(argv) -> int:
             n = store.get(ref)
             neighbors.append({"edge": field, "object_id": ref,
                               "kind": n.get("kind"), "title": n.get("title")})
-    print(json.dumps({"ok": True, "object": obj, "neighbors": neighbors},
-                     ensure_ascii=False, indent=2))
+    # stale-set 캐시에 이 객체가 들면 코드변경 advisory를 최상위에 곁들인다(객체 본문 불변).
+    from project_brain.stale_check import advisories_by_mapping, load_stale_set
+    payload = {"ok": True, "object": obj, "neighbors": neighbors}
+    advisory = advisories_by_mapping(load_stale_set(brain_root)).get(args.id)
+    if advisory:
+        payload["stale_advisory"] = advisory
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -795,9 +806,17 @@ def _run_stale_check(argv) -> int:
     parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모 — brain이 레포 루트 직하라 가정)")
     parser.add_argument("--no-fetch", action="store_true",
                         help="git fetch 생략(오프라인·테스트)")
+    parser.add_argument("--write-cache", action="store_true",
+                        help="결과 stale-set을 .brain-local/stale-set.json에 떨궈 query/show가 읽게 함")
     args = parser.parse_args(argv)
 
-    from project_brain.stale_check import GitError, make_git_runner, stale_check
+    from project_brain.stale_check import (
+        GitError,
+        build_stale_set,
+        make_git_runner,
+        stale_check,
+        write_stale_set,
+    )
 
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
@@ -808,7 +827,11 @@ def _run_stale_check(argv) -> int:
     except GitError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
-    print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
+    payload = {"ok": True, **report}
+    if args.write_cache:
+        path = write_stale_set(brain_root, build_stale_set(report, now=now_kst()))
+        payload["cache_written"] = str(path)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 

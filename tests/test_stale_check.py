@@ -15,11 +15,14 @@ from project_brain import cli
 from project_brain.store import BrainStore
 
 
-def fake_git_runner(target_head, changed):
+def fake_git_runner(target_head, changed, *, merge_base=None):
     """changed: {(from_commit, path): change_type}. 없는 키는 '안 바뀜'(빈 출력).
+    merge_base: {from_commit: base_sha}. 없는 from_commit은 자기 자신을 base로 반환
+    = target_head의 조상(머지됨)으로 본다(기본 — 기존 테스트 보존).
 
     git diff args 형태: ["diff", "--name-status", "FROM..TARGET", "--", "PATH"].
     """
+    merge_base = merge_base or {}
     calls = []
 
     def run(args):
@@ -28,6 +31,9 @@ def fake_git_runner(target_head, changed):
             return ""
         if args[:1] == ["rev-parse"]:
             return target_head + "\n"
+        if args[:1] == ["merge-base"]:
+            fc = args[1]
+            return merge_base.get(fc, fc) + "\n"
         if args[:2] == ["diff", "--name-status"]:
             from_commit = args[2].split("..")[0]
             path = args[4]
@@ -244,6 +250,36 @@ class StaleCheckTest(unittest.TestCase):
         report = stale_check(store, git_runner=runner, target_head="TARGET")
         self.assertEqual(report["candidates"], [])  # 기준점 없는 locator는 건너뜀
 
+    def test_unmerged_anchor_excluded_from_candidates_and_listed(self):
+        # 앵커 commit_sha=WORK가 develop 조상이 아니면(미머지) 거짓 신호 방지로 후보에서 빼고
+        # unmerged_anchors에 별도 라벨. diff가 'D'를 내도 후보로 새지 않아야 한다.
+        from project_brain.stale_check import stale_check
+        store = _store(
+            code_locator("code.work", path="a/Work.cpp", commit_sha="WORK"),
+            domain_mapping("m.work", code_locator_ids=["code.work"]),
+        )
+        runner = fake_git_runner(
+            "TARGET", {("WORK", "a/Work.cpp"): "D"}, merge_base={"WORK": "OLDBASE"})
+        report = stale_check(store, git_runner=runner, target_head="TARGET")
+        self.assertEqual(report["candidates"], [])          # 미머지 → 후보 아님
+        self.assertEqual([u["locator_id"] for u in report["unmerged_anchors"]], ["code.work"])
+        self.assertEqual(report["unmerged_anchors"][0]["reason"], "not_ancestor")
+
+    def test_abbreviated_anchor_sha_detected_as_merged(self):
+        # 약식 sha 함정 회귀: commit_sha가 약식이고 merge-base가 전체 sha를 돌려줘도
+        # prefix 비교로 '머지됨'으로 본다 → 정상적으로 변경 감지(후보)된다.
+        from project_brain.stale_check import stale_check
+        store = _store(
+            code_locator("code.ab", path="a/Ab.cpp", commit_sha="b27a23e385"),
+            domain_mapping("m.ab", code_locator_ids=["code.ab"]),
+        )
+        runner = fake_git_runner(
+            "TARGET", {("b27a23e385", "a/Ab.cpp"): "M"},
+            merge_base={"b27a23e385": "b27a23e38598ffcaffee0011"})  # 전체 sha
+        report = stale_check(store, git_runner=runner, target_head="TARGET")
+        self.assertEqual([c["mapping_id"] for c in report["candidates"]], ["m.ab"])
+        self.assertEqual(report["unmerged_anchors"], [])
+
 
 class CliStaleCheckTest(unittest.TestCase):
     def setUp(self):
@@ -280,6 +316,37 @@ class CliStaleCheckTest(unittest.TestCase):
         # 읽기 전용: locator의 commit_sha가 그대로다(stale-check는 갱신 안 함).
         self.assertEqual(BrainStore.load(self.root).get("code.changed")["commit_sha"], "SHA1")
 
+    def test_stale_check_surfaces_unmerged_anchors(self):
+        for obj in (
+            code_locator("code.work", path="a/Work.cpp", commit_sha="WORK"),
+            domain_mapping("m.work", code_locator_ids=["code.work"]),
+        ):
+            BrainStore.save_object(self.root, obj)
+        runner = fake_git_runner(
+            "TARGET", {("WORK", "a/Work.cpp"): "D"}, merge_base={"WORK": "OLDBASE"})
+        rc, payload = self._run(
+            ["stale-check", "--brain-root", str(self.root), "--no-fetch"], runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["candidates"], [])
+        self.assertEqual([u["locator_id"] for u in payload["unmerged_anchors"]], ["code.work"])
+
+    def test_stale_check_write_cache_persists_stale_set(self):
+        from project_brain.stale_check import load_stale_set
+        for obj in (
+            code_locator("code.changed", path="a/Changed.cpp", commit_sha="SHA1"),
+            domain_mapping("m.on_changed", code_locator_ids=["code.changed"]),
+        ):
+            BrainStore.save_object(self.root, obj)
+        runner = fake_git_runner("TARGET", {("SHA1", "a/Changed.cpp"): "M"})
+        rc, payload = self._run(
+            ["stale-check", "--brain-root", str(self.root), "--no-fetch", "--write-cache"],
+            runner)
+        self.assertEqual(rc, 0)
+        self.assertIn("cache_written", payload)
+        ss = load_stale_set(self.root)
+        self.assertEqual(ss["stale_mapping_ids"], ["m.on_changed"])
+        self.assertEqual(ss["target_head"], "TARGET")
+
     def test_stale_check_git_error_returns_rc1(self):
         # --no-fetch 없이 실행 → resolve_target_head의 fetch 단계에서 GitError → rc=1.
         BrainStore.save_object(
@@ -294,6 +361,55 @@ class CliStaleCheckTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
         self.assertIn("failed", payload["error"])
+
+
+class StaleSetCacheTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_build_stale_set_from_report(self):
+        from project_brain.stale_check import build_stale_set
+        report = {
+            "target_head": "TARGET",
+            "candidates": [{
+                "mapping_id": "m.a", "mapping_key": "m.a",
+                "stale_locators": [
+                    {"locator_id": "code.x", "path": "a/X.cpp",
+                     "change_type": "M", "from_commit": "SHA1"}],
+            }],
+        }
+        ss = build_stale_set(report, now="2026-06-25T12:00:00+09:00")
+        self.assertEqual(ss["target_head"], "TARGET")
+        self.assertEqual(ss["computed_at"], "2026-06-25T12:00:00+09:00")
+        self.assertEqual(ss["stale_mapping_ids"], ["m.a"])
+        self.assertEqual(ss["detail"]["m.a"], {"change_types": ["M"], "paths": ["a/X.cpp"]})
+
+    def test_write_then_load_roundtrip(self):
+        from project_brain.stale_check import write_stale_set, load_stale_set, stale_set_path
+        self.assertIsNone(load_stale_set(self.root))  # 없으면 None
+        ss = {"target_head": "T", "computed_at": "t", "stale_mapping_ids": [], "detail": {}}
+        path = write_stale_set(self.root, ss)
+        self.assertEqual(path, stale_set_path(self.root))
+        self.assertEqual(load_stale_set(self.root), ss)
+
+    def test_advisories_by_mapping(self):
+        from project_brain.stale_check import advisories_by_mapping
+        ss = {"target_head": "T", "computed_at": "t2",
+              "stale_mapping_ids": ["m.a"],
+              "detail": {"m.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}}}
+        adv = advisories_by_mapping(ss)
+        self.assertEqual(adv["m.a"], {
+            "code_changed": True, "change_types": ["M"], "paths": ["a/X.cpp"],
+            "target_head": "T", "computed_at": "t2"})
+
+    def test_advisories_by_mapping_empty_when_no_cache(self):
+        from project_brain.stale_check import advisories_by_mapping
+        self.assertEqual(advisories_by_mapping(None), {})
+        self.assertEqual(advisories_by_mapping({}), {})
 
 
 class MarkCheckedTest(unittest.TestCase):

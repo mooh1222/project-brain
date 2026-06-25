@@ -39,9 +39,13 @@ class QueryRouter:
         db_path=None,
         embedder=None,
         brain_root=None,
+        stale_advisories=None,
     ):
         self.store = store
         self.current_head = current_head
+        # CLI가 .brain-local/stale-set.json을 읽어 만든 매핑id→advisory dict(Step 2).
+        # router는 파일·git을 모르고 주입된 dict만 소비한다(git_runner/current_head와 같은 패턴).
+        self.stale_advisories = stale_advisories or {}
         self.missing_raw_manifest_ids = missing_raw_manifest_ids or set()
         # 의미 회상(§7) 입력. db_path가 None이거나 색인 DB가 없으면 recall을 끄고
         # ★정확 매칭 경로만으로★ 동작한다(안전 폴백) — 색인 없는 tmp store로 도는
@@ -268,14 +272,18 @@ class QueryRouter:
                     source_ids.append(mapping["id"])
                     section_ids.append(mapping["id"])
                     claim_statuses.append(claim_status(mapping, raw_available=self._raw_available_for(mapping), restricted=self._restricted_for(mapping)))
-                    mapping_details.append({
+                    detail = {
                         "id": mapping["id"],
                         "mapping_key": mapping.get("mapping_key"),
                         "meaning": mapping.get("meaning", ""),
                         "boundary": mapping.get("boundary", ""),
                         "caveats": mapping.get("caveats") or [],
                         "code_locator_ids": mapping.get("code_locator_ids") or [],
-                    })
+                    }
+                    adv = self.stale_advisories.get(mapping["id"])
+                    if adv:
+                        detail["stale_advisory"] = adv
+                    mapping_details.append(detail)
                 # §7 전량 적재 → top-K 전이: 색인이 있으면 recall 점수 top-K로 좁히고,
                 # 없으면 기존 전량 적재(DomainContext + GlossaryTerm)로 폴백한다. 정확
                 # 매칭이 이미 잡은 매핑(section_ids)은 의미 확장에서 중복 적재하지 않는다.
@@ -304,6 +312,8 @@ class QueryRouter:
                     # source_ids에 무조건 들어가(router.py:191-195) 실코퍼스에서도 source_ids는 안 빈다.
                     if not matched_mappings:
                         clarification_needed = True
+                if any("stale_advisory" in m for m in mapping_details):
+                    warnings.append("코드 변경 감지된 매핑 포함 — stale-check 기준 시점 확인 필요")
                 summary = "Glossary definition (reviewed mappings prioritized)" if matched_mappings else "Glossary definition"
                 # 검수/후보 구분은 키로: object_ids·mappings = 검수됨, candidate_terms = 후보(각 trust_label).
                 sections.append({
