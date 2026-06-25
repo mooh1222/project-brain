@@ -1,6 +1,6 @@
-# stale 자동화 — B+C 검수 모델에 코드변경 트리거 잇기 (설계 + 보류)
+# stale 자동화 — B+C 검수 모델에 코드변경 트리거 잇기 (설계 + Step 1·2 구현완료, Step 3 보류)
 
-> **상태(2026-06-25): 설계 확정, 구현 보류.** A(추출·해소)는 이미 구현됨. B(자동화)는 착수 방아쇠 전까지 미룸.
+> **상태(2026-06-25): Step 1·2 구현·푸시 완료(커밋 237096d·957d882), Step 3만 보류.** A(추출·해소)는 이미 구현됨. B 중 미머지 앵커 라벨(Step 1, §5)·query/show advisory(Step 2 = 갈래 2, §3)는 엔진에 구현·검증됨. 갈래 1(에이전트 자동 트리아지, Step 3)만 착수 방아쇠 전까지 미룸. 구현 계획·검증: [step12-impl](2026-06-25-brain-stale-step12-impl-plan.md), 현황: ROADMAP §7.
 > 이 문서는 여러 세션에 걸쳐 정렬한 결정을 보존한다(소실 방지). 구현 시 TDD·결정론 원칙은 [CLAUDE.md] 따른다.
 
 **Goal:** "코드가 바뀌면 어느 적재 지식이 낡았나"를 찾고 해소하는 흐름을, 새 철학이 아니라 **이미 있는 검수 모델(B+C)을 "코드 변경" 트리거에 연결**하는 것으로 설계한다. 완전 자동(사람 무개입) supersede는 하지 않는다.
@@ -29,15 +29,15 @@
 
 > 주의: "완전 자동 = 코퍼스 오염"이 아니다. 가드는 "사람 전수검수"가 아니라 **"근거 + 적대검증 게이트"**다. 확실하면 자동, 모호하면 candidate+사용자.
 
-## 3. stale를 B+C에 잇기 (B 설계)
+## 3. stale를 B+C에 잇기 (B 설계 — 갈래 2 = Step 2로 구현완료)
 
 코드가 바뀌면(예: develop pull) stale-check이 짚은 영향 매핑 각각을 에이전트가 diff+매핑 본문을 읽고 판단:
 
-- **갈래 1 — 확실하면 자동(B 논리)**
+- **갈래 1 — 확실하면 자동(B 논리)** ⏸ 보류(Step 3)
   - *그대로인 게 확실*(앵커 함수 불변, 옆 함수만 변경): 앵커 `commit_sha`만 현재로 갱신(=mark-checked). 사람 개입 0.
   - *바뀐 게 확실*: 새 의미를 재도출 + **적대검증 통과 시** supersede 리비전 작성(옛 버전 **이력 보존** — 덮어쓰기 아님). 사람 개입 0. ← 더 공격적, 후순위.
-- **갈래 2 — 모호하면 query에서(C 논리)**
-  - 덮어쓰지 않고 매핑에 "코드 변경됨 — 확인 필요" 표식만. reviewed 답은 계속 서빙(advisory 부착).
+- **갈래 2 — 모호하면 query에서(C 논리)** ✅ 구현완료(Step 2, 2026-06-25)
+  - 덮어쓰지 않고 매핑에 "코드 변경됨 — 확인 필요" 표식만. reviewed 답은 계속 서빙(advisory 부착). → 구현: `stale-check --write-cache`가 stale-set 캐시를 떨구고, query/show가 매핑에 `stale_advisory`(변경유형·경로·기준 시점) 부착 + warnings 한 줄.
   - 그 매핑이 답에 뜰 때 사용자가 promote(유효)/수정/supersede 판정.
 
 핵심: **새 메커니즘이 아니라 B(자동)·C(query 노출)를 "코드 변경" 트리거에 연결**하는 것.
@@ -57,7 +57,7 @@
 
 - 산 증거: BoostedBomb 앵커 13개 전부 `commit_sha=b27a23e385` = `feature/5.6/disturb-boostedbomb` 커밋(develop 조상 아님, 파일 develop 미존재). stale-check의 D 3건이 전부 이 아티팩트(실제 삭제 아님).
 - **머지 방식 의존**: bb2 develop은 머지 커밋(`Merge pull request #NNNN`)과 직접 푸시가 혼재하지만 **둘 다 원커밋 해시를 보존**(스쿼시·리베이스 아님 — 직접 푸시 존재가 그 방증) → 머지되면 b27a23e가 develop 조상이 됨 → **"정정" 불필요, 거짓 신호 자동 해소**. (스쿼시·리베이스 팀이면 새 해시라 정정 필요 — bb2는 해당 없음.)
-- **B 요건**: stale-check이 **"앵커 커밋이 develop 조상 아님(=미머지)"** 을 D/변경과 **별개 범주로 구분 표시**(차단 아니라 라벨). 안 그러면 머지 전 적재가 전부 거짓 stale로 뜬다.
+- **요건 ✅ 구현완료(Step 1, 2026-06-25)**: stale-check이 **"앵커 커밋이 develop 조상 아님(=미머지)"** 을 D/변경과 **별개 범주로 구분 표시**(차단 아니라 라벨). `anchor_merged()`가 `git merge-base` prefix 비교로 판정, `stale_check()`가 `unmerged_anchors:[{locator_id, path, from_commit, reason}]`(reason∈{not_ancestor, anchor_unverifiable})를 반환. bb2 거짓 D 13건이 candidates에서 빠져 unmerged_anchors로 분리됨(확인). 안 했으면 머지 전 적재가 전부 거짓 stale로 떴을 것.
 
 ## 6. symbol 유지 / 줄번호 제거 (확정 근거)
 
@@ -70,8 +70,8 @@
 - **방아쇠**: stale-check 결과를 손으로 triage하는 게 실제로 거슬릴 때, 또는 query 시점 노출이 필요해질 때. 그 전엔 `stale-check` 수동 실행으로 충분.
 - **안 한다**: 완전 자동 supersede(사람·적대검증 무개입), 자동 hook, 엔진 symbol 파서(정밀화는 에이전트가).
 
-## 8. 구현 순서 (방아쇠 후)
+## 8. 구현 순서
 
-1. stale-check에 "미머지 앵커" 구분 라벨 추가(§5) — 엔진, 합성 테스트.
-2. 갈래 2(query 노출): stale-set를 query/show가 읽어 "확인 필요: 코드 변경" advisory 부착. (캐시 설계 — query마다 git 금지.)
-3. 갈래 1(에이전트 트리아지): 스킬/플로우로 diff+매핑 읽고 확실-불변 자동 갱신/변경 supersede 초안. 실코퍼스 회귀 필요.
+1. ✅ **DONE(2026-06-25, 커밋 237096d)**: stale-check에 `anchor_merged()` + `unmerged_anchors` 구분 라벨(§5) — 엔진, 합성 테스트 신규 13(총 519), bb2 실코퍼스 검증.
+2. ✅ **DONE(2026-06-25, 237096d+957d882)**: 갈래 2(query 노출) — `stale-check --write-cache`→`.brain-local/stale-set.json`, query/show가 매핑에 `stale_advisory` 부착(기준 시점 포함). route architect 리뷰 CLEAR.
+3. ⏸ **보류(방아쇠 후)**: 갈래 1(에이전트 트리아지) — 스킬/플로우로 diff+매핑 읽고 확실-불변 자동 갱신/변경 supersede 초안. 실코퍼스 회귀 필요. 트리거 = stale 수동 triage가 거슬릴 때(§7).

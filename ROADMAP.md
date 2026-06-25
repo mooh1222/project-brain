@@ -163,7 +163,7 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
   `.brain-local/stale-set.json`(색인과 같은 재생성 파생물)에 떨구고, `query`/`show`가 읽어
   매핑별 `stale_advisory`(코드 변경 감지 + 기준 시점)를 곁들인다. 파일 IO는 CLI, router는
   주입된 dict만 소비(git·파일 모름 — `git_runner` 주입과 같은 패턴). 캐시 없으면 동작 불변.
-- 검증: 합성 519 통과(신규 9), 3렌즈 적대 검증 correctness·regression clean. 실코퍼스 회귀는
+- 검증: 합성 519 통과(신규 13), 3렌즈 적대 검증 correctness·regression clean. 실코퍼스 회귀는
   데이터 레포에서 별도(아래 주의). 계획: [stale-step1·2 impl](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
 
 ---
