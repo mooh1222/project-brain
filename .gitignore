@@ -6,3 +6,5 @@ uv.lock
 .DS_Store
 # 색인은 재생성 가능한 로컬 파생물 (데이터 레포 쪽에 생기지만 혹시 모를 로컬 실험 대비)
 .brain-local/
+# 세션 대화 스냅샷 (session-snapshot 스킬 산출물, 로컬 전용)
+.snapshots/

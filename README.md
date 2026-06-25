@@ -60,10 +60,16 @@ project-brain ingest --objects-file f    # 객체 묶음 적재 (스키마+lint 
 project-brain promote --ids ...          # candidate → reviewed 승격 (검토 기록 동반)
 project-brain eval                       # 골든셋 회귀 (실모델)
 project-brain eval --check-ids           # 골든셋 기대 id 실존 가드 (모델 불필요)
-project-brain doctor [--download]        # 진단
+project-brain show <id>                  # 객체 본문 + 1-hop 이웃(종류·제목) 펼쳐보기
+project-brain doctor [--download]         # 진단
 project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (읽기 전용)
 project-brain graph export out.html      # 코퍼스를 vis-network 인터랙티브 HTML로 시각화
+project-brain lint                       # 무결성: 끊긴 참조(가리키는 대상 없음) 탐지 (읽기 전용)
+project-brain stale-check                # 코드 변경 → 갱신 필요 매핑 추출 (읽기 전용)
+project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매핑의 commit_sha 갱신
 ```
+
+**점검·진단 4종**(모두 읽기 전용 이상 감지): `lint`(끊긴 참조=아웃바운드) · `graph isolated`(고립=인바운드) · `stale-check`(코드 변경→갱신 후보) · `doctor`(환경). `mark-checked`가 stale 해소(쓰기)다. stale 자동화 설계(보류)는 [docs/plans/2026-06-25-brain-stale-automation-bc.md](docs/plans/2026-06-25-brain-stale-automation-bc.md).
 
 전체 명령 목록은 `project-brain --help`, 각 명령 상세는 `project-brain <명령> --help`로 본다.
 

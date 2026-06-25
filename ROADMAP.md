@@ -193,11 +193,23 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
      계획 Part B에 보존.
      - **착수 방아쇠: locator 좌표를 실제로 읽는 기능(답변에 `파일:줄` 표시·점프 등)이
        엔진에 생길 때.** 그 전엔 착수하지 않는다.
-   - "코드 변경→매핑 의미 갱신 대상 발견"은 별개 니즈 — stale-check/mark-checked로 일부
-     해소됨. 자동 코드 의미 비교·자동 supersede·hook은 하지 않는다.
+   - "코드 변경→매핑 의미 갱신 대상 발견"은 별개 니즈 — 추출(stale-check)·해소(mark-checked)는
+     이미 됨(§7로 분리). **완전 자동(사람·적대검증 무개입) supersede·hook은 안 하되**, B+C
+     게이트(확실 자동 / 모호 query 확인)로 잇는 설계는 §7 참고.
 
 6. **스킬·슬래시 커맨드 라인업 결정**
    - 상태: 후순위 작업 전부 완료한 뒤로 명시 보류. 현재 자동 진입점은 스킬 description뿐.
    - 입력: pkm 비교(스킬 3 + install/init 슬래시) 참고.
+
+7. **stale 자동화 — B+C 검수 모델에 코드변경 트리거 잇기**
+   - 상태: 설계 확정·보류. 추출(`stale-check`)·해소(`mark-checked`)는 **이미 구현·실코퍼스
+     검증**(새 코드 없음). 남은 자동화 = B(에이전트가 diff 읽고 확실-불변 자동 갱신 / 변경은
+     supersede 초안) + query 시점 "확인 필요: 코드 변경" 노출(C). 정밀화는 엔진 파서 아니라
+     에이전트 몫(줄번호 제거로 엔진은 hunk→symbol 못 이음, bb2 84% 클러스터링 실측).
+   - 부수 요건(실코퍼스 발견): stale-check이 "앵커 커밋이 develop 조상 아님(미머지 적재)"을
+     삭제/변경과 구분 표시해야 거짓 stale를 안 낸다(bb2는 머지 커밋·직접 푸시 모두 원커밋 해시
+     보존=스쿼시/리베이스 아님이라 머지되면 자동 해소, commit_sha 정정 불필요).
+   - 트리거: stale 결과 수동 triage가 거슬리거나 query 노출이 필요해질 때.
+   - 설계 정본: [stale-automation-bc](docs/plans/2026-06-25-brain-stale-automation-bc.md).
 
 미결 사항 상세는 [docs/design-canonical.md §4](docs/design-canonical.md)를 본다.
