@@ -387,11 +387,26 @@ def build(notes, store, now):
     refs_map, resolved, ref_errors = resolve_refs(notes, store)
     errors += ref_errors
 
+    # decisions의 affects → 매핑별 decision key 역채움 (lint 8c 양방향 강제 충족).
+    # 노트엔 결정의 affects만 쓰고, 매핑의 decision_record_ids는 여기서 채운다.
+    decisions = notes.get("decisions", [])
+    if decisions:
+        notes = copy.deepcopy(notes)
+        dec_by_mapping = {}
+        for d in notes["decisions"]:
+            for mk in d.get("affects", []):
+                dec_by_mapping.setdefault(mk, []).append(d["key"])
+        for m in notes.get("mappings", []):
+            extra = dec_by_mapping.get(m["key"], [])
+            if extra:
+                m["decision_keys"] = sorted(set(m.get("decision_keys", [])) | set(extra))
+
     new_objs = []
     new_objs += build_manifests(notes, now)        # Task 4 Step 6
     new_objs += build_code_evidence(notes, now)    # Task 2
     new_objs += build_glossary_terms(notes, now)   # Task 1
     new_objs += build_mappings(notes, refs_map, now)  # Task 4
+    new_objs += build_decisions(notes, now)
     new_objs += build_context(notes, now)          # Task 4 Step 6 (신규 context)
     new_objs += list(notes.get("extra_objects", []))  # 탈출구: 완성 객체 직접
 

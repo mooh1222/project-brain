@@ -455,3 +455,53 @@ class BuildDecisionsTest(unittest.TestCase):
         errors = validate_notes(notes)
         self.assertTrue(any("locator" in e for e in errors),
                         f"locator 누락을 1층에서 막아야 함: {errors}")
+
+
+class BuildWithDecisionsTest(unittest.TestCase):
+    def _notes(self):
+        return {
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "bb2_client",
+                        "display_name": "테스트 컨텍스트", "boundary_summary": "경계",
+                        "in_scope": ["x"], "out_of_scope": ["y"], "glossary_term_ids": []},
+            "sources": [
+                {"id": "manifest.ctx.code", "source_type": "code_search",
+                 "title": "코드", "locator": "repo@dev"},
+                {"id": "manifest.ctx.commit", "source_type": "commit",
+                 "title": "커밋 이력", "locator": "bb2_client@develop"},
+            ],
+            # 매핑이 reviewed로 만들어지므로 evidence_refs가 비면 안 됨(schema.py:217).
+            # code_anchor로 CodeLocator+EvidenceRef를 만들어 매핑이 그 evref를 갖게 한다.
+            "code_anchors": [
+                {"key": "filter-fn", "path": "BallGenerator.cpp",
+                 "symbol": "_getEnableGenerateType", "manifest": "manifest.ctx.code",
+                 "quote": "// 셀렉 후보 자격 판정"},
+            ],
+            "mappings": [
+                {"key": "enable-filter", "canonical_summary": "셀렉 후보 필터",
+                 "meaning": "후보 자격 판정", "boundary": "노말타입만",
+                 "caveats": ["history_coverage=partial"],
+                 "glossary_keys": [], "code_evref_keys": ["filter-fn"]},
+            ],
+            "decisions": [
+                {"key": "skull-exclude", "decision_type": "qa_issue",
+                 "title": "해골투구 셀렉 제외", "summary": "해골 상태 색상 숨김",
+                 "decision": "투구 착용 시 후보 제외.",
+                 "evidence": [{"type": "commit", "ref": "900b6ce82d", "summary": "해골 이슈 fix"}],
+                 "affects": ["enable-filter"]},
+            ],
+        }
+
+    def test_build_includes_decision_and_backfills_mapping(self):
+        from project_brain.store import BrainStore
+        result = build(self._notes(), BrainStore({}), NOW)
+        self.assertEqual(result["errors"], [])  # lint 8c 통과 = 양방향 성립
+        by_id = {o["id"]: o for o in result["objects"]}
+        self.assertIn("decision.ctx.skull-exclude", by_id)
+        mapping = by_id["mapping.ctx.enable-filter"]
+        self.assertIn("decision.ctx.skull-exclude", mapping["decision_record_ids"])
+
+    def test_rebuild_is_idempotent(self):
+        from project_brain.store import BrainStore
+        a = build(self._notes(), BrainStore({}), NOW)["objects"]
+        b = build(self._notes(), BrainStore({}), NOW)["objects"]
+        self.assertEqual(a, b)  # 같은 now → 완전 동일(churn 0)
