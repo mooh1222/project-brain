@@ -1343,6 +1343,16 @@ git commit -m "docs(bb2-brain-ingest): build 절차 추가 (노트→build→ing
 - [x] 실사용 회귀: 방해버블 적재(39객체)를 노트로 재표현 → `build` → **errors 0, built 39, store 무변경(읽기전용 확인)**. id 39=39·kind 0불일치·GlossaryTerm 6 근거 연결·updates 4 결과(claim+`evidence_unchanged`)·CodeLocator 11·session EvidenceRef 6(`extra_objects`) **전부 동치**. **1차 build로 실전 적재가 닫힘이 실증됨** — 비-code 근거는 `extra_objects`, 기존 매핑 갱신은 `updates`로 깔끔히 표현.
   - **유일 차이**: code EvidenceRef 11개의 표시용 텍스트 3필드(title/summary/locator). 원인 = `code_anchors`에 evref 설명문·인용라인 입력 칸이 없어 build가 `quote`(코드 인용)·`line_start`로 파생. **엔진은 검색·회상에서 evref locator 라인을 안 읽으므로 회상 무영향**(표시 정확도 차원). build 쪽 라인이 `CodeLocator.line_start`와 오히려 더 일관적.
 - [x] BB2 골든셋: `project-brain eval` → **8/8 passed** (적재 데이터 안 바뀌고 build/assembly는 검색 경로와 무관 — 회귀 0 확인)
+- [x] **build_decisions 신설 (2026-06-26 완료)** — Task 4가 예고한 "decisions 2차" 이행.
+  `assembly.py`에 `build_decisions(notes, now)` 추가, 노트 `decisions[]`를 DecisionRecord +
+  (commit/jira/pr) EvidenceRef로 결정론 조립. `build()`에 `build_mappings` 다음·`build_context`
+  앞으로 배선, 각 결정의 `affects[]`를 그 매핑의 `decision_keys`로 역채움 → `decision_record_ids`
+  자동 도출 → lint 8c(매핑↔결정 양방향) 자동 충족. `_VALID_SECTIONS`/`_LIST_SECTIONS`/
+  `_ITEM_REQUIRED`에 `"decisions"` 등록, `validate_notes`가 `decisions[].evidence[]` 무결성 1층
+  검증. 단일 `now` → 재빌드 idempotent(churn 0). 도메인 무지: commit locator만 `{repo, sha}`
+  자동, jira/pr는 노트 제공. assembly **37 passed**(31+6)·엔진 전체 **525 passed**, 볼셀렉
+  실코퍼스 14결정 회귀 **"차이 0건 PASS"**. 커밋 `7c2f87c`·`91a9a6c`·`37d0da9`. 다음:
+  bb2-brain-ingest 스킬/조립기가 `extra_objects` 손조립 대신 `decisions[]` 노트를 emit하도록 전환(범위 밖).
 
 ### 2차 과제 (완전 동치를 위한 선택 개선 — 회상엔 무영향, 우선순위 낮음)
 

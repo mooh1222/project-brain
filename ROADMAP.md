@@ -24,7 +24,7 @@
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` |
-| L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 |
+| L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화(decisions[] 결정 조립 2026-06-26) |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -165,6 +165,30 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
   주입된 dict만 소비(git·파일 모름 — `git_runner` 주입과 같은 패턴). 캐시 없으면 동작 불변.
 - 검증: 합성 519 통과(신규 13), 3렌즈 적대 검증 correctness·regression clean. 실코퍼스 회귀는
   데이터 레포에서 별도(아래 주의). 계획: [stale-step1·2 impl](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
+
+### build_decisions — decisions[] 결정 결정론 조립 (2026-06-26)
+`assembly.py`에 `build_decisions(notes, now)`를 신설해 노트의 `decisions[]` 섹션을
+`DecisionRecord` + `EvidenceRef`(commit/jira/pr)로 결정론 조립한다. `build()`가 파이프라인에
+배선(`build_mappings` 다음·`build_context` 앞)하고, 각 결정의 `affects[]`(매핑 키)를 그 매핑의
+`decision_keys`로 역채움 → `build_mappings`가 `decision_record_ids`를 도출해 lint 8c(reviewed
+매핑↔결정 양방향 링크)를 자동 충족한다. 모든 객체가 단일 `now` → 재빌드 idempotent(churn 0).
+
+왜: 적재마다 `DecisionRecord`를 손으로 `extra_objects`에 조립하면 타임스탬프가 매번 달라져
+재적재 churn이 나고, 매핑↔결정 양방향을 수동으로 맞춰야 해 실수 소지가 있었다. 손조립을 엔진
+결정론 조립으로 흡수해 churn 제거 + 양방향 자동화 — 위 "적재 조립 자동화 (build)"에서
+`extra_objects` 탈출구로 남겨뒀던 결정 조립을 1급 노트 섹션으로 승격한 것이다.
+
+- **섹션 등록·검증**: `_VALID_SECTIONS`/`_LIST_SECTIONS`/`_ITEM_REQUIRED`에 `"decisions"` 등록,
+  `validate_notes`가 `decisions[].evidence[]` 무결성(type/ref/locator)을 1층에서 검증.
+- **도메인 무지 유지**: commit locator만 `{repo, sha}` 자동(repo=context), jira/pr locator는
+  노트가 제공(인스턴스 URL을 엔진에 박지 않음).
+- 검증: assembly 테스트 37(기존 31+신규 6)·엔진 전체 525 통과, 데이터 레포 볼셀렉 실코퍼스
+  14결정 회귀 "차이 0건 PASS"(손조립==엔진조립 기능 동치). 커밋 `7c2f87c`·`91a9a6c`·`37d0da9`.
+- 계획(2차 이행): [project-brain-assembly-build](docs/plans/2026-06-16-project-brain-assembly-build.md)
+  Task 4가 예고한 "decisions 2차". 상세 설계·구현 플랜은 데이터 레포 `bb2_client`
+  `docs/superpowers/`(2026-06-26).
+- 다음(범위 밖): `bb2-brain-ingest` 스킬/조립기가 `extra_objects` 손조립 대신 `decisions[]`
+  노트를 emit하도록 전환.
 
 ---
 
