@@ -251,6 +251,20 @@ class ApplyUpdatesTest(unittest.TestCase):
         _, _, errors = apply_updates(notes, store, NOW)
         self.assertTrue(any("allowlist" in e.lower() for e in errors))
 
+    def test_glossary_synonyms_union_allowed(self):
+        store = _store({"id": "g.ctx.x", "kind": "GlossaryTerm", "updated_at": T0,
+                        "synonyms": ["기존"], "aliases": [], "status": "reviewed",
+                        "truth_role": "domain", "title": "t", "context_id": "context.ctx",
+                        "term": "용어", "definition": "정의", "evidence_refs": ["evref.ctx.x"],
+                        "schema_version": "0.1", "poc_priority": "P2",
+                        "created_at": T0, "tags": ["ctx"]})
+        notes = {"updates": [{"id": "g.ctx.x", "expected_updated_at": T0,
+                              "union": {"synonyms": ["추가"], "aliases": ["AKA"]}}]}
+        objs, diffs, errors = apply_updates(notes, store, NOW)
+        self.assertEqual(errors, [])
+        self.assertEqual(objs[0]["synonyms"], ["기존", "추가"])
+        self.assertEqual(objs[0]["aliases"], ["AKA"])
+
 
 from project_brain.assembly import validate_notes, build
 

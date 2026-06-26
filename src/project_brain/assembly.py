@@ -230,7 +230,7 @@ _SET_ALLOWLIST = {
 _UNION_ALLOWLIST = {
     "DomainMapping": {"glossary_term_ids", "code_locator_ids", "decision_record_ids",
                       "evidence_refs", "caveats"},
-    "GlossaryTerm": {"evidence_refs"},
+    "GlossaryTerm": {"evidence_refs", "synonyms", "aliases"},
     "DomainContext": {"glossary_term_ids", "in_scope", "out_of_scope"},
 }
 # 의미 주장 필드(kind 무관) — 고치면 근거 동반 강제.
