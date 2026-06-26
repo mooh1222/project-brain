@@ -108,6 +108,8 @@ def build_decisions(notes, now):
     """decisions[] → DecisionRecord + (commit/jira/pr) EvidenceRef.
 
     evref id는 evref.<ctx>.<type>-<ref>로 만들고 같은 id는 한 번만(중복 제거).
+    여러 결정이 같은 근거를 가리켜도 첫 언급의 summary로 한 번만 만들고 뒤 결정은
+    덮어쓰지 않는다 — 공유 근거의 summary는 본래 단일값이라 첫 언급 기준이 맞다.
     commit locator는 {repo, sha}로 자동(repo=context), jira/pr locator는 노트가 준
     값을 그대로 쓴다(인스턴스 URL은 도메인 지식 — 엔진에 박지 않는다). manifest는
     sources[]가 제공(build_manifests) — evref는 manifest.<ctx>.<type>을 가리킨다.
