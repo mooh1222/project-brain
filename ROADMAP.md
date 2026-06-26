@@ -24,7 +24,7 @@
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` |
-| L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화(decisions[] 결정 조립 2026-06-26) |
+| L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화(decisions[] 결정 조립 2026-06-26) + GlossaryTerm 동의어 통로(신규 적재분, 2026-06-26) |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -190,6 +190,31 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
 - 다음(범위 밖): `bb2-brain-ingest` 스킬/조립기가 `extra_objects` 손조립 대신 `decisions[]`
   노트를 emit하도록 전환.
 
+### GlossaryTerm 동의어 — 도메인·언어 갭 recall 보강 통로 (2026-06-26)
+동료 PKM(hwi_PKM)·개인 vault 임베딩 기법을 교차검토(6후보 독립검증 + 적대 리뷰)해 "재랭커
+외에 우리가 가져올 것"으로 도출한 **단 하나**. GlossaryTerm의 `synonyms`/`aliases`(특히
+한국어↔영문 등가어)를 적재가 채울 수 있게 통로를 연다. 색인 표면(`surface.py`)이 이미 이
+필드를 읽으므로 **새 메커니즘이 아니라 빈 필드를 채우는 통로**다.
+
+왜: 코퍼스 term의 다수가 영문(코드명·enum·메시지키)이라 한국어 질의가 BM25 토큰을 못 잡는
+언어 갭이 실재한다(실코퍼스 437개 GlossaryTerm 중 동의어가 채워진 건 2개뿐이었다). 색인 측
+보강이 호출자(어시스턴트)의 질의 다듬기보다 robust한 영역 = 코퍼스에만 있는 내부 코드명·enum.
+
+- **엔진**: `build_glossary_terms`가 노트의 `synonyms`/`aliases`를 객체에 운반(`evidence_refs`와
+  같은 `g.get(...,[])` 패턴) + `_UNION_ALLOWLIST["GlossaryTerm"]`에 추가(기존 객체 백필 통로).
+  `surface.py`·`EXTRACTOR_VERSION` **미변경**(이미 읽음 — 추출 로직 불변, 데이터만 채움).
+- **스킬**: `templates/ingest.md`에 동의어 작성 규칙 — 한↔영 등가어 우선, **흔한 단일어 금지**
+  (답변 게이트 표면 앵커 df를 흔들어 거짓양성 가드를 약화시킴), definition 본문 중복 금지.
+- **검증(Task 4, bb2 실코퍼스 샘플 5개 실측)**: 골든셋 **10/10 통과 = 동의어 무해**(s5 거짓양성
+  가드 유지). recall은 **고유 등가어에서만 뚜렷**("버블 생성기"→BallGenerator 회수 없음→rank5),
+  일반 표현은 완만. **vault에서 본 "5.5배"는 우리 코퍼스서 안 나옴** — GlossaryTerm definition이
+  이미 도메인 정의문이라 갭이 작다는 교차검토 예측이 실측으로 확인됨.
+- **결정**: 기존 437개 **전수 백필 안 함**(ROI 낮음). 동의어는 **신규 적재분에만**(통로는
+  머지로 활성, 추가작업 0). 검증 샘플 5개는 git 원복(기존 동의어 0 유지).
+- 검증: 엔진 합성 528 통과. 커밋 `dbb57ac`·`d8bf86c`·`4987f86`.
+- 계획: [glossary-synonyms-domain-gap](docs/plans/2026-06-26-glossary-synonyms-domain-gap.md)
+  · 교차검토 근거: 메모리 `hwi-pkm-technique-crosscheck`(엔진 밖, 6후보 판정 + 적대 리뷰).
+
 ---
 
 ## 미뤄둔 작업 (최종 관리)
@@ -201,6 +226,9 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
    - 트리거: scope-None 넓은 질의에서 핀포인트 순위 회귀가 반복될 때. 선행 조건 = 골든셋
      s8(scope-None 시나리오) 신설 + red 측정. red 없이 도입 금지.
    - 근거: scoped BM25가 scope 특정 질의는 이미 해결 → 재랭커는 역할 비중첩 영역만.
+   - 2026-06-26 실측: 도메인·언어 갭의 색인 측 보강은 **GlossaryTerm 동의어**가 일부 흡수(완료
+     단계 참고) — 단 효과가 고유 등가어에 한정·무해 확인. 재랭커는 여전히 "후보엔 들어왔으나
+     순서가 나쁜" 비중첩 영역만 남으며, 그 영역 측정용 s8 골든셋이 선행이라는 결론 불변.
 
 2. **L5 개인 메모리 층** (미결 7)
    - 상태: 설계상 자리만. 단기(작업 연속성)/장기(개인 교훈·선호) 구조 미설계.
