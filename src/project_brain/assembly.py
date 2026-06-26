@@ -101,6 +101,55 @@ def build_mappings(notes, refs_map, now):
     return out
 
 
+_DECISION_REF_TYPE = {"commit": "commit", "jira": "jira_issue", "pr": "pr"}
+
+
+def build_decisions(notes, now):
+    """decisions[] → DecisionRecord + (commit/jira/pr) EvidenceRef.
+
+    evref id는 evref.<ctx>.<type>-<ref>로 만들고 같은 id는 한 번만(중복 제거).
+    commit locator는 {repo, sha}로 자동(repo=context), jira/pr locator는 노트가 준
+    값을 그대로 쓴다(인스턴스 URL은 도메인 지식 — 엔진에 박지 않는다). manifest는
+    sources[]가 제공(build_manifests) — evref는 manifest.<ctx>.<type>을 가리킨다.
+    매핑쪽 양방향(decision_record_ids 역채움)은 build()가 한다(여기선 안 함).
+    """
+    cx = notes["context"]
+    ctx, repo = cx["key"], cx.get("repo", "demoapp")
+    out, made = [], set()
+
+    def ensure_evref(item):
+        etype, ref = item["type"], item["ref"]
+        eid = f"evref.{ctx}.{etype}-{ref}"
+        if eid not in made:
+            made.add(eid)
+            locator = {"repo": repo, "sha": ref} if etype == "commit" else item["locator"]
+            ev = {
+                "id": eid, "kind": "EvidenceRef", "status": "reviewed",
+                "truth_role": "reference", "title": (item.get("summary") or ref)[:120],
+                "evidence_manifest_id": f"manifest.{ctx}.{etype}",
+                "ref_type": _DECISION_REF_TYPE[etype], "locator": locator,
+                "summary": item.get("summary") or ref,
+            }
+            out.append(base(ev, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
+        return eid
+
+    for d in notes.get("decisions", []):
+        ref_ids = [ensure_evref(it) for it in d.get("evidence", [])]
+        dec = {
+            "id": derive_id("DecisionRecord", ctx, d["key"]),
+            "kind": "DecisionRecord", "status": "reviewed", "truth_role": "event",
+            "title": d["title"], "decision_type": d["decision_type"],
+            "summary": d["summary"], "decision": d["decision"],
+            "spec_reflected": d.get("spec_reflected", "not_applicable"),
+            "source_object_ids": ref_ids, "evidence_refs": ref_ids,
+            "affected_context_ids": [f"context.{ctx}"],
+            "affected_mapping_ids": [derive_id("DomainMapping", ctx, mk)
+                                     for mk in d.get("affects", [])],
+        }
+        out.append(base(dec, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
+    return out
+
+
 def build_manifests(notes, now):
     """sources[] → EvidenceManifest. id는 노트에 직접 기입(컨벤션 manifest.<ctx>.<...>)."""
     ctx = notes["context"]["key"]
@@ -242,8 +291,9 @@ def apply_updates(notes, store, now):
 
 
 _VALID_SECTIONS = {"context", "sources", "glossary", "code_anchors", "mappings",
-                   "refs", "updates", "extra_objects"}  # decisions는 2차(Task 4 노트 참고)
-_LIST_SECTIONS = {"sources", "glossary", "code_anchors", "mappings", "updates", "extra_objects"}
+                   "decisions", "refs", "updates", "extra_objects"}
+_LIST_SECTIONS = {"sources", "glossary", "code_anchors", "mappings", "decisions",
+                  "updates", "extra_objects"}
 _DICT_SECTIONS = {"context", "refs"}
 _UPDATE_KEYS = {"id", "expected_updated_at", "set", "union", "evidence_unchanged"}
 # 섹션 항목별 필수 필드(중첩 검증). 변환 함수가 default 채우는 필드는 여기 안 넣는다.
@@ -253,6 +303,7 @@ _ITEM_REQUIRED = {
     "code_anchors": ("key", "path", "symbol", "manifest"),
     "mappings": ("key", "canonical_summary", "meaning", "boundary"),
     "sources": ("id", "source_type", "title", "locator"),
+    "decisions": ("key", "decision_type", "title", "summary", "decision"),
 }
 
 
@@ -305,6 +356,20 @@ def validate_notes(notes):
         for op in ("set", "union"):
             if op in up and not isinstance(up[op], dict):
                 errors.append(f"updates {up.get('id')}: {op}은 object여야 함")
+    # decisions[].evidence[] 항목 무결성 (build_decisions가 예외로 죽지 않게 1층에서 친절히).
+    for i, d in enumerate(notes.get("decisions") or []):
+        if not isinstance(d, dict):
+            continue
+        for j, ev in enumerate(d.get("evidence") or []):
+            if not isinstance(ev, dict) or "type" not in ev or "ref" not in ev:
+                errors.append(f"노트: decisions[{i}].evidence[{j}]는 type·ref 필수")
+                continue
+            if ev["type"] not in ("commit", "jira", "pr"):
+                errors.append(f"노트: decisions[{i}].evidence[{j}] type {ev['type']!r} "
+                              f"미지원 (commit/jira/pr)")
+            elif ev["type"] != "commit" and "locator" not in ev:
+                errors.append(f"노트: decisions[{i}].evidence[{j}] {ev['type']}는 locator 필수 "
+                              f"(인스턴스 URL은 노트가 제공 — 엔진이 만들지 않음)")
     return errors
 
 

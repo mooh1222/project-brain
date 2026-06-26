@@ -3,6 +3,7 @@ from project_brain.assembly import derive_id, build_glossary_terms, build_code_e
 from project_brain.assembly import build_mappings
 from project_brain.assembly import build_manifests, build_context
 from project_brain.assembly import apply_updates
+from project_brain.assembly import build_decisions
 from project_brain.store import BrainStore
 
 NOW = "2026-06-16T00:00:00Z"
@@ -381,3 +382,76 @@ class BuildIntegrationTest(unittest.TestCase):
         result = build(notes, store, NOW)
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["preconditions"], {"mapping.ctx.hook": T0})
+
+
+class BuildDecisionsTest(unittest.TestCase):
+    def _notes(self):
+        return {
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "bb2_client"},
+            "decisions": [
+                {
+                    "key": "v55-special-color",
+                    "decision_type": "improvement",
+                    "title": "스페셜버블 색상도 셀렉 체크",
+                    "summary": "스페셜버블 색상 포함 요약",
+                    "decision": "설정이 켜지면 스페셜버블 내부 색상을 체크 타입으로 삼는다.",
+                    "spec_reflected": "not_applicable",
+                    "evidence": [
+                        {"type": "commit", "ref": "763086bc41", "summary": "셀렉로직 개선 commit"},
+                        {"type": "jira", "ref": "3869",
+                         "locator": "https://jira.example/browse/X-3869", "summary": "버닝볼 이슈"},
+                    ],
+                    "affects": ["special-color-select", "enable-filter"],
+                },
+            ],
+        }
+
+    def test_decision_object_required_fields(self):
+        objs = build_decisions(self._notes(), NOW)
+        dec = next(o for o in objs if o["kind"] == "DecisionRecord")
+        self.assertEqual(dec["id"], "decision.ctx.v55-special-color")
+        self.assertEqual(dec["status"], "reviewed")
+        self.assertEqual(dec["truth_role"], "event")
+        self.assertEqual(dec["decision_type"], "improvement")
+        self.assertEqual(dec["spec_reflected"], "not_applicable")
+        self.assertEqual(dec["affected_context_ids"], ["context.ctx"])
+        self.assertEqual(dec["affected_mapping_ids"],
+                         ["mapping.ctx.special-color-select", "mapping.ctx.enable-filter"])
+        self.assertEqual(dec["source_object_ids"],
+                         ["evref.ctx.commit-763086bc41", "evref.ctx.jira-3869"])
+        self.assertEqual(dec["evidence_refs"], dec["source_object_ids"])
+        self.assertEqual(dec["created_at"], NOW)
+        self.assertEqual(dec["updated_at"], NOW)
+
+    def test_evref_types_and_locators(self):
+        objs = build_decisions(self._notes(), NOW)
+        evs = {o["id"]: o for o in objs if o["kind"] == "EvidenceRef"}
+        commit_ev = evs["evref.ctx.commit-763086bc41"]
+        self.assertEqual(commit_ev["ref_type"], "commit")
+        self.assertEqual(commit_ev["locator"], {"repo": "bb2_client", "sha": "763086bc41"})
+        self.assertEqual(commit_ev["evidence_manifest_id"], "manifest.ctx.commit")
+        self.assertEqual(commit_ev["summary"], "셀렉로직 개선 commit")
+        jira_ev = evs["evref.ctx.jira-3869"]
+        self.assertEqual(jira_ev["ref_type"], "jira_issue")
+        self.assertEqual(jira_ev["locator"], "https://jira.example/browse/X-3869")
+        self.assertEqual(jira_ev["evidence_manifest_id"], "manifest.ctx.jira")
+
+    def test_shared_evref_deduped(self):
+        notes = self._notes()
+        notes["decisions"].append({
+            "key": "v56-followup", "decision_type": "improvement",
+            "title": "후속", "summary": "같은 커밋 공유", "decision": "...",
+            "evidence": [{"type": "commit", "ref": "763086bc41", "summary": "셀렉로직 개선 commit"}],
+            "affects": ["enable-filter"],
+        })
+        objs = build_decisions(notes, NOW)
+        commit_evs = [o for o in objs if o.get("id") == "evref.ctx.commit-763086bc41"]
+        self.assertEqual(len(commit_evs), 1)  # 두 결정이 공유해도 evref는 1개
+
+    def test_validate_notes_jira_evidence_requires_locator(self):
+        from project_brain.assembly import validate_notes
+        notes = self._notes()
+        del notes["decisions"][0]["evidence"][1]["locator"]  # jira evidence의 locator 제거
+        errors = validate_notes(notes)
+        self.assertTrue(any("locator" in e for e in errors),
+                        f"locator 누락을 1층에서 막아야 함: {errors}")
