@@ -154,6 +154,29 @@ class BuildGlossaryTest(unittest.TestCase):
         self.assertEqual(t["evidence_refs"], ["evref.ctx.hit-session"])
         self.assertIn("created_at", t)  # base() 적용 확인
 
+    def test_glossary_carries_synonyms_and_aliases(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "a"},
+            "glossary": [{"key": "tok", "term": "CLEAR_PASS_TICKET_RECOVER",
+                          "definition": "토큰 환불 복구 요청 타입",
+                          "evidence_refs": ["evref.ctx.x"],
+                          "synonyms": ["클리어 패스 티켓 복구", "토큰 환불 복구"],
+                          "aliases": ["CPTR"]}],
+        }
+        objs = build_glossary_terms(notes, NOW)
+        self.assertEqual(objs[0]["synonyms"], ["클리어 패스 티켓 복구", "토큰 환불 복구"])
+        self.assertEqual(objs[0]["aliases"], ["CPTR"])
+
+    def test_glossary_synonyms_default_empty(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "a"},
+            "glossary": [{"key": "t", "term": "T", "definition": "d",
+                          "evidence_refs": ["evref.ctx.x"]}],
+        }
+        objs = build_glossary_terms(notes, NOW)
+        self.assertEqual(objs[0]["synonyms"], [])
+        self.assertEqual(objs[0]["aliases"], [])
+
 
 T0 = "2026-06-01T00:00:00Z"
 

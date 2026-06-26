@@ -43,6 +43,8 @@ def build_glossary_terms(notes, now):
             "term": g["term"],
             "definition": g["definition"],
             "evidence_refs": g.get("evidence_refs", []),
+            "synonyms": g.get("synonyms", []),
+            "aliases": g.get("aliases", []),
         }
         out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
     return out
