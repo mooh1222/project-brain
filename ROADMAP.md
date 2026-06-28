@@ -257,6 +257,9 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
    - 트리거: 사용자가 팀 공개를 결정할 때.
 
 5. **locator 위치 갱신 / 기존 데이터 정비 (Part B)**
+   - ⚠️ `commit_sha`와 줄번호는 **별개 필드**다(혼동 주의). `commit_sha`(변경 감지 기준점,
+     stale-check/checkup이 `(path, commit_sha)`로 판정)는 **필수**라 백필 완료(bb2 842/842).
+     아래 "재백필/삭제 보류"는 오직 `line_start`/`line_end`(엔진이 안 읽는 칸) 얘기다.
    - 순수 줄번호 재백필: **영구 보류**. 엔진이 line_start/end를 검색·회상 어디서도 읽지
      않아 line drift가 회상에 무해함을 실측으로 확인(object-model 철학 검증 완료).
    - **신규 데이터는 완료(2026-06-24)**: `build`가 책갈피(EvidenceRef) locator를 짝
