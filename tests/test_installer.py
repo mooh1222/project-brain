@@ -1,4 +1,4 @@
-"""install — 프로젝트에 config + 스킬 3종을 멱등 설치하고 manifest로 추적한다.
+"""install — 프로젝트에 config + 스킬 4종을 멱등 설치하고 manifest로 추적한다.
 
 파일 단위 보존 모델: manifest에 기록된 해시와 디스크가 일치할 때만 갱신(도구 소유),
 불일치(사용자 수정)·manifest 밖(사용자 소유)은 건드리지 않고 보고한다 —
@@ -27,6 +27,11 @@ class RenderTemplateTest(unittest.TestCase):
         self.assertIn("name: demo-brain-session-ingest", si)
         self.assertNotIn("{{PROJECT}}", si)
         self.assertNotIn("{{BRAIN_ROOT}}", si)
+        # checkup 템플릿도 치환 검증
+        cu = render_template("checkup", project="demo", brain_root="brain")
+        self.assertIn("name: demo-brain-checkup", cu)
+        self.assertIn("demo-brain-session-ingest", cu)  # 상대 스킬 참조도 치환
+        self.assertNotIn("{{PROJECT}}", cu)
 
     def test_unknown_template_raises(self):
         with self.assertRaises(KeyError):
@@ -50,22 +55,23 @@ class InstallTest(unittest.TestCase):
         cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(cfg["project"], "demo")
         self.assertEqual(cfg["brain_root"], "brain")
-        # 스킬 3종 렌더 주입
+        # 스킬 4종 렌더 주입
         query = self._skill("demo-brain-query").read_text(encoding="utf-8")
         self.assertIn("name: demo-brain-query", query)
         self.assertTrue(self._skill("demo-brain-ingest").exists())
         self.assertTrue(self._skill("demo-brain-session-ingest").exists())
+        self.assertTrue(self._skill("demo-brain-checkup").exists())
         # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성:
         # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다)
         manifest = json.loads(
             (self.target / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(len(manifest["files"]), 3)
+        self.assertEqual(len(manifest["files"]), 4)
         for key in manifest["files"]:
             self.assertFalse(Path(key).is_absolute(), key)
             self.assertTrue((self.target / key).exists(), key)
         self.assertEqual(report["config"], "created")
-        self.assertEqual(len(report["created"]), 3)
+        self.assertEqual(len(report["created"]), 4)
 
     def test_reinstall_is_idempotent(self):
         install(self.target, project="demo")
@@ -73,7 +79,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["config"], "kept")
         # 동일 내용 재설치 — created가 아니라 updated(도구 소유 갱신)로 보고
         self.assertEqual(report["created"], [])
-        self.assertEqual(len(report["updated"]), 3)
+        self.assertEqual(len(report["updated"]), 4)
 
     def test_existing_config_is_preserved(self):
         (self.target / CONFIG_FILENAME).write_text(

@@ -26,6 +26,7 @@ _TEMPLATES = {
     "query": ("query.md", "brain-query"),
     "ingest": ("ingest.md", "brain-ingest"),
     "session-ingest": ("session-ingest.md", "brain-session-ingest"),
+    "checkup": ("checkup.md", "brain-checkup"),
 }
 
 

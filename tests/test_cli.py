@@ -678,6 +678,24 @@ class TestCliSearch(unittest.TestCase):
         for h in payload["advisories"]:
             self.assertEqual(h["trust_label"], "가로지르는 위험·교훈(검증됨)")
 
+    def test_checkup_bundles_lint_isolated_skips_stale(self):
+        # checkup(코퍼스 건강검진): lint(무결성) + graph isolated(고아)를 한 보고로 묶는다.
+        # stale는 git 의존이라 --no-stale로 건너뛴다(결정론). 고아 candidate 용어는
+        # evidence_refs=[]라 dangling 없이 isolated만 잡힌다.
+        from tests.test_search import glossary_term
+        BrainStore.save_object(
+            self.brain, glossary_term("g.orphan", term="고아", definition="d", status="candidate"))
+        argv = ["checkup", "--no-stale", "--brain-root", str(self.brain)]
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)  # lint clean → rc 0
+        self.assertTrue(payload["lint"]["ok"])
+        self.assertIn("g.orphan", payload["isolated"]["isolated"])
+        self.assertIsNone(payload["stale"])        # --no-stale
+        self.assertIsNone(payload["cache_written"])
+
     def test_search_missing_index_errors(self):
         argv = ["search", "레인", "--db", str(self.db),
                 "--brain-root", str(self.brain), "--stub-embedder"]

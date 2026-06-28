@@ -479,8 +479,63 @@ def _run_lint(argv) -> int:
     return 0 if not problems else 1
 
 
+def _run_checkup(argv) -> int:
+    """코퍼스 건강검진 — lint(무결성) + graph isolated(고아 잎) + stale-check(코드 드리프트)를
+    한 패스로 묶는다. stale는 결과를 캐시에 써 query/show가 advisory를 읽게 하는 '도는 주체'다
+    (읽기·쓰기 양끝은 있는데 캐시를 채울 주체가 없던 갭을 메움). lint 문제 있으면 rc=1; isolated·
+    stale은 곁들임 보고라 rc에 안 넣는다. git 없는 환경은 --no-stale로 lint·isolated만 돈다."""
+    parser = argparse.ArgumentParser(prog="cli checkup")
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모)")
+    parser.add_argument("--no-fetch", action="store_true", help="git fetch 생략(오프라인·테스트)")
+    parser.add_argument("--no-stale", action="store_true",
+                        help="stale-check 생략(git 없는 환경) — lint·isolated만 돈다")
+    args = parser.parse_args(argv)
+
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
+
+    problems = lint_store(store)
+
+    from project_brain.graph import find_isolated
+    isolated = find_isolated(store)
+    by_kind: dict = {}
+    for oid in isolated:
+        k = store.get(oid).get("kind")
+        by_kind[k] = by_kind.get(k, 0) + 1
+
+    stale = None
+    cache_written = None
+    if not args.no_stale:
+        from project_brain.stale_check import (
+            GitError,
+            build_stale_set,
+            make_git_runner,
+            stale_check,
+            write_stale_set,
+        )
+        repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
+        git_runner = make_git_runner(repo_root)
+        try:
+            stale = stale_check(store, git_runner=git_runner, fetch=not args.no_fetch)
+            cache_written = str(write_stale_set(brain_root, build_stale_set(stale, now=now_kst())))
+        except GitError as exc:
+            stale = {"error": str(exc)}
+
+    print(json.dumps(
+        {"ok": not problems,
+         "lint": {"ok": not problems, "problems": problems},
+         "isolated": {"isolated_count": len(isolated),
+                      "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
+                      "isolated": isolated},
+         "stale": stale,
+         "cache_written": cache_written},
+        ensure_ascii=False, indent=2))
+    return 0 if not problems else 1
+
+
 def _run_install(argv) -> int:
-    """프로젝트에 config + 스킬 2종을 멱등 설치 (installer.py — manifest 추적).
+    """프로젝트에 config + 스킬 4종을 멱등 설치 (installer.py — manifest 추적).
 
     설치 직후 어시스턴트가 코퍼스를 보고 스킬 description 트리거 어휘를 맞춤
     제안하는 단계는 사람·에이전트 몫이다 — CLI는 범용 템플릿 주입까지만."""
@@ -922,6 +977,8 @@ def main() -> int:
             return _run_eval(argv[1:])
         if argv and argv[0] == "lint":
             return _run_lint(argv[1:])
+        if argv and argv[0] == "checkup":
+            return _run_checkup(argv[1:])
         if argv and argv[0] == "promote-auto":
             return _run_promote_auto(argv[1:])
         if argv and argv[0] == "promote":

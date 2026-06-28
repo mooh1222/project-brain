@@ -240,7 +240,7 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
 
 4. **팀 공개 — reviewed 승격 권한 결정** (미결 5)
    - 상태: 혼자 시험 제작 단계라 미정. 각자 promote vs 검수자 지정.
-   - 동반 작업: 스킬 범용화(엔진 install이 주입하는 `SKILL.md` 3개(query/ingest/session-ingest)
+   - 동반 작업: 스킬 범용화(엔진 install이 주입하는 `SKILL.md` 4개(query/ingest/session-ingest/checkup)
      외에 `references/`·`scripts/`는 미주입 — 범용화는 삭제가 아니라 추상화, 맞춤은 설치 후 실사용으로).
    - 트리거: 사용자가 팀 공개를 결정할 때.
 
