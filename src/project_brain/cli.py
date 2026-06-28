@@ -479,12 +479,12 @@ def _run_lint(argv) -> int:
     return 0 if not problems else 1
 
 
-def _run_checkup(argv) -> int:
-    """코퍼스 건강검진 — lint(무결성) + graph isolated(고아 잎) + stale-check(코드 드리프트)를
+def _run_audit(argv) -> int:
+    """코퍼스 감사 — lint(무결성) + graph isolated(고아 잎) + stale-check(코드 드리프트)를
     한 패스로 묶는다. stale는 결과를 캐시에 써 query/show가 advisory를 읽게 하는 '도는 주체'다
     (읽기·쓰기 양끝은 있는데 캐시를 채울 주체가 없던 갭을 메움). lint 문제 있으면 rc=1; isolated·
     stale은 곁들임 보고라 rc에 안 넣는다. git 없는 환경은 --no-stale로 lint·isolated만 돈다."""
-    parser = argparse.ArgumentParser(prog="cli checkup")
+    parser = argparse.ArgumentParser(prog="cli audit")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모)")
     parser.add_argument("--no-fetch", action="store_true", help="git fetch 생략(오프라인·테스트)")
@@ -977,8 +977,8 @@ def main() -> int:
             return _run_eval(argv[1:])
         if argv and argv[0] == "lint":
             return _run_lint(argv[1:])
-        if argv and argv[0] == "checkup":
-            return _run_checkup(argv[1:])
+        if argv and argv[0] == "audit":
+            return _run_audit(argv[1:])
         if argv and argv[0] == "promote-auto":
             return _run_promote_auto(argv[1:])
         if argv and argv[0] == "promote":

@@ -1,13 +1,13 @@
 ---
-name: {{PROJECT}}-brain-checkup
+name: {{PROJECT}}-brain-audit
 description: |
-  Use when {{PROJECT}} brain 코퍼스 건강검진이 필요할 때 — develop를 당긴 뒤·대량 적재 후·
+  Use when {{PROJECT}} brain 코퍼스 감사(건강검진)가 필요할 때 — develop를 당긴 뒤·대량 적재 후·
   주기 점검. "brain 점검", "코퍼스 상태 확인", "오래된 매핑/낡은 데이터 찾기", "stale 체크",
   "고아 객체 점검"처럼 {{PROJECT}} 맥락의 점검 요청이 나오면 스킬 이름 없이도 이 스킬을 쓴다.
   적재(쓰기)는 {{PROJECT}}-brain-ingest, 조회(읽기)는 {{PROJECT}}-brain-query 몫이다.
 ---
 
-# {{PROJECT}} Brain 건강검진 (checkup)
+# {{PROJECT}} Brain 코퍼스 감사 (audit)
 
 코퍼스의 세 건강 신호를 한 패스로 본다 — 무결성(끊긴 참조) · 고아(아무도 안 가리키는 잎) ·
 코드 드리프트(brain이 가리키는 코드가 바뀜). stale은 결과를 캐시에 써서, 이후 query/show가
@@ -23,8 +23,8 @@ description: |
 ## 한 줄 실행
 
 ```bash
-project-brain checkup             # lint + graph isolated + stale-check(캐시 기록)
-project-brain checkup --no-stale  # git 없는 환경 — lint·isolated만
+project-brain audit             # lint + graph isolated + stale-check(캐시 기록)
+project-brain audit --no-stale  # git 없는 환경 — lint·isolated만
 ```
 
 출력은 `2>/dev/null | jq`로 읽는다(stdout=깨끗한 JSON, 노이즈는 stderr). `lint` 문제가 있으면 rc=1.
@@ -39,7 +39,7 @@ project-brain checkup --no-stale  # git 없는 환경 — lint·isolated만
 
 ## stale 후보 처리 (검수 정책 B+C)
 
-checkup이 캐시를 쓰면 그 다음부터 query/show에 `stale_advisory`(코드 바뀐 매핑 표시)가 뜬다.
+audit이 캐시를 쓰면 그 다음부터 query/show에 `stale_advisory`(코드 바뀐 매핑 표시)가 뜬다.
 코드를 직접 보고 판정한다 — **자동 supersede는 없다, 에이전트가 B+C로 판정**한다.
 
 - 의미가 정말 낡았으면 → `{{PROJECT}}-brain-session-ingest`의 "갱신 운용 규약"대로 supersede(매핑)/

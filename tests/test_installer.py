@@ -27,9 +27,9 @@ class RenderTemplateTest(unittest.TestCase):
         self.assertIn("name: demo-brain-session-ingest", si)
         self.assertNotIn("{{PROJECT}}", si)
         self.assertNotIn("{{BRAIN_ROOT}}", si)
-        # checkup 템플릿도 치환 검증
-        cu = render_template("checkup", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-checkup", cu)
+        # audit 템플릿도 치환 검증
+        cu = render_template("audit", project="demo", brain_root="brain")
+        self.assertIn("name: demo-brain-audit", cu)
         self.assertIn("demo-brain-session-ingest", cu)  # 상대 스킬 참조도 치환
         self.assertNotIn("{{PROJECT}}", cu)
 
@@ -60,7 +60,7 @@ class InstallTest(unittest.TestCase):
         self.assertIn("name: demo-brain-query", query)
         self.assertTrue(self._skill("demo-brain-ingest").exists())
         self.assertTrue(self._skill("demo-brain-session-ingest").exists())
-        self.assertTrue(self._skill("demo-brain-checkup").exists())
+        self.assertTrue(self._skill("demo-brain-audit").exists())
         # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성:
         # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다)
         manifest = json.loads(
