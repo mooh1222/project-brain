@@ -3,7 +3,9 @@
 spec: docs/superpowers/specs/2026-06-14-project-brain-stale-check-design.md
 git 호출은 git_runner 콜러블로 주입한다 — 로직 함수는 git을 모른다(테스트는
 합성 입력으로 대체, 네트워크·실레포 무관). 기계는 "어느 파일이 바뀌어 어느
-매핑이 영향권인가"까지 찾고, "의미가 진짜 낡았나"는 사람이 판정한다.
+매핑이 영향권인가"까지 찾고, 영향권 후보의 처리는 검수 정책 B+C를 따른다 —
+근거 확실하면 에이전트가 자동(reviewed) 갱신/supersede, 모호하면 candidate,
+완전 애매한 것만 사용자(정본: docs/plans/2026-06-25-brain-stale-automation-bc.md §2).
 """
 from __future__ import annotations
 
