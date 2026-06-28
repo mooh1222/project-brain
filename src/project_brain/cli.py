@@ -373,10 +373,16 @@ def _run_search(argv) -> int:
                               else "재사용 후보(미검증)")}
         for h in resp.get("projection_reuse", [])
     ]
+    # advisories 채널(spec 2026-06-15 §4.6): reviewed Insight를 신뢰 라벨과 함께 낸다 —
+    # eval_recall이 이미 반환하나(search.py) 출력에서 빠져 있던 비대칭 누락 복구.
+    # projection_reuse/raw_excerpts 라벨 규약과 동형(검수된 통찰이라 "검증됨" 라벨).
+    advisories = [{**h, "trust_label": "가로지르는 위험·교훈(검증됨)"}
+                  for h in resp.get("advisories", [])]
     print(json.dumps(
         {"ok": True, "query": args.query,
          "results": resp["results"], "candidates": resp["candidates"],
          "raw_excerpts": raw_excerpts,
+         "advisories": advisories,
          "projection_reuse": projection_reuse,
          "needs_clarification": resp["needs_clarification"]},
         ensure_ascii=False, indent=2))

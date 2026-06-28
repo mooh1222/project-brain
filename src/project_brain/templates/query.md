@@ -32,7 +32,7 @@ project-brain search "<질문>"
   ```
 - **출력 읽기**: `project-brain`은 JSON을 stdout으로 내보내고 진행 로그·HF 경고는 stderr로 보낸다 →
   `project-brain search "<질문>" 2>/dev/null | jq` 로 읽는다(`2>&1`로 합쳐 손파싱하면 키 혼동·잔여줄로 깨짐).
-  search 적중 배열 키는 `.results`(candidates·raw_excerpts·projection_reuse는 별도 채널), eval 요약은 `.summary`.
+  search 적중 배열 키는 `.results`(candidates·raw_excerpts·advisories·projection_reuse는 별도 채널), eval 요약은 `.summary`.
   각 적중 원소의 객체 식별자 키는 `object_id`다(`id` 아님) — promote 등 후속 명령엔 이 값을 넘긴다.
 
 ## 2. 결과만으로 답한다
@@ -50,6 +50,7 @@ project-brain search "<질문>"
 | `candidates` | candidate(미검수) 적중 | **"확인 필요" 라벨 필수** — 확신처럼 말하지 않는다 |
 | `raw_excerpts` | 원문 발췌(미검수, 기획서 청크) | 단정 답이 아니라 **발췌 자료**로 취급 — "기획서 원문에 이런 서술이 있다"로 인용. 객체화 안 된 기획 배경·의도 질문은 이 채널이 답 |
 | `projection_reuse` | 재사용 후보(미검증, 이전 착수 브리핑) | 단정 답 아님 — **"재사용 후보(미검증)" 라벨 필수**. 개발 착수 시 §8 0단계 입력으로만 쓰고, 확신은 정본 객체(results) 적중으로 확인 |
+| `advisories` | 가로지르는 위험·교훈(검증됨, reviewed Insight) | 단정 답 아님 — 질의와 가로지르는 위험·교훈을 답에 **참고로 곁들임**(results 확신 답을 대체하지 않음). 답이 그 위험과 맞닿으면 함께 일러준다 |
 | `needs_clarification: true` | 게이트 통과 reviewed 0건 | 아래 4번 — "없다"가 답이거나 질문을 좁힌다 (raw 발췌만 있으면 발췌 인용+"검수된 답 없음" 명시) |
 
 superseded(대체됨) 객체는 위 채널 어디에도 안 나온다 — 현재 사실은 대체한 새 객체가 답하고,

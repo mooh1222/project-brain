@@ -662,6 +662,22 @@ class TestCliSearch(unittest.TestCase):
             self.assertTrue(h["object_id"].startswith("raw.foo-ctx."))
             self.assertTrue(h["surface"])
 
+    def test_search_advisories_channel(self):
+        # reviewed Insight가 advisories 채널로 노출된다(spec 2026-06-15 §4.6).
+        # 회귀 가드: eval_recall은 advisories를 반환하나 _run_search 출력에서
+        # 빠져 있던 비대칭 누락 복구(2026-06-27). g.token이 anchor 토큰 제공.
+        from tests.test_search import glossary_term, insight
+        self._build_index([
+            glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
+            insight("insight.gate", body="클리어 토큰 노출 게이트가 두 팝업에 이중구현"),
+        ])
+        rc, payload = self._search("클리어 토큰 노출 게이트 이중구현")
+        self.assertEqual(rc, 0)
+        self.assertIn("advisories", payload)
+        self.assertIn("insight.gate", {h["object_id"] for h in payload["advisories"]})
+        for h in payload["advisories"]:
+            self.assertEqual(h["trust_label"], "가로지르는 위험·교훈(검증됨)")
+
     def test_search_missing_index_errors(self):
         argv = ["search", "레인", "--db", str(self.db),
                 "--brain-root", str(self.brain), "--stub-embedder"]
