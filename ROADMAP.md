@@ -166,6 +166,18 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
 - 검증: 합성 519 통과(신규 13), 3렌즈 적대 검증 correctness·regression clean. 실코퍼스 회귀는
   데이터 레포에서 별도(아래 주의). 계획: [stale-step1·2 impl](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
 
+### 코퍼스 건강검진 checkup — stale 캐시 도는 주체 (2026-06-28)
+Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 만들었으나 **캐시를
+채울 주체가 없어** stale_advisory 채널이 죽어 있던 갭을 메움. `project-brain checkup`이
+`lint`(무결성) + `graph isolated`(고아 잎) + `stale-check --write-cache`(코드 드리프트)를 한
+패스로 돌려 캐시를 채운다 — 셋은 "코퍼스 건강검진"이라는 같은 결이라 묶음. 관리 스킬
+`checkup.md`(install 주입 4번째)로 어시스턴트가 develop 당긴 뒤·대량 적재 후 돌린다. 후보
+처리는 검수 정책 B+C(자동 supersede 없음 — Step 3 여전히 보류, 에이전트가 advisory 보고 판정).
+- 검증: 합성 530 통과(신규 checkup 1), 적대 검증 OK. 실 bb2 종단(checkup→캐시 45건→`show`
+  stale_advisory 실회수)로 죽은 채널 부활 입증.
+- 데이터레포 backlog의 2026-06-12·13 항목(line drift 무해 + "코드변경→의미갱신 발견" 별개
+  니즈)이 이 기능의 설계 입력이었고, 이제 stale-check+checkup으로 실현돼 그 항목들은 졸업.
+
 ### build_decisions — decisions[] 결정 결정론 조립 (2026-06-26)
 `assembly.py`에 `build_decisions(notes, now)`를 신설해 노트의 `decisions[]` 섹션을
 `DecisionRecord` + `EvidenceRef`(commit/jira/pr)로 결정론 조립한다. `build()`가 파이프라인에
