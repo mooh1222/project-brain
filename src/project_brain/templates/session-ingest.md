@@ -23,12 +23,12 @@ description: |
 
 ## 공통 불변 규칙
 
-- 적재 후 5단계: `project-brain ingest …` 성공 → `lint`(무결성 — 끊긴 참조 0) → `index rebuild` → `eval --check-ids && eval`(골든셋) → 샘플 `search`. 색인 신선도 가드가 rebuild 누락을 막아주지만, 골든셋 회귀는 절차로만 잡힌다. eval/search 출력은 `2>/dev/null | jq`로 읽는다(stdout=깨끗한 JSON·노이즈는 stderr; eval 통과수=`.summary`의 passed/failed/total, search 적중=`.results`) — `2>&1`로 합쳐 손파싱 금지(키 혼동·잔여줄로 깨짐).
+- 적재 후 6단계: `project-brain ingest …` 성공 → `lint`(무결성 — 끊긴 참조 0) → `index rebuild` → `eval --check-ids && eval`(골든셋) → 샘플 `search` → 고립 재점검(`project-brain graph isolated`로 신규/잔여 고립을 나열 — 명백한 건 에이전트가 (a)즉시 연결 (b)의도적 종착점 유지 (c)제거로 처리하고, 애매한 것만 사용자 확인. 정본 절차는 `{{PROJECT}}-brain-ingest/references/ingest-tools.md` "적재 후 확인"). 색인 신선도 가드가 rebuild 누락을 막아주지만, 골든셋 회귀는 절차로만 잡힌다. eval/search 출력은 `2>/dev/null | jq`로 읽는다(stdout=깨끗한 JSON·노이즈는 stderr; eval 통과수=`.summary`의 passed/failed/total, search 적중=`.results`) — `2>&1`로 합쳐 손파싱 금지(키 혼동·잔여줄로 깨짐).
 - 적재로 색인 행 수가 변하면 실코퍼스 가드 수치를 **의식적으로 갱신**하고 같은 커밋에 포함한다.
 - 파괴 작업(promote·일괄 수정) 전 "커밋 먼저".
 - 검수 상태: 사용자 명시 지시 = reviewed(reviewer=user-statement) / 어시스턴트 판단 = candidate. reviewed 객체의 의미 변경은 검토 라운드 없이 금지("갱신 운용 규약" 참고).
 - 분류 3종: 팀 지식 → 적재 / 개인 메모리(주어가 사용자·어시스턴트·작업 방식) → 적재 안 함, auto-memory·handoff에 / 기존 kind로 못 담는 교훈·함정 → `raw/sources/insights/backlog.md`에 누적(날짜·출처 세션 uuid·한 줄 요약·핵심 인용. raw 색인 대상이라 추가 후 rebuild까지 한 동작).
-- Insight: 2개 이상 객체·구현·결정을 가로지르는 **검증된** 관찰/위험/교훈은 raw backlog가 아니라 Insight kind로 적재한다(candidate 거부·reviewed 직접·source 개수·사용자 진술 근거). 미검증 후보는 여전히 backlog.
+- Insight: 여러 객체·구현·결정을 가로지르는 **검증된** 관찰/위험/교훈은 raw backlog가 아니라 Insight kind로 적재한다(candidate 거부·reviewed 직접·사용자 진술 근거. `source_object_ids` 개수는 `insight_type`별 — cross-cutting-risk는 2개 이상, operational-lesson은 1개 이상). 미검증 후보는 여전히 backlog.
 
 ---
 
@@ -126,10 +126,10 @@ reviewed 의미 변경 금지(새 candidate 제안만 가능) — ingest의 revi
     "kind": "EventLedgerRecord", "schema_version": "0.1", "status": "candidate",
     "poc_priority": "P2", "truth_role": "event",
     "title": "버튼 스케일 82%→85% 변경",
-    "event_type": "spec_revision", "happened_at": "2026-07-01T00:00:00Z",
+    "event_type": "spec_revision", "happened_at": "2026-07-01T00:00:00+09:00",
     "summary": "기획 개정으로 버튼 setScale 0.82f→0.85f",
     "related_objects": ["fact.<context-slug>.ad-button-scale-v2"],
-    "created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-01T00:00:00Z",
+    "created_at": "2026-07-01T00:00:00+09:00", "updated_at": "2026-07-01T00:00:00+09:00",
     "tags": ["<context-slug>"], "evidence_refs": []
   },
   {
@@ -139,11 +139,11 @@ reviewed 의미 변경 금지(새 candidate 제안만 가능) — ingest의 revi
     "title": "버튼 스케일 = 85%",
     "subject": "mapping.<context-slug>.ad-button", "predicate": "scale",
     "value": "0.85", "scope": "context.<context-slug>",
-    "valid_from": "2026-07-01T00:00:00Z",
+    "valid_from": "2026-07-01T00:00:00+09:00",
     "derived_from_event_id": "event.<context-slug>.ad-button-scale-20260701",
     "confidence": "high",
     "supersedes": "fact.<context-slug>.ad-button-scale-v1",
-    "created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-01T00:00:00Z",
+    "created_at": "2026-07-01T00:00:00+09:00", "updated_at": "2026-07-01T00:00:00+09:00",
     "tags": ["<context-slug>"], "evidence_refs": []
   }
 ]
