@@ -69,10 +69,11 @@ def _rendered_bytes(src: Path, *, project: str, brain_root: str,
 
 
 def install(target, *, project: str, brain_root: str = "brain",
-            default_branch: str = "", repo: str = "") -> dict:
-    """target 프로젝트 루트에 설치. 반환: {config, created, updated, skipped}."""
+            default_branch: str = "", repo: str = "", force: bool = False) -> dict:
+    """target 프로젝트 루트에 설치. 반환: {config, created, updated, adopted, skipped}."""
     target = Path(target)
-    report = {"config": "kept", "created": [], "updated": [], "skipped": []}
+    report = {"config": "kept", "created": [], "updated": [],
+              "adopted": [], "skipped": []}
 
     # 1. config — 있으면 보존(스킬 렌더는 config를 따른다), 없으면 생성.
     cfg_path = target / CONFIG_FILENAME
@@ -116,12 +117,20 @@ def install(target, *, project: str, brain_root: str = "brain",
             recorded = manifest["files"].get(rel_key)
             if dst.exists():
                 on_disk = _sha256_bytes(dst.read_bytes())
-                if recorded != on_disk:
-                    # 사용자 수정(해시 불일치) 또는 manifest 밖에서 생긴 파일 — 보존.
+                if on_disk == rendered_hash:
+                    # 내용 동일 → 채택(manifest 밖이었으면)·유지. 안 씀.
+                    if recorded != rendered_hash:
+                        report["adopted"].append(str(dst))
+                    manifest["files"][rel_key] = rendered_hash
+                    continue
+                if recorded == on_disk or (recorded is not None and force):
+                    # 도구 소유 갱신, 또는 manifest 기록 있고 force(사용자 수정 덮기)
+                    dst.write_bytes(rendered)
+                    report["updated"].append(str(dst))
+                else:
+                    # manifest 밖(사용자 소유) 또는 사용자 수정 + not force — 보존
                     report["skipped"].append(str(dst))
                     continue
-                dst.write_bytes(rendered)
-                report["updated"].append(str(dst))
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(rendered)

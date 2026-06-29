@@ -115,9 +115,10 @@ class InstallTest(unittest.TestCase):
         install(self.target, project="demo")
         report = install(self.target, project="demo")
         self.assertEqual(report["config"], "kept")
-        # 동일 내용 재설치 — created가 아니라 updated(도구 소유 갱신)로 보고
+        # 동일 내용 재설치 — 내용 동일·이미 도구 소유 → 무변경
         self.assertEqual(report["created"], [])
-        self.assertEqual(len(report["updated"]), self._expected_count())
+        self.assertEqual(report["updated"], [])
+        self.assertEqual(report["adopted"], [])
         self.assertEqual(report["skipped"], [])
 
     def test_existing_config_is_preserved(self):
@@ -156,6 +157,34 @@ class InstallTest(unittest.TestCase):
         cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(cfg["default_branch"], "main")
         self.assertEqual(cfg["repo"], "myrepo")
+
+    def test_adopts_matching_disk_file_into_manifest(self):
+        # manifest 밖 파일이 렌더 결과와 내용이 같으면 채택(도구 소유 등록).
+        install(self.target, project="demo")  # 1회 설치로 파일·manifest 생성
+        # manifest를 비워 "사용자 소유"로 되돌린 뒤 재설치 → 내용 같으니 채택
+        (self.target / MANIFEST_FILENAME).write_text('{"files": {}}', encoding="utf-8")
+        report = install(self.target, project="demo")
+        self.assertTrue(report["adopted"])
+        self.assertEqual(report["skipped"], [])
+        manifest = json.loads((self.target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        self.assertTrue(len(manifest["files"]) >= 4)
+
+    def test_force_overwrites_manifest_tracked_user_edit(self):
+        install(self.target, project="demo")
+        skill = self._skill("demo-brain-query")
+        skill.write_text("사용자 수정본", encoding="utf-8")  # manifest 기록 있음 + 수정
+        report = install(self.target, project="demo", force=True)
+        self.assertIn("name: demo-brain-query", skill.read_text(encoding="utf-8"))
+        self.assertIn(str(skill), report["updated"])
+
+    def test_force_preserves_manifest_outside_file(self):
+        # manifest 밖(사용자 소유) 파일은 force여도 보존.
+        skill = self._skill("demo-brain-query")
+        skill.parent.mkdir(parents=True)
+        skill.write_text("기존 사용자 스킬", encoding="utf-8")
+        report = install(self.target, project="demo", force=True)
+        self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
+        self.assertIn(str(skill), report["skipped"])
 
 
 if __name__ == "__main__":
