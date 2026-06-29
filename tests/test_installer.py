@@ -186,6 +186,26 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
         self.assertIn(str(skill), report["skipped"])
 
+    def test_real_templates_render_with_synthetic_values(self):
+        # 역수입된 실제 templates를 합성값으로 렌더 → (a) 미치환 토큰 0(현재 brain 스킬엔
+        # 정당한 {{ 리터럴이 없음 — 확인됨), (b) 도구명 오염(project-{{BRAIN_ROOT}}) 부재.
+        import project_brain.installer as inst
+        for skill in inst._SKILLS:
+            root = inst._TEMPLATES_DIR / skill
+            for src in root.rglob("*"):
+                if not src.is_file() or inst._excluded(src.relative_to(root)):
+                    continue
+                if src.suffix not in inst._TEXT_SUFFIXES:
+                    continue
+                raw = src.read_text(encoding="utf-8")
+                out = inst.render_text(raw, project="zzz", brain_root="kkk",
+                                       default_branch="ttt", repo="qqq")
+                self.assertNotIn("{{", out, f"미치환 토큰: {src}")
+                # F1 오염 백스톱: project-brain이 project-{{BRAIN_ROOT}}로 깨졌으면
+                # 합성 렌더에서 project-kkk가 나타난다(정상 리터럴에선 부재).
+                self.assertNotIn("project-kkk", out,
+                                 f"도구명 오염(project-brain→project-<root>): {src}")
+
 
 if __name__ == "__main__":
     unittest.main()
