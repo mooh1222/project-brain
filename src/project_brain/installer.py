@@ -37,9 +37,13 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def render_text(text: str, *, project: str, brain_root: str) -> str:
+def render_text(text: str, *, project: str, brain_root: str,
+                default_branch: str = "", repo: str = "") -> str:
     """텍스트의 치환 변수를 채운다. {{VAR}} 토큰이라 순서 무관."""
-    return text.replace("{{BRAIN_ROOT}}", brain_root).replace("{{PROJECT}}", project)
+    return (text.replace("{{REPO}}", repo)
+                .replace("{{DEFAULT_BRANCH}}", default_branch)
+                .replace("{{BRAIN_ROOT}}", brain_root)
+                .replace("{{PROJECT}}", project))
 
 
 def _excluded(rel: Path) -> bool:
@@ -54,16 +58,18 @@ def _excluded(rel: Path) -> bool:
     return False
 
 
-def _rendered_bytes(src: Path, *, project: str, brain_root: str) -> bytes:
+def _rendered_bytes(src: Path, *, project: str, brain_root: str,
+                    default_branch: str, repo: str) -> bytes:
     """텍스트면 렌더 후 utf-8 바이트, 아니면 원본 바이트(바이너리 복사)."""
     if src.suffix in _TEXT_SUFFIXES:
-        text = render_text(src.read_text(encoding="utf-8"),
-                           project=project, brain_root=brain_root)
+        text = render_text(src.read_text(encoding="utf-8"), project=project,
+                           brain_root=brain_root, default_branch=default_branch, repo=repo)
         return text.encode("utf-8")
     return src.read_bytes()
 
 
-def install(target, *, project: str, brain_root: str = "brain") -> dict:
+def install(target, *, project: str, brain_root: str = "brain",
+            default_branch: str = "", repo: str = "") -> dict:
     """target 프로젝트 루트에 설치. 반환: {config, created, updated, skipped}."""
     target = Path(target)
     report = {"config": "kept", "created": [], "updated": [], "skipped": []}
@@ -74,9 +80,12 @@ def install(target, *, project: str, brain_root: str = "brain") -> dict:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         project = cfg.get("project") or project
         brain_root = cfg.get("brain_root", brain_root)
+        default_branch = cfg.get("default_branch", default_branch)
+        repo = cfg.get("repo", repo)
     else:
         cfg_path.write_text(
-            json.dumps({"project": project, "brain_root": brain_root},
+            json.dumps({"project": project, "brain_root": brain_root,
+                        "default_branch": default_branch, "repo": repo},
                        ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8")
         report["config"] = "created"
@@ -101,7 +110,8 @@ def install(target, *, project: str, brain_root: str = "brain") -> dict:
                 continue
             rel_key = str(Path(".agents") / "skills" / skill_dir_name / rel)
             dst = target / rel_key
-            rendered = _rendered_bytes(src, project=project, brain_root=brain_root)
+            rendered = _rendered_bytes(src, project=project, brain_root=brain_root,
+                                       default_branch=default_branch, repo=repo)
             rendered_hash = _sha256_bytes(rendered)
             recorded = manifest["files"].get(rel_key)
             if dst.exists():

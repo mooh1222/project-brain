@@ -23,6 +23,12 @@ class RenderTextTest(unittest.TestCase):
         self.assertNotIn("{{PROJECT}}", out)
         self.assertNotIn("{{BRAIN_ROOT}}", out)
 
+    def test_render_text_substitutes_branch_and_repo(self):
+        out = render_text("{{REPO}}@{{DEFAULT_BRANCH}} for {{PROJECT}}",
+                          project="demo", brain_root="brain",
+                          default_branch="main", repo="myrepo")
+        self.assertEqual(out, "myrepo@main for demo")
+
 
 class InstallTest(unittest.TestCase):
     def setUp(self):
@@ -144,6 +150,12 @@ class InstallTest(unittest.TestCase):
         report = install(self.target, project="demo")
         self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
         self.assertIn(str(skill), report["skipped"])
+
+    def test_install_writes_new_config_keys(self):
+        install(self.target, project="demo", default_branch="main", repo="myrepo")
+        cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["default_branch"], "main")
+        self.assertEqual(cfg["repo"], "myrepo")
 
 
 if __name__ == "__main__":
