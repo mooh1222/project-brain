@@ -1,7 +1,7 @@
 ---
 name: {{PROJECT}}-brain-audit
 description: |
-  Use when {{PROJECT}} brain 코퍼스 감사(건강검진)가 필요할 때 — develop를 당긴 뒤·대량 적재 후·
+  Use when {{PROJECT}} brain 코퍼스 감사(건강검진)가 필요할 때 — {{DEFAULT_BRANCH}}를 당긴 뒤·대량 적재 후·
   주기 점검. "brain 점검", "코퍼스 상태 확인", "오래된 매핑/낡은 데이터 찾기", "stale 체크",
   "고아 객체 점검"처럼 {{PROJECT}} 맥락의 점검 요청이 나오면 스킬 이름 없이도 이 스킬을 쓴다.
   적재(쓰기)는 {{PROJECT}}-brain-ingest, 조회(읽기)는 {{PROJECT}}-brain-query 몫이다.
@@ -16,7 +16,7 @@ description: |
 
 ## 언제
 
-- develop를 당긴 뒤 — 코드가 바뀌면 brain의 의미가 낡았을 수 있다(stale이 그걸 잡는다).
+- {{DEFAULT_BRANCH}}를 당긴 뒤 — 코드가 바뀌면 brain의 의미가 낡았을 수 있다(stale이 그걸 잡는다).
 - 한 묶음 대량 적재 후 마무리 점검.
 - 회상이 이상할 때 — 끊긴 참조·고아로 회수가 흔들리나 확인.
 
@@ -35,7 +35,7 @@ project-brain audit --no-stale  # git 없는 환경 — lint·isolated만
 |---|---|---|
 | `lint.problems` | 끊긴 참조(가리키는 대상 없음) | 비어야 정상. 있으면 참조를 잇거나 끊긴 객체 정정 |
 | `isolated.isolated` | 아무도 안 가리키는 잎(CodeLocator·GlossaryTerm·EvidenceRef) | 명백한 건 에이전트가 (a)즉시 연결 (b)의도적 종착점 유지 (c)제거, 애매한 것만 사용자 확인(검수 정책 B+C) |
-| `stale.detail` | 코드가 develop에서 바뀐 매핑(코드 드리프트). `cache_written`에 기록 | 후보는 B+C로 — 확실하면 의미 갱신, 애매하면 candidate. 처리는 아래 |
+| `stale.detail` | 코드가 {{DEFAULT_BRANCH}}에서 바뀐 매핑(코드 드리프트). `cache_written`에 기록 | 후보는 B+C로 — 확실하면 의미 갱신, 애매하면 candidate. 처리는 아래 |
 
 ## stale 후보 처리 (검수 정책 B+C)
 
@@ -45,7 +45,7 @@ audit이 캐시를 쓰면 그 다음부터 query/show에 `stale_advisory`(코드
 - 의미가 정말 낡았으면 → `{{PROJECT}}-brain-session-ingest`의 "갱신 운용 규약"대로 supersede(매핑)/
   제자리 수정 + DecisionRecord 연결.
 - 바뀐 게 의미 무관(리팩터·이동·테스트 변경)이면 → 의미는 그대로니 `mark-checked`로 그 시점
-  develop sha 기준 검토 완료 표시(스냅샷만 갱신, 의미 불변):
+  {{DEFAULT_BRANCH}} sha 기준 검토 완료 표시(스냅샷만 갱신, 의미 불변):
   ```bash
   project-brain mark-checked --mappings <매핑id …> --checked-head <stale가 낸 target_head>
   ```

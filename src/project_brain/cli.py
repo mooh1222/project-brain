@@ -544,13 +544,18 @@ def _run_install(argv) -> int:
     parser.add_argument("--project", help="프로젝트 이름 (기본: target 디렉토리명)")
     parser.add_argument("--brain-root", default="brain",
                         help="코퍼스 상대 경로 (기본: brain)")
+    parser.add_argument("--default-branch", default="", help="스킬 템플릿의 {{DEFAULT_BRANCH}} 값")
+    parser.add_argument("--repo", default="", help="스킬 템플릿의 {{REPO}} 값")
+    parser.add_argument("--force", action="store_true",
+                        help="manifest 추적 파일의 사용자 수정도 덮어 갱신(엔진이 소스)")
     args = parser.parse_args(argv)
 
     from project_brain.installer import install
 
     target = Path(args.target) if args.target else Path.cwd()
     project = args.project or target.resolve().name
-    report = install(target, project=project, brain_root=args.brain_root)
+    report = install(target, project=project, brain_root=args.brain_root,
+                     default_branch=args.default_branch, repo=args.repo, force=args.force)
     print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
     return 0
 

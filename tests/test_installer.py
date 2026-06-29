@@ -12,30 +12,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from project_brain.config import CONFIG_FILENAME
-from project_brain.installer import MANIFEST_FILENAME, install, render_template
+from project_brain.installer import MANIFEST_FILENAME, install, render_text
 
 
-class RenderTemplateTest(unittest.TestCase):
+class RenderTextTest(unittest.TestCase):
     def test_substitutes_project_and_brain_root(self):
-        text = render_template("query", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-query", text)
-        self.assertIn("demo-brain-ingest", text)  # 상대 스킬 참조도 치환
-        self.assertNotIn("{{PROJECT}}", text)
-        self.assertNotIn("{{BRAIN_ROOT}}", text)
-        # session-ingest 템플릿도 치환 검증
-        si = render_template("session-ingest", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-session-ingest", si)
-        self.assertNotIn("{{PROJECT}}", si)
-        self.assertNotIn("{{BRAIN_ROOT}}", si)
-        # audit 템플릿도 치환 검증
-        cu = render_template("audit", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-audit", cu)
-        self.assertIn("demo-brain-session-ingest", cu)  # 상대 스킬 참조도 치환
-        self.assertNotIn("{{PROJECT}}", cu)
+        out = render_text("name: {{PROJECT}}-brain-query → {{BRAIN_ROOT}}/x",
+                          project="demo", brain_root="knowledge")
+        self.assertEqual(out, "name: demo-brain-query → knowledge/x")
+        self.assertNotIn("{{PROJECT}}", out)
+        self.assertNotIn("{{BRAIN_ROOT}}", out)
 
-    def test_unknown_template_raises(self):
-        with self.assertRaises(KeyError):
-            render_template("nope", project="x", brain_root="brain")
+    def test_render_text_substitutes_branch_and_repo(self):
+        out = render_text("{{REPO}}@{{DEFAULT_BRANCH}} for {{PROJECT}}",
+                          project="demo", brain_root="brain",
+                          default_branch="main", repo="myrepo")
+        self.assertEqual(out, "myrepo@main for demo")
 
 
 class InstallTest(unittest.TestCase):
@@ -46,8 +38,55 @@ class InstallTest(unittest.TestCase):
     def tearDown(self):
         self._td.cleanup()
 
+    def _skill_dir(self, name):
+        return self.target / ".agents" / "skills" / name
+
     def _skill(self, name):
-        return self.target / ".claude" / "skills" / name / "SKILL.md"
+        return self._skill_dir(name) / "SKILL.md"
+
+    def _expected_count(self):
+        import project_brain.installer as inst
+        n = 0
+        for skill in inst._SKILLS:
+            root = inst._TEMPLATES_DIR / skill
+            if not root.is_dir():
+                continue
+            for src in root.rglob("*"):
+                if src.is_file() and not inst._excluded(src.relative_to(root)):
+                    n += 1
+        return n
+
+    def test_walk_injects_references_and_scripts(self):
+        # 합성 템플릿: query 스킬에 references/scripts와 제외 대상까지 둔다.
+        import project_brain.installer as inst
+        tdir = Path(self._td.name) / "fake_templates"
+        q = tdir / "query"
+        (q / "references").mkdir(parents=True)
+        (q / "scripts" / "fixtures").mkdir(parents=True)
+        (q / "scripts" / "__pycache__").mkdir(parents=True)
+        (q / "SKILL.md").write_text("name: {{PROJECT}}-brain-query\n", encoding="utf-8")
+        (q / "references" / "guide.md").write_text("see {{PROJECT}}\n", encoding="utf-8")
+        (q / "scripts" / "run.sh").write_text("echo {{PROJECT}}\n", encoding="utf-8")
+        (q / "scripts" / "test_run.py").write_text("# dev test\n", encoding="utf-8")
+        (q / "scripts" / "fixtures" / "data.py").write_text("X = 1\n", encoding="utf-8")
+        (q / "scripts" / "__pycache__" / "x.pyc").write_text("junk\n", encoding="utf-8")
+        orig_dir, orig_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = tdir, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = orig_dir, orig_skills
+        base = self._skill_dir("demo-brain-query")
+        self.assertEqual((base / "SKILL.md").read_text(encoding="utf-8"),
+                         "name: demo-brain-query\n")
+        self.assertEqual((base / "references" / "guide.md").read_text(encoding="utf-8"),
+                         "see demo\n")
+        self.assertEqual((base / "scripts" / "run.sh").read_text(encoding="utf-8"),
+                         "echo demo\n")
+        # 제외: test_*.py · fixtures/ · __pycache__
+        self.assertFalse((base / "scripts" / "test_run.py").exists())
+        self.assertFalse((base / "scripts" / "fixtures").exists())
+        self.assertFalse((base / "scripts" / "__pycache__").exists())
 
     def test_fresh_install_creates_config_skills_manifest(self):
         report = install(self.target, project="demo")
@@ -61,25 +100,26 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(self._skill("demo-brain-ingest").exists())
         self.assertTrue(self._skill("demo-brain-session-ingest").exists())
         self.assertTrue(self._skill("demo-brain-audit").exists())
-        # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성:
-        # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다)
+        # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성)
         manifest = json.loads(
             (self.target / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(len(manifest["files"]), 4)
+        self.assertEqual(len(manifest["files"]), self._expected_count())
         for key in manifest["files"]:
             self.assertFalse(Path(key).is_absolute(), key)
             self.assertTrue((self.target / key).exists(), key)
         self.assertEqual(report["config"], "created")
-        self.assertEqual(len(report["created"]), 4)
+        self.assertEqual(len(report["created"]), self._expected_count())
 
     def test_reinstall_is_idempotent(self):
         install(self.target, project="demo")
         report = install(self.target, project="demo")
         self.assertEqual(report["config"], "kept")
-        # 동일 내용 재설치 — created가 아니라 updated(도구 소유 갱신)로 보고
+        # 동일 내용 재설치 — 내용 동일·이미 도구 소유 → 무변경
         self.assertEqual(report["created"], [])
-        self.assertEqual(len(report["updated"]), 4)
+        self.assertEqual(report["updated"], [])
+        self.assertEqual(report["adopted"], [])
+        self.assertEqual(report["skipped"], [])
 
     def test_existing_config_is_preserved(self):
         (self.target / CONFIG_FILENAME).write_text(
@@ -111,6 +151,60 @@ class InstallTest(unittest.TestCase):
         report = install(self.target, project="demo")
         self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
         self.assertIn(str(skill), report["skipped"])
+
+    def test_install_writes_new_config_keys(self):
+        install(self.target, project="demo", default_branch="main", repo="myrepo")
+        cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["default_branch"], "main")
+        self.assertEqual(cfg["repo"], "myrepo")
+
+    def test_adopts_matching_disk_file_into_manifest(self):
+        # manifest 밖 파일이 렌더 결과와 내용이 같으면 채택(도구 소유 등록).
+        install(self.target, project="demo")  # 1회 설치로 파일·manifest 생성
+        # manifest를 비워 "사용자 소유"로 되돌린 뒤 재설치 → 내용 같으니 채택
+        (self.target / MANIFEST_FILENAME).write_text('{"files": {}}', encoding="utf-8")
+        report = install(self.target, project="demo")
+        self.assertTrue(report["adopted"])
+        self.assertEqual(report["skipped"], [])
+        manifest = json.loads((self.target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        self.assertTrue(len(manifest["files"]) >= 4)
+
+    def test_force_overwrites_manifest_tracked_user_edit(self):
+        install(self.target, project="demo")
+        skill = self._skill("demo-brain-query")
+        skill.write_text("사용자 수정본", encoding="utf-8")  # manifest 기록 있음 + 수정
+        report = install(self.target, project="demo", force=True)
+        self.assertIn("name: demo-brain-query", skill.read_text(encoding="utf-8"))
+        self.assertIn(str(skill), report["updated"])
+
+    def test_force_preserves_manifest_outside_file(self):
+        # manifest 밖(사용자 소유) 파일은 force여도 보존.
+        skill = self._skill("demo-brain-query")
+        skill.parent.mkdir(parents=True)
+        skill.write_text("기존 사용자 스킬", encoding="utf-8")
+        report = install(self.target, project="demo", force=True)
+        self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
+        self.assertIn(str(skill), report["skipped"])
+
+    def test_real_templates_render_with_synthetic_values(self):
+        # 역수입된 실제 templates를 합성값으로 렌더 → (a) 미치환 토큰 0(현재 brain 스킬엔
+        # 정당한 {{ 리터럴이 없음 — 확인됨), (b) 도구명 오염(project-{{BRAIN_ROOT}}) 부재.
+        import project_brain.installer as inst
+        for skill in inst._SKILLS:
+            root = inst._TEMPLATES_DIR / skill
+            for src in root.rglob("*"):
+                if not src.is_file() or inst._excluded(src.relative_to(root)):
+                    continue
+                if src.suffix not in inst._TEXT_SUFFIXES:
+                    continue
+                raw = src.read_text(encoding="utf-8")
+                out = inst.render_text(raw, project="zzz", brain_root="kkk",
+                                       default_branch="ttt", repo="qqq")
+                self.assertNotIn("{{", out, f"미치환 토큰: {src}")
+                # F1 오염 백스톱: project-brain이 project-{{BRAIN_ROOT}}로 깨졌으면
+                # 합성 렌더에서 project-kkk가 나타난다(정상 리터럴에선 부재).
+                self.assertNotIn("project-kkk", out,
+                                 f"도구명 오염(project-brain→project-<root>): {src}")
 
 
 if __name__ == "__main__":
