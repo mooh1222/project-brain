@@ -112,6 +112,7 @@ class InstallTest(unittest.TestCase):
         # 동일 내용 재설치 — created가 아니라 updated(도구 소유 갱신)로 보고
         self.assertEqual(report["created"], [])
         self.assertEqual(len(report["updated"]), self._expected_count())
+        self.assertEqual(report["skipped"], [])
 
     def test_existing_config_is_preserved(self):
         (self.target / CONFIG_FILENAME).write_text(
