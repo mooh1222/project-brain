@@ -96,6 +96,7 @@ def install(target, *, project: str, brain_root: str = "brain",
     manifest = {"files": {}}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.setdefault("files", {})  # 구버전·손상 manifest 방어(KeyError 차단)
 
     # 3. 스킬 디렉토리 walk 주입(파일 단위 보존)
     for skill, suffix in _SKILLS.items():
