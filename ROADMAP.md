@@ -5,7 +5,7 @@
 
 - 설계 근거(정체성·철학·아키텍처·미결): [docs/design-canonical.md](docs/design-canonical.md)
 - 설치·사용: [README.md](README.md) · 개발 루프: [CLAUDE.md](CLAUDE.md)
-- 단계별 설계/계획 문서: `docs/specs/`(18) · `docs/plans/`(28) · `docs/skill-drafts/`(3)
+- 단계별 설계/계획 문서: `docs/specs/`(18) · `docs/plans/`(38) · `docs/skill-drafts/`(3)
 - 데이터·적재 이력은 각 프로젝트 레포(`brain/`)에 있다. 이 로드맵은 **엔진 기능**만 다룬다.
   BB2(첫 데이터) 적재 작업 추적은 vault task `bb2-project-brain-build`에 남아 있다.
 
@@ -227,6 +227,26 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - 계획: [glossary-synonyms-domain-gap](docs/plans/2026-06-26-glossary-synonyms-domain-gap.md)
   · 교차검토 근거: 메모리 `hwi-pkm-technique-crosscheck`(엔진 밖, 6후보 판정 + 적대 리뷰).
 
+### 엔진 단일 관리 주체 — installer 디렉토리 walk + 채택 + footgun (2026-06-29)
+스킬을 고치는 곳이 둘(엔진 templates/ + 데이터 레포 손수정)이라 갈라지던 것을 엔진 한 곳으로
+모음. install이 `SKILL.md` 한 장만 주입하던 것을 `templates/<skill>/` 디렉토리 통째 walk로
+바꿔 `references/`·`scripts/`까지 함께 주입한다(`__pycache__`·`fixtures`·`*.pyc`·`test_*.py`는
+주입 제외 — 개발 자산·테스트 픽스처·생성물). 목표는 범용화/추상화가 아니라 "관리 주체 1곳"이며,
+소비처가 bb2 하나뿐이라 도메인 예시는 bb2색 리터럴로 두고 변수 치환은 최소 수단만 쓴다.
+
+- **변수 치환**: `{{PROJECT}}`·`{{BRAIN_ROOT}}`·`{{DEFAULT_BRANCH}}`·`{{REPO}}` 4개만(머신·레포
+  종속값). 그 외 도메인 예시는 리터럴 보존.
+- **manifest 파일단위 추적·보존·채택(adopt)**: `.project-brain-manifest.json`이 파일별로 무엇을
+  주입했는지 기록(hwi_PKM 멱등 패턴). 디스크 내용이 렌더 결과와 같으면 채택(adopt) 처리하고,
+  사용자가 수정했거나 manifest 밖 파일은 보존한다. `--force`는 manifest에 기록된 사용자 수정만
+  덮고, manifest 밖 파일은 force여도 보존.
+- **config 누락 키 backfill(footgun 차단)**: config가 없으면 생성, 있으면 보존하되 누락 키 중
+  값이 있는 것만 채워 넣는다(기존 키·빈 값은 안 건드림). 빈 값을 기록해버리던 footgun을 막음.
+- 검증: 머지+origin 푸시(`edc2f88..c9eda64`), 합성 537 통과, bb2 채택 19파일 diff 0.
+- 계획: [engine-single-source(spec)](docs/plans/2026-06-29-engine-single-source-spec.md) ·
+  [engine-single-source(plan)](docs/plans/2026-06-29-engine-single-source-plan.md) ·
+  [engine-single-source(decision)](docs/plans/2026-06-29-engine-single-source-decision.md)
+
 ---
 
 ## 미뤄둔 작업 (최종 관리)
@@ -252,8 +272,11 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 
 4. **팀 공개 — reviewed 승격 권한 결정** (미결 5)
    - 상태: 혼자 시험 제작 단계라 미정. 각자 promote vs 검수자 지정.
-   - 동반 작업: 스킬 범용화(엔진 install이 주입하는 `SKILL.md` 4개(query/ingest/session-ingest/audit)
-     외에 `references/`·`scripts/`는 미주입 — 범용화는 삭제가 아니라 추상화, 맞춤은 설치 후 실사용으로).
+   - 동반 작업: install 측 인프라는 단일원본 작업(2026-06-29, 완료 단계 참고)으로 **이미 완료**.
+     install이 `templates/<skill>/` 디렉토리를 통째 walk해 `SKILL.md`·`references/`·`scripts/`를
+     다 주입하고 manifest로 보존·채택한다(과거 "SKILL.md만 주입·references/scripts 미주입"은 옛 상태).
+     목표는 범용화/추상화가 아니라 "관리 주체 1곳"이며, 소비처가 bb2뿐이라 도메인 예시는 리터럴로
+     둔다. 팀 공개 시 남는 건 승격 권한 정책 결정이지 미주입 인프라가 아니다.
    - 트리거: 사용자가 팀 공개를 결정할 때.
 
 5. **locator 위치 갱신 / 기존 데이터 정비 (Part B)**

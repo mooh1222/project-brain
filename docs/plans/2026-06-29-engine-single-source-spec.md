@@ -1,5 +1,7 @@
 # 엔진 단일 관리 주체 — 구현 설계 spec
 
+> 상태(2026-06-29): 이 설계는 전부 구현·main 머지·origin 푸시 완료(엔진 6d6a936..c9eda64). 본문은 구현 전 설계 시점 서술이고, 아래 §8 코드 스냅샷은 구현 전 baseline이라 현재와 다르다.
+
 > **목적:** [배포모델 결정 문서](2026-06-29-engine-single-source-decision.md)의 후속. 그 문서는
 > "1번(installer 디렉토리 통째 주입) vs 2번 vs 3번" 중 사용자가 1번에 기운 데까지였다.
 > 이 세션(2026-06-29)에서 **1번 확정 + 실제 코드 전수 조사 + 상세 설계**까지 마쳤고, 이 문서가
@@ -214,7 +216,12 @@ diff 0이면 "치환이 원래 값으로 정확히 복원 + 내용 후퇴 없음
 
 ## 8. 참고 — 이번 세션 산출 위치
 
-- 코드 사실 검증: `installer.py`(`install`/`_TEMPLATES`/`render_template`), `cli.py`(`_run_install`
-  537~·`--force` 없음 확인), `tests/test_installer.py`(117줄·5테스트), bb2
+> (구현 전 baseline 스냅샷 — 아래 줄은 구현 전 값이라 현재 코드와 다르다. 괄호 안에 현재값을
+> 적어 정정했다. `_TEMPLATES`·`render_template`은 현재 코드에 없는 심볼이니 찾지 말 것.)
+
+- 코드 사실 검증: `installer.py`(구현 전: `install`/`_TEMPLATES`/`render_template` → 현재:
+  `install`/`_SKILLS`/`render_text`/`_TEMPLATES_DIR`/`_excluded`), `cli.py`(`_run_install`
+  537~·구현 전 `--force` 없음 확인 → 현재 `--force`·`--default-branch`·`--repo` 있음),
+  `tests/test_installer.py`(구현 전 117줄·5테스트 → 현재 229줄·14테스트), bb2
   `.agents/skills/bb2-brain-*`(원본)·`.claude/skills`(심볼릭).
 - 조사 워크플로: bb2 스킬 4종 전수 분류(공통/변수화/자유서술/제외) + 하드코딩 인벤토리.

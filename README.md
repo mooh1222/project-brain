@@ -40,13 +40,16 @@ uv tool install -e ./project-brain
 
 ```bash
 cd <프로젝트 루트>
-project-brain install --project <이름>   # config + 스킬 3종(조회/적재/세션) 주입(manifest 추적)
+project-brain install --project <이름>   # config + 스킬 4종(조회/적재/세션/audit) 주입(manifest 추적)
+project-brain install --project <이름> --default-branch develop --repo myorg/myrepo  # 스킬의 {{DEFAULT_BRANCH}}·{{REPO}} 값 채움
+project-brain install --project <이름> --force  # manifest에 기록된 사용자 수정 파일도 덮어 갱신
 project-brain doctor                      # 환경·프로젝트 상태 진단
 project-brain bootstrap                   # install → 색인 재구축 → doctor 한번에
 ```
 
-`install`은 `.claude/skills/<이름>-brain-{query,ingest,session-ingest}/SKILL.md`를 범용 템플릿에서
-렌더해 심는다. 설치 직후 어시스턴트(Claude 등)가 코퍼스를 보고 description 트리거
+`install`은 `.agents/skills/<이름>-brain-{query,ingest,session-ingest,audit}/` 4종을 템플릿에서
+렌더해 심는다 — SKILL.md 한 장이 아니라 `templates/<skill>/` 디렉토리 통째(SKILL.md +
+references/ + scripts/ 포함)를 주입한다. 설치 직후 어시스턴트(Claude 등)가 코퍼스를 보고 description 트리거
 어휘를 프로젝트 어휘로 맞춤 제안하는 단계까지가 온보딩이다 — 맞춤된 스킬 파일은
 사용자 소유가 되고, 이후 `install` 재실행은 그 파일을 덮지 않는다(manifest 해시
 불일치 → skip 보고).

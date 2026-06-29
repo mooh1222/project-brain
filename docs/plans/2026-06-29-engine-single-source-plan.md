@@ -1,5 +1,8 @@
 # 엔진 단일 관리 주체 구현 Plan
 
+> **상태: 구현 완료** — 엔진 main 머지+origin 푸시(edc2f88..c9eda64), 합성 537 통과, bb2 채택 19파일 diff0 (2026-06-29). 아래 Task 체크박스는 작성 시점(미착수) 그대로이며 **전부 완료됨**.
+> plan 외 broad-review Minor 후속도 함께 머지됨 — 03f2780(manifest files 키 setdefault 방어 + pyproject testpaths=["tests"]), 495c21d(멱등 재설치 skipped 단언).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** installer를 SKILL.md 한 장 주입에서 스킬 디렉토리(references/scripts 포함) 통째 walk 주입으로 키워, 엔진(project-brain)이 brain 스킬의 단일 관리 주체가 되게 한다.
@@ -18,6 +21,7 @@
 - **커밋**: plan에 커밋 스텝이 있으나, 실제 커밋·푸시는 사용자 승인 후. 기본 브랜치에서 작업하면 먼저 브랜치를 판다.
 - **manifest 키**: 항상 target 기준 상대 경로(머신 이식성). 절대 경로 금지.
 - **빈 변수 기본값 + 백스톱(critic F4)**: `install`의 `repo`·`default_branch` 기본값은 `""`(변수 미사용 프로젝트 허용). 변수를 쓰는 프로젝트(bb2)가 config에 값을 안 채우면 `{{REPO}}`→`""`로 빈 스킬이 조용히 생길 수 있다. **방어는 Task 7 Step 2**: bb2 config에 `repo`·`default_branch`를 먼저 채우고(필수), install report의 `skipped`에 brain 스킬 파일이 있으면 문제 신호로 멈춘다. (§6.3 diff는 이 케이스를 **못 잡는다** — 최초 채택 때 렌더 `""`≠디스크라 그 파일이 skip되고 install이 디스크를 안 써 diff=0이 되기 때문. 그래서 백스톱은 diff가 아니라 config 사전보강 + skip 신호다.) install에 토큰-존재-시-ConfigError 가드를 안 박는 이유: 합성 테스트가 실 templates를 쓰므로 모든 테스트에 두 값을 줘야 해 복잡도만 는다.
+  > **후속 결정(완료, commit c9eda64)**: footgun은 위의 절차 백스톱(config 사전보강 + skip 신호)이 아니라 `install()`의 자동 backfill로 닫혔다 — config에 있으나 값이 빠진 키를, 누락 키 중 **값이 있는 것만** 보충하고 기존 키·빈 값은 건드리지 않는다. 원래 "ConfigError 가드 안 박음" 결정은 이 backfill로 대체됐다(코드 가드가 없는 게 아니라 backfill이 자동으로 메운다). 미래 세션은 이 항목을 "코드 차원 방어 없음"으로 오해하지 말 것.
 
 ---
 
