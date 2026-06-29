@@ -158,6 +158,24 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(cfg["default_branch"], "main")
         self.assertEqual(cfg["repo"], "myrepo")
 
+    def test_install_backfills_missing_config_keys_from_flags(self):
+        # footgun 방지: 기존 config에 repo/default_branch 칸이 없는데 옵션으로 값을 주면
+        # 그 값을 config에 채워(backfill) 다음 install이 같은 값으로 결정적이게 한다.
+        # 기존 키는 안 건드리고(보존), 옵션이 빈 값이면 안 적는다.
+        (self.target / CONFIG_FILENAME).write_text(
+            json.dumps({"project": "demo", "brain_root": "brain"}), encoding="utf-8")
+        report = install(self.target, project="demo", repo="myrepo", default_branch="main")
+        cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["repo"], "myrepo")          # 누락 키 보충
+        self.assertEqual(cfg["default_branch"], "main")  # 누락 키 보충
+        self.assertEqual(cfg["project"], "demo")         # 기존 키 보존
+        self.assertEqual(report["config"], "updated")
+        # backfill 덕에 옵션 없이 재실행해도 같은 값으로 렌더(다음번에 빈 값으로 안 깨짐)
+        report2 = install(self.target, project="demo")
+        self.assertEqual(report2["config"], "kept")
+        skill = self._skill("demo-brain-query").read_text(encoding="utf-8")
+        self.assertNotIn("{{REPO}}", skill)
+
     def test_adopts_matching_disk_file_into_manifest(self):
         # manifest 밖 파일이 렌더 결과와 내용이 같으면 채택(도구 소유 등록).
         install(self.target, project="demo")  # 1회 설치로 파일·manifest 생성

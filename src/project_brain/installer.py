@@ -1,7 +1,7 @@
 """install — 프로젝트에 config + 스킬을 멱등 설치하고 manifest로 추적한다.
 
 산출물:
-  1. .project-brain.json — 없으면 생성, 있으면 보존.
+  1. .project-brain.json — 없으면 생성, 있으면 보존(누락 키만 옵션값으로 보충).
   2. .agents/skills/<project>-brain-{query,ingest,session-ingest,audit}/...
      — templates/<skill>/ 디렉토리를 통째 walk·렌더 주입(SKILL.md + references/ + scripts/).
   3. .project-brain-manifest.json — 심은 파일 경로+sha256.
@@ -83,6 +83,17 @@ def install(target, *, project: str, brain_root: str = "brain",
         brain_root = cfg.get("brain_root", brain_root)
         default_branch = cfg.get("default_branch", default_branch)
         repo = cfg.get("repo", repo)
+        # 누락 키 보충: 옵션/기본으로 들어온 값이 있는데 config에 칸이 없으면 채운다.
+        # 기존 키는 안 건드리고(보존 원칙 유지), 빈 값은 안 적어 무의미한 갱신을 막는다.
+        # 미보충 시 다음 install이 빈 값으로 렌더해 스킬이 깨지는 footgun 차단.
+        backfill = {k: v for k, v in (("project", project), ("brain_root", brain_root),
+                    ("default_branch", default_branch), ("repo", repo))
+                    if v and k not in cfg}
+        if backfill:
+            cfg.update(backfill)
+            cfg_path.write_text(
+                json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            report["config"] = "updated"
     else:
         cfg_path.write_text(
             json.dumps({"project": project, "brain_root": brain_root,
