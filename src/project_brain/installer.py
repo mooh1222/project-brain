@@ -1,15 +1,15 @@
 """install — 프로젝트에 config + 스킬을 멱등 설치하고 manifest로 추적한다.
 
 산출물:
-  1. .project-brain.json — 없으면 생성(project·brain_root 기록), 있으면 보존.
-  2. .claude/skills/<project>-brain-{query,ingest,session-ingest}/SKILL.md
-     — templates/를 {{PROJECT}}/{{BRAIN_ROOT}} 치환해 주입.
+  1. .project-brain.json — 없으면 생성, 있으면 보존.
+  2. .agents/skills/<project>-brain-{query,ingest,session-ingest,audit}/...
+     — templates/<skill>/ 디렉토리를 통째 walk·렌더 주입(SKILL.md + references/ + scripts/).
   3. .project-brain-manifest.json — 심은 파일 경로+sha256.
 
-파일 단위 보존(hwi_PKM manifest 멱등 패턴): 디스크 해시가 manifest 기록과 일치할
-때만 갱신(도구 소유). 불일치(사용자 수정)·manifest 밖 기존 파일(사용자 소유)은
-건드리지 않고 skipped로 보고한다 — 설치 직후 코퍼스에 맞춘 description 어휘 제안과
-그 반영(스킬 맞춤)은 어시스턴트의 몫이고, 맞춤된 파일은 그때부터 사용자 소유가 된다.
+파일 단위 보존(hwi_PKM 멱등): 디스크 해시가 manifest 기록과 일치할 때만 갱신(도구 소유),
+불일치(사용자 수정)·manifest 밖(사용자 소유)은 보존. (--force·채택은 Task 3에서 추가.)
+스킬 런타임에 안 쓰이는 개발 자산(test_*.py)·죽은 산출물(fixtures/)·생성물(__pycache__/.pyc)은
+주입하지 않는다.
 """
 from __future__ import annotations
 
@@ -20,24 +20,47 @@ from pathlib import Path
 from project_brain.config import CONFIG_FILENAME
 
 MANIFEST_FILENAME = ".project-brain-manifest.json"
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-# 템플릿 이름 → (파일명, 스킬 디렉토리 접미)
-_TEMPLATES = {
-    "query": ("query.md", "brain-query"),
-    "ingest": ("ingest.md", "brain-ingest"),
-    "session-ingest": ("session-ingest.md", "brain-session-ingest"),
-    "audit": ("audit.md", "brain-audit"),
+# 스킬 키 → 디렉토리 접미. templates/<key>/ 가 소스.
+_SKILLS = {
+    "query": "brain-query",
+    "ingest": "brain-ingest",
+    "session-ingest": "brain-session-ingest",
+    "audit": "brain-audit",
 }
 
-
-def render_template(name: str, *, project: str, brain_root: str) -> str:
-    filename, _ = _TEMPLATES[name]
-    raw = (Path(__file__).parent / "templates" / filename).read_text(encoding="utf-8")
-    return raw.replace("{{PROJECT}}", project).replace("{{BRAIN_ROOT}}", brain_root)
+_TEXT_SUFFIXES = {".md", ".py", ".js", ".sh", ".json"}
 
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def render_text(text: str, *, project: str, brain_root: str) -> str:
+    """텍스트의 치환 변수를 채운다. {{VAR}} 토큰이라 순서 무관."""
+    return text.replace("{{BRAIN_ROOT}}", brain_root).replace("{{PROJECT}}", project)
+
+
+def _excluded(rel: Path) -> bool:
+    """install 미주입: 개발 자산·죽은 산출물·생성물."""
+    parts = set(rel.parts)
+    if "__pycache__" in parts or "fixtures" in parts:
+        return True
+    if rel.suffix == ".pyc":
+        return True
+    if rel.name.startswith("test_") and rel.suffix == ".py":
+        return True
+    return False
+
+
+def _rendered_bytes(src: Path, *, project: str, brain_root: str) -> bytes:
+    """텍스트면 렌더 후 utf-8 바이트, 아니면 원본 바이트(바이너리 복사)."""
+    if src.suffix in _TEXT_SUFFIXES:
+        text = render_text(src.read_text(encoding="utf-8"),
+                           project=project, brain_root=brain_root)
+        return text.encode("utf-8")
+    return src.read_bytes()
 
 
 def install(target, *, project: str, brain_root: str = "brain") -> dict:
@@ -45,50 +68,56 @@ def install(target, *, project: str, brain_root: str = "brain") -> dict:
     target = Path(target)
     report = {"config": "kept", "created": [], "updated": [], "skipped": []}
 
-    # 1. config — 있으면 그대로 보존(사용자 편집 대상), 없으면 생성.
+    # 1. config — 있으면 보존(스킬 렌더는 config를 따른다), 없으면 생성.
     cfg_path = target / CONFIG_FILENAME
     if cfg_path.exists():
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        # 스킬 렌더는 실제 config를 따른다(인자와 다르면 config가 정답).
         project = cfg.get("project") or project
         brain_root = cfg.get("brain_root", brain_root)
     else:
         cfg_path.write_text(
             json.dumps({"project": project, "brain_root": brain_root},
                        ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+            encoding="utf-8")
         report["config"] = "created"
 
-    # 2. manifest 로드 — 심었던 파일의 해시 기록.
+    # 2. manifest 로드
     manifest_path = target / MANIFEST_FILENAME
     manifest = {"files": {}}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    # 3. 스킬 주입(파일 단위 보존). manifest 키는 target 기준 상대 경로 —
-    # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다.
-    for name in _TEMPLATES:
-        _, suffix = _TEMPLATES[name]
-        rel_key = str(Path(".claude") / "skills" / f"{project}-{suffix}" / "SKILL.md")
-        skill_path = target / rel_key
-        rendered = render_template(name, project=project, brain_root=brain_root)
-        recorded = manifest["files"].get(rel_key)
-        if skill_path.exists():
-            on_disk = _sha256(skill_path.read_text(encoding="utf-8"))
-            if recorded != on_disk:
-                # 사용자 수정(해시 불일치) 또는 install 밖에서 생긴 파일 — 보존.
-                report["skipped"].append(str(skill_path))
+    # 3. 스킬 디렉토리 walk 주입(파일 단위 보존)
+    for skill, suffix in _SKILLS.items():
+        src_root = _TEMPLATES_DIR / skill
+        if not src_root.is_dir():
+            continue
+        skill_dir_name = f"{project}-{suffix}"
+        for src in sorted(src_root.rglob("*")):
+            if not src.is_file():
                 continue
-            skill_path.write_text(rendered, encoding="utf-8")
-            report["updated"].append(str(skill_path))
-        else:
-            skill_path.parent.mkdir(parents=True, exist_ok=True)
-            skill_path.write_text(rendered, encoding="utf-8")
-            report["created"].append(str(skill_path))
-        manifest["files"][rel_key] = _sha256(rendered)
+            rel = src.relative_to(src_root)
+            if _excluded(rel):
+                continue
+            rel_key = str(Path(".agents") / "skills" / skill_dir_name / rel)
+            dst = target / rel_key
+            rendered = _rendered_bytes(src, project=project, brain_root=brain_root)
+            rendered_hash = _sha256_bytes(rendered)
+            recorded = manifest["files"].get(rel_key)
+            if dst.exists():
+                on_disk = _sha256_bytes(dst.read_bytes())
+                if recorded != on_disk:
+                    # 사용자 수정(해시 불일치) 또는 manifest 밖에서 생긴 파일 — 보존.
+                    report["skipped"].append(str(dst))
+                    continue
+                dst.write_bytes(rendered)
+                report["updated"].append(str(dst))
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(rendered)
+                report["created"].append(str(dst))
+            manifest["files"][rel_key] = rendered_hash
 
     manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report

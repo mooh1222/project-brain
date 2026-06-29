@@ -12,30 +12,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from project_brain.config import CONFIG_FILENAME
-from project_brain.installer import MANIFEST_FILENAME, install, render_template
+from project_brain.installer import MANIFEST_FILENAME, install, render_text
 
 
-class RenderTemplateTest(unittest.TestCase):
+class RenderTextTest(unittest.TestCase):
     def test_substitutes_project_and_brain_root(self):
-        text = render_template("query", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-query", text)
-        self.assertIn("demo-brain-ingest", text)  # 상대 스킬 참조도 치환
-        self.assertNotIn("{{PROJECT}}", text)
-        self.assertNotIn("{{BRAIN_ROOT}}", text)
-        # session-ingest 템플릿도 치환 검증
-        si = render_template("session-ingest", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-session-ingest", si)
-        self.assertNotIn("{{PROJECT}}", si)
-        self.assertNotIn("{{BRAIN_ROOT}}", si)
-        # audit 템플릿도 치환 검증
-        cu = render_template("audit", project="demo", brain_root="brain")
-        self.assertIn("name: demo-brain-audit", cu)
-        self.assertIn("demo-brain-session-ingest", cu)  # 상대 스킬 참조도 치환
-        self.assertNotIn("{{PROJECT}}", cu)
-
-    def test_unknown_template_raises(self):
-        with self.assertRaises(KeyError):
-            render_template("nope", project="x", brain_root="brain")
+        out = render_text("name: {{PROJECT}}-brain-query → {{BRAIN_ROOT}}/x",
+                          project="demo", brain_root="knowledge")
+        self.assertEqual(out, "name: demo-brain-query → knowledge/x")
+        self.assertNotIn("{{PROJECT}}", out)
+        self.assertNotIn("{{BRAIN_ROOT}}", out)
 
 
 class InstallTest(unittest.TestCase):
@@ -46,8 +32,55 @@ class InstallTest(unittest.TestCase):
     def tearDown(self):
         self._td.cleanup()
 
+    def _skill_dir(self, name):
+        return self.target / ".agents" / "skills" / name
+
     def _skill(self, name):
-        return self.target / ".claude" / "skills" / name / "SKILL.md"
+        return self._skill_dir(name) / "SKILL.md"
+
+    def _expected_count(self):
+        import project_brain.installer as inst
+        n = 0
+        for skill in inst._SKILLS:
+            root = inst._TEMPLATES_DIR / skill
+            if not root.is_dir():
+                continue
+            for src in root.rglob("*"):
+                if src.is_file() and not inst._excluded(src.relative_to(root)):
+                    n += 1
+        return n
+
+    def test_walk_injects_references_and_scripts(self):
+        # 합성 템플릿: query 스킬에 references/scripts와 제외 대상까지 둔다.
+        import project_brain.installer as inst
+        tdir = Path(self._td.name) / "fake_templates"
+        q = tdir / "query"
+        (q / "references").mkdir(parents=True)
+        (q / "scripts" / "fixtures").mkdir(parents=True)
+        (q / "scripts" / "__pycache__").mkdir(parents=True)
+        (q / "SKILL.md").write_text("name: {{PROJECT}}-brain-query\n", encoding="utf-8")
+        (q / "references" / "guide.md").write_text("see {{PROJECT}}\n", encoding="utf-8")
+        (q / "scripts" / "run.sh").write_text("echo {{PROJECT}}\n", encoding="utf-8")
+        (q / "scripts" / "test_run.py").write_text("# dev test\n", encoding="utf-8")
+        (q / "scripts" / "fixtures" / "data.py").write_text("X = 1\n", encoding="utf-8")
+        (q / "scripts" / "__pycache__" / "x.pyc").write_text("junk\n", encoding="utf-8")
+        orig_dir, orig_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = tdir, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = orig_dir, orig_skills
+        base = self._skill_dir("demo-brain-query")
+        self.assertEqual((base / "SKILL.md").read_text(encoding="utf-8"),
+                         "name: demo-brain-query\n")
+        self.assertEqual((base / "references" / "guide.md").read_text(encoding="utf-8"),
+                         "see demo\n")
+        self.assertEqual((base / "scripts" / "run.sh").read_text(encoding="utf-8"),
+                         "echo demo\n")
+        # 제외: test_*.py · fixtures/ · __pycache__
+        self.assertFalse((base / "scripts" / "test_run.py").exists())
+        self.assertFalse((base / "scripts" / "fixtures").exists())
+        self.assertFalse((base / "scripts" / "__pycache__").exists())
 
     def test_fresh_install_creates_config_skills_manifest(self):
         report = install(self.target, project="demo")
@@ -61,17 +94,16 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(self._skill("demo-brain-ingest").exists())
         self.assertTrue(self._skill("demo-brain-session-ingest").exists())
         self.assertTrue(self._skill("demo-brain-audit").exists())
-        # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성:
-        # 절대 경로를 박으면 다른 머신 checkout에서 도구 소유 파일을 못 알아본다)
+        # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성)
         manifest = json.loads(
             (self.target / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(len(manifest["files"]), 4)
+        self.assertEqual(len(manifest["files"]), self._expected_count())
         for key in manifest["files"]:
             self.assertFalse(Path(key).is_absolute(), key)
             self.assertTrue((self.target / key).exists(), key)
         self.assertEqual(report["config"], "created")
-        self.assertEqual(len(report["created"]), 4)
+        self.assertEqual(len(report["created"]), self._expected_count())
 
     def test_reinstall_is_idempotent(self):
         install(self.target, project="demo")
@@ -79,7 +111,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["config"], "kept")
         # 동일 내용 재설치 — created가 아니라 updated(도구 소유 갱신)로 보고
         self.assertEqual(report["created"], [])
-        self.assertEqual(len(report["updated"]), 4)
+        self.assertEqual(len(report["updated"]), self._expected_count())
 
     def test_existing_config_is_preserved(self):
         (self.target / CONFIG_FILENAME).write_text(
