@@ -28,7 +28,10 @@ step "ingest";        project-brain ingest --objects-file "$OBJS"
 step "index rebuild"; project-brain index rebuild
 step "lint";          project-brain lint
 step "eval";          project-brain eval 2>/dev/null | jq '.summary'
-step "unittest";      python3 -m unittest discover -s {{BRAIN_ROOT}}/checks
 step "search 샘플";   project-brain search "이 컨텍스트 핵심 동작" 2>/dev/null | jq '.results | length'
 step "graph isolated"; project-brain graph isolated
+# unittest를 맨 뒤로 둔다 — set -e라 실패 시 그 자리서 중단되는데, EXPECTED_RAW_CHUNKS 드리프트로 인한
+# 실패가 위 search·graph isolated(고아 점검)를 건너뛰지 않게 하기 위함. 이 단계 실패가 드리프트면
+# 적재는 이미 성공한 것(ingest 통과)이고 데이터레포 상수만 bump하면 된다.
+step "unittest";      python3 -m unittest discover -s {{BRAIN_ROOT}}/checks
 echo "── 적재 완료 ──"

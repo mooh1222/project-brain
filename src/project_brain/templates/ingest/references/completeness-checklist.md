@@ -74,9 +74,20 @@ SKILL.md 5단계에서 참조. `ingest`/`lint`는 "없는 id 참조·충돌·고
 - 이전 세션·설계문서·작업 히스토리·메모리에서 알아버린 사실을 객체 근거로 쓰지 않았나.
 - claim-bearing field(`meaning`, `boundary`, `value`, `decision`, `caveat`, `code_locator`)가 이번 소스 패킷의
   EvidenceRef를 가리키나.
-- 전 객체 cold replay는 필수가 아니다. 대신 필드별 출처 태깅을 하고, 고위험 객체만 재구성 감사를 한다:
-  `DecisionRecord`, supersede, `spec_reflected=no`, 낮은 confidence, 새 source type, code anchor,
-  `history_coverage=complete` 선언.
+- 전 객체 cold replay는 필수가 아니다. 대신 필드별 출처 태깅을 하고, 고위험 객체는 재구성 감사를
+  **필수로** 한다(선택 아님): `DecisionRecord`, supersede, `spec_reflected=no`, 낮은 confidence,
+  새 source type, code anchor, `history_coverage=complete` 선언.
+- **`DecisionRecord` 서사를 메모리·이전 세션 기억으로 채웠으면 적재 전 코드/원문으로 독립 대조(적대검증)해
+  반박을 시도하라.** 기억의 "그때 이렇게 고쳤다" 류 서술이 실제 코드 이력과 어긋나는 패턴이 잦다 —
+  기억은 절대 근거가 아니므로(규칙 3), 그 claim이 이번 소스 EvidenceRef로 재구성되는지 확인한 뒤에야 reviewed로 적재한다.
+  (이건 추출 verify와 별개다 — verify는 소스에서 뽑은 claim을 그 소스와 대조하지만, 메모리 서사는
+  대조할 소스 패킷이 애초에 없어 verify가 못 본다. `system-domain-playbook.md`의 "verify가 적대검증이라
+  critic 생략"은 소스 추출 claim에 해당하고, 메모리로 채운 서사엔 적용되지 않는다. 또 evidence가 있어도
+  그 evidence가 claim을 실제로 **뒷받침하는지**는 개수가 아니라 내용을 봐야 한다 — 틀린 커밋을 근거로 단
+  허위 결정은 evidence 개수 검사로 안 걸린다.)
+- 단 이 적대검증은 의무 단계로 못 박아도 "적대검증 완료"라는 마음속 도장으로 퇴화하면 무의미하다 — 핵심은
+  단계를 거쳤는지가 아니라 **실제로 반박을 시도해 모순을 찾으려 했는지**다. 코드로 강제 못 하는 행동 규율이라
+  보장이 아니라 완화책이다(엔진 schema 빈값 게이트는 구문 층이라 "근거 있는데 모순"이라는 의미 결함에 못 닿는다).
 
 ## lint가 잡아주는 것 (점검 후 자동 확인)
 

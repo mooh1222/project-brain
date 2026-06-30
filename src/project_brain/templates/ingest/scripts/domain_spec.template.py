@@ -5,7 +5,7 @@ COMMIT = ""                    # {{DEFAULT_BRANCH}} 앵커 커밋 (git rev-parse
 REPO = "{{REPO}}"
 MANIFESTS = {                  # sources[]가 될 매니페스트. 키=종류, 값=manifest id
     "code": "manifest.<ctx>.code",
-    # "commit": "manifest.<ctx>.commit", "jira": "manifest.<ctx>.jira",
+    # "commit": "manifest.<ctx>.commit", "jira": "manifest.<ctx>.jira", "pr": "manifest.<ctx>.pr",
 }
 DISPLAY_NAME = ""
 BOUNDARY_SUMMARY = """"""      # 다줄 한국어 경계 설명
@@ -20,4 +20,5 @@ DECISIONS = []               # decisions[] 노트 그대로(엔진 build_decisio
                               # 각: {"key","decision_type","title","summary","decision",
                               #      "spec_reflected"?, "affects":[mapping_key...],
                               #      "evidence":[{"type":"commit|jira|pr","ref","summary"?,"locator"?}]}
+                              #   (commit: locator={repo,sha} 자동. jira/pr: locator=인스턴스 URL을 직접 적는다.)
 # HOOK = lambda atoms: atoms  # (선택) 선언적으로 안 되는 그 적재 한정 변칙. 쓰면 ingest-case-log.md에 기록.

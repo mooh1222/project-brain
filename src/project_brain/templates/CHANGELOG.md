@@ -10,6 +10,14 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-07-01 — 적대검증 진정성 문구 보강 + 안전장치 B 폐기(엔진 변경 없음)
+
+completeness-checklist 8번: 적대검증을 의무로 못 박아도 "완료" 도장으로 퇴화하면 무의미 — 핵심은 단계 존재가 아니라 실제 반박 시도, 코드로 강제 못 하는 행동 완화책임을 한 줄 보강. 안전장치로 검토하던 DecisionRecord.verification_note 하드 게이트(설계 B)는 4렌즈+surface 교차검증 결과 헛도장(빈값 검사는 구문 층이라 "근거 있는데 모순"에 못 닿음)으로 판정해 **폐기 — 엔진 변경 없음**. 결정 근거·후속 위생 티켓은 `docs/plans/2026-06-30-ingest-skill-retro-improvements.md`("P0 후속") + `docs/plans/2026-07-01-decisionrecord-evidence-refs-hygiene.md`.
+
+## 2026-06-30 — 적재 회고 반영: 적대검증 의무화 + 머지 전 앵커 경계 + PR/evref 문서 보강
+
+completeness-checklist 8번: 고위험 객체(DecisionRecord·supersede·code anchor·history_coverage=complete) 재구성 감사를 "선택"→"필수"로, 메모리 서사를 결정에 옮길 땐 코드/원문 대조 적대검증 의무를 명시(메모리 기반 허위 DecisionRecord 방지 — 럭키박스 세션 실측). scope.md: 기본은 머지 후 앵커 / 머지 전 PR HEAD SHA는 그 PR이 merge-commit으로 머지될 게 확실할 때만(머지 방식은 레포 속성 아닌 per-PR 선택, 죽은 SHA는 lint dangling에 안 걸려 조용히 깨짐) 경계 추가. domain_spec.template.py·ingest-tools.md: PR manifest 예시 + commit(locator={repo,sha} auto)/jira·pr(locator 수동) 형식·evref `<ctx>.<type>-<ref>` id 형식 명시. run_ingest.sh: EXPECTED_RAW_CHUNKS 드리프트 ≠ 적재 실패 주석. 근거: `docs/plans/2026-06-30-ingest-skill-retro-improvements.md`.
+
 ## 2026-06-29 — 디렉토리 통째 주입 + bb2 정합본 역수입 + 변수화
 
 주입 단위를 SKILL.md 한 장 → `templates/<skill>/` 디렉토리 통째 walk로 확장(`references/`·`scripts/` 포함, `__pycache__`·`fixtures`·`*.pyc`·`test_*.py` 제외). bb2 실사용 개선분을 엔진 templates로 역수입하며 `{{PROJECT}}`/`{{BRAIN_ROOT}}`/`{{DEFAULT_BRANCH}}`/`{{REPO}}` 변수화 동반. glossary 세션이 덮어쓴 ingest 동의어 섹션도 복원. 엔진 커밋 `6d6a936`(walk)·`5ca5405`(역수입)·`6722d65`(synonyms 복원).

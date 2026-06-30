@@ -49,6 +49,8 @@ project-brain index rebuild && project-brain eval && project-brain search "..."
   의미(claim) 필드(meaning·boundary 등) 수정은 `evidence_unchanged: true`나 evidence 변경을 동반해야 한다.
   `expected_updated_at`로 낙관적 잠금(build 시점·ingest 저장 직전 두 번 검사 — 그 사이 store가 바뀌면 거부).
 - **DecisionRecord**는 `decisions[]` 노트 키로 조립한다(build_decisions — DecisionRecord + commit/jira/pr EvidenceRef + affects 역채움).
+  decision 근거의 evref id는 `evref.<ctx>.<type>-<ref>`(예: `evref.sally-canoe.commit-abc1234567`)로 파생되고 같은 id는 중복 제거된다.
+  commit은 locator={repo,sha}를 자동으로 채우고, jira/pr은 노트 evidence의 `locator`(인스턴스 URL)를 그대로 쓴다.
   **노트로 못 담는 완성 객체**(session 등 비-code EvidenceRef)는 `extra_objects[]`에 직접 넣는다 —
   build가 검증·끊긴 참조 검사에 함께 태운다.
 

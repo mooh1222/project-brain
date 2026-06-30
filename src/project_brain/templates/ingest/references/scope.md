@@ -14,7 +14,12 @@ Brain 적재에는 세 시나리오가 있고, 이 스킬은 그중 하나만 �
 이 스킬을 쓰려면 그 기능이 **소급 적재 대상일 만큼 완료**되어 있어야 한다. 완료 여부(`feature_done`)는
 사용자 선언, QA/release 맥락, 이슈 상태로 판단한다. Jira/Slack 데이터 유무가 기능 완료 조건은 아니다.
 
-- 코드가 {{DEFAULT_BRANCH}}에 들어가 있다(앵커 잡을 `commit_sha`가 고정된다).
+- 코드가 {{DEFAULT_BRANCH}}에 들어가 있다(앵커 잡을 `commit_sha`가 고정된다). 가장 안전한 기본값은
+  **머지 후 {{DEFAULT_BRANCH}} 커밋을 앵커로** 잡는 것이다. 머지 전 PR HEAD SHA를 앵커로 쓰는 건
+  그 PR이 **merge-commit으로 머지될 게 확실할 때만** 한다 — squash/rebase로 머지되면 그 SHA가 사라진다.
+  머지 방식은 레포 속성이 아니라 PR마다 머지 시점에 고르는 선택이라("레포가 merge-commit 허용"만으론
+  불충분), 확신이 없으면 머지를 기다린다. 죽은 SHA는 CodeLocator 객체 id가 살아 있어 lint dangling
+  검사에 안 걸리고 **조용히** 깨지니 더 주의해야 한다.
 - 1층 현재 소스가 한자리에 있다 — 현행 기획서 원문, {{DEFAULT_BRANCH}} 코드, 서버 위키.
 - 이미 일어난 변경(QA 버그수정·개선)은 "지금 진행 중"이 아니라 **완결된 이력**으로 존재할 수 있다.
   이 이력은 `history_coverage`를 높일 때만 필수다.
