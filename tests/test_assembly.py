@@ -122,8 +122,16 @@ class BuildManifestsContextTest(unittest.TestCase):
         self.assertEqual(m["id"], "manifest.ctx.s")
         self.assertEqual(m["kind"], "EvidenceManifest")
         self.assertEqual(m["truth_role"], "source")
-        self.assertEqual(m["redaction_status"], "none")  # default
+        self.assertNotIn("redaction_status", m)  # 미지정은 키 생략 → ingest에서 schema가 거부
         self.assertEqual(m["acl"], ["demo-team"])          # default
+
+    def test_source_redaction_status_passes_through(self):
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
+                 "sources": [{"id": "manifest.ctx.s", "source_type": "session",
+                              "title": "T", "locator": "...", "captured_by": "user-statement",
+                              "redaction_status": "approved"}]}
+        m = build_manifests(notes, NOW)[0]
+        self.assertEqual(m["redaction_status"], "approved")
 
     def test_context_built_only_with_display_fields(self):
         base_cx = {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"}
@@ -343,7 +351,8 @@ class BuildIntegrationTest(unittest.TestCase):
         notes = {
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
-                         "title": "코드", "locator": "...", "captured_by": "agent"}],
+                         "title": "코드", "locator": "...", "captured_by": "agent",
+                         "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
                               "manifest": "manifest.ctx.code-v2"}],
@@ -365,7 +374,8 @@ class BuildIntegrationTest(unittest.TestCase):
         notes = {
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
-                         "title": "코드", "locator": "...", "captured_by": "agent"}],
+                         "title": "코드", "locator": "...", "captured_by": "agent",
+                         "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
                               "manifest": "manifest.ctx.code-v2"}],
@@ -502,9 +512,10 @@ class BuildWithDecisionsTest(unittest.TestCase):
                         "in_scope": ["x"], "out_of_scope": ["y"], "glossary_term_ids": []},
             "sources": [
                 {"id": "manifest.ctx.code", "source_type": "code_search",
-                 "title": "코드", "locator": "repo@dev"},
+                 "title": "코드", "locator": "repo@dev", "redaction_status": "approved"},
                 {"id": "manifest.ctx.commit", "source_type": "commit",
-                 "title": "커밋 이력", "locator": "bb2_client@develop"},
+                 "title": "커밋 이력", "locator": "bb2_client@develop",
+                 "redaction_status": "approved"},
             ],
             # 매핑이 reviewed로 만들어지므로 evidence_refs가 비면 안 됨(schema.py:217).
             # code_anchor로 CodeLocator+EvidenceRef를 만들어 매핑이 그 evref를 갖게 한다.

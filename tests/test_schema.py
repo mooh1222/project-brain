@@ -94,6 +94,24 @@ class TestRefTypeEnum(unittest.TestCase):
         self.assertTrue(any("invalid ref_type" in e for e in errors))
 
 
+class TestRedactionStatusEnum(unittest.TestCase):
+    """EvidenceManifest.redaction_status enum(spec §6.1: raw_local|staged|approved|rejected).
+    enum 밖 문자열(예: "none")은 라우터 화이트리스트에 걸려 조용히 restricted 오라벨을
+    만들었다(2026-07-02 발견 1, bb2 409개) — 적재 시점에 거부해 재발을 막는다."""
+
+    def test_spec_enum_values_valid(self):
+        for rs in ("raw_local", "staged", "approved", "rejected"):
+            obj = manifest()
+            obj["redaction_status"] = rs
+            self.assertEqual(validate_object(obj), [], f"redaction_status {rs!r} should be valid")
+
+    def test_none_string_rejected(self):
+        obj = manifest()
+        obj["redaction_status"] = "none"
+        errors = validate_object(obj)
+        self.assertTrue(any("invalid redaction_status" in e for e in errors))
+
+
 class TestInsightKind(unittest.TestCase):
     """Insight kind(2026-06-15 신설) — truth_role=synthesis 재사용, insight_type A/B enum,
     source_object_ids 개수 검사(공통 ≥1, A형 cross-cutting-risk ≥2)."""

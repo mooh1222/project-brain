@@ -53,7 +53,7 @@ def _manifest(mid, *, source_type, title, locator, captured_by):
             "captured_by": captured_by,
             "sensitivity": "internal",
             "acl": ["team"],
-            "redaction_status": "none",
+            "redaction_status": "approved",
         },
         tags=["mina-kayak"], created_at=T, updated_at=T,
     )

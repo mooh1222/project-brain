@@ -84,6 +84,10 @@ REF_TYPE_VALUES = frozenset({
     "code_locator", "build_log_range", "session_turn", "wiki_section", "context_term",
     "commit", "pr", "jira_issue",
 })
+# spec §6.1 EvidenceManifest.redaction_status. 라우터 _restricted_for(router.py)가
+# "approved"만 통과시키는 화이트리스트라, enum 밖 문자열(예: 옛 assembly 기본값 "none")은
+# 조용히 restricted 오라벨이 됐다(2026-07-02 발견 1, bb2 409개) — 적재 시점에 거부한다.
+REDACTION_STATUS_VALUES = frozenset({"raw_local", "staged", "approved", "rejected"})
 # spec §10.1 CodeLocator.locator_source
 LOCATOR_SOURCE_VALUES = frozenset({"codanna", "rg", "clangd", "manual"})
 # spec §6.5 TemporalFact.confidence
@@ -141,6 +145,9 @@ def validate_object(obj: dict) -> list[str]:
         source_type = obj.get("source_type")
         if source_type is not None and source_type not in SOURCE_TYPE_VALUES:
             errors.append(f"{obj['id']}: EvidenceManifest invalid source_type {source_type!r}")
+        redaction_status = obj.get("redaction_status")
+        if redaction_status is not None and redaction_status not in REDACTION_STATUS_VALUES:
+            errors.append(f"{obj['id']}: EvidenceManifest invalid redaction_status {redaction_status!r}")
     elif kind == "EvidenceRef":
         ref_type = obj.get("ref_type")
         if ref_type is not None and ref_type not in REF_TYPE_VALUES:
@@ -197,6 +204,13 @@ def validate_object(obj: dict) -> list[str]:
         if index_name is not None and index_name not in INDEX_NAME_VALUES:
             errors.append(f"{obj['id']}: IndexRecord invalid index_name {index_name!r}")
     elif kind == "DecisionRecord":
+        # evidence_refs non-empty 규칙을 여기 두지 않는 건 의도다(오버사이트 아님).
+        # DecisionRecord의 정본 근거 필드는 source_object_ids다 — 링크 무결성(lint.py 8b)·
+        # 그래프·랭킹(search.py)이 그 필드를 소비한다. evidence_refs는 여기선 보조 사본이라
+        # GlossaryTerm/DomainMapping 같은 reviewed→non-empty 강제를 두지 않는다(빈 값 정상).
+        # 단 evidence_refs는 죽은 필드가 아니다 — router의 provenance(:360)·_raw_available_for(:748)·
+        # _restricted_for(:758, 접근제한 게이트)가 읽는다. "결정에도 non-empty 규칙 넣자"는 제안은
+        # docs/plans/2026-07-01-decisionrecord-evidence-refs-hygiene.md에서 폐기됨(정본은 source_object_ids).
         decision_type = obj.get("decision_type")
         if decision_type is not None and decision_type not in DECISION_TYPE_VALUES:
             errors.append(f"{obj['id']}: DecisionRecord invalid decision_type {decision_type!r}")

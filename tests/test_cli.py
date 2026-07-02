@@ -840,7 +840,8 @@ class RunBuildTest(unittest.TestCase):
                 "context": {"key": "ctx", "commit": "abc",
                             "now": "2026-06-16T00:00:00Z", "repo": "demoapp"},
                 "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
-                             "title": "코드", "locator": "...", "captured_by": "agent"}],
+                             "title": "코드", "locator": "...", "captured_by": "agent",
+                             "redaction_status": "approved"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                                   "line_start": 1, "line_end": 1, "quote": "q",
                                   "manifest": "manifest.ctx.code"}],
@@ -877,7 +878,8 @@ class RunBuildTest(unittest.TestCase):
             notes_path.write_text(json.dumps({
                 "context": {"key": "ctx", "commit": "abc", "repo": "demoapp"},  # now 생략
                 "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
-                             "title": "코드", "locator": "...", "captured_by": "agent"}],
+                             "title": "코드", "locator": "...", "captured_by": "agent",
+                             "redaction_status": "approved"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                                   "line_start": 1, "line_end": 1, "quote": "q",
                                   "manifest": "manifest.ctx.code"}],

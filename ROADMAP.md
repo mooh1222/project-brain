@@ -247,6 +247,29 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
   [engine-single-source(plan)](docs/plans/2026-06-29-engine-single-source-plan.md) ·
   [engine-single-source(decision)](docs/plans/2026-06-29-engine-single-source-decision.md)
 
+### redaction 게이트 정합 + evidence_refs 비대칭 정리 (2026-07-02)
+적재 회고 후속 점검에서 두 건 처리. 발단은 "reviewed 결정에 근거가 없다"는 오해였는데, 그 점검이
+훨씬 큰 신뢰 라벨 버그를 드러냈다.
+
+- **redaction "none" 함정 (발견·수정).** EvidenceManifest의 `redaction_status`는 라우터
+  `_restricted_for`(router.py:758) 화이트리스트에서 `(None,"approved")`만 통과하는데, assembly 기본값이
+  spec enum(`raw_local|staged|approved|rejected`)에 없는 문자열 `"none"`이라, bb2 초기 컨텍스트
+  manifest 10개를 인용한 객체 **409개**(reviewed 404+candidate 5)가 최고 심각도 `restricted`로
+  **오라벨**됐다. 콘텐츠 억제가 아니라 신뢰 라벨만 틀려 골든셋 eval은 통과해와 여태 안 들켰다.
+  처리: bb2 데이터 10개 `approved` 교정(엔진 함수로 409→0 실측) + assembly 기본값 **폐지**(미지정=키
+  생략→적재가 시끄럽게 거부) + schema에 `REDACTION_STATUS_VALUES` enum 검증(“none”·오타 적재 거부) +
+  object-model 게이트 안내. 후속으로 `assemble_notes.py`가 redaction을 안 방출해 기본값 폐지 후 domain
+  적재가 전부 거부되던 회귀를 잡아 수정(source마다 `approved` 명시). B2(기본값 approved)·게이트 제거·
+  lint 가드는 기각(근거는 plan 참조).
+- **evidence_refs 비대칭 정리.** DecisionRecord·Insight의 정본 근거 필드는 `source_object_ids`이고
+  `evidence_refs`는 보조 사본이라 빈 값이 정상이다(schema non-empty 강제는 GlossaryTerm·DomainMapping만).
+  "근거 없는 reviewed"라는 오판을 막게 문서 3곳(schema.py 주석·object-model DecisionRecord 절·
+  completeness-checklist §5)에 못박음. 스키마 규칙 추가·bb2 backfill은 안 함(빈값 게이트는 헛도장).
+- 검증: 합성 540 + 템플릿 테스트 11 + installer 14 통과, bb2 실측 가드 5 통과, bb2 전파(install) 완료 —
+  모두 메인 에이전트가 직접 재실행. surface(review)가 옵션 실행을 맡았고 메인이 전수 재검증하며 회귀 1건 포착.
+- 계획: [decisionrecord-evidence-refs-hygiene](docs/plans/2026-07-01-decisionrecord-evidence-refs-hygiene.md) ·
+  [broad-review-findings](docs/plans/2026-07-02-broad-review-findings.md)
+
 ---
 
 ## 미뤄둔 작업 (최종 관리)

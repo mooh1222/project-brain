@@ -32,7 +32,7 @@ def manifest(mid="ev.manifest"):
             "captured_by": "neutral",
             "sensitivity": "internal",
             "acl": ["team"],
-            "redaction_status": "none",
+            "redaction_status": "approved",
         },
         tags=["neutral"], created_at=T, updated_at=T,
     )

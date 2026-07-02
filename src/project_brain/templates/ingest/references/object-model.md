@@ -55,6 +55,12 @@ BASE_REQUIRED 외에 kind마다 추가 필수 필드(schema.py `KIND_REQUIRED` �
 
 (소급 적재에서 잘 안 쓰는 kind는 schema.py에서 확인: ContextProjection, CurrentView, KnowledgePage, IndexRecord.)
 
+EvidenceManifest의 `redaction_status`는 **필수 명시**(기본값 없음 — 미지정 노트는 build/ingest가
+거부). 허용 값은 `raw_local|staged|approved|rejected`(schema enum 강제)이고, 라우터 화이트리스트는
+`"approved"`만 통과시킨다 — 다른 값이면 그 근거가 달린 답 전체에 restricted 라벨이 붙는다(콘텐츠
+억제는 아님). raw를 회상에 노출해도 되면 `"approved"`를 명시하라. 옛 기본값 `"none"`이 bb2 객체
+409개를 조용히 restricted로 오라벨한 함정의 재발 방지다(2026-07-02 발견 1).
+
 CodeLocator의 `commit_sha`는 스키마상 선택 필드지만 **적재 시 기입 의무**(SKILL.md 절대 규칙 8) —
 라인을 확인한 코드의 기준 커밋(`git rev-parse --short=10`). 비우면 코드 변경 감지 기준점이 없다
 (2026-06-12 348개 공백 → 소급 백필 수습 사례).
@@ -245,6 +251,11 @@ Manifest 1개, 그 소스에서 인용한 조각마다 EvidenceRef를 만들어 
   "evidence_refs": []
 }
 ```
+
+> **위 예시의 `evidence_refs: []`는 비어도 정상이다.** DecisionRecord·Insight의 정본(定本) 근거 필드는
+> `source_object_ids`다 — 이 두 종류는 `evidence_refs`가 비어도 정상이다(근거가 CodeLocator뿐이거나,
+> 인사이트처럼 여러 brain 객체를 종합한 경우). 위 `evidence_refs` non-empty 규칙은 DomainMapping·GlossaryTerm에만
+> 적용되니, 결정·인사이트의 빈 `evidence_refs`를 "근거 없는 reviewed"로 오판하지 마라.
 
 ### decisions[] 노트 섹션 (엔진 build_decisions가 조립 — 손조립 금지)
 

@@ -54,6 +54,9 @@ class BuildNotesTest(unittest.TestCase):
         self.assertEqual(c["commit"], "abc123")
         self.assertEqual(c["glossary_term_ids"], ["g.ctx.t1"])
         self.assertEqual(notes["sources"][0]["id"], "manifest.ctx.code")
+        # B3(2026-07-02): 엔진이 redaction_status 기본값을 안 채우므로 노트가 명시해야
+        # ingest schema(필수 필드 + enum)를 통과한다. 누락 시 "missing field"로 적재 거부.
+        self.assertEqual(notes["sources"][0]["redaction_status"], "approved")
 
 
 class NormalizeTest(unittest.TestCase):

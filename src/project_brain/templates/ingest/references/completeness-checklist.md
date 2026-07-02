@@ -60,6 +60,8 @@ SKILL.md 5단계에서 참조. `ingest`/`lint`는 "없는 id 참조·충돌·고
 - `schema.py`는 reviewed `DomainMapping`·`GlossaryTerm`의 `evidence_refs` non-empty를 강제한다(§6.4 — 근거 빈
   reviewed는 거부). 단 `code_locator_ids` non-empty는 강제하지 않는다(코드앵커는 한 종류라 서버규칙엔 없을 수 있음).
   lint는 `code_locator_ids`가 있을 때 없는 id를 가리키는지(dangling)만 잡는다.
+- **이 규칙은 매핑·용어에만.** DecisionRecord·Insight는 정본 근거가 `source_object_ids`라 `evidence_refs`가
+  비어도 정상이다 — 빈 걸 "근거 없는 reviewed"로 오판하지 마라(상세: object-model.md DecisionRecord 절).
 
 ### 6. 고아가 없나 (32객체 실패 패턴의 핵심)
 - 잇는 매핑/결정 없는 GlossaryTerm.

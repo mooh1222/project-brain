@@ -166,8 +166,12 @@ def build_manifests(notes, now):
             "captured_by": s.get("captured_by", "agent"),
             "sensitivity": s.get("sensitivity", "internal"),
             "acl": s.get("acl", ["demo-team"]),
-            "redaction_status": s.get("redaction_status", "none"),
         }
+        # redaction_status는 기본값을 채우지 않는다 — 미지정이면 키 생략 → ingest의
+        # schema 필수필드 검사가 시끄럽게 거부한다. 옛 기본값 "none"은 라우터
+        # 화이트리스트("approved"만 통과) 밖이라 조용한 restricted 오라벨을 만들었다.
+        if "redaction_status" in s:
+            obj["redaction_status"] = s["redaction_status"]
         out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
     return out
 
