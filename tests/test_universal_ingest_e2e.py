@@ -316,7 +316,7 @@ def build_candidate_bundle():
         "g.dummy-npc",
         term="더미 NPC",
         definition="레이스 참여자는 실제 유저가 아니라 모두 더미 NPC다. 본인 외 최대 6명이 더미로 채워진다.",
-        synonyms=["더미 NPC", "DUMMY NPC", "더미"],
+        synonyms=["더미 NPC", "DUMMY NPC"],
         evidence_refs=["ev.ref.spec.dummy-npc"],
     ))
     objs.append(_candidate_term(
@@ -324,7 +324,7 @@ def build_candidate_bundle():
         term="선착순 3위",
         definition="N개 스테이지를 먼저 클리어한 선착순 3명에게 보상을 지급한다. 3위 안에 못 들면 레이스가 "
                    "자동 종료된다(미달성).",
-        synonyms=["선착순 3위", "선착순", "완주", "입상"],
+        synonyms=["선착순 3위", "선착순"],
         evidence_refs=["ev.ref.spec.basic-info", "ev.ref.spec.race-end"],
     ))
     objs.append(_candidate_term(
@@ -341,7 +341,7 @@ def build_candidate_bundle():
         "g.repeat-join",
         term="반복 참여",
         definition="이벤트 기간 내 레이스에 반복 참여할 수 있으나 반복 참여 MAX 횟수 제한이 있다.",
-        synonyms=["반복 참여", "반복", "재참여"],
+        synonyms=["반복 참여", "재참여"],
         evidence_refs=["ev.ref.spec.cooltime"],
     ))
 

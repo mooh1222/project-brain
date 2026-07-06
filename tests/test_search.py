@@ -21,6 +21,7 @@ from project_brain.search import (
     _ABS_SCORE_FLOOR_REVIEWED,
     _ANCHOR_DF_MAX,
     _GRAPH_SUPPORT_CAP,
+    _REGISTRY_MIN_SURFACE_LEN,
     _document_frequency,
     _gate_pass,
     _graph_signals_by_id,
@@ -759,6 +760,10 @@ class GatePureFunctionTest(unittest.TestCase):
         self.assertEqual(_ABS_SCORE_FLOOR_CANDIDATE, 0.001)
         # candidate 바닥이 reviewed보다 관대(낮음)해야 채널 분리가 성립(§7).
         self.assertLess(_ABS_SCORE_FLOOR_CANDIDATE, _ABS_SCORE_FLOOR_REVIEWED)
+        # 명부 길이 문턱은 lint 최소 길이와 일치해야 오매칭/규칙 불일치가 안 생긴다.
+        from project_brain.schema import _SYNONYM_MIN_LEN
+        self.assertEqual(_REGISTRY_MIN_SURFACE_LEN, 3)
+        self.assertEqual(_SYNONYM_MIN_LEN, _REGISTRY_MIN_SURFACE_LEN)
 
     def test_passes_when_anchored_and_above_floor(self):
         # 앵커 df가 상한 안(희소 토큰 present) + 점수가 바닥 위 → 통과(s1~s4 형태).
