@@ -41,13 +41,18 @@ def _b(obj):
     return base(obj, tags=["neutral"], created_at=T, updated_at=T)
 
 
-def glossary_term(tid, *, term, definition="정의", status="reviewed", context_id="context.neutral"):
+def glossary_term(tid, *, term, definition="정의", status="reviewed",
+                  context_id="context.neutral", synonyms=None, aliases=None):
     obj = {
         "id": tid, "kind": "GlossaryTerm", "status": status, "truth_role": "domain",
         "title": f"Term: {term}", "context_id": context_id,
         "term": term, "definition": definition,
         "evidence_refs": ["ev.x"] if status == "reviewed" else [],
     }
+    if synonyms is not None:
+        obj["synonyms"] = synonyms
+    if aliases is not None:
+        obj["aliases"] = aliases
     if status == "candidate":
         obj["candidate"] = {"candidate_state": "ready_for_review", "candidate_source": "spec"}
     return _b(obj)
@@ -844,7 +849,7 @@ class ComputeQuerySignalsTest(unittest.TestCase):
     def test_signal_keys(self):
         hits = recall("레이스", db_path=self.db, embedder=self.embedder, brain_root=self.brain)
         sig = compute_query_signals("레이스", hits, self.db)
-        self.assertEqual(set(sig.keys()), {"top_score", "margin", "anchor_df"})
+        self.assertEqual(set(sig.keys()), {"top_score", "margin", "anchor_df", "registry_match"})
 
     def test_top_score_and_margin_from_hits(self):
         hits = recall("레이스 보상", db_path=self.db, embedder=self.embedder,
@@ -885,6 +890,35 @@ class ComputeQuerySignalsTest(unittest.TestCase):
         sig = compute_query_signals("유일토큰", hits, db)
         if len(hits) == 1:
             self.assertEqual(sig["margin"], round(hits[0]["score"], 6))
+
+    def test_registry_match_true_when_surface_in_query(self):
+        class _FakeStore:
+            def by_kind(self, kind):
+                return ([{"term": "PopupLuckyBoxInfo", "synonyms": ["럭키박스"], "aliases": []}]
+                        if kind == "GlossaryTerm" else [])
+        sig = compute_query_signals("럭키박스 API 쓰나", [], self.db, store=_FakeStore())
+        self.assertTrue(sig["registry_match"])
+
+    def test_registry_match_false_when_no_surface(self):
+        class _FakeStore:
+            def by_kind(self, kind):
+                return ([{"term": "PopupLuckyBoxInfo", "synonyms": ["럭키박스"], "aliases": []}]
+                        if kind == "GlossaryTerm" else [])
+        sig = compute_query_signals("크리스마스 이벤트 보상", [], self.db, store=_FakeStore())
+        self.assertFalse(sig["registry_match"])
+
+    def test_registry_ignores_short_surfaces(self):
+        class _FakeStore:
+            def by_kind(self, kind):
+                return ([{"term": "NL", "synonyms": [], "aliases": []}]
+                        if kind == "GlossaryTerm" else [])
+        sig = compute_query_signals("NL 값 알려줘", [], self.db, store=_FakeStore())
+        self.assertFalse(sig["registry_match"])
+
+    def test_registry_match_absent_when_no_store(self):
+        sig = compute_query_signals("레이스", [], self.db)
+        self.assertFalse(sig["registry_match"])
+        self.assertIn("registry_match", sig)
 
 
 class EvalRecallGateAppliedTest(unittest.TestCase):
