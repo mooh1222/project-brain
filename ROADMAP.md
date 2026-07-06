@@ -29,7 +29,6 @@
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
 | 공유 경계 | ✅ 엔진/데이터 2-레포 분리 (2026-06-11) | brain/ git 추적·색인만 로컬 |
-| L5 개인 메모리 | ⬜ 없음 | 설계상 자리만 (미뤄둠) |
 
 ---
 
@@ -148,12 +147,12 @@ bb2_client 고립 노드 정비 4세션(2026-06-23)을 회고해 도출·검증�
 router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROVE(LOW 1건은 검색 정본과
 일관·회귀 아님으로 보류). 엔진 템플릿(ingest·session-ingest·query)·데이터 레포 bb2 스킬에서
 줄번호 안내를 함께 정리(심볼+`commit_sha`가 앵커·변경감지 기준임을 명시). 기존 코퍼스 일괄
-변경(Part B)은 실익 0 + 짝짓기 구조적 불가 ~45건으로 미룸(미뤄둔 작업 §5).
+변경(Part B)은 실익 0 + 짝짓기 구조적 불가 ~45건으로 미룸(미뤄둔 작업 §4).
 
 - 계획(확정본·결정 로그·Part B 보류 근거): [code-evidence-cleanup](docs/plans/2026-06-24-brain-code-evidence-cleanup.md)
 
 ### stale 자동화 Step 1·2 — 미머지 앵커 라벨 + query/show 노출 (2026-06-25)
-설계(보류했던 자동화, 미뤄둔 작업 §7)의 **엔진 부분만** 구현. Step 3(에이전트 diff 자동
+설계(보류했던 자동화, 미뤄둔 작업 §6)의 **엔진 부분만** 구현. Step 3(에이전트 diff 자동
 정리)은 실코퍼스 회귀가 필요해 보류 유지.
 - **Step 1 — 미머지 앵커 라벨**: `stale-check`이 `git merge-base`로 앵커 `commit_sha`가
   origin/develop 조상인지 판정해, 조상 아니면(PR 머지 전 작업 브랜치 커밋) candidate에서 빼고
@@ -277,7 +276,7 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
   수기 manifest 키 누락 시 미승인 근거의 신뢰 오표기 차단) + 발견3(결정 근거 어휘에 slack/spec/wiki 추가 —
   스키마 REF_TYPE_VALUES는 이미 지원, `validate_notes` 하드코딩 튜플도 `_DECISION_REF_TYPE` 참조로).
 - **앵커: 근본 방향 "엔티티 명부 기반" 확정** — 빈도 조정 4안 전부 s5 거짓양성 재도입 실측 기각. bb2 골든셋 보강 선행.
-- **7건 확정 종결(결함 아님, 열린 대기 아님):** 재랭커·L5·세션hook·팀승격·Part B·슬래시·stale Step3.
+- **4건 확정 종결(결함 아님):** 재랭커·Part B·슬래시·stale Step3. **2건 추후 논의 항목:** 팀승격·세션hook. **개인 메모리(L5)는 안 만듦**(handoff·auto-memory·vault 대체).
 - 계획·근거·미해결 설계질문: [deferred-items-and-anchor-decisions](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md)
 
 ### 명부 인식 앵커 게이트 — 럭키박스 거짓음성 근본 수정 (2026-07-06)
@@ -307,8 +306,9 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 
 각 항목은 "왜 미뤘는가 / 착수 트리거"를 함께 적는다. 트리거가 없으면 착수하지 않는다.
 
-> 아래 재랭커·L5·세션hook·팀승격·Part B·슬래시·stale Step3는 2026-07-03에 "결함 아님"으로 확정 종결됐다
-> (열린 대기가 아니라 근거 댄 종결). 프레임·근거: [2026-07-03 결정문](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md).
+> 아래 재랭커·Part B·슬래시·stale Step3는 2026-07-03에 "결함 아님"으로 확정 종결됐고(열린 대기가
+> 아니라 근거 댄 종결), 팀승격·세션hook은 추후 논의 항목으로 남긴다. 개인 메모리(L5)는 안 만들기로
+> 확정(2026-07-06, 외부 도구 대체 — 상세 [design-canonical §4](docs/design-canonical.md)). 프레임·근거: [2026-07-03 결정문](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md).
 
 1. **top-K 상수·재랭커(cross-encoder) 필요성 재평가**
    - 상태: 보류. 실사용 회상 실패 증거가 벤치마크 1건뿐이라 도입 안 함.
@@ -319,16 +319,11 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
      단계 참고) — 단 효과가 고유 등가어에 한정·무해 확인. 재랭커는 여전히 "후보엔 들어왔으나
      순서가 나쁜" 비중첩 영역만 남으며, 그 영역 측정용 s8 골든셋이 선행이라는 결론 불변.
 
-2. **L5 개인 메모리 층** (미결 7)
-   - 상태: 설계상 자리만. 단기(작업 연속성)/장기(개인 교훈·선호) 구조 미설계.
-   - 트리거: 1차 목표(팀 공유 가능 코어) 완료 후. 기존 도구(handoff·auto-memory·vault
-     task)와의 관계 정리가 설계 입력.
+2. **세션 종료 hook 저장 제안 기능** (미결 6)
+   - 상태: 추후 논의 항목. 세션 끝에서 "저장할까요?" 제안하는 형태·시점 미정.
 
-3. **세션 종료 hook 저장 제안 기능** (미결 6)
-   - 상태: 후순위. 세션 끝에서 "저장할까요?" 제안하는 형태·시점 미정.
-
-4. **팀 공개 — reviewed 승격 권한 결정** (미결 5)
-   - 상태: 혼자 시험 제작 단계라 미정. 각자 promote vs 검수자 지정.
+3. **팀 공개 — reviewed 승격 권한 결정** (미결 5)
+   - 상태: 추후 논의 항목 — 혼자 시험 제작 단계라 미정. 각자 promote vs 검수자 지정.
    - 동반 작업: install 측 인프라는 단일원본 작업(2026-06-29, 완료 단계 참고)으로 **이미 완료**.
      install이 `templates/<skill>/` 디렉토리를 통째 walk해 `SKILL.md`·`references/`·`scripts/`를
      다 주입하고 manifest로 보존·채택한다(과거 "SKILL.md만 주입·references/scripts 미주입"은 옛 상태).
@@ -336,7 +331,7 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
      둔다. 팀 공개 시 남는 건 승격 권한 정책 결정이지 미주입 인프라가 아니다.
    - 트리거: 사용자가 팀 공개를 결정할 때.
 
-5. **locator 위치 갱신 / 기존 데이터 정비 (Part B)**
+4. **locator 위치 갱신 / 기존 데이터 정비 (Part B)**
    - ⚠️ `commit_sha`와 줄번호는 **별개 필드**다(혼동 주의). `commit_sha`(변경 감지 기준점,
      stale-check/audit이 `(path, commit_sha)`로 판정)는 **필수**라 백필 완료(bb2 842/842).
      아래 "재백필/삭제 보류"는 오직 `line_start`/`line_end`(엔진이 안 읽는 칸) 얘기다.
@@ -355,14 +350,14 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
      - **착수 방아쇠: locator 좌표를 실제로 읽는 기능(답변에 `파일:줄` 표시·점프 등)이
        엔진에 생길 때.** 그 전엔 착수하지 않는다.
    - "코드 변경→매핑 의미 갱신 대상 발견"은 별개 니즈 — 추출(stale-check)·해소(mark-checked)는
-     이미 됨(§7로 분리). **완전 자동(사람·적대검증 무개입) supersede·hook은 안 하되**, B+C
-     게이트(확실 자동 / 모호 query 확인)로 잇는 설계는 §7 참고.
+     이미 됨(§6로 분리). **완전 자동(사람·적대검증 무개입) supersede·hook은 안 하되**, B+C
+     게이트(확실 자동 / 모호 query 확인)로 잇는 설계는 §6 참고.
 
-6. **스킬·슬래시 커맨드 라인업 결정**
+5. **스킬·슬래시 커맨드 라인업 결정**
    - 상태: 후순위 작업 전부 완료한 뒤로 명시 보류. 현재 자동 진입점은 스킬 description뿐.
    - 입력: pkm 비교(스킬 3 + install/init 슬래시) 참고.
 
-7. **stale 자동화 — B+C 검수 모델에 코드변경 트리거 잇기**
+6. **stale 자동화 — B+C 검수 모델에 코드변경 트리거 잇기**
    - 상태: 설계 확정. 추출(`stale-check`)·해소(`mark-checked`)는 이미 구현·실코퍼스 검증.
      **Step 1·2(엔진) ✅ 구현(2026-06-25, 완료 단계 참고)** — 미머지 앵커 라벨 + query/show
      "코드 변경" 노출(C). **남은 것 = Step 3(B)**: 에이전트가 diff 읽고 확실-불변 자동 갱신 /
