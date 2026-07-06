@@ -967,33 +967,38 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
         self.assertEqual(resp["candidates"], [])
         self.assertTrue(resp["needs_clarification"])
 
-    def test_registry_query_opens_and_absent_still_blocked(self):
-        # 배관 검증: store가 compute_query_signals까지 닿아 registry_match가 게이트에 반영된다.
-        # eval_recall이 1회 로드한 store를 compute_query_signals에도 전달하는지 확인한다.
+    def test_registry_match_opens_query_that_anchor_would_block(self):
+        # ★end-to-end 판별★: 같은 코퍼스에서 두 질의가 둘 다 anchor_df>상한(앵커만으론 차단)인데,
+        # 명부 표면형('럭키박스')을 포함한 질의만 registry_match로 열리고, 명부에 없는 흔한 토큰만인
+        # 질의는 s5처럼 차단된다 → registry_match가 eval_recall 경로에서 결정적 요인임을 증명(배관+게이트 합성).
+        # 흔한 토큰 2종(len 3+)을 정의에 심어 df를 상한 위로: '럭키박스'(타깃 synonym으로 명부 표면형이 됨)
+        # + '흔한보상어휘'(명부 어디에도 없음).
         n = _ANCHOR_DF_MAX + 5
-        common = [glossary_term(f"g.c{i}", term="보상", definition="흔한 보상 토큰")
+        common = [glossary_term(f"g.common{i}", term=f"공용용어{i}",
+                                definition="럭키박스 흔한보상어휘 관련 설명")
                   for i in range(n)]
         target = glossary_term("g.lb", term="럭키박스구성품",
-                               definition="럭키박스 구성품 표시 기능",
-                               synonyms=["럭키박스표시팝업"])
+                               definition="럭키박스 구성품 표시", synonyms=["럭키박스"])
         brain, db = self._build(common + [target])
-        # compute_query_signals에 store kwarg가 실제로 전달되는지 배관 검증.
+        store = BrainStore.load(brain)
+
+        # 배관 검증: eval_recall이 store를 compute_query_signals에 kwarg로 전달한다.
         with mock.patch("project_brain.search.compute_query_signals",
-                        wraps=__import__("project_brain.search",
-                                         fromlist=["compute_query_signals"]).compute_query_signals
-                        ) as spy:
-            eval_recall("럭키박스표시팝업 알려줘", db_path=db,
-                        embedder=self.embedder, brain_root=brain)
-        _, kwargs = spy.call_args
-        self.assertIsNotNone(kwargs.get("store"),
+                        wraps=compute_query_signals) as spy:
+            opened = eval_recall("럭키박스", db_path=db,
+                                 embedder=self.embedder, brain_root=brain)
+        self.assertIsNotNone(spy.call_args.kwargs.get("store"),
                              "eval_recall이 store를 compute_query_signals에 전달해야 한다")
-        # 결과 검증: g.lb가 results에 포함된다(anchor_df=1이라 registry_match 없이도 통과).
-        opened = eval_recall("럭키박스표시팝업 알려줘", db_path=db,
-                             embedder=self.embedder, brain_root=brain)
-        self.assertIn("g.lb", {h["object_id"] for h in opened["results"]})
+
+        # 명부 표면형 질의: anchor_df가 상한을 넘어 앵커만으론 차단인데 registry_match로 열린다.
+        sig = compute_query_signals("럭키박스", [], db, store=store)
+        self.assertGreater(sig["anchor_df"], _ANCHOR_DF_MAX)  # 앵커만이면 차단 신호
+        self.assertTrue(sig["registry_match"])
+        self.assertGreater(len(opened["results"]), 0)
         self.assertFalse(opened["needs_clarification"])
-        # 미적재 엔티티는 여전히 차단된다.
-        blocked = eval_recall("없는엔티티 보상", db_path=db,
+
+        # 대조: 같은 코퍼스·같은 高 anchor_df지만 명부에 없는 흔한 토큰만인 질의 → 차단 유지(s5 가드).
+        blocked = eval_recall("흔한보상어휘", db_path=db,
                               embedder=self.embedder, brain_root=brain)
         self.assertEqual(blocked["results"], [])
         self.assertTrue(blocked["needs_clarification"])
