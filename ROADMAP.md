@@ -23,7 +23,7 @@
 | L1 인사이트 그릇 | ✅ `Insight` kind (2026-06-15) | advisories 별도 통로·candidate 적재 거부(1차) |
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
-| L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` |
+| L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
 | L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화(decisions[] 결정 조립 2026-06-26) + GlossaryTerm 동의어 통로(신규 적재분, 2026-06-26) |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
@@ -279,6 +279,27 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - **앵커: 근본 방향 "엔티티 명부 기반" 확정** — 빈도 조정 4안 전부 s5 거짓양성 재도입 실측 기각. bb2 골든셋 보강 선행.
 - **7건 확정 종결(결함 아님, 열린 대기 아님):** 재랭커·L5·세션hook·팀승격·Part B·슬래시·stale Step3.
 - 계획·근거·미해결 설계질문: [deferred-items-and-anchor-decisions](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md)
+
+### 명부 인식 앵커 게이트 — 럭키박스 거짓음성 근본 수정 (2026-07-06)
+2026-07-03에 확정한 "엔티티 명부 기반" 방향을 구현. 앵커 게이트가 토큰 빈도(anchor_df)만 보던 것을,
+질의가 명부(GlossaryTerm 표면형)의 엔티티와 통째 매칭되면 통과시키는 OR 보강으로 바꿨다. "럭키"·"박스"가
+흔한 토큰이라 거짓 차단되던 잘 적재된 엔티티 질의가 열리고, 미적재 엔티티(크리스마스 등)는 명부에 없어
+여전히 차단(거짓양성 가드 유지). 빈도 무관이라 코퍼스 성장에 안 무너진다(빈도 조정 4안이 전부 실패한 근본 원인 제거).
+- **엔진**: `_gate_pass`에 `registry_match` OR 보강(게이트 = 명부 D1 매칭 OR `anchor_df≤30`, 단조 완화라
+  기존 통과 질의 회귀 0) + `compute_query_signals`·`_registry_surfaces`(GlossaryTerm term+synonyms+aliases
+  표면형, 길이 3+) + `eval_recall` store 배관. synonyms가 "검색 리콜 보조"에서 **"게이트 통과권"으로 승격**되어
+  schema lint(최소 3글자·단독 일반명사 blocklist)와 적재 스킬 규칙에 "누가 '이벤트'를 넣으면 D1이 뚫림" 제약을 박음.
+- **검증**: 엔진 합성 556 통과. bb2 실모델 eval **15/15** — 럭키박스 진양성(s16·s17) red→green, 미적재
+  no_answer(s5·s13~s15) 차단 유지, 기존 s1~s12 회귀 0. bb2 manifest 전량 approved라 결함 A(fail-closed)의
+  restricted 0→0도 실측 확인.
+- **백필은 실측 타겟팅**: 27개 컨텍스트 중 이름이 흔한-토큰으로만 이뤄져 핵심 질의가 게이트에 막히던 6개
+  (볼셀렉·방해버블·고슴도치·인게임로직·인게임뷰·메인맵)+럭키박스만 백필. 나머지는 자연어 질의로 이미 도달해
+  제외(플랜의 "수십 개" 대량 백필 가정을 실측이 축소 — 저가치 churn·거짓열림 표면 증가 회피).
+- 반영: 엔진 머지 `ffc84fc`(origin/main) + bb2 `docs/bb2-brain-object-model` 푸시(골든셋·백필 + `bb2-brain-ingest`
+  스킬 재install 전파).
+- 계획: [registry-aware-anchor-gate](docs/plans/2026-07-06-registry-aware-anchor-gate.md) ·
+  [bb2-anchor-golden-set-backfill](docs/plans/2026-07-06-bb2-anchor-golden-set-backfill.md) ·
+  방향·근거: [deferred-items-and-anchor-decisions §2](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md)
 
 ---
 
