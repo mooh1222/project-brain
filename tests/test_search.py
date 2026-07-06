@@ -967,6 +967,37 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
         self.assertEqual(resp["candidates"], [])
         self.assertTrue(resp["needs_clarification"])
 
+    def test_registry_query_opens_and_absent_still_blocked(self):
+        # 배관 검증: store가 compute_query_signals까지 닿아 registry_match가 게이트에 반영된다.
+        # eval_recall이 1회 로드한 store를 compute_query_signals에도 전달하는지 확인한다.
+        n = _ANCHOR_DF_MAX + 5
+        common = [glossary_term(f"g.c{i}", term="보상", definition="흔한 보상 토큰")
+                  for i in range(n)]
+        target = glossary_term("g.lb", term="럭키박스구성품",
+                               definition="럭키박스 구성품 표시 기능",
+                               synonyms=["럭키박스표시팝업"])
+        brain, db = self._build(common + [target])
+        # compute_query_signals에 store kwarg가 실제로 전달되는지 배관 검증.
+        with mock.patch("project_brain.search.compute_query_signals",
+                        wraps=__import__("project_brain.search",
+                                         fromlist=["compute_query_signals"]).compute_query_signals
+                        ) as spy:
+            eval_recall("럭키박스표시팝업 알려줘", db_path=db,
+                        embedder=self.embedder, brain_root=brain)
+        _, kwargs = spy.call_args
+        self.assertIsNotNone(kwargs.get("store"),
+                             "eval_recall이 store를 compute_query_signals에 전달해야 한다")
+        # 결과 검증: g.lb가 results에 포함된다(anchor_df=1이라 registry_match 없이도 통과).
+        opened = eval_recall("럭키박스표시팝업 알려줘", db_path=db,
+                             embedder=self.embedder, brain_root=brain)
+        self.assertIn("g.lb", {h["object_id"] for h in opened["results"]})
+        self.assertFalse(opened["needs_clarification"])
+        # 미적재 엔티티는 여전히 차단된다.
+        blocked = eval_recall("없는엔티티 보상", db_path=db,
+                              embedder=self.embedder, brain_root=brain)
+        self.assertEqual(blocked["results"], [])
+        self.assertTrue(blocked["needs_clarification"])
+
     def test_candidate_channel_survives_when_reviewed_empty(self):
         # 앵커 있는 질의 + candidate만 적중 → results 빈, candidates 채워짐,
         # needs_clarification=True(reviewed 게이트 통과 0 — §7 산출식).

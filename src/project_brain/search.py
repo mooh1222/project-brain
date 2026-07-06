@@ -734,9 +734,13 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
             f"색인 DB 없음: {db_path} — `cli index rebuild` 먼저 실행해야 한다(스펙 §4)."
         )
 
-    hits = recall(query, db_path=db_path, embedder=embedder, brain_root=brain_root,
+    resolved_root = resolve_brain_root(brain_root)
+    if store is None:
+        store = BrainStore.load(resolved_root)
+
+    hits = recall(query, db_path=db_path, embedder=embedder, brain_root=resolved_root,
                   store=store)
-    signals = compute_query_signals(query, hits, db_path)
+    signals = compute_query_signals(query, hits, db_path, store=store)
 
     results = [h for h in hits
                if h.get("status") == "reviewed"
