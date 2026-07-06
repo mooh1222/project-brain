@@ -503,6 +503,37 @@ class BuildDecisionsTest(unittest.TestCase):
         self.assertTrue(any("locator" in e for e in errors),
                         f"locator 누락을 1층에서 막아야 함: {errors}")
 
+    def test_decision_evidence_slack_spec_wiki_types(self):
+        # 발견3: 기획서→구현 이후 최초와 달라지는 변경(개선/기획요청)이 '결정'이 되고,
+        # 그 근거가 Slack/기획서/위키인 경우가 실재한다(spec_reflected=no는 commit 근거 자체가 없음).
+        # 자동조립이 이 근거들을 받아야 한다 — 스키마 REF_TYPE_VALUES는 이미 지원.
+        from project_brain.assembly import validate_notes
+        notes = self._notes()
+        notes["decisions"][0]["evidence"] = [
+            {"type": "slack", "ref": "C123-p456",
+             "locator": "https://slack/archives/C123/p456", "summary": "기획요청 스레드"},
+            {"type": "spec", "ref": "luckybox-v2",
+             "locator": "기획서 럭키박스 v2 §3", "summary": "완주 기준 개정"},
+            {"type": "wiki", "ref": "luckybox-page",
+             "locator": "wiki/luckybox", "summary": "서버 규칙 위키"},
+        ]
+        self.assertEqual(validate_notes(notes), [])  # 1층 통과(하드코딩 튜플 아닌 dict 참조)
+        objs = build_decisions(notes, NOW)
+        evs = {o["id"]: o for o in objs if o["kind"] == "EvidenceRef"}
+        self.assertEqual(evs["evref.ctx.slack-C123-p456"]["ref_type"], "slack_thread")
+        self.assertEqual(evs["evref.ctx.spec-luckybox-v2"]["ref_type"], "spec_section")
+        self.assertEqual(evs["evref.ctx.wiki-luckybox-page"]["ref_type"], "wiki_section")
+        # 커밋 외 타입은 노트가 준 locator를 그대로 쓴다(인스턴스 URL은 엔진이 안 만듦)
+        self.assertEqual(evs["evref.ctx.slack-C123-p456"]["locator"],
+                         "https://slack/archives/C123/p456")
+
+    def test_decision_evidence_unsupported_type_still_rejected(self):
+        # 무한 확장 아님 — 지원 목록(_DECISION_REF_TYPE) 밖 타입은 1층에서 여전히 거부
+        from project_brain.assembly import validate_notes
+        notes = self._notes()
+        notes["decisions"][0]["evidence"] = [{"type": "email", "ref": "x", "locator": "y"}]
+        self.assertTrue(any("미지원" in e for e in validate_notes(notes)))
+
 
 class BuildWithDecisionsTest(unittest.TestCase):
     def _notes(self):

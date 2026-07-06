@@ -103,7 +103,8 @@ def build_mappings(notes, refs_map, now):
     return out
 
 
-_DECISION_REF_TYPE = {"commit": "commit", "jira": "jira_issue", "pr": "pr"}
+_DECISION_REF_TYPE = {"commit": "commit", "jira": "jira_issue", "pr": "pr",
+                      "slack": "slack_thread", "spec": "spec_section", "wiki": "wiki_section"}
 
 
 def build_decisions(notes, now):
@@ -372,9 +373,9 @@ def validate_notes(notes):
             if not isinstance(ev, dict) or "type" not in ev or "ref" not in ev:
                 errors.append(f"노트: decisions[{i}].evidence[{j}]는 type·ref 필수")
                 continue
-            if ev["type"] not in ("commit", "jira", "pr"):
+            if ev["type"] not in _DECISION_REF_TYPE:
                 errors.append(f"노트: decisions[{i}].evidence[{j}] type {ev['type']!r} "
-                              f"미지원 (commit/jira/pr)")
+                              f"미지원 ({'/'.join(_DECISION_REF_TYPE)})")
             elif ev["type"] != "commit" and "locator" not in ev:
                 errors.append(f"노트: decisions[{i}].evidence[{j}] {ev['type']}는 locator 필수 "
                               f"(인스턴스 URL은 노트가 제공 — 엔진이 만들지 않음)")
