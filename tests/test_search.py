@@ -739,10 +739,10 @@ class GatePureFunctionTest(unittest.TestCase):
     캡 패턴(_GRAPH_SUPPORT_CAP)을 따라 계수 값 단언으로 침묵 드리프트를 막는다.
     """
 
-    def _signals(self, *, top_score=0.02, second=0.01, anchor_df=5):
+    def _signals(self, *, top_score=0.02, second=0.01, anchor_df=5, registry_match=False):
         # margin은 _gate_pass boolean에 안 들어가지만 신호 dict 형태를 맞춰 둔다.
         return {"top_score": top_score, "margin": round(top_score - second, 6),
-                "anchor_df": anchor_df}
+                "anchor_df": anchor_df, "registry_match": registry_match}
 
     def test_calibration_constants_pinned(self):
         # §8 "계수는 코드 상수+테스트로 고정". 실모델 cli eval 캘리브레이션 값
@@ -801,6 +801,23 @@ class GatePureFunctionTest(unittest.TestCase):
         sig = self._signals(top_score=0.0275, second=0.0156, anchor_df=52)
         self.assertGreater(sig["margin"], 0.01)  # 큰 margin이지만
         self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))  # 그래도 차단
+
+    def test_registry_match_opens_despite_high_anchor_df(self):
+        # ★확정설계 핵심(OR 보강)★: anchor_df가 상한을 넘어 원래 차단될 신호라도
+        # registry_match=True면 열린다. 단조 완화 — 새로 열리는 유일한 경로.
+        sig = self._signals(top_score=0.02, anchor_df=52, registry_match=True)
+        self.assertTrue(_gate_pass(0.02, sig, channel="reviewed"))
+        self.assertTrue(_gate_pass(0.02, sig, channel="candidate"))
+
+    def test_registry_match_still_requires_floor(self):
+        # registry_match=True라도 절대 점수 바닥 미만이면 차단(보강은 앵커만 우회, 바닥은 유지).
+        sig = self._signals(top_score=0.0001, second=0.0, anchor_df=52, registry_match=True)
+        self.assertFalse(_gate_pass(0.0001, sig, channel="reviewed"))
+
+    def test_no_registry_match_preserves_s5_block(self):
+        # ★s5 가드 보존★: registry_match=False + anchor_df>상한 → 여전히 차단.
+        sig = self._signals(top_score=0.0275, anchor_df=52, registry_match=False)
+        self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))
 
 
 class ComputeQuerySignalsTest(unittest.TestCase):

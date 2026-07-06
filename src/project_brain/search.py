@@ -653,9 +653,11 @@ def _gate_pass(score: float, signals: dict, *, channel: str) -> bool:
     채널별 다신호 규칙:
     1. (i) 절대 점수 바닥 — channel에 따라 reviewed/candidate 바닥을 쓴다(채널 분리,
        §7). candidate는 더 관대(낮은 바닥)해 후보 노출 기회를 보존한다.
-    2. (iii) 표면 앵커 — anchor_df가 None(present 내용 토큰 0)이거나 _ANCHOR_DF_MAX를
-       넘으면(흔한 토큰만 매칭) 차단한다. ★s5 거짓 양성 가드의 우선 신호★ — 의미
-       점수가 confident해도 질의 핵심 엔티티의 표면 앵커가 없으면 "없다"로 간다.
+    2. (iii) 표면 앵커 — ★명부 매칭(registry_match)이 없을 때만★ anchor_df가
+       None이거나 _ANCHOR_DF_MAX를 넘으면 차단한다. 질의가 아는 엔티티 표면형을
+       통째로 포함하면(registry_match) anchor_df와 무관하게 연다(OR 보강, 단조 완화).
+       ★s5 거짓 양성 가드의 우선 신호★ — 의미 점수가 confident해도 질의 핵심
+       엔티티의 표면 앵커가 없고 명부 매칭도 없으면 "없다"로 간다.
 
     (ii) margin은 signals에 동반돼 호출처·보고에 노출되지만 boolean 규칙에는 안 쓴다 —
     s5는 오히려 margin이 ★크다★(lone spurious spike, 실측 0.0119)라 "margin 크면
@@ -672,6 +674,8 @@ def _gate_pass(score: float, signals: dict, *, channel: str) -> bool:
     if score < floor:
         return False
     if channel == "raw":
+        return True
+    if signals.get("registry_match"):
         return True
     anchor_df = signals.get("anchor_df")
     if anchor_df is None or anchor_df > _ANCHOR_DF_MAX:
