@@ -123,6 +123,8 @@ _GRAPH_SUPPORT_CAP = 2
 # ≈10%, "10% 이상 문서에 든 토큰은 generic"이라는 해석. 한쪽 경계에 붙인 값이 아님).
 _ANCHOR_DF_MAX = 30
 
+_REGISTRY_MIN_SURFACE_LEN = 3  # 명부 표면형 매칭 최소 길이(2자 이하 오매칭 방지). schema._SYNONYM_MIN_LEN과 일치해야 함.
+
 # (i) 절대 점수 바닥(채널별). RRF 점수 스케일은 ~0.014~0.033(실측). 이 바닥은 s5
 # 게이트가 아니라(s5 top 점수 0.0275는 confident 수준이라 점수만으론 못 거름 — 그건
 # 앵커 신호 몫) ★degenerate한 약한 적중★을 막는 방어선이다. reviewed 골든셋 최저
@@ -616,7 +618,20 @@ def _document_frequency(conn: sqlite3.Connection, token: str) -> int:
     ).fetchone()[0]
 
 
-def compute_query_signals(query: str, hits: list[dict], db_path) -> dict:
+def _registry_surfaces(store) -> set[str]:
+    """게이트 명부 표면형 집합 — GlossaryTerm term+synonyms+aliases 중 strip 후
+    길이 _REGISTRY_MIN_SURFACE_LEN 이상만, 소문자화. 질의와 D1(부분문자열) 대조용."""
+    surfaces: set[str] = set()
+    for term in store.by_kind("GlossaryTerm"):
+        for v in (term.get("term"), *(term.get("synonyms") or []), *(term.get("aliases") or [])):
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if len(s) >= _REGISTRY_MIN_SURFACE_LEN:
+                    surfaces.add(s)
+    return surfaces
+
+
+def compute_query_signals(query: str, hits: list[dict], db_path, store=None) -> dict:
     """질의·융합 결과에서 다신호 게이트 입력 3종을 1회 계산한다(§7·§8 — 질의 레벨).
 
     - top_score   (i)   : 융합 top 적중의 RRF 절대 점수(없으면 0.0).
@@ -644,7 +659,13 @@ def compute_query_signals(query: str, hits: list[dict], db_path) -> dict:
         if present_dfs:
             anchor_df = min(present_dfs)
 
-    return {"top_score": top_score, "margin": margin, "anchor_df": anchor_df}
+    registry_match = False
+    if store is not None:
+        q = query.lower()
+        registry_match = any(surface in q for surface in _registry_surfaces(store))
+
+    return {"top_score": top_score, "margin": margin, "anchor_df": anchor_df,
+            "registry_match": registry_match}
 
 
 def _gate_pass(score: float, signals: dict, *, channel: str) -> bool:
@@ -653,9 +674,11 @@ def _gate_pass(score: float, signals: dict, *, channel: str) -> bool:
     채널별 다신호 규칙:
     1. (i) 절대 점수 바닥 — channel에 따라 reviewed/candidate 바닥을 쓴다(채널 분리,
        §7). candidate는 더 관대(낮은 바닥)해 후보 노출 기회를 보존한다.
-    2. (iii) 표면 앵커 — anchor_df가 None(present 내용 토큰 0)이거나 _ANCHOR_DF_MAX를
-       넘으면(흔한 토큰만 매칭) 차단한다. ★s5 거짓 양성 가드의 우선 신호★ — 의미
-       점수가 confident해도 질의 핵심 엔티티의 표면 앵커가 없으면 "없다"로 간다.
+    2. (iii) 표면 앵커 — ★명부 매칭(registry_match)이 없을 때만★ anchor_df가
+       None이거나 _ANCHOR_DF_MAX를 넘으면 차단한다. 질의가 아는 엔티티 표면형을
+       통째로 포함하면(registry_match) anchor_df와 무관하게 연다(OR 보강, 단조 완화).
+       ★s5 거짓 양성 가드의 우선 신호★ — 의미 점수가 confident해도 질의 핵심
+       엔티티의 표면 앵커가 없고 명부 매칭도 없으면 "없다"로 간다.
 
     (ii) margin은 signals에 동반돼 호출처·보고에 노출되지만 boolean 규칙에는 안 쓴다 —
     s5는 오히려 margin이 ★크다★(lone spurious spike, 실측 0.0119)라 "margin 크면
@@ -672,6 +695,8 @@ def _gate_pass(score: float, signals: dict, *, channel: str) -> bool:
     if score < floor:
         return False
     if channel == "raw":
+        return True
+    if signals.get("registry_match"):
         return True
     anchor_df = signals.get("anchor_df")
     if anchor_df is None or anchor_df > _ANCHOR_DF_MAX:
@@ -709,9 +734,13 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
             f"색인 DB 없음: {db_path} — `cli index rebuild` 먼저 실행해야 한다(스펙 §4)."
         )
 
-    hits = recall(query, db_path=db_path, embedder=embedder, brain_root=brain_root,
+    resolved_root = resolve_brain_root(brain_root)
+    if store is None:
+        store = BrainStore.load(resolved_root)
+
+    hits = recall(query, db_path=db_path, embedder=embedder, brain_root=resolved_root,
                   store=store)
-    signals = compute_query_signals(query, hits, db_path)
+    signals = compute_query_signals(query, hits, db_path, store=store)
 
     results = [h for h in hits
                if h.get("status") == "reviewed"

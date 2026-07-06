@@ -55,6 +55,9 @@ BASE_REQUIRED 외에 kind마다 추가 필수 필드(schema.py `KIND_REQUIRED` �
 
 (소급 적재에서 잘 안 쓰는 kind는 schema.py에서 확인: ContextProjection, CurrentView, KnowledgePage, IndexRecord.)
 
+- **GlossaryTerm synonyms/aliases** (선택 필드지만 게이트 통과권): 표면형이 질의에 통째 등장하면
+  답변 게이트가 엔티티 존재를 인정한다(D1 매칭). 최소 3글자·단독 일반명사 금지(lint 강제).
+
 EvidenceManifest의 `redaction_status`는 **필수 명시**(기본값 없음 — 미지정 노트는 build/ingest가
 거부). 허용 값은 `raw_local|staged|approved|rejected`(schema enum 강제)이고, 라우터 화이트리스트는
 `"approved"`만 통과시킨다 — 다른 값이면 그 근거가 달린 답 전체에 restricted 라벨이 붙는다(콘텐츠

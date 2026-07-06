@@ -52,6 +52,30 @@ def candidate_term_inline(tid, term, *, definition="후보 정의", aliases=None
     return base(obj, tags=["neutral"], created_at="2026-06-04T00:00:00Z", updated_at="2026-06-04T00:00:00Z")
 
 
+class TestRestrictedForFailClosed(unittest.TestCase):
+    """_restricted_for 신뢰 게이트는 fail-closed: 'approved'만 통과, None·키 누락·비승인은 restricted."""
+
+    def _store_and_obj(self, manifest):
+        evref = {"id": "evref.x", "kind": "EvidenceRef", "evidence_manifest_id": manifest["id"]}
+        obj = {"id": "mapping.x", "kind": "DomainMapping", "evidence_refs": ["evref.x"]}
+        return store_of(obj, evref, manifest), obj
+
+    def test_approved_not_restricted(self):
+        store, obj = self._store_and_obj(
+            {"id": "manifest.x", "kind": "EvidenceManifest", "redaction_status": "approved"})
+        self.assertFalse(QueryRouter(store)._restricted_for(obj))
+
+    def test_missing_redaction_status_is_restricted(self):
+        # 키 누락(수기편집 등 lint 전 비정상 상태) → fail-closed로 restricted(신뢰 오표시 방지)
+        store, obj = self._store_and_obj({"id": "manifest.x", "kind": "EvidenceManifest"})
+        self.assertTrue(QueryRouter(store)._restricted_for(obj))
+
+    def test_nonapproved_status_is_restricted(self):
+        store, obj = self._store_and_obj(
+            {"id": "manifest.x", "kind": "EvidenceManifest", "redaction_status": "staged"})
+        self.assertTrue(QueryRouter(store)._restricted_for(obj))
+
+
 class TestCandidateExposure(unittest.TestCase):
     def test_only_candidate_exposed_with_clarification(self):
         # 후보만 매칭(매칭된 검수 매핑 없음) → 후보 노출 + needs_clarification=True.

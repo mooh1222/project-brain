@@ -131,14 +131,17 @@ SQLite DB 안에 테이블이 4개 만들어진다(`search_index.py:80-108`, `SC
    `search_bm25_scoped`로 바뀐다 — 후보 집합 안에서 df를 다시 계산해 scope 밖 문서가 scope
    안 순위를 흔들지 못하게 한다(`search.py:392-393`).
 
-`eval_recall`(`search.py:678`)은 평가·CLI 진입점으로, `recall` 결과를 **다신호 답변
-게이트**(`_gate_pass`, `search.py:646-675`)에 통과시켜 채널로 가른다 — reviewed `results` /
+`eval_recall`(`search.py:707`)은 평가·CLI 진입점으로, `recall` 결과를 **다신호 답변
+게이트**(`_gate_pass`, `search.py:671`)에 통과시켜 채널로 가른다 — reviewed `results` /
 candidate `candidates` / `raw_excerpts` / `advisories`(Insight) / `projection_reuse`. 게이트
-세 신호는 RRF 절대 점수 바닥, 1·2등 점수 차(`margin`), **표면 앵커**(질의에서 가장 희소한
-토큰의 문서 빈도, `_ANCHOR_DF_MAX=30`)다. 예컨대 '크리스마스'(코퍼스 빈도 0)처럼 핵심
-엔티티가 코퍼스에 없으면, '보상'·'이벤트' 같은 흔한 토큰만 맞아도 게이트가 막아 거짓
-양성을 거른다 — "근거 없으면 없다고 답한다"의 구현부다. reviewed 게이트 통과가 0건이면
-`needs_clarification`을 켠다.
+boolean은 RRF 절대 점수 바닥 + (**명부 매칭** OR **표면 앵커**)다. **명부 매칭**(`registry_match`)은
+질의에 GlossaryTerm term/synonyms/aliases 표면형(3자+)이 통째 부분문자열로 등장하면 참 —
+`compute_query_signals`가 store로 계산한다. **표면 앵커**(`anchor_df`, 질의에서 가장 희소한
+토큰의 문서 빈도, `_ANCHOR_DF_MAX=30`)는 명부 매칭이 없을 때의 폴백 신호다. 1·2등 점수 차
+(`margin`)는 신호에 동반되나 boolean에는 안 쓴다. 예컨대 '크리스마스'(코퍼스 빈도 0, 명부 미등재)
+처럼 핵심 엔티티가 없으면 명부도 앵커도 실패해 게이트가 막아 거짓양성을 거른다 — "근거 없으면
+없다고 답한다"의 구현부다. 잘 적재된 엔티티는 토큰이 흔해져 `anchor_df`가 상한을 넘어도 명부
+표면형으로 통과한다(럭키박스 거짓음성 해소). reviewed 게이트 통과가 0건이면 `needs_clarification`을 켠다.
 
 ## 5. 확인 범위·한계
 

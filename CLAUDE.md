@@ -49,3 +49,7 @@ project-brain eval               # 골든셋 7종 (실모델)
 - `context_projection.py`는 context_md 빌더와 `build_reuse_projection`(재사용 projection 빌더)를 모두 담는 정본이다. projection 재사용층(별도 검색 레인)이 소비하며, cli `projection` 서브커맨드·`rebuild`·`lint`도 이 파일을 참조한다. "동결·소비자 없음"이 아님.
 - 스킬 템플릿(`src/project_brain/templates/`)을 바꾸면 install의 manifest 보존
   동작(사용자 수정 파일 skip)을 깨지 않는지 `tests/test_installer.py`로 확인.
+- `raw/manifests/`를 손으로 편집·추가한 뒤에는 `project-brain audit`를 돌린다 — redaction_status
+  enum 검증이 write 시점(save_object)뿐 아니라 lint_store 전수 재검증에도 있으나, 수기 편집은
+  write 층을 건너뛰므로 audit로 태워야 잡힌다. (라우터 `_restricted_for`는 "approved"가 아니면
+  fail-closed로 restricted 처리 — 누락 시 조용한 신뢰 오표기는 없으나 enum 위반은 audit로 확인.)

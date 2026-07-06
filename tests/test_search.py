@@ -21,6 +21,7 @@ from project_brain.search import (
     _ABS_SCORE_FLOOR_REVIEWED,
     _ANCHOR_DF_MAX,
     _GRAPH_SUPPORT_CAP,
+    _REGISTRY_MIN_SURFACE_LEN,
     _document_frequency,
     _gate_pass,
     _graph_signals_by_id,
@@ -41,13 +42,18 @@ def _b(obj):
     return base(obj, tags=["neutral"], created_at=T, updated_at=T)
 
 
-def glossary_term(tid, *, term, definition="정의", status="reviewed", context_id="context.neutral"):
+def glossary_term(tid, *, term, definition="정의", status="reviewed",
+                  context_id="context.neutral", synonyms=None, aliases=None):
     obj = {
         "id": tid, "kind": "GlossaryTerm", "status": status, "truth_role": "domain",
         "title": f"Term: {term}", "context_id": context_id,
         "term": term, "definition": definition,
         "evidence_refs": ["ev.x"] if status == "reviewed" else [],
     }
+    if synonyms is not None:
+        obj["synonyms"] = synonyms
+    if aliases is not None:
+        obj["aliases"] = aliases
     if status == "candidate":
         obj["candidate"] = {"candidate_state": "ready_for_review", "candidate_source": "spec"}
     return _b(obj)
@@ -739,10 +745,10 @@ class GatePureFunctionTest(unittest.TestCase):
     캡 패턴(_GRAPH_SUPPORT_CAP)을 따라 계수 값 단언으로 침묵 드리프트를 막는다.
     """
 
-    def _signals(self, *, top_score=0.02, second=0.01, anchor_df=5):
+    def _signals(self, *, top_score=0.02, second=0.01, anchor_df=5, registry_match=False):
         # margin은 _gate_pass boolean에 안 들어가지만 신호 dict 형태를 맞춰 둔다.
         return {"top_score": top_score, "margin": round(top_score - second, 6),
-                "anchor_df": anchor_df}
+                "anchor_df": anchor_df, "registry_match": registry_match}
 
     def test_calibration_constants_pinned(self):
         # §8 "계수는 코드 상수+테스트로 고정". 실모델 cli eval 캘리브레이션 값
@@ -754,6 +760,10 @@ class GatePureFunctionTest(unittest.TestCase):
         self.assertEqual(_ABS_SCORE_FLOOR_CANDIDATE, 0.001)
         # candidate 바닥이 reviewed보다 관대(낮음)해야 채널 분리가 성립(§7).
         self.assertLess(_ABS_SCORE_FLOOR_CANDIDATE, _ABS_SCORE_FLOOR_REVIEWED)
+        # 명부 길이 문턱은 lint 최소 길이와 일치해야 오매칭/규칙 불일치가 안 생긴다.
+        from project_brain.schema import _SYNONYM_MIN_LEN
+        self.assertEqual(_REGISTRY_MIN_SURFACE_LEN, 3)
+        self.assertEqual(_SYNONYM_MIN_LEN, _REGISTRY_MIN_SURFACE_LEN)
 
     def test_passes_when_anchored_and_above_floor(self):
         # 앵커 df가 상한 안(희소 토큰 present) + 점수가 바닥 위 → 통과(s1~s4 형태).
@@ -802,6 +812,23 @@ class GatePureFunctionTest(unittest.TestCase):
         self.assertGreater(sig["margin"], 0.01)  # 큰 margin이지만
         self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))  # 그래도 차단
 
+    def test_registry_match_opens_despite_high_anchor_df(self):
+        # ★확정설계 핵심(OR 보강)★: anchor_df가 상한을 넘어 원래 차단될 신호라도
+        # registry_match=True면 열린다. 단조 완화 — 새로 열리는 유일한 경로.
+        sig = self._signals(top_score=0.02, anchor_df=52, registry_match=True)
+        self.assertTrue(_gate_pass(0.02, sig, channel="reviewed"))
+        self.assertTrue(_gate_pass(0.02, sig, channel="candidate"))
+
+    def test_registry_match_still_requires_floor(self):
+        # registry_match=True라도 절대 점수 바닥 미만이면 차단(보강은 앵커만 우회, 바닥은 유지).
+        sig = self._signals(top_score=0.0001, second=0.0, anchor_df=52, registry_match=True)
+        self.assertFalse(_gate_pass(0.0001, sig, channel="reviewed"))
+
+    def test_no_registry_match_preserves_s5_block(self):
+        # ★s5 가드 보존★: registry_match=False + anchor_df>상한 → 여전히 차단.
+        sig = self._signals(top_score=0.0275, anchor_df=52, registry_match=False)
+        self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))
+
 
 class ComputeQuerySignalsTest(unittest.TestCase):
     """compute_query_signals — top_score(i)/margin(ii)/anchor_df(iii) 질의 레벨 계산.
@@ -827,7 +854,7 @@ class ComputeQuerySignalsTest(unittest.TestCase):
     def test_signal_keys(self):
         hits = recall("레이스", db_path=self.db, embedder=self.embedder, brain_root=self.brain)
         sig = compute_query_signals("레이스", hits, self.db)
-        self.assertEqual(set(sig.keys()), {"top_score", "margin", "anchor_df"})
+        self.assertEqual(set(sig.keys()), {"top_score", "margin", "anchor_df", "registry_match"})
 
     def test_top_score_and_margin_from_hits(self):
         hits = recall("레이스 보상", db_path=self.db, embedder=self.embedder,
@@ -868,6 +895,35 @@ class ComputeQuerySignalsTest(unittest.TestCase):
         sig = compute_query_signals("유일토큰", hits, db)
         if len(hits) == 1:
             self.assertEqual(sig["margin"], round(hits[0]["score"], 6))
+
+    def test_registry_match_true_when_surface_in_query(self):
+        class _FakeStore:
+            def by_kind(self, kind):
+                return ([{"term": "PopupLuckyBoxInfo", "synonyms": ["럭키박스"], "aliases": []}]
+                        if kind == "GlossaryTerm" else [])
+        sig = compute_query_signals("럭키박스 API 쓰나", [], self.db, store=_FakeStore())
+        self.assertTrue(sig["registry_match"])
+
+    def test_registry_match_false_when_no_surface(self):
+        class _FakeStore:
+            def by_kind(self, kind):
+                return ([{"term": "PopupLuckyBoxInfo", "synonyms": ["럭키박스"], "aliases": []}]
+                        if kind == "GlossaryTerm" else [])
+        sig = compute_query_signals("크리스마스 이벤트 보상", [], self.db, store=_FakeStore())
+        self.assertFalse(sig["registry_match"])
+
+    def test_registry_ignores_short_surfaces(self):
+        class _FakeStore:
+            def by_kind(self, kind):
+                return ([{"term": "NL", "synonyms": [], "aliases": []}]
+                        if kind == "GlossaryTerm" else [])
+        sig = compute_query_signals("NL 값 알려줘", [], self.db, store=_FakeStore())
+        self.assertFalse(sig["registry_match"])
+
+    def test_registry_match_absent_when_no_store(self):
+        sig = compute_query_signals("레이스", [], self.db)
+        self.assertFalse(sig["registry_match"])
+        self.assertIn("registry_match", sig)
 
 
 class EvalRecallGateAppliedTest(unittest.TestCase):
@@ -915,6 +971,42 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
         self.assertEqual(resp["results"], [])
         self.assertEqual(resp["candidates"], [])
         self.assertTrue(resp["needs_clarification"])
+
+    def test_registry_match_opens_query_that_anchor_would_block(self):
+        # ★end-to-end 판별★: 같은 코퍼스에서 두 질의가 둘 다 anchor_df>상한(앵커만으론 차단)인데,
+        # 명부 표면형('럭키박스')을 포함한 질의만 registry_match로 열리고, 명부에 없는 흔한 토큰만인
+        # 질의는 s5처럼 차단된다 → registry_match가 eval_recall 경로에서 결정적 요인임을 증명(배관+게이트 합성).
+        # 흔한 토큰 2종(len 3+)을 정의에 심어 df를 상한 위로: '럭키박스'(타깃 synonym으로 명부 표면형이 됨)
+        # + '흔한보상어휘'(명부 어디에도 없음).
+        n = _ANCHOR_DF_MAX + 5
+        common = [glossary_term(f"g.common{i}", term=f"공용용어{i}",
+                                definition="럭키박스 흔한보상어휘 관련 설명")
+                  for i in range(n)]
+        target = glossary_term("g.lb", term="럭키박스구성품",
+                               definition="럭키박스 구성품 표시", synonyms=["럭키박스"])
+        brain, db = self._build(common + [target])
+        store = BrainStore.load(brain)
+
+        # 배관 검증: eval_recall이 store를 compute_query_signals에 kwarg로 전달한다.
+        with mock.patch("project_brain.search.compute_query_signals",
+                        wraps=compute_query_signals) as spy:
+            opened = eval_recall("럭키박스", db_path=db,
+                                 embedder=self.embedder, brain_root=brain)
+        self.assertIsNotNone(spy.call_args.kwargs.get("store"),
+                             "eval_recall이 store를 compute_query_signals에 전달해야 한다")
+
+        # 명부 표면형 질의: anchor_df가 상한을 넘어 앵커만으론 차단인데 registry_match로 열린다.
+        sig = compute_query_signals("럭키박스", [], db, store=store)
+        self.assertGreater(sig["anchor_df"], _ANCHOR_DF_MAX)  # 앵커만이면 차단 신호
+        self.assertTrue(sig["registry_match"])
+        self.assertGreater(len(opened["results"]), 0)
+        self.assertFalse(opened["needs_clarification"])
+
+        # 대조: 같은 코퍼스·같은 高 anchor_df지만 명부에 없는 흔한 토큰만인 질의 → 차단 유지(s5 가드).
+        blocked = eval_recall("흔한보상어휘", db_path=db,
+                              embedder=self.embedder, brain_root=brain)
+        self.assertEqual(blocked["results"], [])
+        self.assertTrue(blocked["needs_clarification"])
 
     def test_candidate_channel_survives_when_reviewed_empty(self):
         # 앵커 있는 질의 + candidate만 적중 → results 빈, candidates 채워짐,

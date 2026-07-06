@@ -761,6 +761,9 @@ class QueryRouter:
                 continue
             manifest_id = self.store.get(ref_id).get("evidence_manifest_id")
             if manifest_id and self.store.has(manifest_id):
-                if self.store.get(manifest_id).get("redaction_status") not in (None, "approved"):
+                # 신뢰 게이트 fail-closed: "approved"가 아니면(None·키 누락 포함) restricted로 본다.
+                # schema.py 화이트리스트 주석 의도와 일치 — 정상 데이터는 redaction_status 필수·enum이라
+                # None은 lint 전 수기편집 같은 비정상 상태다. 의심스러우면 막는 쪽(거짓양성>거짓음성).
+                if self.store.get(manifest_id).get("redaction_status") != "approved":
                     return True
         return False

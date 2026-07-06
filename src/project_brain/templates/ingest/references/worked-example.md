@@ -35,7 +35,7 @@ Jira/Slack/PR 변경 이력까지 확인하지 않았어도 `current_ingest_done
 참여 가능 조건이 "무엇이고 어떤 규칙인가"를 기획서·위키에서 찾아 객체를 만들고 연결한다:
 
 - `CodeLocator` `code.join-availability-manager` — path/symbol/line/locator_source=rg/verified_at, {{DEFAULT_BRANCH}} 기준.
-- `GlossaryTerm` `g.join-availability`(참여 가능 조건), `g.repeat-join`(반복 참여) — 용어 + 정의(+ 별칭이 있으면).
+- `GlossaryTerm` `g.join-availability`(참여 가능 조건), `g.repeat-join`(반복 참여) — 용어 + 정의 + **synonyms/aliases에 한국어 대표명·등가어(게이트 통과권, 최소 3글자·단독 일반명사 금지)**.
 - `EvidenceRef` `ev.ref.spec.join-availability` — 기획서 참여 조건 섹션을 가리킴(ref_type=spec_section,
   evidence_manifest_id=기획서 매니페스트).
 - `DomainMapping` `mapping.join-availability` — mapping_key="join-availability-repeat", meaning/boundary,

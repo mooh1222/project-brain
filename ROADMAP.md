@@ -270,11 +270,24 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - 계획: [decisionrecord-evidence-refs-hygiene](docs/plans/2026-07-01-decisionrecord-evidence-refs-hygiene.md) ·
   [broad-review-findings](docs/plans/2026-07-02-broad-review-findings.md)
 
+### 미결 일괄 결정 + 앵커 근본 방향 + 신뢰 게이트 fail-closed (2026-07-03)
+미뤄둔 목록·발견3·럭키박스 앵커를 "미루지 말고 결정" 지시로 일괄 종결(워크플로우 분석 + brain critic 2라운드
+검수 [OKAY], critic가 bb2 실코퍼스로 서브에이전트 허위 수치 2건·브리핑 오류 1건 실측 포착).
+- **결함 2건 수정(엔진 합성 545 통과):** router `_restricted_for` fail-open→fail-closed(`!= "approved"` —
+  수기 manifest 키 누락 시 미승인 근거의 신뢰 오표기 차단) + 발견3(결정 근거 어휘에 slack/spec/wiki 추가 —
+  스키마 REF_TYPE_VALUES는 이미 지원, `validate_notes` 하드코딩 튜플도 `_DECISION_REF_TYPE` 참조로).
+- **앵커: 근본 방향 "엔티티 명부 기반" 확정** — 빈도 조정 4안 전부 s5 거짓양성 재도입 실측 기각. bb2 골든셋 보강 선행.
+- **7건 확정 종결(결함 아님, 열린 대기 아님):** 재랭커·L5·세션hook·팀승격·Part B·슬래시·stale Step3.
+- 계획·근거·미해결 설계질문: [deferred-items-and-anchor-decisions](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md)
+
 ---
 
 ## 미뤄둔 작업 (최종 관리)
 
 각 항목은 "왜 미뤘는가 / 착수 트리거"를 함께 적는다. 트리거가 없으면 착수하지 않는다.
+
+> 아래 재랭커·L5·세션hook·팀승격·Part B·슬래시·stale Step3는 2026-07-03에 "결함 아님"으로 확정 종결됐다
+> (열린 대기가 아니라 근거 댄 종결). 프레임·근거: [2026-07-03 결정문](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md).
 
 1. **top-K 상수·재랭커(cross-encoder) 필요성 재평가**
    - 상태: 보류. 실사용 회상 실패 증거가 벤치마크 1건뿐이라 도입 안 함.

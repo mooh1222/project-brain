@@ -167,5 +167,28 @@ class TestInsightKind(unittest.TestCase):
         self.assertTrue(any("candidate Insight not supported" in e for e in errors))
 
 
+class TestSynonymGatePassRule(unittest.TestCase):
+    """synonyms/aliases가 게이트 통과권으로 승격(registry_match) — 단독 일반명사·2자 이하는
+    D1 부분문자열로 아무 질의에나 걸려 s5 거짓양성을 낸다. 적재 시점 lint로 막는다."""
+
+    def _term(self, gid, synonyms):
+        return {"id": gid, "kind": "GlossaryTerm", "status": "reviewed",
+                "truth_role": "domain", "title": "T", "context_id": "context.n",
+                "term": "온전한용어", "definition": "정의", "evidence_refs": ["ev.x"],
+                "synonyms": synonyms}
+
+    def test_glossary_synonym_too_short_rejected(self):
+        errors = validate_object(self._term("g.x", ["NL"]))
+        self.assertTrue(any("too short" in e for e in errors))
+
+    def test_glossary_synonym_bare_generic_rejected(self):
+        errors = validate_object(self._term("g.y", ["이벤트"]))
+        self.assertTrue(any("generic" in e for e in errors))
+
+    def test_glossary_good_synonym_passes(self):
+        errors = validate_object(self._term("g.z", ["럭키박스", "클리어 패스 티켓 복구"]))
+        self.assertFalse(any(("too short" in e or "generic" in e) for e in errors))
+
+
 if __name__ == "__main__":
     unittest.main()
