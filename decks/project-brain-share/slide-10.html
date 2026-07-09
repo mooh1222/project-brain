@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=960, initial-scale=1">
+  <title>project-brain 공유 자료 - 10</title>
+  <link rel="stylesheet" href="./assets/project-brain-share.css">
+  <style>
+    .skill-system { position: relative; height: 238pt; }
+    .install-card { position: absolute; left: 0; top: 20pt; width: 188pt; padding: 13pt; }
+    .skill-grid { position: absolute; right: 0; top: 12pt; width: 382pt; display: grid; grid-template-columns: 1fr 1fr; gap: 9pt; }
+    .skill-grid .cell { min-height: 66pt; padding: 10pt 11pt; }
+    .skill-grid .cell p:not(.label) { font-size: 11.8pt; line-height: 1.26; }
+    .skill-path { position: absolute; left: 0; right: 0; bottom: 50pt; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10pt; }
+    .skill-path .lane { padding: 6pt 8pt; border-color: var(--rule); text-align: center; }
+    .skill-path .lane p { font-size: 9.4pt; line-height: 1.18; }
+  </style>
+</head>
+<body>
+  <main class="slide">
+    <section class="topline">
+      <div>
+        <p class="kicker">AGENT USE</p>
+        <h2>스킬이 에이전트의<br>사용법을 고정한다</h2>
+      </div>
+      <p class="caption">install은 프로젝트에 config와 brain 스킬 4종을 심고, 에이전트의 절차를 고정한다.</p>
+    </section>
+    <section class="skill-system" aria-label="에이전트 스킬 사용 흐름">
+      <div class="install-card node active">
+        <p class="label">PROJECT INSTALL</p>
+        <p>project-brain install</p>
+        <p class="small">.project-brain.json<br>.project-brain-manifest.json</p>
+      </div>
+      <div class="hairline" style="left:196pt; top:86pt; width:64pt;"></div>
+      <div class="skill-grid">
+        <div class="cell active">
+          <p class="label">brain-query</p>
+          <p>먼저 search / show<br>없으면 없다고 말한다</p>
+        </div>
+        <div class="cell">
+          <p class="label">brain-ingest</p>
+          <p>완료된 기능을<br>객체 그래프로 적재</p>
+        </div>
+        <div class="cell">
+          <p class="label">brain-session-ingest</p>
+          <p>개발 중 결정과<br>세션 지식 갱신</p>
+        </div>
+        <div class="cell">
+          <p class="label">brain-audit</p>
+          <p>lint, isolated,<br>stale-check 점검</p>
+        </div>
+      </div>
+      <div class="skill-path">
+        <div class="lane"><p>.agents/skills/<br>&lt;project&gt;-brain-*</p></div>
+        <div class="lane"><p>검색·적재·점검의<br>절차를 문서로 고정</p></div>
+        <div class="lane"><p>사용자 수정 파일은<br>manifest로 보존</p></div>
+      </div>
+    </section>
+    <footer class="footer">
+      <p>스킬은 에이전트가 언제 찾고, 언제 저장하고, 언제 점검할지 정한다</p>
+      <p>10 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>

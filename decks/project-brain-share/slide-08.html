@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=960, initial-scale=1">
+  <title>project-brain 공유 자료 - 08</title>
+  <link rel="stylesheet" href="./assets/project-brain-share.css">
+  <style>
+    .recall { margin-top: 28pt; }
+    .recall .stage { position: relative; min-height: 78pt; padding: 12pt; }
+    .recall .stage p:not(.label) { font-size: 12.5pt; }
+    .lanes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7pt; margin-top: 18pt; }
+    .lanes .lane { padding: 8pt; border-color: var(--rule); }
+    .lanes p { text-align: center; font-size: 10.5pt; }
+  </style>
+</head>
+<body>
+  <main class="slide">
+    <section class="topline">
+      <div>
+        <p class="kicker">RECALL</p>
+        <h2>불러올 때는 텍스트와<br>연결을 같이 쓴다</h2>
+      </div>
+      <p class="caption">surface.py가 타입별 검색 표면을 만들고, 검색기는 그 위에서 여러 신호를 합친다.</p>
+    </section>
+    <section class="recall" aria-label="검색 회상 흐름">
+      <div class="flow-row five">
+        <div class="stage"><p class="label">QUERY</p><p>질문</p></div>
+        <div class="stage"><p class="label">SURFACE</p><p>kind별 텍스트 표면</p></div>
+        <div class="stage"><p class="label">BM25</p><p>토큰 기반 키워드</p></div>
+        <div class="stage"><p class="label">VECTOR</p><p>의미 임베딩</p></div>
+        <div class="stage active"><p class="label">GRAPH</p><p>1-hop 상호지지</p></div>
+      </div>
+      <div class="lanes" aria-label="검색 결과 통로">
+        <div class="lane active"><p>reviewed</p></div>
+        <div class="lane"><p>candidate</p></div>
+        <div class="lane"><p>raw</p></div>
+        <div class="lane"><p>Insight</p></div>
+        <div class="lane"><p>projection</p></div>
+      </div>
+    </section>
+    <footer class="footer">
+      <p>일반 객체, raw, Insight, projection은 서로 다른 통로로 다룬다</p>
+      <p>08 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>

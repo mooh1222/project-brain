@@ -1,0 +1,2426 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slide Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #111;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    .viewer-container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .nav-bar {
+      height: 48px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      flex-shrink: 0;
+      z-index: 100;
+    }
+
+    .nav-bar button {
+      background: #333;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 16px;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .nav-bar button:hover {
+      background: #555;
+    }
+
+    .nav-bar button:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    .slide-counter {
+      color: #aaa;
+      font-size: 14px;
+      font-weight: 500;
+      min-width: 60px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .btn-fullscreen {
+      position: absolute;
+      right: 16px;
+      background: transparent !important;
+      font-size: 18px;
+      padding: 6px 10px !important;
+    }
+
+    .slide-viewport {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .slide-scaler {
+      width: 720pt;
+      height: 405pt;
+      position: relative;
+      transform-origin: center center;
+    }
+
+    .slide-frame {
+      position: absolute;
+      inset: 0;
+      width: 720pt;
+      height: 405pt;
+      border: none;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+
+    .slide-frame.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="viewer-container">
+    <div class="nav-bar">
+      <button id="btn-prev" title="Previous (\u2190)">Prev</button>
+      <span class="slide-counter" id="counter">1 / 11</span>
+      <button id="btn-next" title="Next (\u2192)">Next</button>
+      <button class="btn-fullscreen" id="btn-fs" title="Fullscreen (F)">&#x26F6;</button>
+    </div>
+
+    <div class="slide-viewport" id="viewport">
+      <div class="slide-scaler" id="scaler">
+        <iframe class="slide-frame active" data-slide="1" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-01.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 01</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .cover-map {
+      position: absolute;
+      right: 58pt;
+      bottom: 76pt;
+      width: 320pt;
+      height: 96pt;
+    }
+    .cover-node {
+      position: absolute;
+      width: 70pt;
+      height: 42pt;
+      padding: 9pt 10pt;
+    }
+    .cover-node p {
+      font-size: 12pt;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide&quot;>
+    <section class=&quot;title-stack&quot;>
+      <p class=&quot;kicker&quot;>INTERNAL SHARE</p>
+      <h1>project-brain</h1>
+      <p class=&quot;subhead&quot;>프로젝트 기억을 구조화하고<br>다시 꺼내 쓰는 엔진</p>
+    </section>
+    <section class=&quot;cover-map&quot; aria-label=&quot;project-brain 흐름&quot;>
+      <div class=&quot;hairline muted&quot; style=&quot;left:55pt; top:47pt; width:208pt;&quot;></div>
+      <div class=&quot;cover-node node&quot; style=&quot;left:0; top:24pt;&quot;><p>raw</p></div>
+      <div class=&quot;cover-node node&quot; style=&quot;left:82pt; top:24pt;&quot;><p>objects</p></div>
+      <div class=&quot;cover-node node active&quot; style=&quot;left:164pt; top:24pt;&quot;><p>search</p></div>
+      <div class=&quot;cover-node node&quot; style=&quot;left:246pt; top:24pt;&quot;><p>answer</p></div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>project-brain share deck</p>
+      <p>01 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="2" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-02.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 02</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .scatter { position: relative; height: 210pt; margin-top: 10pt; }
+    .scatter .node { position: absolute; width: 116pt; padding: 12pt; }
+    .memory { position: absolute; right: 0; top: 58pt; width: 152pt; padding: 16pt; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide surface&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>WHY</p>
+        <h2>프로젝트 지식은 흩어지고<br>사람은 쉽게 잊는다</h2>
+      </div>
+      <p class=&quot;caption&quot;>코드, 기획서, 대화, PR, 결정 기록이 서로 다른 위치에 남는다.</p>
+    </section>
+    <section class=&quot;scatter&quot; aria-label=&quot;흩어진 프로젝트 지식&quot;>
+      <div class=&quot;hairline muted&quot; style=&quot;left:48pt; top:112pt; width:414pt;&quot;></div>
+      <div class=&quot;hairline muted&quot; style=&quot;left:186pt; top:67pt; width:230pt; transform:rotate(15deg);&quot;></div>
+      <div class=&quot;node&quot; style=&quot;left:0; top:18pt;&quot;><p class=&quot;label&quot;>SOURCE</p><p>기획서와 위키</p></div>
+      <div class=&quot;node&quot; style=&quot;left:150pt; top:0;&quot;><p class=&quot;label&quot;>CODE</p><p>파일과 심볼</p></div>
+      <div class=&quot;node&quot; style=&quot;left:64pt; top:132pt;&quot;><p class=&quot;label&quot;>THREAD</p><p>슬랙과 세션</p></div>
+      <div class=&quot;node&quot; style=&quot;left:280pt; top:118pt;&quot;><p class=&quot;label&quot;>CHANGE</p><p>PR과 커밋</p></div>
+      <div class=&quot;memory node active&quot;>
+        <p class=&quot;label&quot;>NEED</p>
+        <p>질문 시점에 필요한 조각만 근거와 함께 꺼내야 한다.</p>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>없으면 없다고 말할 수 있어야 안전하다</p>
+      <p>02 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="3" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-03.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 03</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .agent-flow { margin-top: 35pt; }
+    .agent-flow .stage { position: relative; min-height: 84pt; padding: 13pt 12pt 12pt; }
+    .agent-flow .badge { position: absolute; top: -13pt; left: 12pt; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide&quot;>
+    <section class=&quot;title-stack&quot;>
+      <p class=&quot;kicker&quot;>IDENTITY</p>
+      <h2 class=&quot;headline&quot;>사람이 직접 뒤지는 도구가 아니라,<br>에이전트가 호출하는 지식 엔진</h2>
+      <p class=&quot;subhead&quot;>질문은 사람에게서 오고, 검색과 조립은 에이전트가 맡는다.</p>
+    </section>
+    <section class=&quot;flow-row agent-flow&quot; aria-label=&quot;사용자와 에이전트 흐름&quot;>
+      <div class=&quot;stage&quot;>
+        <p class=&quot;badge&quot;>1</p>
+        <p class=&quot;label&quot;>USER</p>
+        <p>질문하거나 작업을 맡긴다</p>
+      </div>
+      <div class=&quot;stage&quot;>
+        <p class=&quot;badge&quot;>2</p>
+        <p class=&quot;label&quot;>AGENT</p>
+        <p>필요한 지식을 판단한다</p>
+      </div>
+      <div class=&quot;stage active&quot;>
+        <p class=&quot;badge&quot;>3</p>
+        <p class=&quot;label&quot;>BRAIN</p>
+        <p>근거와 검수 상태를 회수한다</p>
+      </div>
+      <div class=&quot;stage&quot;>
+        <p class=&quot;badge&quot;>4</p>
+        <p class=&quot;label&quot;>ANSWER</p>
+        <p>근거 있는 답을 만든다</p>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>raw 문서와 구조화 객체를 함께 쓴다</p>
+      <p>03 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="4" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-04.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 04</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .repo-map { position: relative; height: 226pt; }
+    .repo { position: absolute; width: 216pt; min-height: 122pt; padding: 16pt; }
+    .cache { position: absolute; left: 250pt; top: 112pt; width: 150pt; padding: 10pt 12pt; }
+    .repo ul { margin-top: 9pt; }
+    .repo li { font-size: 12.8pt; line-height: 1.32; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide surface&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>STORAGE MODEL</p>
+        <h2>엔진과 데이터는<br>분리된다</h2>
+      </div>
+      <p class=&quot;caption&quot;>엔진은 범용이고, 실제 코퍼스는 각 프로젝트 저장소의 `brain/`이 가진다.</p>
+    </section>
+    <section class=&quot;repo-map&quot; aria-label=&quot;엔진 저장소와 데이터 저장소&quot;>
+      <div class=&quot;hairline&quot; style=&quot;left:228pt; top:82pt; width:150pt;&quot;></div>
+      <div class=&quot;hairline muted&quot; style=&quot;left:302pt; top:125pt; width:1pt; height:45pt;&quot;></div>
+      <div class=&quot;repo node&quot; style=&quot;left:0; top:30pt;&quot;>
+        <p class=&quot;label&quot;>ENGINE REPO</p>
+        <p>project-brain</p>
+        <ul>
+          <li>스키마와 저장 로직</li>
+          <li>색인, 검색, 라우터</li>
+          <li>합성 테스트</li>
+        </ul>
+      </div>
+      <div class=&quot;repo node active&quot; style=&quot;right:0; top:30pt;&quot;>
+        <p class=&quot;label&quot;>PROJECT REPO</p>
+        <p>brain/</p>
+        <ul>
+          <li>객체 JSON과 raw 원문</li>
+          <li>골든셋과 실측 가드</li>
+          <li>프로젝트 git이 추적</li>
+        </ul>
+      </div>
+      <div class=&quot;cache node&quot;>
+        <p class=&quot;label&quot;>LOCAL CACHE</p>
+        <p class=&quot;code-text&quot;>.brain-local/<br>index.db</p>
+        <p class=&quot;small&quot;>재생성 가능한 색인</p>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>진실은 JSON 원본, 색인은 재생성 가능한 파생물</p>
+      <p>04 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="5" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-05.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 05</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .engine-pipe { position: relative; height: 226pt; }
+    .engine-row { position: absolute; left: 0; right: 0; top: 42pt; display: grid; grid-template-columns: repeat(5, 1fr); gap: 10pt; }
+    .engine-row .stage { min-height: 78pt; padding: 10pt; }
+    .engine-row .stage p:not(.label) { font-size: 11.8pt; line-height: 1.24; }
+    .engine-line { position: absolute; left: 88pt; right: 88pt; top: 82pt; height: 1pt; background: var(--rule); }
+    .principles { position: absolute; left: 60pt; right: 60pt; bottom: 38pt; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10pt; }
+    .principles .lane { padding: 9pt 10pt; border-color: var(--rule); text-align: center; }
+    .principles .lane p { font-size: 10.5pt; line-height: 1.25; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide surface&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>ENGINE DESIGN</p>
+        <h2>원본에서 답까지<br>얇은 파이프라인</h2>
+      </div>
+      <p class=&quot;caption&quot;>엔진은 판단을 대신하지 않고, 저장·색인·검색·상태 신호를 맡는다.</p>
+    </section>
+    <section class=&quot;engine-pipe&quot; aria-label=&quot;project-brain 엔진 내부 파이프라인&quot;>
+      <div class=&quot;engine-line&quot;></div>
+      <div class=&quot;engine-row&quot;>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;label&quot;>1. CORPUS</p>
+          <p>brain/ JSON<br>raw 원문</p>
+        </div>
+        <div class=&quot;stage active&quot;>
+          <p class=&quot;label&quot;>2. STORE</p>
+          <p>schema.py<br>store.py</p>
+        </div>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;label&quot;>3. SURFACE</p>
+          <p>kind별<br>검색 텍스트</p>
+        </div>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;label&quot;>4. INDEX</p>
+          <p>BM25 + vector<br>SQLite</p>
+        </div>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;label&quot;>5. RECALL</p>
+          <p>RRF + graph<br>router gate</p>
+        </div>
+      </div>
+      <div class=&quot;principles&quot;>
+        <div class=&quot;lane&quot;><p>원본은 git이 추적하는 JSON과 raw</p></div>
+        <div class=&quot;lane&quot;><p>색인은 지우고 다시 만들 수 있는 파생물</p></div>
+        <div class=&quot;lane&quot;><p>통과 근거가 없으면 없음·확인 필요를 표시</p></div>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>저장과 검색은 코드가, 의미 판정은 에이전트와 검수 루틴이 맡는다</p>
+      <p>05 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="6" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-06.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 06</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .type-grid { margin-top: 26pt; }
+    .type-grid .cell { min-height: 110pt; padding: 13pt; }
+    .type-grid .cell p:not(.label) { margin-top: 5pt; font-size: 12.7pt; line-height: 1.3; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>OBJECT KINDS</p>
+        <h2>타입은 분류표가 아니라<br>역할의 경계다</h2>
+      </div>
+      <p class=&quot;caption&quot;>같은 “지식”이라도 원본, 용어, 매핑, 코드, 결정, 교훈은 서로 다른 검증 규칙을 갖는다.</p>
+    </section>
+    <section class=&quot;grid-4 type-grid&quot; aria-label=&quot;객체 타입 역할&quot;>
+      <div class=&quot;cell&quot;>
+        <p class=&quot;label&quot;>SOURCE</p>
+        <p>EvidenceManifest</p>
+        <p>EvidenceRef</p>
+        <p class=&quot;small&quot;>원본과 원본 안의 특정 근거 위치</p>
+      </div>
+      <div class=&quot;cell active&quot;>
+        <p class=&quot;label&quot;>DOMAIN</p>
+        <p>DomainContext</p>
+        <p>GlossaryTerm</p>
+        <p>DomainMapping</p>
+        <p class=&quot;small&quot;>용어, 경계, 의미 연결</p>
+      </div>
+      <div class=&quot;cell&quot;>
+        <p class=&quot;label&quot;>IMPLEMENTATION</p>
+        <p>CodeLocator</p>
+        <p>DecisionRecord</p>
+        <p class=&quot;small&quot;>어디에 있고 왜 정했는가</p>
+      </div>
+      <div class=&quot;cell&quot;>
+        <p class=&quot;label&quot;>REUSE</p>
+        <p>Insight</p>
+        <p>ContextProjection</p>
+        <p class=&quot;small&quot;>여러 객체를 가로지르는 교훈과 재사용 브리핑</p>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>타입이 다르면 저장 규칙, 검색 표면, 그래프 연결 방식도 달라진다</p>
+      <p>06 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="7" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-07.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 07</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .relation-map { position: relative; height: 238pt; }
+    .relation-map .node { position: absolute; padding: 10pt 11pt; }
+    .mapping { left: 245pt; top: 64pt; width: 152pt; min-height: 78pt; }
+    .storage-strip { position: absolute; left: 82pt; right: 82pt; bottom: 46pt; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8pt; }
+    .storage-strip .lane { padding: 8pt; border-color: var(--rule); }
+    .storage-strip p { font-size: 10pt; line-height: 1.2; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide surface&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>GRAPH + STORE</p>
+        <h2>객체 id 필드가<br>그래프를 만든다</h2>
+      </div>
+      <p class=&quot;caption&quot;>저장 전에는 공통 필드와 kind별 필수 필드를 통과해야 한다.</p>
+    </section>
+    <section class=&quot;relation-map&quot; aria-label=&quot;DomainMapping 중심 관계 그래프&quot;>
+      <div class=&quot;hairline&quot; style=&quot;left:186pt; top:74pt; width:72pt; transform:rotate(18deg);&quot;></div>
+      <div class=&quot;hairline&quot; style=&quot;left:392pt; top:74pt; width:78pt; transform:rotate(-16deg);&quot;></div>
+      <div class=&quot;hairline&quot; style=&quot;left:190pt; top:122pt; width:66pt; transform:rotate(-12deg);&quot;></div>
+      <div class=&quot;hairline&quot; style=&quot;left:392pt; top:122pt; width:72pt; transform:rotate(14deg);&quot;></div>
+      <div class=&quot;node&quot; style=&quot;left:56pt; top:20pt; width:130pt;&quot;>
+        <p class=&quot;label&quot;>GlossaryTerm</p>
+        <p>용어와 동의어</p>
+      </div>
+      <div class=&quot;node&quot; style=&quot;right:54pt; top:20pt; width:132pt;&quot;>
+        <p class=&quot;label&quot;>CodeLocator</p>
+        <p>파일·심볼·커밋</p>
+      </div>
+      <div class=&quot;node&quot; style=&quot;left:58pt; top:104pt; width:132pt;&quot;>
+        <p class=&quot;label&quot;>DecisionRecord</p>
+        <p>결정과 이유</p>
+      </div>
+      <div class=&quot;node&quot; style=&quot;right:54pt; top:104pt; width:132pt;&quot;>
+        <p class=&quot;label&quot;>EvidenceRef</p>
+        <p>검증 근거</p>
+      </div>
+      <div class=&quot;node active mapping&quot;>
+        <p class=&quot;label&quot;>DomainMapping</p>
+        <p>의미·용어·결정·코드를 한 지점에서 묶는다</p>
+      </div>
+      <div class=&quot;storage-strip&quot; aria-label=&quot;kind별 저장 경로&quot;>
+        <div class=&quot;lane&quot;><p>objects/domain</p></div>
+        <div class=&quot;lane&quot;><p>objects/mappings</p></div>
+        <div class=&quot;lane&quot;><p>objects/code</p></div>
+        <div class=&quot;lane&quot;><p>objects/decisions</p></div>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>schema.py가 규칙을 보고, store.py가 kind별 디렉토리에 쓴다</p>
+      <p>07 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="8" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-08.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 08</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .recall { margin-top: 28pt; }
+    .recall .stage { position: relative; min-height: 78pt; padding: 12pt; }
+    .recall .stage p:not(.label) { font-size: 12.5pt; }
+    .lanes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7pt; margin-top: 18pt; }
+    .lanes .lane { padding: 8pt; border-color: var(--rule); }
+    .lanes p { text-align: center; font-size: 10.5pt; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>RECALL</p>
+        <h2>불러올 때는 텍스트와<br>연결을 같이 쓴다</h2>
+      </div>
+      <p class=&quot;caption&quot;>surface.py가 타입별 검색 표면을 만들고, 검색기는 그 위에서 여러 신호를 합친다.</p>
+    </section>
+    <section class=&quot;recall&quot; aria-label=&quot;검색 회상 흐름&quot;>
+      <div class=&quot;flow-row five&quot;>
+        <div class=&quot;stage&quot;><p class=&quot;label&quot;>QUERY</p><p>질문</p></div>
+        <div class=&quot;stage&quot;><p class=&quot;label&quot;>SURFACE</p><p>kind별 텍스트 표면</p></div>
+        <div class=&quot;stage&quot;><p class=&quot;label&quot;>BM25</p><p>토큰 기반 키워드</p></div>
+        <div class=&quot;stage&quot;><p class=&quot;label&quot;>VECTOR</p><p>의미 임베딩</p></div>
+        <div class=&quot;stage active&quot;><p class=&quot;label&quot;>GRAPH</p><p>1-hop 상호지지</p></div>
+      </div>
+      <div class=&quot;lanes&quot; aria-label=&quot;검색 결과 통로&quot;>
+        <div class=&quot;lane active&quot;><p>reviewed</p></div>
+        <div class=&quot;lane&quot;><p>candidate</p></div>
+        <div class=&quot;lane&quot;><p>raw</p></div>
+        <div class=&quot;lane&quot;><p>Insight</p></div>
+        <div class=&quot;lane&quot;><p>projection</p></div>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>일반 객체, raw, Insight, projection은 서로 다른 통로로 다룬다</p>
+      <p>08 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="9" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-09.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 09</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .ops-flow { margin-top: 32pt; }
+    .ops-flow .stage { position: relative; min-height: 88pt; padding: 13pt 10pt 10pt; }
+    .ops-flow .badge { position: absolute; top: -13pt; left: 10pt; }
+    .ops-flow .stage p:not(.label):not(.badge) { font-size: 12.5pt; }
+    .audit-row { margin-top: 18pt; display: grid; grid-template-columns: repeat(4, 1fr); gap: 9pt; }
+    .audit-row .lane { padding: 8pt; border-color: var(--rule); }
+    .audit-row p { font-size: 10.5pt; text-align: center; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide surface&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>OPERATING LOOP</p>
+        <h2>근거로 상태를 정해<br>쌓는다</h2>
+      </div>
+      <p class=&quot;caption&quot;>많이 저장하는 것보다 근거와 상태를 유지하는 운영 흐름이 더 중요하다.</p>
+    </section>
+    <section class=&quot;ops-flow&quot; aria-label=&quot;적재와 검수 흐름&quot;>
+      <div class=&quot;flow-row five&quot;>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;badge&quot;>1</p>
+          <p class=&quot;label&quot;>NOTE</p>
+          <p>구조화 노트</p>
+        </div>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;badge&quot;>2</p>
+          <p class=&quot;label&quot;>BUILD</p>
+          <p>객체 묶음 조립</p>
+        </div>
+        <div class=&quot;stage active&quot;>
+          <p class=&quot;badge&quot;>3</p>
+          <p class=&quot;label&quot;>INGEST</p>
+          <p>근거 서면 reviewed 저장</p>
+        </div>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;badge&quot;>4</p>
+          <p class=&quot;label&quot;>PROMOTE</p>
+          <p>candidate를 reviewed로</p>
+        </div>
+        <div class=&quot;stage&quot;>
+          <p class=&quot;badge&quot;>5</p>
+          <p class=&quot;label&quot;>RECALL</p>
+          <p>search / show</p>
+        </div>
+      </div>
+      <div class=&quot;audit-row&quot; aria-label=&quot;점검 명령&quot;>
+        <div class=&quot;lane&quot;><p>audit</p></div>
+        <div class=&quot;lane&quot;><p>lint</p></div>
+        <div class=&quot;lane&quot;><p>graph isolated</p></div>
+        <div class=&quot;lane&quot;><p>stale-check</p></div>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>mark-checked는 의미가 그대로인 코드 연결의 확인 상태를 갱신한다</p>
+      <p>09 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="10" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-10.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 10</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .skill-system { position: relative; height: 238pt; }
+    .install-card { position: absolute; left: 0; top: 20pt; width: 188pt; padding: 13pt; }
+    .skill-grid { position: absolute; right: 0; top: 12pt; width: 382pt; display: grid; grid-template-columns: 1fr 1fr; gap: 9pt; }
+    .skill-grid .cell { min-height: 66pt; padding: 10pt 11pt; }
+    .skill-grid .cell p:not(.label) { font-size: 11.8pt; line-height: 1.26; }
+    .skill-path { position: absolute; left: 0; right: 0; bottom: 50pt; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10pt; }
+    .skill-path .lane { padding: 6pt 8pt; border-color: var(--rule); text-align: center; }
+    .skill-path .lane p { font-size: 9.4pt; line-height: 1.18; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide&quot;>
+    <section class=&quot;topline&quot;>
+      <div>
+        <p class=&quot;kicker&quot;>AGENT USE</p>
+        <h2>스킬이 에이전트의<br>사용법을 고정한다</h2>
+      </div>
+      <p class=&quot;caption&quot;>install은 프로젝트에 config와 brain 스킬 4종을 심고, 에이전트의 절차를 고정한다.</p>
+    </section>
+    <section class=&quot;skill-system&quot; aria-label=&quot;에이전트 스킬 사용 흐름&quot;>
+      <div class=&quot;install-card node active&quot;>
+        <p class=&quot;label&quot;>PROJECT INSTALL</p>
+        <p>project-brain install</p>
+        <p class=&quot;small&quot;>.project-brain.json<br>.project-brain-manifest.json</p>
+      </div>
+      <div class=&quot;hairline&quot; style=&quot;left:196pt; top:86pt; width:64pt;&quot;></div>
+      <div class=&quot;skill-grid&quot;>
+        <div class=&quot;cell active&quot;>
+          <p class=&quot;label&quot;>brain-query</p>
+          <p>먼저 search / show<br>없으면 없다고 말한다</p>
+        </div>
+        <div class=&quot;cell&quot;>
+          <p class=&quot;label&quot;>brain-ingest</p>
+          <p>완료된 기능을<br>객체 그래프로 적재</p>
+        </div>
+        <div class=&quot;cell&quot;>
+          <p class=&quot;label&quot;>brain-session-ingest</p>
+          <p>개발 중 결정과<br>세션 지식 갱신</p>
+        </div>
+        <div class=&quot;cell&quot;>
+          <p class=&quot;label&quot;>brain-audit</p>
+          <p>lint, isolated,<br>stale-check 점검</p>
+        </div>
+      </div>
+      <div class=&quot;skill-path&quot;>
+        <div class=&quot;lane&quot;><p>.agents/skills/<br>&amp;lt;project&amp;gt;-brain-*</p></div>
+        <div class=&quot;lane&quot;><p>검색·적재·점검의<br>절차를 문서로 고정</p></div>
+        <div class=&quot;lane&quot;><p>사용자 수정 파일은<br>manifest로 보존</p></div>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>스킬은 에이전트가 언제 찾고, 언제 저장하고, 언제 점검할지 정한다</p>
+      <p>10 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+        <iframe class="slide-frame" data-slide="11" srcdoc="<!doctype html>
+<html lang=&quot;ko&quot;>
+<head>
+<base href=&quot;./&quot;>
+<script>
+(() => {
+  const slideFile = &quot;slide-11.html&quot;;
+  const localAssetPrefix = &quot;./assets/&quot;;
+  const absolutePathRe = /^(file:\/\/|\/Users\/|\/home\/|\/var\/|\/tmp\/|\/private\/|\/Volumes\/|[A-Za-z]:[\\/]|\\\\)/i;
+  const schemeRe = /^[a-z][a-z0-9+\-.]*:/i;
+  const prefix = '[slides-grab:image]';
+
+  function describeElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return '';
+    if (element === document.body) return 'body';
+
+    const parts = [];
+    let current = element;
+    while (current &amp;&amp; current.nodeType === Node.ELEMENT_NODE &amp;&amp; current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) {
+        part += '#' + current.id;
+        parts.unshift(part);
+        break;
+      }
+      if (current.classList.length > 0) {
+        part += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
+
+  function warn(message, detail) {
+    console.warn(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function fail(message, detail) {
+    console.error(prefix + ' ' + slideFile + ': ' + message, detail);
+  }
+
+  function validateAssetSource(kind, source, { allowEmpty = true, onNoncanonical = 'warn' } = {}) {
+    const value = (source || '').trim();
+    if (!value) {
+      return allowEmpty;
+    }
+    if (value.startsWith('data:')) {
+      return true;
+    }
+    if (value.startsWith('https://')) {
+      fail('remote ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (value.startsWith('http://')) {
+      fail('remote http:// ' + kind + ' URL is unsupported in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (absolutePathRe.test(value) || value.startsWith('/')) {
+      fail('non-portable ' + kind + ' path is unsupported', { src: value });
+      return false;
+    }
+    if (schemeRe.test(value)) {
+      fail('unsupported ' + kind + ' URL scheme in saved slides; download it into ./assets/<file>', { src: value });
+      return false;
+    }
+    if (!value.startsWith(localAssetPrefix)) {
+      const report = onNoncanonical === 'fail' ? fail : warn;
+      report('noncanonical local ' + kind + ' path should use ./assets/<file>', { src: value });
+    }
+    return true;
+  }
+
+  function getVideoSources(video) {
+    const sources = [];
+    const directSrc = (video.getAttribute('src') || '').trim();
+    if (directSrc) {
+      sources.push(directSrc);
+    }
+    for (const source of video.querySelectorAll('source[src]')) {
+      const src = (source.getAttribute('src') || '').trim();
+      if (src) {
+        sources.push(src);
+      }
+    }
+    return sources;
+  }
+
+  window.addEventListener('error', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) {
+      const src = (target.getAttribute('src') || target.currentSrc || '').trim();
+      if (!src || src.startsWith('data:')) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local asset', { src });
+        return;
+      }
+      fail('image failed to load', { src });
+      return;
+    }
+
+    if (target instanceof HTMLVideoElement) {
+      const sources = getVideoSources(target);
+      if (sources.some((src) => src.startsWith(localAssetPrefix))) {
+        fail('missing local video asset', { sources });
+        return;
+      }
+      fail('video failed to load', { sources });
+      return;
+    }
+
+    if (target instanceof HTMLSourceElement &amp;&amp; target.parentElement instanceof HTMLVideoElement) {
+      const src = (target.getAttribute('src') || '').trim();
+      if (!src) return;
+      if (src.startsWith(localAssetPrefix)) {
+        fail('missing local video asset', { src });
+        return;
+      }
+      fail('video source failed to load', { src });
+    }
+  }, true);
+
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const image of document.querySelectorAll('img[src]')) {
+      const src = (image.getAttribute('src') || '').trim();
+      validateAssetSource('image', src);
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      for (const src of getVideoSources(video)) {
+        validateAssetSource('video', src);
+      }
+
+      const poster = (video.getAttribute('poster') || '').trim();
+      if (poster) {
+        validateAssetSource('image', poster);
+      }
+    }
+
+    for (const element of document.body.querySelectorAll('*')) {
+      if (element === document.body) continue;
+      const backgroundImage = window.getComputedStyle(element).backgroundImage;
+      if (!backgroundImage || backgroundImage === 'none' || !backgroundImage.includes('url(')) continue;
+      fail('non-body background-image is not supported for slide content', {
+        element: describeElement(element),
+        backgroundImage,
+      });
+    }
+  });
+})();
+</script>
+  <meta charset=&quot;utf-8&quot;>
+  <meta name=&quot;viewport&quot; content=&quot;width=960, initial-scale=1&quot;>
+  <title>project-brain 공유 자료 - 11</title>
+  <link rel=&quot;stylesheet&quot; href=&quot;./assets/project-brain-share.css&quot;>
+  <style>
+    .closing { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 42pt; align-items: center; height: 260pt; }
+    .loop { position: relative; height: 210pt; }
+    .loop .node { position: absolute; width: 108pt; padding: 11pt; text-align: center; }
+  </style>
+</head>
+<body>
+  <main class=&quot;slide&quot;>
+    <section class=&quot;closing&quot; aria-label=&quot;같이 쓰기 위한 운영 원칙&quot;>
+      <div class=&quot;title-stack&quot;>
+        <p class=&quot;kicker&quot;>TEAM USE</p>
+        <h2>핵심은 많이 쌓기가 아니라<br>다시 쓸 수 있게 쌓기</h2>
+        <p class=&quot;subhead&quot;>근거, 검수 상태, 운영 루틴이 유지될 때 프로젝트 기억이 팀 자산이 된다.</p>
+      </div>
+      <div class=&quot;loop&quot;>
+        <div class=&quot;hairline&quot; style=&quot;left:84pt; top:54pt; width:94pt;&quot;></div>
+        <div class=&quot;hairline&quot; style=&quot;left:151pt; top:91pt; width:88pt; transform:rotate(84deg);&quot;></div>
+        <div class=&quot;hairline&quot; style=&quot;left:84pt; top:154pt; width:94pt;&quot;></div>
+        <div class=&quot;hairline&quot; style=&quot;left:20pt; top:91pt; width:88pt; transform:rotate(84deg);&quot;></div>
+        <div class=&quot;node&quot; style=&quot;left:0; top:20pt;&quot;><p class=&quot;label&quot;>CAPTURE</p><p>raw + objects</p></div>
+        <div class=&quot;node active&quot; style=&quot;right:0; top:20pt;&quot;><p class=&quot;label&quot;>REVIEW</p><p>근거 확실→reviewed<br>애매→candidate</p></div>
+        <div class=&quot;node&quot; style=&quot;right:0; bottom:0;&quot;><p class=&quot;label&quot;>RECALL</p><p>질문에 맞게 회수</p></div>
+        <div class=&quot;node&quot; style=&quot;left:0; bottom:0;&quot;><p class=&quot;label&quot;>MAINTAIN</p><p>audit + stale-check</p></div>
+      </div>
+    </section>
+    <footer class=&quot;footer&quot;>
+      <p>팀 공유 전에는 권한, 검수 기준, 운영 루틴을 정해야 한다</p>
+      <p>11 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
+" sandbox="allow-scripts"></iframe>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const TOTAL = 11;
+    let current = 1;
+
+    const frames = document.querySelectorAll('.slide-frame');
+    const counter = document.getElementById('counter');
+    const btnPrev = document.getElementById('btn-prev');
+    const btnNext = document.getElementById('btn-next');
+    const scaler = document.getElementById('scaler');
+    const viewport = document.getElementById('viewport');
+
+    function goTo(n) {
+      n = Math.max(1, Math.min(TOTAL, n));
+      if (n === current) return;
+      frames[current - 1].classList.remove('active');
+      current = n;
+      frames[current - 1].classList.add('active');
+      counter.textContent = current + ' / ' + TOTAL;
+      btnPrev.disabled = current === 1;
+      btnNext.disabled = current === TOTAL;
+    }
+
+    function next() { goTo(current + 1); }
+    function prev() { goTo(current - 1); }
+
+    btnPrev.addEventListener('click', prev);
+    btnNext.addEventListener('click', next);
+    btnPrev.disabled = true;
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); next(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+      else if (e.key === 'Home') { e.preventDefault(); goTo(1); }
+      else if (e.key === 'End') { e.preventDefault(); goTo(TOTAL); }
+      else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    });
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen();
+      }
+    }
+    document.getElementById('btn-fs').addEventListener('click', toggleFullscreen);
+
+    function rescale() {
+      const vw = viewport.clientWidth;
+      const vh = viewport.clientHeight;
+      const slideW = scaler.offsetWidth;
+      const slideH = scaler.offsetHeight;
+      const scale = Math.min(vw / slideW, vh / slideH) * 0.95;
+      scaler.style.transform = 'scale(' + scale + ')';
+    }
+
+    window.addEventListener('resize', rescale);
+    document.addEventListener('fullscreenchange', () => setTimeout(rescale, 100));
+    rescale();
+  </script>
+</body>
+</html>

@@ -1,0 +1,288 @@
+@import url("https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600&display=swap");
+@import url("https://cdn.jsdelivr.net/npm/pretendard/dist/web/static/pretendard.css");
+
+:root {
+  --bg: #F2EBDF;
+  --surface: #FBF7EF;
+  --text: #3D3528;
+  --muted: #8A8170;
+  --accent: #C2693F;
+  --rule: #D6CCB8;
+  --ink: #3D3528;
+}
+
+html,
+body {
+  margin: 0;
+  width: 720pt;
+  height: 405pt;
+  background: var(--bg);
+}
+
+body {
+  font-family: "Work Sans", "Pretendard", sans-serif;
+  color: var(--text);
+}
+
+.slide {
+  position: relative;
+  width: 720pt;
+  height: 405pt;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--bg);
+  padding: 50pt 58pt 36pt;
+  --node-bg: var(--bg);
+}
+
+.slide.surface {
+  background: var(--surface);
+  --node-bg: var(--surface);
+}
+
+h1,
+h2,
+h3,
+p,
+li {
+  margin: 0;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: 52pt;
+  line-height: 1.14;
+  font-weight: 500;
+  padding-bottom: 4pt;
+}
+
+h2 {
+  font-size: 31pt;
+  line-height: 1.18;
+  font-weight: 500;
+}
+
+h3 {
+  font-size: 15pt;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+p,
+li {
+  font-size: 15pt;
+  line-height: 1.42;
+  font-weight: 400;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18pt;
+}
+
+.kicker {
+  color: var(--accent);
+  font-size: 11pt;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+.caption,
+.footer p,
+.small {
+  color: var(--muted);
+  font-size: 10pt;
+  line-height: 1.3;
+  font-weight: 500;
+}
+
+.footer {
+  position: absolute;
+  left: 58pt;
+  right: 58pt;
+  bottom: 24pt;
+  border-top: 1pt solid var(--rule);
+  padding-top: 7pt;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title-stack {
+  display: grid;
+  gap: 13pt;
+}
+
+.headline {
+  max-width: 520pt;
+}
+
+.subhead {
+  max-width: 440pt;
+  color: var(--muted);
+  font-size: 17pt;
+  line-height: 1.42;
+}
+
+.node,
+.cell,
+.stage,
+.lane,
+.thin-panel {
+  box-sizing: border-box;
+  border: 1pt solid var(--ink);
+  border-radius: 12pt;
+  background: var(--node-bg);
+}
+
+.node.active,
+.stage.active,
+.lane.active {
+  border-color: var(--accent);
+  background: rgba(194, 105, 63, 0.08);
+}
+
+.node p,
+.cell p,
+.stage p,
+.lane p {
+  font-size: 13.5pt;
+  line-height: 1.28;
+}
+
+.node .label,
+.cell .label,
+.stage .label,
+.lane .label {
+  color: var(--muted);
+  font-size: 10pt;
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+.badge {
+  display: grid;
+  place-items: center;
+  width: 24pt;
+  height: 24pt;
+  border-radius: 999pt;
+  background: var(--accent);
+  color: var(--surface);
+  font-size: 12pt;
+  line-height: 1;
+  font-weight: 600;
+}
+
+.hairline {
+  position: absolute;
+  height: 1pt;
+  background: var(--ink);
+  transform-origin: left center;
+}
+
+.hairline.muted {
+  background: var(--rule);
+}
+
+.vline {
+  position: absolute;
+  width: 1pt;
+  background: var(--ink);
+}
+
+.dot {
+  position: absolute;
+  width: 10pt;
+  height: 10pt;
+  border: 1pt solid var(--ink);
+  border-radius: 999pt;
+  background: var(--bg);
+}
+
+.dot.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 34pt;
+  align-items: center;
+}
+
+.grid-2x2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12pt;
+}
+
+.grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12pt;
+}
+
+.flow-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 13pt;
+}
+
+.flow-row.five {
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10pt;
+}
+
+.mono {
+  font-family: "Work Sans", "Pretendard", sans-serif;
+}
+
+.code-text {
+  font-size: 12pt;
+  line-height: 1.25;
+}
+
+.quiet {
+  color: var(--muted);
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.big-number {
+  font-size: 48pt;
+  line-height: 0.9;
+  font-weight: 300;
+}
+
+.topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20pt;
+  margin-bottom: 26pt;
+}
+
+.topline h2 {
+  max-width: 500pt;
+}
+
+.diagram-space {
+  position: relative;
+  height: 220pt;
+}
+
+.center-note {
+  display: grid;
+  place-items: center;
+  text-align: center;
+}

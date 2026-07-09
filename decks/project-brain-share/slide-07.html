@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=960, initial-scale=1">
+  <title>project-brain 공유 자료 - 07</title>
+  <link rel="stylesheet" href="./assets/project-brain-share.css">
+  <style>
+    .relation-map { position: relative; height: 238pt; }
+    .relation-map .node { position: absolute; padding: 10pt 11pt; }
+    .mapping { left: 245pt; top: 64pt; width: 152pt; min-height: 78pt; }
+    .storage-strip { position: absolute; left: 82pt; right: 82pt; bottom: 46pt; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8pt; }
+    .storage-strip .lane { padding: 8pt; border-color: var(--rule); }
+    .storage-strip p { font-size: 10pt; line-height: 1.2; }
+  </style>
+</head>
+<body>
+  <main class="slide surface">
+    <section class="topline">
+      <div>
+        <p class="kicker">GRAPH + STORE</p>
+        <h2>객체 id 필드가<br>그래프를 만든다</h2>
+      </div>
+      <p class="caption">저장 전에는 공통 필드와 kind별 필수 필드를 통과해야 한다.</p>
+    </section>
+    <section class="relation-map" aria-label="DomainMapping 중심 관계 그래프">
+      <div class="hairline" style="left:186pt; top:74pt; width:72pt; transform:rotate(18deg);"></div>
+      <div class="hairline" style="left:392pt; top:74pt; width:78pt; transform:rotate(-16deg);"></div>
+      <div class="hairline" style="left:190pt; top:122pt; width:66pt; transform:rotate(-12deg);"></div>
+      <div class="hairline" style="left:392pt; top:122pt; width:72pt; transform:rotate(14deg);"></div>
+      <div class="node" style="left:56pt; top:20pt; width:130pt;">
+        <p class="label">GlossaryTerm</p>
+        <p>용어와 동의어</p>
+      </div>
+      <div class="node" style="right:54pt; top:20pt; width:132pt;">
+        <p class="label">CodeLocator</p>
+        <p>파일·심볼·커밋</p>
+      </div>
+      <div class="node" style="left:58pt; top:104pt; width:132pt;">
+        <p class="label">DecisionRecord</p>
+        <p>결정과 이유</p>
+      </div>
+      <div class="node" style="right:54pt; top:104pt; width:132pt;">
+        <p class="label">EvidenceRef</p>
+        <p>검증 근거</p>
+      </div>
+      <div class="node active mapping">
+        <p class="label">DomainMapping</p>
+        <p>의미·용어·결정·코드를 한 지점에서 묶는다</p>
+      </div>
+      <div class="storage-strip" aria-label="kind별 저장 경로">
+        <div class="lane"><p>objects/domain</p></div>
+        <div class="lane"><p>objects/mappings</p></div>
+        <div class="lane"><p>objects/code</p></div>
+        <div class="lane"><p>objects/decisions</p></div>
+      </div>
+    </section>
+    <footer class="footer">
+      <p>schema.py가 규칙을 보고, store.py가 kind별 디렉토리에 쓴다</p>
+      <p>07 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=960, initial-scale=1">
+  <title>project-brain 공유 자료 - 04</title>
+  <link rel="stylesheet" href="./assets/project-brain-share.css">
+  <style>
+    .repo-map { position: relative; height: 226pt; }
+    .repo { position: absolute; width: 216pt; min-height: 122pt; padding: 16pt; }
+    .cache { position: absolute; left: 250pt; top: 112pt; width: 150pt; padding: 10pt 12pt; }
+    .repo ul { margin-top: 9pt; }
+    .repo li { font-size: 12.8pt; line-height: 1.32; }
+  </style>
+</head>
+<body>
+  <main class="slide surface">
+    <section class="topline">
+      <div>
+        <p class="kicker">STORAGE MODEL</p>
+        <h2>엔진과 데이터는<br>분리된다</h2>
+      </div>
+      <p class="caption">엔진은 범용이고, 실제 코퍼스는 각 프로젝트 저장소의 `brain/`이 가진다.</p>
+    </section>
+    <section class="repo-map" aria-label="엔진 저장소와 데이터 저장소">
+      <div class="hairline" style="left:228pt; top:82pt; width:150pt;"></div>
+      <div class="hairline muted" style="left:302pt; top:125pt; width:1pt; height:45pt;"></div>
+      <div class="repo node" style="left:0; top:30pt;">
+        <p class="label">ENGINE REPO</p>
+        <p>project-brain</p>
+        <ul>
+          <li>스키마와 저장 로직</li>
+          <li>색인, 검색, 라우터</li>
+          <li>합성 테스트</li>
+        </ul>
+      </div>
+      <div class="repo node active" style="right:0; top:30pt;">
+        <p class="label">PROJECT REPO</p>
+        <p>brain/</p>
+        <ul>
+          <li>객체 JSON과 raw 원문</li>
+          <li>골든셋과 실측 가드</li>
+          <li>프로젝트 git이 추적</li>
+        </ul>
+      </div>
+      <div class="cache node">
+        <p class="label">LOCAL CACHE</p>
+        <p class="code-text">.brain-local/<br>index.db</p>
+        <p class="small">재생성 가능한 색인</p>
+      </div>
+    </section>
+    <footer class="footer">
+      <p>진실은 JSON 원본, 색인은 재생성 가능한 파생물</p>
+      <p>04 / 11</p>
+    </footer>
+  </main>
+</body>
+</html>
