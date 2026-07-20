@@ -6,6 +6,7 @@
 - 설계 근거(정체성·철학·아키텍처·미결): [docs/design-canonical.md](docs/design-canonical.md)
 - 설치·사용: [README.md](README.md) · 개발 루프: [CLAUDE.md](CLAUDE.md)
 - 단계별 설계/계획 문서: `docs/specs/`(18) · `docs/plans/`(38) · `docs/skill-drafts/`(3)
+- 비교·검증 보고서: [docs/reports/](docs/reports/)
 - 데이터·적재 이력은 각 프로젝트 레포(`brain/`)에 있다. 이 로드맵은 **엔진 기능**만 다룬다.
   BB2(첫 데이터) 적재 작업 추적은 vault task `bb2-project-brain-build`에 남아 있다.
 
