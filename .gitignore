@@ -8,3 +8,4 @@ uv.lock
 .brain-local/
 # 세션 대화 스냅샷 (session-snapshot 스킬 산출물, 로컬 전용)
 .snapshots/
+.worktrees/
