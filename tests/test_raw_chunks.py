@@ -25,6 +25,12 @@ class ApproxTokensTest(unittest.TestCase):
         # 한글 4글자 → 2토큰 근사(hwi_PKM 동일 근사).
         self.assertEqual(approx_tokens("가나다라"), 2)
 
+    def test_hangul_is_counted_conservatively(self):
+        self.assertEqual(approx_tokens("가나다라"), 4)
+
+    def test_markdown_symbols_are_not_free(self):
+        self.assertGreaterEqual(approx_tokens("|---|---|---|"), 4)
+
     def test_mixed(self):
         self.assertEqual(approx_tokens("hello 가나다라"), 3)
 
@@ -65,6 +71,12 @@ class SplitMarkdownTest(unittest.TestCase):
         # 겹침: 앞 청크의 마지막 문장 조각이 다음 청크에도 나타난다.
         tail = chunks[0].splitlines()[-1]
         self.assertIn(tail, chunks[1])
+
+    def test_single_oversized_table_line_is_split(self):
+        text = "# 표\n" + ("| 값 |" * 2000)
+        chunks = split_markdown(text, target_tokens=100)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(approx_tokens(c) <= 150 for c in chunks))
 
     def test_deterministic(self):
         text = "# 제목\n" + " ".join(f"{i}번 문장." for i in range(300))

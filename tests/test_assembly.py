@@ -302,6 +302,156 @@ def _ref_objs(ctx="ctx"):
 
 
 class ValidateNotesTest(unittest.TestCase):
+    def test_validate_notes_rejects_full_object_id_as_mapping_key(self):
+        notes = {
+            "context": {"key": "disturb-bubble-system", "commit": "abc"},
+            "mappings": [{
+                "key": "mapping.disturb-bubble-system.bubble-attribution",
+                "canonical_summary": "요약",
+                "meaning": "의미",
+                "boundary": "경계",
+            }],
+        }
+        errors = validate_notes(notes)
+        self.assertTrue(any("mappings[0].key" in e and "논리 key" in e for e in errors))
+
+    def test_validate_notes_rejects_full_object_ids_in_logical_key_fields(self):
+        def context_notes():
+            return {"context": {"key": "disturb-bubble-system", "commit": "abc"}}
+
+        cases = [
+            (
+                "context.key",
+                "context.disturb-bubble-system",
+                {"context": {"key": "context.disturb-bubble-system", "commit": "abc"}},
+                True,
+            ),
+            (
+                "glossary[0].key",
+                "g.disturb-bubble-system.bubble-attribution",
+                {
+                    **context_notes(),
+                    "glossary": [{
+                        "key": "g.disturb-bubble-system.bubble-attribution",
+                        "term": "용어",
+                        "definition": "정의",
+                        "evidence_refs": ["evref.disturb-bubble-system.source"],
+                    }],
+                },
+                True,
+            ),
+            (
+                "decisions[0].key",
+                "decision.disturb-bubble-system.bubble-attribution",
+                {
+                    **context_notes(),
+                    "decisions": [{
+                        "key": "decision.disturb-bubble-system.bubble-attribution",
+                        "decision_type": "spec_clarification",
+                        "title": "결정",
+                        "summary": "요약",
+                        "decision": "내용",
+                    }],
+                },
+                True,
+            ),
+            (
+                "code_anchors[0].key",
+                "code.disturb-bubble-system.core-behavior--0",
+                {
+                    **context_notes(),
+                    "code_anchors": [{
+                        "key": "code.disturb-bubble-system.core-behavior--0",
+                        "path": "Core.cpp",
+                        "symbol": "Core::run",
+                        "manifest": "manifest.disturb-bubble-system.code",
+                    }],
+                },
+                True,
+            ),
+            (
+                "mappings[0].glossary_keys[0]",
+                "g.disturb-bubble-system.bubble-attribution",
+                {
+                    **context_notes(),
+                    "mappings": [{
+                        "key": "bubble-attribution",
+                        "canonical_summary": "요약",
+                        "meaning": "의미",
+                        "boundary": "경계",
+                        "glossary_keys": ["g.disturb-bubble-system.bubble-attribution"],
+                    }],
+                },
+                True,
+            ),
+            (
+                "mappings[0].code_evref_keys[0]",
+                "evref.disturb-bubble-system.core-behavior--0",
+                {
+                    **context_notes(),
+                    "mappings": [{
+                        "key": "bubble-attribution",
+                        "canonical_summary": "요약",
+                        "meaning": "의미",
+                        "boundary": "경계",
+                        "code_evref_keys": ["evref.disturb-bubble-system.core-behavior--0"],
+                    }],
+                },
+                True,
+            ),
+            (
+                "mappings[0].decision_keys[0]",
+                "decision.disturb-bubble-system.bubble-attribution",
+                {
+                    **context_notes(),
+                    "mappings": [{
+                        "key": "bubble-attribution",
+                        "canonical_summary": "요약",
+                        "meaning": "의미",
+                        "boundary": "경계",
+                        "decision_keys": ["decision.disturb-bubble-system.bubble-attribution"],
+                    }],
+                },
+                True,
+            ),
+            (
+                "decisions[0].affects[0]",
+                "mapping.disturb-bubble-system.bubble-attribution",
+                {
+                    **context_notes(),
+                    "decisions": [{
+                        "key": "bubble-attribution",
+                        "decision_type": "spec_clarification",
+                        "title": "결정",
+                        "summary": "요약",
+                        "decision": "내용",
+                        "affects": ["mapping.disturb-bubble-system.bubble-attribution"],
+                    }],
+                },
+                True,
+            ),
+            (
+                "code_anchors[0].key",
+                "core-behavior--0",
+                {
+                    **context_notes(),
+                    "code_anchors": [{
+                        "key": "core-behavior--0",
+                        "path": "Core.cpp",
+                        "symbol": "Core::run",
+                        "manifest": "manifest.disturb-bubble-system.code",
+                    }],
+                },
+                False,
+            ),
+        ]
+
+        for field, value, notes, should_reject in cases:
+            with self.subTest(field=field, value=value):
+                errors = validate_notes(notes)
+                rejected = any(field in error and "논리 key" in error for error in errors)
+                self.assertEqual(rejected, should_reject)
+
     def test_unknown_section_fails(self):
         errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
                                  "bogus_section": []})

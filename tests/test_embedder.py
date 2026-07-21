@@ -8,7 +8,10 @@ L2 노름≈1)·차원·get_embedder 팩토리 분기·lazy 로드(생성만으�
 """
 
 import os
+import sys
+import types
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -104,6 +107,18 @@ class RealEmbedderLazyTest(unittest.TestCase):
         e = RealEmbedder()
         self.assertIsNone(e._model)
         self.assertEqual(e.model_name, REAL_MODEL_NAME)
+
+    def test_lazy_load_sets_max_sequence_length(self):
+        class FakeModel:
+            def __init__(self, name):
+                self.name = name
+                self.max_seq_length = None
+
+        fake_module = types.SimpleNamespace(SentenceTransformer=FakeModel)
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            e = RealEmbedder()
+            e._ensure_model()
+        self.assertEqual(e._model.max_seq_length, 2048)
 
 
 if __name__ == "__main__":
