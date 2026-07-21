@@ -302,6 +302,53 @@ def _ref_objs(ctx="ctx"):
 
 
 class ValidateNotesTest(unittest.TestCase):
+    def test_logical_key_reference_fields_require_lists(self):
+        mapping = {
+            "key": "bubble-attribution",
+            "canonical_summary": "요약",
+            "meaning": "의미",
+            "boundary": "경계",
+        }
+        decision = {
+            "key": "bubble-attribution",
+            "decision_type": "spec_clarification",
+            "title": "결정",
+            "summary": "요약",
+            "decision": "내용",
+        }
+        cases = [
+            ("mappings[0].glossary_keys", mapping, "glossary_keys", "term"),
+            ("mappings[0].code_evref_keys", mapping, "code_evref_keys", "anchor"),
+            ("mappings[0].decision_keys", mapping, "decision_keys", None),
+            ("decisions[0].affects", decision, "affects", 1),
+        ]
+
+        for location, item, field, value in cases:
+            with self.subTest(location=location, value=value):
+                item = {**item, field: value}
+                notes = {"context": {"key": "disturb-bubble-system", "commit": "abc"}}
+                notes["mappings" if location.startswith("mappings") else "decisions"] = [item]
+
+                errors = validate_notes(notes)
+
+                self.assertTrue(any(location in e and "list여야 함" in e for e in errors))
+
+    def test_source_key_is_not_validated_as_logical_key(self):
+        notes = {
+            "context": {"key": "disturb-bubble-system", "commit": "abc"},
+            "sources": [{
+                "id": "manifest.disturb-bubble-system.source",
+                "key": "source.disturb-bubble-system.source",
+                "source_type": "session",
+                "title": "근거",
+                "locator": "session-1",
+            }],
+        }
+
+        errors = validate_notes(notes)
+
+        self.assertFalse(any("sources[0].key" in e and "논리 key" in e for e in errors))
+
     def test_validate_notes_rejects_full_object_id_as_mapping_key(self):
         notes = {
             "context": {"key": "disturb-bubble-system", "commit": "abc"},

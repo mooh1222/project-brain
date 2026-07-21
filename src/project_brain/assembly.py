@@ -5,6 +5,7 @@
 저장은 절대 안 한다 — build()는 객체 묶음 + diff만 반환하고 ingest가 저장한다.
 """
 import copy
+import re
 
 from project_brain.objbase import base
 from project_brain.schema import validate_object
@@ -305,6 +306,8 @@ _LIST_SECTIONS = {"sources", "glossary", "code_anchors", "mappings", "decisions"
                   "updates", "extra_objects"}
 _DICT_SECTIONS = {"context", "refs"}
 _UPDATE_KEYS = {"id", "expected_updated_at", "set", "union", "evidence_unchanged"}
+_LOGICAL_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_ANCHOR_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:--[0-9]+)?$")
 # 섹션 항목별 필수 필드(중첩 검증). 변환 함수가 default 채우는 필드는 여기 안 넣는다.
 _ITEM_REQUIRED = {
     # glossary는 항상 reviewed로 만들어지므로 evidence_refs 필수(2층 schema가 막는 걸 1층에서 친절히).
@@ -314,6 +317,15 @@ _ITEM_REQUIRED = {
     "sources": ("id", "source_type", "title", "locator"),
     "decisions": ("key", "decision_type", "title", "summary", "decision"),
 }
+
+
+def _validate_logical_key(errors, location, value, *, anchor=False):
+    pattern = _ANCHOR_KEY_RE if anchor else _LOGICAL_KEY_RE
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        errors.append(
+            f"노트: {location}={value!r}는 논리 key여야 함 "
+            "(소문자 영숫자와 단일 하이픈, 전체 객체 id 금지)"
+        )
 
 
 def validate_notes(notes):
@@ -330,6 +342,8 @@ def validate_notes(notes):
     cx = notes.get("context")
     if not isinstance(cx, dict) or "key" not in cx or "commit" not in cx:
         errors.append("노트: context.key·context.commit 필수")
+    elif "key" in cx:
+        _validate_logical_key(errors, "context.key", cx["key"])
     # 섹션 항목 중첩 필수 필드
     for section, required in _ITEM_REQUIRED.items():
         value = notes.get(section)
@@ -342,6 +356,46 @@ def validate_notes(notes):
             for field in required:
                 if field not in item:
                     errors.append(f"노트: {section}[{i}] 필수 필드 {field!r} 누락")
+            if (
+                section in {"glossary", "code_anchors", "mappings", "decisions"}
+                and "key" in item
+            ):
+                _validate_logical_key(
+                    errors,
+                    f"{section}[{i}].key",
+                    item["key"],
+                    anchor=section == "code_anchors",
+                )
+            if section == "mappings":
+                for field, anchor in (
+                    ("glossary_keys", False),
+                    ("code_evref_keys", True),
+                    ("decision_keys", False),
+                ):
+                    if field not in item:
+                        continue
+                    keys = item[field]
+                    if not isinstance(keys, list):
+                        errors.append(
+                            f"노트: mappings[{i}].{field}는 list여야 함 "
+                            f"(현재 {type(keys).__name__})"
+                        )
+                        continue
+                    for j, key in enumerate(keys):
+                        _validate_logical_key(
+                            errors, f"mappings[{i}].{field}[{j}]", key, anchor=anchor)
+            elif section == "decisions":
+                if "affects" not in item:
+                    continue
+                affects = item["affects"]
+                if not isinstance(affects, list):
+                    errors.append(
+                        f"노트: decisions[{i}].affects는 list여야 함 "
+                        f"(현재 {type(affects).__name__})"
+                    )
+                    continue
+                for j, key in enumerate(affects):
+                    _validate_logical_key(errors, f"decisions[{i}].affects[{j}]", key)
     # glossary는 reviewed로 생성되므로 evidence_refs가 비어 있어도 안 됨(2층 schema:186을 1층에서 친절히).
     # _ITEM_REQUIRED는 키 존재만 보므로 빈 리스트는 여기서 별도로 잡는다.
     glossary = notes.get("glossary")
