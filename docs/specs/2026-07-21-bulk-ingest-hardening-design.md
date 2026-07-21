@@ -18,7 +18,8 @@
   상한을 회귀 테스트로 보장한다.
 - 여러 항목을 적재할 때 항목마다 색인을 다시 만들지 않고, 전 항목 성공 후 한 번만 마무리 검증한다.
 - 워크플로우의 최상위 상태가 `completed`여도 내부 실패·누락이 있으면 적재 단계로 넘어가지 않는다.
-- 코드 흐름을 근거로 쓰는 매핑은 `bb2-code-search-routing`에 따라 일반 함수 callers를 clangd로 확인한다.
+- 코드 흐름을 근거로 쓰는 매핑은 프로젝트별 코드 검증 계약을 따른다. BB2에서는 설치본의
+  `references/project-code-verification.md`가 `bb2-code-search-routing`과 clangd callers 규칙을 연결한다.
 - 기획서 raw 파일명은 버전형과 대량 보관형을 구분해 `analyze-spec-ppt` 규약과 충돌하지 않는다.
 - `SKILL.md`는 130~170줄의 실행 라우터가 되고, 같은 정의를 본문·참조에 반복하지 않는다.
 - `project-brain` 템플릿을 고친 뒤 installer로 BB2 설치본에 전파하며 직접 복사하지 않는다.
@@ -77,7 +78,9 @@ history_coverage`와 history literal이 네 파일 이상에 중복된다.
 첫 검증에서는 코드로 확인 가능한 내용도 모호하다고 남았다. 이후 `bb2-code-search-routing`을 프롬프트에
 넣고 clangd callers 실행 기록을 필수로 하자 68개 항목이 pass 35·fixed 33·needs_user 0으로 닫혔다.
 
-대규모 시스템 playbook에는 이 검색 계약이 필수 단계로 연결돼 있지 않다.
+대규모 시스템 playbook에는 이 검색 계약이 필수 단계로 연결돼 있지 않다. 다만 이는 BB2에서 확인된
+구체 사례다. 범용 `project-brain` 템플릿은 특정 스킬이나 검색 엔진 이름을 직접 요구하지 않고,
+프로젝트가 제공한 코드 검증 계약을 읽고 작업자 프롬프트까지 전달하는 책임만 가져야 한다.
 
 #### S4. raw 파일명 규약 충돌
 
@@ -130,6 +133,7 @@ BB2 스킬과 스크립트만 수정한다.
 | 엔진 `embedder.py` | 실모델 입력 길이 최종 상한 | 청크 의미 분할 |
 | 스킬 `SKILL.md` | 실행 순서, 필수 게이트, 조건별 reference 라우팅 | 객체 필드 전체 설명·CLI 전체 설명 |
 | 스킬 `references/` | 범위·객체·판정·도구·대량 운영의 각 단일 원본 | 서로 같은 정의 반복 |
+| 프로젝트 전용 overlay | 프로젝트의 정확한 검색 스킬·도구·예외 규칙 | 범용 템플릿에 프로젝트 이름을 역주입 |
 | 스킬 `scripts/` | 조립, 대량 실행, 결과 검증, 최종화의 결정론적 작업 | 도메인 의미 추론 |
 | installer | 템플릿을 프로젝트별 값으로 렌더하고 설치본 소유권 추적 | 사용자 수정 파일의 무조건 덮어쓰기 |
 
@@ -218,13 +222,26 @@ report 계약:
 
 ### 4.6 코드 흐름 검증 계약
 
-코드로 표현되는 동작을 적재할 때는 `bb2-code-search-routing`을 필수 하위 스킬로 지정한다.
+범용 템플릿은 특정 프로젝트의 검색 스킬이나 도구를 직접 의존하지 않는다. 대신 다음 계약을 강제한다.
 
+- 프로젝트 `AGENTS.md`와 프로젝트 전용 코드 검색 규칙을 우선한다.
+- 코드 흐름을 근거로 쓸 때는 호출처 추적 기록이나, 호출처 추적이 불가능한 경계와 대체 확인 기록을 남긴다.
+- `references/project-code-verification.md`가 있으면 코드 기반 extract/verify 전에 반드시 읽는다.
+- 동적 workflow나 하위 작업자에게 코드 검증을 맡기면 읽은 프로젝트 계약을 작업자 프롬프트에도 전달한다.
+- 코드로 확인 가능한데 프로젝트 계약에 맞는 query 기록이 없으면 `needs_user`가 아니라 검증 실패다.
+
+`project-code-verification.md`는 installer가 생성하거나 manifest로 관리하지 않는 선택적 프로젝트 덧붙임
+파일(overlay)이다.
+BB2 설치본에는 이 파일을 두고 다음을 소유하게 한다.
+
+- 필수 하위 스킬: `bb2-code-search-routing`
 - 일반 함수·메서드 호출처: clangd callers 우선
 - 매크로 생성 심볼: `rg`
-- notification/callback 경계: 발신과 수신을 `rg`로 잇고, 양쪽 심볼의 callers를 가능한 범위에서 확인
-- 결과 atom: 실행한 clangd query, 시작 심볼, 확인한 경계, 끊긴 지점을 함께 기록
-- 코드로 확인 가능한데 query 기록이 없으면 `needs_user`가 아니라 검증 실패
+- notification/callback 경계: 발신과 수신을 `rg`로 잇고, 양쪽 심볼 callers를 가능한 범위에서 확인
+- 결과 atom: 실행한 query, 시작 심볼, 확인한 경계, 끊긴 지점 기록
+
+BB2의 `AGENTS.md`와 `bb2-code-search-routing/SKILL.md`에는 이미 이 라우팅 계약이 있으므로 이번 작업에서
+수정하지 않는다. 적재 스킬 overlay는 기존 프로젝트 규칙을 적재·검증 단계에 연결하는 얇은 어댑터다.
 
 ### 4.7 SKILL.md 축소와 reference 소유권
 
@@ -244,10 +261,11 @@ report 계약:
 | `object-model.md` | 객체 필드, 연결, logical key, 동의어 계약 |
 | `judgment.md` | 대체·보완·충돌과 이력 판정 |
 | `ingest-tools.md` | CLI, raw 저장, 단건·대량 스크립트 사용법 |
-| `system-domain-playbook.md` | 대규모 분할, 동적 workflow, clangd, 재개·완료 게이트 |
+| `system-domain-playbook.md` | 대규모 분할, 동적 workflow, 프로젝트 코드 검증 계약 전달, 재개·완료 게이트 |
 | `completeness-checklist.md` | 적재 직전/직후 통과 조건만 |
 | `worked-example.md` | 작은 end-to-end 예시 하나 |
 | `ingest-case-log.md` | 재사용 코드로 승격할 실제 변칙 기록 |
+| `project-code-verification.md` | 선택적 프로젝트 overlay. 정확한 검색 스킬·도구·예외 규칙이며 템플릿에는 포함하지 않음 |
 
 100줄을 넘는 reference에는 짧은 목차를 둔다.
 
@@ -270,9 +288,11 @@ report 계약:
 1. `project-brain` 엔진과 `src/project_brain/templates/ingest/` 수정
 2. 엔진·템플릿 테스트 통과
 3. `project-brain install --target <bb2-root>` 실행
-4. report의 `skipped`가 비어 있는지 확인
-5. BB2의 `.agents/skills/bb2-brain-ingest` diff 검토
-6. `agents-doctor`로 `.claude/skills` 심링크와 프로젝트 구조 확인
+4. BB2 설치본에 installer 관리 밖의 `references/project-code-verification.md` 추가
+5. installer를 다시 실행해 overlay 내용이 그대로이고 manifest에 들어가지 않는지 확인
+6. report의 `skipped`가 비어 있는지 확인
+7. BB2의 `.agents/skills/bb2-brain-ingest` diff 검토
+8. `agents-doctor`로 `.claude/skills` 심링크와 프로젝트 구조 확인
 
 installer report에 managed skill 파일이 `skipped`로 나오면 `--force`로 즉시 덮지 않는다. 설치본의 사용자
 수정인지 먼저 diff하고, 템플릿에 역반영할 내용인지 결정한다.
@@ -285,7 +305,7 @@ installer report에 managed skill 파일이 `skipped`로 나오면 `--force`로 
 - 한글·기호가 많은 긴 표가 목표 토큰 이하로 과소계산된다.
 - 워크플로우 `completed` 결과에 내부 실패가 있어도 별도 validator가 없어 통과한다.
 - batch 기능이 없어 각 항목이 색인을 반복한다.
-- 현재 스킬은 코드 흐름 질문에 clangd 실행 기록을 요구하지 않는다.
+- 현재 범용 스킬은 프로젝트 전용 코드 검증 계약을 읽거나 하위 작업자에게 전달하지 않는다.
 
 ### GREEN: 최소 구현
 
@@ -298,6 +318,7 @@ installer report에 managed skill 파일이 `skipped`로 나오면 `--force`로 
 ### REFACTOR: 전파와 독립 사용 검증
 
 - installer 테스트로 새 파일 포함·개발 테스트 제외 확인
+- installer 재실행이 프로젝트 전용 overlay를 보존하고 manifest에 넣지 않는지 확인
 - BB2 설치본에 전파하고 `agents-doctor` 실행
 - 작은 가상 적재 5개 시나리오로 수정 전/후 에이전트 행동 비교
 - 기존 엔진 전체 테스트와 BB2 brain corpus 검증 실행
@@ -320,4 +341,6 @@ installer report에 managed skill 파일이 `skipped`로 나오면 `--force`로 
 | batch 중 일부 ingest 후 실패 | report에 성공 목록을 남기고 finalize 금지, 같은 NOW로 `--resume` |
 | 스킬 축소 중 안전 규칙 유실 | 요구사항-파일 추적표와 계약 테스트로 각 규칙의 새 위치 확인 |
 | installer가 사용자 변경을 건너뜀 | `skipped`가 하나라도 있으면 중단하고 diff, 즉시 `--force` 금지 |
-| clangd가 macro/callback에서 끊김 | `bb2-code-search-routing`의 rg 예외와 notification 양방향 추적을 함께 명시 |
+| 프로젝트 overlay를 읽지 않고 코드 검증 시작 | `SKILL.md`의 조건부 라우팅과 BB2 행동 시나리오로 차단 |
+| installer가 프로젝트 overlay를 덮거나 소유권에 포함 | 재설치 전후 해시 비교와 manifest 부재 테스트로 차단 |
+| BB2에서 clangd가 macro/callback 경계에서 끊김 | BB2 overlay에 기존 `bb2-code-search-routing`의 rg 예외와 양방향 추적을 연결 |

@@ -7,9 +7,11 @@
 
 **Architecture:** `project-brain` 엔진이 형식·자원 안전을 강제하고,
 `src/project_brain/templates/ingest/`가 적재 절차와 의미 판단 계약의 단일 원본이 된다. 테스트가 통과한
-템플릿만 installer로 BB2 설치본에 전파한다.
+템플릿만 installer로 BB2 설치본에 전파한다. 범용 템플릿은 프로젝트별 코드 검증 계약을 조건부로 읽고,
+BB2의 정확한 검색 스킬·도구 규칙은 installer가 관리하지 않는 `project-code-verification.md` 덧붙임
+파일(overlay)이 맡는다.
 
-**Tech Stack:** Python 3.11, stdlib `unittest`, pytest, Bash, project-brain CLI, clangd daemon,
+**Tech Stack:** Python 3.11, stdlib `unittest`, pytest, Bash, project-brain CLI,
 Project Brain installer, agents-doctor
 
 ---
@@ -45,7 +47,7 @@ Project Brain installer, agents-doctor
 - `src/project_brain/templates/ingest/references/object-model.md`: 객체·연결·key·동의어 계약
 - `src/project_brain/templates/ingest/references/judgment.md`: 변경 이력 판정
 - `src/project_brain/templates/ingest/references/ingest-tools.md`: CLI·raw·단건/대량 실행
-- `src/project_brain/templates/ingest/references/system-domain-playbook.md`: workflow·clangd·재개 게이트
+- `src/project_brain/templates/ingest/references/system-domain-playbook.md`: workflow·프로젝트 검증 계약 전달·재개 게이트
 - `src/project_brain/templates/ingest/references/completeness-checklist.md`: 완료 조건
 - `src/project_brain/templates/ingest/references/worked-example.md`: 작은 전체 예시
 - `src/project_brain/templates/ingest/references/ingest-case-log.md`: 실제 변칙 기록
@@ -55,16 +57,18 @@ Project Brain installer, agents-doctor
 - `src/project_brain/templates/ingest/scripts/validate_workflow_result.py`: workflow 완료 판정
 - `src/project_brain/templates/ingest/scripts/test_assemble_notes.py`: 기존 조립 회귀
 - `src/project_brain/templates/ingest/scripts/test_batch_tools.py`: batch·workflow validator 회귀
-- `tests/test_installer.py`: 새 실행 파일 전파와 `test_*.py` 제외 계약
-- `tests/test_ingest_skill_contract.py`: 본문 크기·reference routing·중복 정본 계약
+- `tests/test_installer.py`: 새 실행 파일 전파, `test_*.py` 제외, 프로젝트 overlay 보존 계약
+- `tests/test_ingest_skill_contract.py`: 본문 크기·reference routing·중복 정본·범용 템플릿 독립 계약
 - `src/project_brain/templates/CHANGELOG.md`: 변경 이유와 전파 기록
 
 ### BB2 설치본
 
 - `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/**`:
   installer가 생성하는 결과
+- `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/references/project-code-verification.md`:
+  BB2의 정확한 `bb2-code-search-routing`·clangd·rg 규칙을 연결하는 installer 관리 밖 프로젝트 파일
 - `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.project-brain-manifest.json`:
-  installer 파일 소유권 기록
+  installer 파일 소유권 기록. `project-code-verification.md`는 포함하지 않음
 - `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.claude/skills/bb2-brain-ingest`:
   `.agents` 원본을 가리키는 심링크
 
@@ -316,7 +320,7 @@ git commit -m "fix(raw-index): count Korean and markdown symbols conservatively"
 1. 전체 ID를 logical key로 쓰지 않는다.
 2. 대량 적재는 item ingest와 finalization을 분리한다.
 3. workflow top-level `completed`만으로 완료 처리하지 않는다.
-4. 코드 흐름 적대검증은 `bb2-code-search-routing`과 clangd callers를 기록한다.
+4. 코드 흐름 적대검증은 프로젝트별 코드 검증 계약을 읽고 하위 작업자에게도 전달한다.
 5. raw 파일명은 versioned spec과 bulk archive를 구분한다.
 
 - [ ] **Step 2: SKILL 본문 크기와 routing 계약 테스트를 작성한다**
@@ -328,11 +332,19 @@ def test_skill_is_a_compact_router(self):
     for ref in REQUIRED_REFERENCES:
         self.assertIn(f"references/{ref}", text)
 
-def test_skill_requires_bulk_completion_and_code_flow_gates(self):
-    text = SKILL.read_text(encoding="utf-8")
-    self.assertIn("validate_workflow_result.py", text)
-    self.assertIn("bb2-code-search-routing", text)
-    self.assertIn("clangd callers", text)
+def test_generic_skill_routes_optional_project_code_verification(self):
+    skill = SKILL.read_text(encoding="utf-8")
+    playbook = (REFERENCES / "system-domain-playbook.md").read_text(encoding="utf-8")
+    template_markdown = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in TEMPLATE_ROOT.rglob("*.md")
+    )
+    self.assertIn("validate_workflow_result.py", skill)
+    self.assertIn("references/project-code-verification.md", skill)
+    self.assertIn("프로젝트", playbook)
+    self.assertIn("하위 작업자", playbook)
+    self.assertNotIn("bb2-code-search-routing", template_markdown)
+    self.assertNotIn("clangd callers", template_markdown)
 ```
 
 `REQUIRED_REFERENCES`에는 파일 책임 지도에 나온 8개 reference를 넣는다.
@@ -364,7 +376,9 @@ batch runner의 외부 명령은 임시 가짜 실행 파일을 만들어 호출
 - `scripts/run_ingest_batch.py`
 - `scripts/validate_workflow_result.py`
 
-`scripts/test_batch_tools.py`는 설치되지 않아야 한다.
+`scripts/test_batch_tools.py`는 설치되지 않아야 한다. 설치 대상에 미리
+`references/project-code-verification.md`를 만들고 installer를 두 번 실행한 뒤에도 내용이 같고,
+`.project-brain-manifest.json`의 파일 목록에 이 경로가 없는지도 확인한다.
 
 - [ ] **Step 6: 계약 테스트가 현재 실패하는지 확인한다**
 
@@ -492,7 +506,7 @@ git commit -m "feat(ingest-skill): add resumable batch runner and completion gat
 - 136개 대량 적재에서 단건 러너 대신 임시 wave/finalize 러너 작성
 - workflow top-level completed와 내부 27개 실패 불일치
 - 전체 ID key로 인한 이중 접두 24객체와 65객체 롤백
-- callers 미추적 뒤 68개 항목을 clangd로 재검증해 33개 수정
+- 프로젝트 호출처 검증 계약을 적용해 68개 항목을 재검증하고 33개 수정
 
 서술은 재사용 가능한 증상·조치만 남기고 세션 이야기를 길게 쓰지 않는다.
 
@@ -509,6 +523,9 @@ git commit -m "feat(ingest-skill): add resumable batch runner and completion gat
 7. `## Reference routing`
 
 본문에는 객체 필드 표, 판정 다이어그램, 긴 실수 표, raw 상세 명령을 넣지 않는다.
+`Reference routing`에는 `references/project-code-verification.md`가 존재하면 코드 기반 extract/verify 전에
+직접 읽고, 그 계약을 동적 workflow와 하위 작업자 프롬프트에도 전달한다는 조건부 라우팅을 둔다.
+특정 프로젝트 이름·스킬 이름·검색 도구 이름은 범용 본문에 넣지 않는다.
 
 - [ ] **Step 3: 본문의 필수 규칙을 8개 이하로 정리한다**
 
@@ -575,10 +592,14 @@ git commit -m "docs(ingest-skill): reduce main skill to an execution router"
 다음을 명시한다.
 
 ```markdown
-**REQUIRED SUB-SKILL:** BB2 코드 흐름을 근거로 쓰면 `bb2-code-search-routing`을 사용한다.
-일반 함수·메서드의 1단계 호출처는 clangd callers가 우선이다. 매크로 생성 심볼은 rg를 쓰고,
-notification/callback 경계는 발신·수신을 양쪽에서 잇는다. 결과에는 실행한 callers query와 끊긴 경계를 남긴다.
+코드 흐름을 근거로 쓰면 프로젝트 AGENTS.md의 코드 검색 규칙을 따른다.
+`references/project-code-verification.md`가 있으면 extract/verify 전에 읽는다.
+호출처 추적 기록이나 추적이 불가능한 경계와 대체 확인 기록을 결과에 남긴다.
+동적 workflow와 하위 작업자에게는 읽은 프로젝트 검증 계약을 프롬프트로 전달한다.
 ```
+
+이 범용 문서에는 `bb2-code-search-routing`, clangd 같은 BB2 전용 이름을 넣지 않는다. 정확한 검색 도구와
+예외 처리는 Task 10의 BB2 overlay가 소유한다.
 
 - [ ] **Step 2: workflow 완료 게이트와 resume 절차를 추가한다**
 
@@ -684,8 +705,8 @@ Expected: valid skill.
 
 - [ ] **Step 4: CHANGELOG에 변경 묶음을 기록한다**
 
-한 단락에 key guard, raw chunk 보수화, batch/finalize, workflow validator, clangd gate, raw 이름 분기,
-SKILL 130~170줄 축소를 기록한다. 실제 BB2 전파 커밋은 전파 후 채운다.
+한 단락에 key guard, raw chunk 보수화, batch/finalize, workflow validator, 프로젝트 코드 검증 계약 routing,
+raw 이름 분기, SKILL 130~170줄 축소를 기록한다. 실제 BB2 전파 커밋은 전파 후 채운다.
 
 - [ ] **Step 5: 엔진 관련 테스트 묶음을 실행한다**
 
@@ -758,7 +779,8 @@ Prompt:
 일반 C++ 메서드가 실제 런타임에서 호출되는지 확인해 매핑으로 적재해 줘.
 ```
 
-Expected: `bb2-code-search-routing`을 사용하고 clangd callers query를 근거에 남긴다.
+Expected: BB2 설치본이 `project-code-verification.md`를 읽고 `bb2-code-search-routing`을 사용하며,
+clangd callers query를 근거에 남긴다.
 
 - [ ] **Step 5: logical key 시나리오를 실행한다**
 
@@ -789,7 +811,10 @@ Expected: 개정본은 `spec-v<N>.md`, 옛 문서 묶음은 안전하게 정리�
 
 **Files:**
 - Modify: `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/**`
+- Create: `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/references/project-code-verification.md`
 - Modify: `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.project-brain-manifest.json`
+- Read only: `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/AGENTS.md`
+- Read only: `/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-code-search-routing/SKILL.md`
 
 - [ ] **Step 1: 깨끗한 BB2 작업공간인지 확인한다**
 
@@ -810,7 +835,44 @@ PYTHONPATH=/Users/al03040455/Downloads/codes/project-brain-bulk-ingest-hardening
 
 Expected: JSON `ok=true`, `skipped=[]`, ingest skill 파일은 `updated` 또는 `created`에 포함.
 
-- [ ] **Step 3: 템플릿 치환자가 남지 않았는지 확인한다**
+- [ ] **Step 3: BB2 전용 코드 검증 overlay를 추가한다**
+
+installer 실행 뒤 다음 파일을 만든다.
+
+```markdown
+# BB2 코드 근거 검증
+
+**REQUIRED SUB-SKILL:** 코드 흐름을 근거로 적재하거나 검증할 때 `bb2-code-search-routing`을 사용한다.
+
+- 일반 함수·메서드 호출처는 clangd callers를 우선한다.
+- 매크로 생성 심볼은 `rg`로 추적한다.
+- notification/callback 경계는 발신과 수신을 `rg`로 잇고, 양쪽 심볼 callers를 가능한 범위에서 확인한다.
+- 결과에는 실행한 query, 시작 심볼, 확인한 경계, 끊긴 지점을 기록한다.
+- 동적 workflow와 하위 작업자 프롬프트에도 이 계약을 그대로 전달한다.
+- 코드로 확인 가능한데 위 기록이 없으면 `needs_user`가 아니라 검증 실패로 판정한다.
+```
+
+이 파일은 BB2가 소유하며 project-brain 템플릿이나 installer manifest에 추가하지 않는다. 기존 `AGENTS.md`와
+`bb2-code-search-routing/SKILL.md`는 이미 필요한 라우팅을 소유하므로 수정하지 않는다.
+
+- [ ] **Step 4: installer 재실행이 overlay를 보존하는지 확인한다**
+
+```bash
+BB2_OVERLAY=/Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/references/project-code-verification.md
+before=$(shasum -a 256 "$BB2_OVERLAY" | awk '{print $1}')
+PYTHONPATH=/Users/al03040455/Downloads/codes/project-brain-bulk-ingest-hardening/src \
+  /Users/al03040455/Downloads/codes/project-brain/.venv/bin/python \
+  -m project_brain.cli install \
+  --target /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening
+after=$(shasum -a 256 "$BB2_OVERLAY" | awk '{print $1}')
+test "$before" = "$after"
+! rg -n 'project-code-verification\.md' \
+  /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.project-brain-manifest.json
+```
+
+Expected: 재설치 report의 `skipped=[]`, overlay 해시 동일, manifest 검색 결과 없음.
+
+- [ ] **Step 5: 템플릿 치환자가 남지 않았는지 확인한다**
 
 ```bash
 rg -n '\{\{(PROJECT|BRAIN_ROOT|DEFAULT_BRANCH|REPO)\}\}' \
@@ -819,7 +881,7 @@ rg -n '\{\{(PROJECT|BRAIN_ROOT|DEFAULT_BRANCH|REPO)\}\}' \
 
 Expected: 출력 없음.
 
-- [ ] **Step 4: 설치본 스킬 형식을 검사한다**
+- [ ] **Step 6: 설치본 스킬 형식을 검사한다**
 
 ```bash
 /Users/al03040455/Downloads/codes/project-brain/.venv/bin/python \
@@ -829,7 +891,16 @@ Expected: 출력 없음.
 
 Expected: valid skill.
 
-- [ ] **Step 5: agents-doctor를 실행한다**
+- [ ] **Step 7: BB2 코드 검증 연결을 확인한다**
+
+```bash
+rg -n 'bb2-code-search-routing|clangd callers|매크로 생성 심볼|notification/callback|하위 작업자' \
+  /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/references/project-code-verification.md
+```
+
+Expected: 다섯 계약이 모두 overlay에서 확인되고, 범용 template에는 BB2 전용 문자열이 없음.
+
+- [ ] **Step 8: agents-doctor를 실행한다**
 
 ```bash
 cd /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening
@@ -838,7 +909,7 @@ python3 .agents/skills/agents-doctor/scripts/doctor.py --root "$PWD"
 
 Expected: exit 0, 깨진 심링크·skill mirror 오류 없음.
 
-- [ ] **Step 6: 설치본 스크립트 테스트와 문법 검사를 실행한다**
+- [ ] **Step 9: 설치본 스크립트 테스트와 문법 검사를 실행한다**
 
 ```bash
 /Users/al03040455/Downloads/codes/project-brain/.venv/bin/python -m unittest discover \
@@ -850,7 +921,7 @@ bash -n /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agen
 
 Expected: PASS, shell exit 0.
 
-- [ ] **Step 7: BB2 변경을 커밋한다**
+- [ ] **Step 10: BB2 변경을 커밋한다**
 
 ```bash
 git -C /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening add \
@@ -942,7 +1013,20 @@ rg -n 'T[B]D|T[O]DO|implement[[:space:]]+later|fill[[:space:]]+in' \
 Expected: `extract_template.js`의 의도된 채워넣기 슬롯 외 새 미완성 표식 없음. 슬롯은 실행 템플릿 계약이므로
 그 파일 안에서만 허용한다.
 
-- [ ] **Step 3: 두 저장소 diff를 검사한다**
+- [ ] **Step 3: 범용 템플릿과 BB2 전용 계약의 경계를 검사한다**
+
+```bash
+! rg -n 'bb2-code-search-routing|clangd callers' \
+  /Users/al03040455/Downloads/codes/project-brain-bulk-ingest-hardening/src/project_brain/templates/ingest
+rg -n 'bb2-code-search-routing|clangd callers' \
+  /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.agents/skills/bb2-brain-ingest/references/project-code-verification.md
+! rg -n 'project-code-verification\.md' \
+  /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening/.project-brain-manifest.json
+```
+
+Expected: BB2 전용 이름은 overlay에서만 확인되고, 범용 템플릿과 installer manifest에는 없음.
+
+- [ ] **Step 4: 두 저장소 diff를 검사한다**
 
 ```bash
 git -C /Users/al03040455/Downloads/codes/project-brain-bulk-ingest-hardening diff --check
@@ -951,7 +1035,7 @@ git -C /Users/al03040455/orca/workspaces/bb2_client/bulk-ingest-hardening diff -
 
 Expected: 출력 없이 exit 0.
 
-- [ ] **Step 4: 최종 테스트 명령과 실제 결과를 기록한다**
+- [ ] **Step 5: 최종 테스트 명령과 실제 결과를 기록한다**
 
 엔진 전체 pytest, 템플릿 unittest, quick_validate, installer report, agents-doctor, BB2 lint/eval/graph/
 unittest, MPS 실모델 색인 결과를 최종 보고에 포함한다.
