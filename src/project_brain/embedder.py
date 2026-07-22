@@ -88,11 +88,13 @@ class RealEmbedder:
         from sentence_transformers import SentenceTransformer  # type: ignore
 
         self._model = SentenceTransformer(self.model_name)
-        # ★메모리 방어선★: 시퀀스 길이를 2048 토큰으로 상한. 청커의 approx_tokens는
-        # 한글을 글자수/2로, 기호(표 파이프 등)를 0으로 근사해 실토큰을 크게 과소평가할
-        # 수 있고, 그런 청크가 배치에 섞이면 어텐션 버퍼가 Metal(MPS) 한계를 넘어 죽는다
-        # (2026-07-17 실측 — 방해버블 기획서 raw 90건에서 "Invalid buffer size: 24.29 GiB").
-        # 512-근사 청크의 실토큰은 한글 기준 ~1000-2000이라 2048 절단의 정보 손실은 꼬리뿐.
+        # ★메모리 방어선★: 청커의 approx_tokens는 ASCII 단어, 한글 글자 하나씩, 나머지
+        # 비공백 기호 두 글자당 하나를 보수적으로 센다. 그래도 이 근사식은 실제 BAAI/bge-m3
+        # tokenizer와 같지 않아 일부 입력은 실토큰 수가 더 클 수 있으므로, 2048 상한이 MPS
+        # 메모리의 최종 방어선이다. 이 상한이 없으면 긴 청크가 배치에 섞일 때 어텐션 버퍼가
+        # Metal(MPS) 한계를 넘어 죽을 수 있다(2026-07-17 실측 — 방해버블 기획서 raw 90건에서
+        # "Invalid buffer size: 24.29 GiB"). 당시 512-근사 청크는 실토큰이 한글 기준
+        # 약 1000-2000까지 커졌고, 2048 절단이 생겨도 손실은 입력 꼬리에만 한정된다.
         # 색인·질의가 같은 임베더를 쓰므로 결정론에 영향 없음(같은 텍스트 → 같은 벡터).
         self._model.max_seq_length = 2048
 
