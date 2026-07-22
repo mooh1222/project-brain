@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from pathlib import Path
 
 from project_brain.config import CONFIG_FILENAME
@@ -66,6 +67,18 @@ def _rendered_bytes(src: Path, *, project: str, brain_root: str,
                            brain_root=brain_root, default_branch=default_branch, repo=repo)
         return text.encode("utf-8")
     return src.read_bytes()
+
+
+def _preserve_executable_mode(src: Path, dst: Path) -> bool:
+    """템플릿의 실행 비트만 도구가 쓴 설치 파일에 맞춘다."""
+    executable_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    source_mode = stat.S_IMODE(src.stat().st_mode)
+    destination_mode = stat.S_IMODE(dst.stat().st_mode)
+    desired_mode = (destination_mode & ~executable_bits) | (source_mode & executable_bits)
+    if desired_mode == destination_mode:
+        return False
+    dst.chmod(desired_mode)
+    return True
 
 
 def install(target, *, project: str, brain_root: str = "brain",
@@ -133,11 +146,14 @@ def install(target, *, project: str, brain_root: str = "brain",
                     # 내용 동일 → 채택(manifest 밖이었으면)·유지. 안 씀.
                     if recorded != rendered_hash:
                         report["adopted"].append(str(dst))
+                    elif _preserve_executable_mode(src, dst):
+                        report["updated"].append(str(dst))
                     manifest["files"][rel_key] = rendered_hash
                     continue
                 if recorded == on_disk or (recorded is not None and force):
                     # 도구 소유 갱신, 또는 manifest 기록 있고 force(사용자 수정 덮기)
                     dst.write_bytes(rendered)
+                    _preserve_executable_mode(src, dst)
                     report["updated"].append(str(dst))
                 else:
                     # manifest 밖(사용자 소유) 또는 사용자 수정 + not force — 보존
@@ -146,6 +162,7 @@ def install(target, *, project: str, brain_root: str = "brain",
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(rendered)
+                _preserve_executable_mode(src, dst)
                 report["created"].append(str(dst))
             manifest["files"][rel_key] = rendered_hash
 

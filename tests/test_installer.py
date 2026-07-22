@@ -89,6 +89,73 @@ class InstallTest(unittest.TestCase):
         self.assertFalse((base / "scripts" / "fixtures").exists())
         self.assertFalse((base / "scripts" / "__pycache__").exists())
 
+    def test_tool_owned_update_preserves_executable_template_mode(self):
+        import project_brain.installer as inst
+        tdir = Path(self._td.name) / "fake_executable_templates"
+        script = tdir / "query" / "scripts" / "run.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("echo first\n", encoding="utf-8")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        orig_dir, orig_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = tdir, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            installed = self._skill_dir("demo-brain-query") / "scripts" / "run.sh"
+            self.assertTrue(installed.stat().st_mode & stat.S_IXUSR)
+
+            script.write_text("echo updated\n", encoding="utf-8")
+            install(self.target, project="demo")
+            self.assertEqual(installed.read_text(encoding="utf-8"), "echo updated\n")
+            self.assertTrue(installed.stat().st_mode & stat.S_IXUSR)
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = orig_dir, orig_skills
+
+    def test_executable_mode_changes_only_for_tool_owned_template_writes(self):
+        import project_brain.installer as inst
+        tdir = Path(self._td.name) / "fake_mode_templates"
+        script = tdir / "query" / "scripts" / "run.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("echo v1\n", encoding="utf-8")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        orig_dir, orig_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = tdir, {"query": "brain-query"}
+        try:
+            tracked_target = self.target / "tracked"
+            tracked_target.mkdir()
+            install(tracked_target, project="demo")
+            tracked = tracked_target / ".agents" / "skills" / "demo-brain-query" / "scripts" / "run.sh"
+            self.assertTrue(tracked.stat().st_mode & stat.S_IXUSR)  # fresh
+
+            script.write_text("echo v2\n", encoding="utf-8")
+            tracked.chmod(tracked.stat().st_mode & ~stat.S_IXUSR)
+            install(tracked_target, project="demo")
+            self.assertTrue(tracked.stat().st_mode & stat.S_IXUSR)  # tracked update
+
+            tracked.write_text("user edit\n", encoding="utf-8")
+            tracked.chmod(tracked.stat().st_mode & ~stat.S_IXUSR)
+            install(tracked_target, project="demo", force=True)
+            self.assertTrue(tracked.stat().st_mode & stat.S_IXUSR)  # force update
+
+            adopted_target = self.target / "adopted"
+            adopted_target.mkdir()
+            adopted = adopted_target / ".agents" / "skills" / "demo-brain-query" / "scripts" / "run.sh"
+            adopted.parent.mkdir(parents=True)
+            adopted.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+            adopted.chmod(adopted.stat().st_mode & ~stat.S_IXUSR)
+            install(adopted_target, project="demo")
+            self.assertFalse(adopted.stat().st_mode & stat.S_IXUSR)  # matching untracked adopt
+
+            skipped_target = self.target / "skipped"
+            skipped_target.mkdir()
+            skipped = skipped_target / ".agents" / "skills" / "demo-brain-query" / "scripts" / "run.sh"
+            skipped.parent.mkdir(parents=True)
+            skipped.write_text("user edit\n", encoding="utf-8")
+            skipped.chmod(skipped.stat().st_mode & ~stat.S_IXUSR)
+            install(skipped_target, project="demo")
+            self.assertFalse(skipped.stat().st_mode & stat.S_IXUSR)  # user-owned skipped
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = orig_dir, orig_skills
+
     def test_fresh_install_creates_config_skills_manifest(self):
         report = install(self.target, project="demo")
         # config 생성 + project 기록

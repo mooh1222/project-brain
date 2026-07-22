@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -206,8 +209,50 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
         report = json.loads((self.root / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["succeeded"], ["a", "b", "c"])
         self.assertFalse(report["finalized"])
+        self.assertEqual(report["finalize_failure"],
+                         {"exit_code": 23, "stderr": "finalizer failed\n"})
         self.assertEqual([call["kind"] for call in self._calls()],
                          ["item", "item", "item", "finalize"])
+
+    def test_preflight_rejects_duplicate_keys_and_missing_paths_before_running(self):
+        self._copy_runtime_scripts()
+        manifest = self._manifest()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["items"][1]["key"] = "a"
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+        duplicate = self._run_batch(manifest, self.root / "duplicate-report.json")
+        self.assertEqual(duplicate.returncode, 1, duplicate.stderr)
+        self.assertEqual(self._calls(), [])
+
+        payload["items"][1]["key"] = "b"
+        payload["items"][1]["verify_json"] = "inputs/missing.json"
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        missing_path = self._run_batch(manifest, self.root / "missing-report.json")
+        self.assertEqual(missing_path.returncode, 1, missing_path.stderr)
+        self.assertEqual(self._calls(), [])
+
+    def test_invalid_report_target_fails_before_any_item_with_json_error(self):
+        self._copy_runtime_scripts()
+        report_directory = self.root / "report-directory"
+        report_directory.mkdir()
+        result = self._run_batch(self._manifest(), report_directory)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self._calls(), [])
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["errors"])
+
+    def test_unreadable_resume_report_returns_json_error_before_any_item(self):
+        self._copy_runtime_scripts()
+        resume_directory = self.root / "resume-directory"
+        resume_directory.mkdir()
+        result = self._run_batch(self._manifest(), resume_directory, resume=True)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self._calls(), [])
+        self.assertFalse(json.loads(result.stdout)["ok"])
 
 
 class WorkflowResultValidatorTest(unittest.TestCase):
@@ -262,6 +307,316 @@ class WorkflowResultValidatorTest(unittest.TestCase):
 
     def test_accepts_only_all_good_result(self):
         self.assertEqual(self._validate(self._valid_payload()), [])
+
+    def test_cli_prints_required_json_and_exit_status(self):
+        with TemporaryDirectory() as td:
+            path = Path(td) / "result.json"
+            path.write_text(json.dumps(self._valid_payload()), encoding="utf-8")
+            valid = subprocess.run([sys.executable, str(VALIDATOR_SCRIPT), str(path)],
+                                   text=True, capture_output=True, check=False)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(json.loads(valid.stdout), {"ok": True, "completed": 3})
+
+            payload = self._valid_payload()
+            payload["failures"] = [{"key": "b"}]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            invalid = subprocess.run([sys.executable, str(VALIDATOR_SCRIPT), str(path)],
+                                     text=True, capture_output=True, check=False)
+            self.assertEqual(invalid.returncode, 1, invalid.stderr)
+            self.assertFalse(json.loads(invalid.stdout)["ok"])
+
+    def test_cli_invalid_input_always_returns_json_error(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            invalid_inputs = {
+                "invalid-utf8": b"\xff",
+                "malformed": b"{",
+                "array": b"[]",
+            }
+            for name, content in invalid_inputs.items():
+                with self.subTest(name=name):
+                    path = root / f"{name}.json"
+                    path.write_bytes(content)
+                    result = subprocess.run([sys.executable, str(VALIDATOR_SCRIPT), str(path)],
+                                            text=True, capture_output=True, check=False)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertFalse(payload["ok"])
+                    self.assertTrue(payload["errors"])
+                    self.assertNotIn("Traceback", result.stderr)
+            missing = subprocess.run([sys.executable, str(VALIDATOR_SCRIPT), str(root / "missing.json")],
+                                     text=True, capture_output=True, check=False)
+            self.assertEqual(missing.returncode, 1, missing.stderr)
+            self.assertFalse(json.loads(missing.stdout)["ok"])
+
+
+class BatchRunnerApiTest(unittest.TestCase):
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.manifest_dir = self.root / "manifest"
+        self.manifest_dir.mkdir()
+        (self.manifest_dir / "verify.json").write_text("{}\n", encoding="utf-8")
+        (self.manifest_dir / "domain.py").write_text("# fixture\n", encoding="utf-8")
+        self.manifest = self.manifest_dir / "batch.json"
+        self.manifest.write_text(json.dumps({"items": [{
+            "key": "one", "verify_json": "verify.json", "domain_spec_py": "domain.py",
+        }]}), encoding="utf-8")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _module(self):
+        return load_script(BATCH_SCRIPT, "run_ingest_batch_under_test")
+
+    def test_unknown_or_bool_injected_results_fail_closed(self):
+        module = self._module()
+        invalid_results = (None, "ok", True, (0,), (False, "stderr"), ("0", "stderr"))
+        for index, result in enumerate(invalid_results):
+            with self.subTest(result=repr(result)):
+                report = module.run_batch(
+                    self.manifest, self.root / f"unknown-{index}.json",
+                    item_runner=lambda item, value=result: value,
+                    finalizer=lambda: 0,
+                )
+                self.assertEqual(report["succeeded"], [])
+                self.assertFalse(report["finalized"])
+                self.assertEqual(report["failed"][0]["key"], "one")
+
+    def test_supported_injected_results_and_falsey_callables_succeed(self):
+        module = self._module()
+
+        class FalseyCallable:
+            def __init__(self, result):
+                self.result = result
+                self.calls = 0
+
+            def __bool__(self):
+                return False
+
+            def __call__(self, *args):
+                self.calls += 1
+                return self.result
+
+        for index, result in enumerate((0, (0, ""), subprocess.CompletedProcess([], 0, stderr=""))):
+            with self.subTest(result=repr(result)):
+                runner = FalseyCallable(result)
+                finalizer = FalseyCallable(result)
+                report = module.run_batch(self.manifest, self.root / f"accepted-{index}.json",
+                                          item_runner=runner, finalizer=finalizer)
+                self.assertEqual(report["succeeded"], ["one"])
+                self.assertTrue(report["finalized"])
+                self.assertEqual((runner.calls, finalizer.calls), (1, 1))
+
+    def test_injected_exceptions_become_item_or_finalizer_failures(self):
+        module = self._module()
+        item_failure = module.run_batch(
+            self.manifest, self.root / "item-exception.json",
+            item_runner=lambda item: (_ for _ in ()).throw(RuntimeError("item boom")),
+            finalizer=lambda: 0,
+        )
+        self.assertEqual(item_failure["failed"][0]["stderr"], "item boom")
+        self.assertFalse(item_failure["finalized"])
+
+        finalizer_failure = module.run_batch(
+            self.manifest, self.root / "finalizer-exception.json",
+            item_runner=lambda item: 0,
+            finalizer=lambda: (_ for _ in ()).throw(RuntimeError("finalizer boom")),
+        )
+        self.assertTrue(finalizer_failure["succeeded"])
+        self.assertFalse(finalizer_failure["finalized"])
+        self.assertEqual(finalizer_failure["finalize_failure"]["stderr"], "finalizer boom")
+
+    def test_completed_process_bytes_stderr_is_recorded_as_text(self):
+        module = self._module()
+        report = module.run_batch(
+            self.manifest, self.root / "bytes-stderr.json",
+            item_runner=lambda item: subprocess.CompletedProcess([], 7, stderr=b"byte failure"),
+        )
+        self.assertEqual(report["failed"][0]["stderr"], "byte failure")
+
+    def test_invalid_resume_reports_are_rejected_before_item_execution(self):
+        module = self._module()
+        invalid_reports = (
+            [],
+            {"expected": 1, "succeeded": [], "failed": []},
+            {"expected": True, "succeeded": [], "failed": [], "finalized": False},
+            {"expected": 2, "succeeded": [], "failed": [], "finalized": False},
+            {"expected": 1, "succeeded": ["one", "one"], "failed": [], "finalized": False},
+            {"expected": 1, "succeeded": [1], "failed": [], "finalized": False},
+            {"expected": 1, "succeeded": ["foreign"], "failed": [], "finalized": False},
+            {"expected": 1, "succeeded": [], "failed": "bad", "finalized": False},
+            {"expected": 1, "succeeded": [], "failed": [{"key": 1}], "finalized": False},
+            {"expected": 1, "succeeded": [], "failed": [{"key": "foreign"}], "finalized": False},
+            {"expected": 1, "succeeded": [], "failed": [
+                {"key": "one", "exit_code": 1, "stderr": "x"},
+                {"key": "one", "exit_code": 1, "stderr": "x"},
+            ], "finalized": False},
+            {"expected": 1, "succeeded": ["one"], "failed": [{"key": "one"}], "finalized": False},
+            {"expected": 1, "succeeded": [], "failed": [], "finalized": 0},
+        )
+        calls: list[str] = []
+        for index, payload in enumerate(invalid_reports):
+            with self.subTest(payload=payload):
+                resume = self.root / f"invalid-resume-{index}.json"
+                resume.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    module.run_batch(self.manifest, self.root / f"report-{index}.json",
+                                     resume_path=resume,
+                                     item_runner=lambda item: calls.append(item["key"]) or 0)
+        self.assertEqual(calls, [])
+
+    def test_report_fingerprint_allows_resume_of_unchanged_inputs(self):
+        module = self._module()
+        report_path = self.root / "resume-report.json"
+        failed = module.run_batch(self.manifest, report_path, item_runner=lambda item: 9)
+        self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["manifest_fingerprint"],
+                         failed["manifest_fingerprint"])
+        calls: list[str] = []
+        resumed = module.run_batch(report_path=report_path, manifest_path=self.manifest,
+                                   resume_path=report_path,
+                                   item_runner=lambda item: calls.append(item["key"]) or 0,
+                                   finalizer=lambda: 0)
+        self.assertEqual(calls, ["one"])
+        self.assertTrue(resumed["finalized"])
+        self.assertIsInstance(resumed["manifest_fingerprint"], str)
+        self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["manifest_fingerprint"],
+                         resumed["manifest_fingerprint"])
+
+    def test_resume_rejects_changed_verify_content_before_item_execution(self):
+        module = self._module()
+        report_path = self.root / "changed-verify-report.json"
+        module.run_batch(self.manifest, report_path, item_runner=lambda item: 9)
+        (self.manifest_dir / "verify.json").write_text('{"changed": true}\n', encoding="utf-8")
+        calls: list[str] = []
+        with self.assertRaises(ValueError):
+            module.run_batch(self.manifest, report_path, resume_path=report_path,
+                             item_runner=lambda item: calls.append(item["key"]) or 0)
+        self.assertEqual(calls, [])
+
+    def test_resume_rejects_same_key_with_different_resolved_input(self):
+        module = self._module()
+        report_path = self.root / "different-path-report.json"
+        module.run_batch(self.manifest, report_path, item_runner=lambda item: 9)
+        other_verify = self.manifest_dir / "other-verify.json"
+        other_verify.write_text((self.manifest_dir / "verify.json").read_text(encoding="utf-8"),
+                                encoding="utf-8")
+        self.manifest.write_text(json.dumps({"items": [{
+            "key": "one", "verify_json": "other-verify.json", "domain_spec_py": "domain.py",
+        }]}), encoding="utf-8")
+        calls: list[str] = []
+        with self.assertRaises(ValueError):
+            module.run_batch(self.manifest, report_path, resume_path=report_path,
+                             item_runner=lambda item: calls.append(item["key"]) or 0)
+        self.assertEqual(calls, [])
+
+    def test_resume_rejects_missing_or_malformed_fingerprint_before_execution(self):
+        module = self._module()
+        base_report = {
+            "expected": 1, "succeeded": [], "failed": [], "finalized": False,
+        }
+        calls: list[str] = []
+        for index, fingerprint in enumerate((None, 3, "")):
+            with self.subTest(fingerprint=fingerprint):
+                payload = dict(base_report)
+                if fingerprint is not None:
+                    payload["manifest_fingerprint"] = fingerprint
+                resume = self.root / f"bad-fingerprint-{index}.json"
+                resume.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    module.run_batch(self.manifest, self.root / f"target-{index}.json",
+                                     resume_path=resume,
+                                     item_runner=lambda item: calls.append(item["key"]) or 0)
+        self.assertEqual(calls, [])
+
+    def test_parent_directory_unsupported_fsync_errno_is_tolerated(self):
+        module = self._module()
+        report_path = self.root / "unsupported-parent-fsync.json"
+        original_parent_fsync = module._fsync_parent_directory
+
+        def unsupported_parent_fsync(path):
+            with mock.patch.object(module.os, "fsync",
+                                   side_effect=OSError(errno.EINVAL, "unsupported directory fsync")):
+                return original_parent_fsync(path)
+
+        with mock.patch.object(module, "_fsync_parent_directory",
+                               side_effect=unsupported_parent_fsync):
+            module._write_report(report_path, {"ok": True})
+        self.assertEqual(json.loads(report_path.read_text(encoding="utf-8")), {"ok": True})
+
+    def test_parent_directory_eio_surfaces_and_cleans_temporary_file(self):
+        module = self._module()
+        report_path = self.root / "eio-parent-fsync.json"
+        original_parent_fsync = module._fsync_parent_directory
+
+        def eio_parent_fsync(path):
+            with mock.patch.object(module.os, "fsync", side_effect=OSError(errno.EIO, "disk error")):
+                return original_parent_fsync(path)
+
+        with mock.patch.object(module, "_fsync_parent_directory", side_effect=eio_parent_fsync):
+            with self.assertRaises(ValueError):
+                module._write_report(report_path, {"ok": True})
+        self.assertEqual(list(self.root.glob(f".{report_path.name}.*.tmp")), [])
+
+
+class RunIngestCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.runtime = self.root / "runtime"
+        self.runtime.mkdir()
+        self.bin_dir = self.root / "bin"
+        self.bin_dir.mkdir()
+        self.tmp_dir = self.root / "tmp"
+        self.tmp_dir.mkdir()
+        shutil.copy2(SCRIPTS / "run_ingest.sh", self.runtime / "run_ingest.sh")
+        (self.runtime / "assemble_notes.py").write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import sys
+            from pathlib import Path
+            Path(sys.argv[sys.argv.index("-o") + 1]).write_text("notes", encoding="utf-8")
+        """), encoding="utf-8")
+        (self.runtime / "finalize_ingest.sh").write_text("#!/usr/bin/env bash\nexit \"${FAKE_FINALIZER_EXIT:-0}\"\n", encoding="utf-8")
+        (self.bin_dir / "project-brain").write_text(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            if [ "$1" = "build" ]; then
+              shift
+              while [ "$#" -gt 0 ]; do
+                if [ "$1" = "--objects-file" ]; then : > "$2"; exit 0; fi
+                shift
+              done
+            fi
+            if [ "$1" = "ingest" ]; then exit "${FAKE_INGEST_EXIT:-0}"; fi
+        """), encoding="utf-8")
+        for path in (self.runtime / "run_ingest.sh", self.runtime / "finalize_ingest.sh",
+                     self.bin_dir / "project-brain"):
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        self.verify = self.root / "verify.json"
+        self.spec = self.root / "domain.py"
+        self.verify.write_text("{}\n", encoding="utf-8")
+        self.spec.write_text("# fixture\n", encoding="utf-8")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_default_finalizer_returns_through_runner_shell(self):
+        text = (SCRIPTS / "run_ingest.sh").read_text(encoding="utf-8")
+        self.assertNotIn('exec "$HERE/finalize_ingest.sh"', text)
+
+    def test_all_exit_paths_remove_both_temporary_files(self):
+        cases = (([], 0, 0), ([], 23, 0), (["--defer-finalize"], 0, 0), (["--dry"], 0, 0))
+        for flags, finalizer_exit, ingest_exit in cases:
+            with self.subTest(flags=flags, finalizer_exit=finalizer_exit, ingest_exit=ingest_exit):
+                env = dict(os.environ, TMPDIR=str(self.tmp_dir),
+                           PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
+                           FAKE_FINALIZER_EXIT=str(finalizer_exit),
+                           FAKE_INGEST_EXIT=str(ingest_exit))
+                result = subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
+                                         str(self.verify), str(self.spec)],
+                                        env=env, text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, finalizer_exit, result.stderr)
+                self.assertEqual(list(self.tmp_dir.glob("notes.*.json")), [])
+                self.assertEqual(list(self.tmp_dir.glob("objects.*.json")), [])
 
 
 if __name__ == "__main__":
