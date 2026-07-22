@@ -87,8 +87,8 @@ def _preserve_executable_mode(src: Path, dst: Path) -> bool:
     return True
 
 
-def _atomic_write_bytes(dst: Path, data: bytes, *, src: Path | None = None) -> None:
-    """같은 디렉터리의 완성된 임시 파일을 교체해 관리 파일을 기록한다."""
+def _prepare_atomic_write_bytes(dst: Path, data: bytes, *, src: Path | None = None) -> Path:
+    """같은 디렉터리에 완성·fsync된 교체용 임시 파일을 준비한다."""
     executable_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
     if dst.exists():
         destination_mode = stat.S_IMODE(dst.stat().st_mode)
@@ -109,12 +109,55 @@ def _atomic_write_bytes(dst: Path, data: bytes, *, src: Path | None = None) -> N
         temporary_path.chmod(destination_mode)
         with temporary_path.open("rb") as f:
             os.fsync(f.fileno())
+        return temporary_path
+    except Exception:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_write_bytes(dst: Path, data: bytes, *, src: Path | None = None) -> None:
+    """같은 디렉터리의 완성된 임시 파일을 교체해 관리 파일을 기록한다."""
+    temporary_path = _prepare_atomic_write_bytes(dst, data, src=src)
+    try:
         os.replace(temporary_path, dst)
     finally:
         try:
             temporary_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _retirement_backup_path(dst: Path) -> Path:
+    """retired 파일을 잠시 보관할 같은 디렉터리의 고유 경로를 만든다."""
+    fd, backup_name = tempfile.mkstemp(
+        dir=dst.parent, prefix=f".{dst.name}.retired-", suffix=".bak")
+    os.close(fd)
+    return Path(backup_name)
+
+
+def _rollback_retirements(staged: list[tuple[Path, Path]],
+                          backups: list[Path]) -> list[OSError]:
+    """옮긴 retired를 역순 복원하고, 아직 비어 있는 backup만 정리한다."""
+    errors: list[OSError] = []
+    staged_backups = {backup for _, backup in staged}
+    for original, backup in reversed(staged):
+        try:
+            os.replace(backup, original)
+        except OSError as exc:
+            errors.append(exc)
+    for backup in backups:
+        if backup in staged_backups:
+            continue
+        try:
+            backup.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            errors.append(exc)
+    return errors
 
 
 def _desired_files(*, project: str, brain_root: str,
@@ -351,14 +394,51 @@ def install(target, *, project: str, brain_root: str = "brain",
             report["created"].append(str(dst))
         manifest["files"][rel_key] = rendered_hash
 
-    # 5. config까지 안전하게 기록한 뒤에만 retired를 제거하고 manifest를 확정한다.
-    if config_bytes is not None:
-        _atomic_write_bytes(cfg_path, config_bytes)
-    for rel_key, dst, exists in retired:
-        if exists:
-            dst.unlink()
-            report["removed"].append(str(dst))
-        manifest["files"].pop(rel_key, None)
-    manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    _atomic_write_bytes(manifest_path, manifest_bytes)
+    # 5. manifest를 먼저 준비한다. retired 원본은 manifest 확정 전까지 같은 디렉터리의
+    # backup으로만 옮기며, 어느 단계든 실패하면 원위치로 되돌린다.
+    final_manifest = dict(manifest)
+    final_manifest["files"] = dict(manifest["files"])
+    for rel_key, _, _ in retired:
+        final_manifest["files"].pop(rel_key, None)
+    manifest_bytes = (json.dumps(final_manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    manifest_temporary = _prepare_atomic_write_bytes(manifest_path, manifest_bytes)
+    staged_retirements: list[tuple[Path, Path]] = []
+    retirement_backups: list[Path] = []
+    try:
+        if config_bytes is not None:
+            _atomic_write_bytes(cfg_path, config_bytes)
+        for _, dst, exists in retired:
+            if not exists:
+                continue
+            backup = _retirement_backup_path(dst)
+            retirement_backups.append(backup)
+            os.replace(dst, backup)
+            staged_retirements.append((dst, backup))
+        os.replace(manifest_temporary, manifest_path)
+        manifest_temporary = None
+    except OSError as exc:
+        rollback_errors = _rollback_retirements(staged_retirements, retirement_backups)
+        if rollback_errors:
+            details = "; ".join(str(error) for error in rollback_errors)
+            raise RuntimeError(f"retired 복구 실패: {details}; 원인: {exc}") from exc
+        raise
+    finally:
+        if manifest_temporary is not None:
+            try:
+                manifest_temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    cleanup_errors: list[OSError] = []
+    for _, backup in staged_retirements:
+        try:
+            backup.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_errors.append(exc)
+    if cleanup_errors:
+        details = "; ".join(str(error) for error in cleanup_errors)
+        raise RuntimeError(f"manifest 확정 뒤 retired backup 정리 실패: {details}")
+    report["removed"] = [str(dst) for _, dst, exists in retired if exists]
     return report

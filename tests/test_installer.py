@@ -80,6 +80,10 @@ class InstallTest(unittest.TestCase):
             path.write_bytes(managed_content)
         return path
 
+    def _assert_no_retirement_artifacts(self):
+        self.assertEqual(list(self.target.rglob(".*.tmp")), [])
+        self.assertEqual(list(self.target.rglob(".*.retired-*.bak")), [])
+
     def test_walk_injects_references_and_scripts(self):
         # 합성 템플릿: query 스킬에 references/scripts와 제외 대상까지 둔다.
         import project_brain.installer as inst
@@ -358,6 +362,98 @@ class InstallTest(unittest.TestCase):
 
         self.assertEqual(report["removed"], [])
         self.assertNotIn(rel_key, self._manifest()["files"])
+
+    def test_manifest_prepare_failure_keeps_retired_file_and_old_manifest(self):
+        import project_brain.installer as inst
+        install(self.target, project="demo")
+        retired = self._record_retired(
+            ".agents/skills/demo-brain-query/references/retired.md", b"retired bytes\n")
+        manifest_path = self.target / MANIFEST_FILENAME
+        manifest_before = manifest_path.read_bytes()
+        retired_before = retired.read_bytes()
+        original_write_bytes = Path.write_bytes
+
+        def fail_manifest_temporary_write(path, data):
+            if path.name.startswith(f".{MANIFEST_FILENAME}."):
+                raise OSError("injected manifest preparation failure")
+            return original_write_bytes(path, data)
+
+        with mock.patch.object(Path, "write_bytes", new=fail_manifest_temporary_write):
+            with self.assertRaisesRegex(OSError, "manifest preparation failure"):
+                install(self.target, project="demo")
+
+        self.assertEqual(retired.read_bytes(), retired_before)
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self._assert_no_retirement_artifacts()
+        install(self.target, project="demo")
+        self.assertFalse(retired.exists())
+        second = install(self.target, project="demo")
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [])
+
+    def test_manifest_replace_failure_restores_all_retired_files(self):
+        import project_brain.installer as inst
+        install(self.target, project="demo")
+        retired = [
+            self._record_retired(
+                ".agents/skills/demo-brain-query/references/retired-one.md", b"first retired\n"),
+            self._record_retired(
+                ".agents/skills/demo-brain-query/references/retired-two.md", b"second retired\n"),
+        ]
+        manifest_path = self.target / MANIFEST_FILENAME
+        manifest_before = manifest_path.read_bytes()
+        retired_before = [path.read_bytes() for path in retired]
+        original_replace = inst.os.replace
+
+        def fail_manifest_replace(source, destination):
+            if Path(destination) == manifest_path:
+                raise OSError("injected manifest replace failure")
+            return original_replace(source, destination)
+
+        with mock.patch.object(inst.os, "replace", new=fail_manifest_replace):
+            with self.assertRaisesRegex(OSError, "manifest replace failure"):
+                install(self.target, project="demo")
+
+        self.assertEqual([path.read_bytes() for path in retired], retired_before)
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self._assert_no_retirement_artifacts()
+        install(self.target, project="demo")
+        self.assertTrue(all(not path.exists() for path in retired))
+        second = install(self.target, project="demo")
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [])
+
+    def test_second_retirement_move_failure_restores_first_file(self):
+        import project_brain.installer as inst
+        install(self.target, project="demo")
+        retired = [
+            self._record_retired(
+                ".agents/skills/demo-brain-query/references/retired-one.md", b"first retired\n"),
+            self._record_retired(
+                ".agents/skills/demo-brain-query/references/retired-two.md", b"second retired\n"),
+        ]
+        manifest_path = self.target / MANIFEST_FILENAME
+        manifest_before = manifest_path.read_bytes()
+        retired_before = [path.read_bytes() for path in retired]
+        original_replace = inst.os.replace
+
+        def fail_second_retirement_move(source, destination):
+            if Path(source) == retired[1]:
+                raise OSError("injected second retirement move failure")
+            return original_replace(source, destination)
+
+        with mock.patch.object(inst.os, "replace", new=fail_second_retirement_move):
+            with self.assertRaisesRegex(OSError, "second retirement move failure"):
+                install(self.target, project="demo")
+
+        self.assertEqual([path.read_bytes() for path in retired], retired_before)
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self._assert_no_retirement_artifacts()
+        install(self.target, project="demo")
+        self.assertTrue(all(not path.exists() for path in retired))
+        second = install(self.target, project="demo")
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [])
 
     def test_desired_write_failure_preserves_retired_config_and_manifest(self):
         import project_brain.installer as inst
