@@ -550,12 +550,16 @@ def _run_install(argv) -> int:
                         help="manifest 추적 파일의 사용자 수정도 덮어 갱신(엔진이 소스)")
     args = parser.parse_args(argv)
 
-    from project_brain.installer import install
+    from project_brain.installer import InstallConflictError, install
 
     target = Path(args.target) if args.target else Path.cwd()
     project = args.project or target.resolve().name
-    report = install(target, project=project, brain_root=args.brain_root,
-                     default_branch=args.default_branch, repo=args.repo, force=args.force)
+    try:
+        report = install(target, project=project, brain_root=args.brain_root,
+                         default_branch=args.default_branch, repo=args.repo, force=args.force)
+    except InstallConflictError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 1
     print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
     return 0
 

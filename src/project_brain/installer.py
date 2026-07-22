@@ -34,6 +34,10 @@ _SKILLS = {
 _TEXT_SUFFIXES = {".md", ".py", ".js", ".sh", ".json"}
 
 
+class InstallConflictError(RuntimeError):
+    """안전한 재설치를 보장할 수 없어 어떤 쓰기도 시작하지 않은 상태."""
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -81,15 +85,97 @@ def _preserve_executable_mode(src: Path, dst: Path) -> bool:
     return True
 
 
+def _desired_files(*, project: str, brain_root: str,
+                   default_branch: str, repo: str) -> dict[str, tuple[Path, bytes, str]]:
+    desired = {}
+    for skill, suffix in _SKILLS.items():
+        src_root = _TEMPLATES_DIR / skill
+        if not src_root.is_dir():
+            continue
+        skill_dir_name = f"{project}-{suffix}"
+        for src in sorted(src_root.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(src_root)
+            if _excluded(rel):
+                continue
+            rel_key = str(Path(".agents") / "skills" / skill_dir_name / rel)
+            rendered = _rendered_bytes(
+                src, project=project, brain_root=brain_root,
+                default_branch=default_branch, repo=repo,
+            )
+            desired[rel_key] = (src, rendered, _sha256_bytes(rendered))
+    return desired
+
+
+def _managed_roots(project: str) -> tuple[Path, ...]:
+    return tuple(
+        Path(".agents") / "skills" / f"{project}-{suffix}"
+        for suffix in _SKILLS.values()
+    )
+
+
+def _safe_managed_path(target_root: Path, rel_key: str,
+                       allowed_roots: tuple[Path, ...]) -> Path:
+    if not isinstance(rel_key, str) or not rel_key:
+        raise InstallConflictError(f"{rel_key!r}: 안전하지 않은 관리 경로")
+    rel = Path(rel_key)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise InstallConflictError(f"{rel_key}: 안전하지 않은 관리 경로")
+    if not any(rel != root and rel.parts[:len(root.parts)] == root.parts
+               for root in allowed_roots):
+        raise InstallConflictError(f"{rel_key}: 안전하지 않은 관리 경로")
+
+    cursor = target_root
+    for part in rel.parts[:-1]:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise InstallConflictError(
+                f"{rel_key}: 부모 심링크가 대상 루트 밖 또는 다른 위치를 가리킴"
+            )
+    dst = target_root / rel
+    if dst.is_symlink():
+        raise InstallConflictError(f"{rel_key}: 관리 파일이 심링크임")
+    return dst
+
+
+def _preflight_retired(target_root: Path, manifest_files: dict,
+                       desired_keys: set[str], allowed_roots: tuple[Path, ...]):
+    retired = []
+    for rel_key in sorted(set(manifest_files) - desired_keys):
+        recorded = manifest_files[rel_key]
+        if (not isinstance(recorded, str) or len(recorded) != 64
+                or any(ch not in "0123456789abcdef" for ch in recorded)):
+            raise InstallConflictError(f"{rel_key}: manifest SHA-256 기록이 올바르지 않음")
+        dst = _safe_managed_path(target_root, rel_key, allowed_roots)
+        if not dst.exists():
+            retired.append((rel_key, dst, False))
+            continue
+        if not dst.is_file():
+            raise InstallConflictError(f"{rel_key}: retired 관리 경로가 일반 파일이 아님")
+        on_disk = _sha256_bytes(dst.read_bytes())
+        if on_disk != recorded:
+            raise InstallConflictError(
+                f"{rel_key}: 사용자 수정된 retired 관리 파일은 삭제할 수 없음"
+            )
+        retired.append((rel_key, dst, True))
+    return retired
+
+
 def install(target, *, project: str, brain_root: str = "brain",
             default_branch: str = "", repo: str = "", force: bool = False) -> dict:
-    """target 프로젝트 루트에 설치. 반환: {config, created, updated, adopted, skipped}."""
-    target = Path(target)
-    report = {"config": "kept", "created": [], "updated": [],
-              "adopted": [], "skipped": []}
+    """target에 설치한다.
 
-    # 1. config — 있으면 보존(스킬 렌더는 config를 따른다), 없으면 생성.
+    ``removed``는 실제로 unlink한 retired 관리 파일만 담는다. 이미 없던 retired 파일은
+    manifest key만 정리하므로 ``removed``에 넣지 않는다.
+    """
+    target = Path(target).resolve()
+    report = {"config": "kept", "created": [], "updated": [],
+              "removed": [], "adopted": [], "skipped": []}
+
+    # 1. config를 읽고 유효값만 계산한다. retired preflight 전에는 쓰지 않는다.
     cfg_path = target / CONFIG_FILENAME
+    config_bytes = None
     if cfg_path.exists():
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         project = cfg.get("project") or project
@@ -104,67 +190,74 @@ def install(target, *, project: str, brain_root: str = "brain",
                     if v and k not in cfg}
         if backfill:
             cfg.update(backfill)
-            cfg_path.write_text(
-                json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            config_bytes = (json.dumps(cfg, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
             report["config"] = "updated"
     else:
-        cfg_path.write_text(
-            json.dumps({"project": project, "brain_root": brain_root,
-                        "default_branch": default_branch, "repo": repo},
-                       ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8")
+        config_bytes = (json.dumps(
+            {"project": project, "brain_root": brain_root,
+             "default_branch": default_branch, "repo": repo},
+            ensure_ascii=False, indent=2,
+        ) + "\n").encode("utf-8")
         report["config"] = "created"
 
-    # 2. manifest 로드
+    # 2. manifest와 현재 템플릿의 원하는 파일 집합을 계산한다.
     manifest_path = target / MANIFEST_FILENAME
     manifest = {"files": {}}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest.setdefault("files", {})  # 구버전·손상 manifest 방어(KeyError 차단)
+    if not isinstance(manifest.get("files"), dict):
+        raise InstallConflictError("manifest files는 객체여야 함")
+    desired = _desired_files(
+        project=project, brain_root=brain_root,
+        default_branch=default_branch, repo=repo,
+    )
+    allowed_roots = _managed_roots(project)
 
-    # 3. 스킬 디렉토리 walk 주입(파일 단위 보존)
-    for skill, suffix in _SKILLS.items():
-        src_root = _TEMPLATES_DIR / skill
-        if not src_root.is_dir():
-            continue
-        skill_dir_name = f"{project}-{suffix}"
-        for src in sorted(src_root.rglob("*")):
-            if not src.is_file():
-                continue
-            rel = src.relative_to(src_root)
-            if _excluded(rel):
-                continue
-            rel_key = str(Path(".agents") / "skills" / skill_dir_name / rel)
-            dst = target / rel_key
-            rendered = _rendered_bytes(src, project=project, brain_root=brain_root,
-                                       default_branch=default_branch, repo=repo)
-            rendered_hash = _sha256_bytes(rendered)
-            recorded = manifest["files"].get(rel_key)
-            if dst.exists():
-                on_disk = _sha256_bytes(dst.read_bytes())
-                if on_disk == rendered_hash:
-                    # 내용 동일 → 채택(manifest 밖이었으면)·유지. 안 씀.
-                    if recorded != rendered_hash:
-                        report["adopted"].append(str(dst))
-                    elif _preserve_executable_mode(src, dst):
-                        report["updated"].append(str(dst))
-                    manifest["files"][rel_key] = rendered_hash
-                    continue
-                if recorded == on_disk or (recorded is not None and force):
-                    # 도구 소유 갱신, 또는 manifest 기록 있고 force(사용자 수정 덮기)
-                    dst.write_bytes(rendered)
-                    _preserve_executable_mode(src, dst)
+    # 3. 삭제·생성·갱신 후보를 모두 검사한 뒤에만 쓰기를 시작한다.
+    retired = _preflight_retired(
+        target, manifest["files"], set(desired), allowed_roots,
+    )
+    desired_paths = {
+        rel_key: _safe_managed_path(target, rel_key, allowed_roots)
+        for rel_key in desired
+    }
+
+    if config_bytes is not None:
+        cfg_path.write_bytes(config_bytes)
+
+    for rel_key, dst, exists in retired:
+        if exists:
+            dst.unlink()
+            report["removed"].append(str(dst))
+        manifest["files"].pop(rel_key, None)
+
+    # 4. 원하는 파일을 주입한다(기존 파일 보존 의미는 유지).
+    for rel_key, (src, rendered, rendered_hash) in desired.items():
+        dst = desired_paths[rel_key]
+        recorded = manifest["files"].get(rel_key)
+        if dst.exists():
+            on_disk = _sha256_bytes(dst.read_bytes())
+            if on_disk == rendered_hash:
+                if recorded != rendered_hash:
+                    report["adopted"].append(str(dst))
+                elif _preserve_executable_mode(src, dst):
                     report["updated"].append(str(dst))
-                else:
-                    # manifest 밖(사용자 소유) 또는 사용자 수정 + not force — 보존
-                    report["skipped"].append(str(dst))
-                    continue
-            else:
-                dst.parent.mkdir(parents=True, exist_ok=True)
+                manifest["files"][rel_key] = rendered_hash
+                continue
+            if recorded == on_disk or (recorded is not None and force):
                 dst.write_bytes(rendered)
                 _preserve_executable_mode(src, dst)
-                report["created"].append(str(dst))
-            manifest["files"][rel_key] = rendered_hash
+                report["updated"].append(str(dst))
+            else:
+                report["skipped"].append(str(dst))
+                continue
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(rendered)
+            _preserve_executable_mode(src, dst)
+            report["created"].append(str(dst))
+        manifest["files"][rel_key] = rendered_hash
 
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

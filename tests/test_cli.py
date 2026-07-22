@@ -7,10 +7,11 @@ ingest 서브커맨드가 ingest()를 호출해 store에 적재하는지(test_cl
 검증한다(spec §3.1 CLI subcommand)."""
 
 import io
+import hashlib
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -763,6 +764,37 @@ class TestCliInstallDoctor(unittest.TestCase):
             self.assertTrue(
                 (target / ".agents" / "skills" / "demo-brain-query" / "SKILL.md").exists()
             )
+
+    def test_install_retired_conflict_returns_json_error_without_traceback(self):
+        from project_brain.installer import MANIFEST_FILENAME, install
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo")
+            rel_key = ".agents/skills/demo-brain-query/references/retired.md"
+            retired = target / rel_key
+            retired.parent.mkdir(parents=True, exist_ok=True)
+            retired.write_text("managed\n", encoding="utf-8")
+            manifest_path = target / MANIFEST_FILENAME
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_data["files"][rel_key] = hashlib.sha256(b"managed\n").hexdigest()
+            manifest_path.write_text(
+                json.dumps(manifest_data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            retired.write_text("사용자 수정\n", encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            argv = ["install", "--target", td, "--project", "demo", "--force"]
+
+            with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(stdout), redirect_stderr(stderr):
+                rc = cli.main()
+
+            self.assertNotEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertIn("retired.md", payload["error"])
+            self.assertIn("사용자 수정", payload["error"])
+            self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_doctor_subcommand_runs(self):
         out = io.StringIO()

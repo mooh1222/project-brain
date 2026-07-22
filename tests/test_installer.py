@@ -7,6 +7,7 @@ hwi_PKM manifest 멱등 패턴의 파일 단위 적용.
 from __future__ import annotations
 
 import json
+import hashlib
 import stat
 import unittest
 from pathlib import Path
@@ -56,6 +57,27 @@ class InstallTest(unittest.TestCase):
                 if src.is_file() and not inst._excluded(src.relative_to(root)):
                     n += 1
         return n
+
+    def _manifest(self):
+        return json.loads(
+            (self.target / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+
+    def _write_manifest(self, manifest):
+        (self.target / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _record_retired(self, rel_key, managed_content=b"managed\n", *, create=True):
+        manifest = self._manifest()
+        manifest["files"][rel_key] = hashlib.sha256(managed_content).hexdigest()
+        self._write_manifest(manifest)
+        path = self.target / rel_key
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(managed_content)
+        return path
 
     def test_walk_injects_references_and_scripts(self):
         # 합성 템플릿: query 스킬에 references/scripts와 제외 대상까지 둔다.
@@ -188,6 +210,126 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["updated"], [])
         self.assertEqual(report["adopted"], [])
         self.assertEqual(report["skipped"], [])
+        self.assertEqual(report["removed"], [])
+
+    def test_reinstall_removes_unchanged_retired_file_and_prunes_manifest(self):
+        install(self.target, project="demo")
+        rel_key = ".agents/skills/demo-brain-query/references/retired.md"
+        retired = self._record_retired(rel_key)
+
+        report = install(self.target, project="demo")
+
+        self.assertFalse(retired.exists())
+        self.assertEqual(report["removed"], [str(retired)])
+        self.assertNotIn(rel_key, self._manifest()["files"])
+
+    def test_reinstall_prunes_missing_retired_manifest_key_without_reporting_removal(self):
+        install(self.target, project="demo")
+        rel_key = ".agents/skills/demo-brain-query/references/missing.md"
+        self._record_retired(rel_key, create=False)
+
+        report = install(self.target, project="demo")
+
+        self.assertEqual(report["removed"], [])
+        self.assertNotIn(rel_key, self._manifest()["files"])
+
+    def test_modified_retired_file_fails_before_any_write_even_with_force(self):
+        install(self.target, project="demo")
+        rel_key = ".agents/skills/demo-brain-query/references/retired.md"
+        retired = self._record_retired(rel_key)
+        retired.write_text("사용자 수정\n", encoding="utf-8")
+        desired = self._skill("demo-brain-query")
+        desired.unlink()
+        manifest_before = (self.target / MANIFEST_FILENAME).read_bytes()
+        config_before = (self.target / CONFIG_FILENAME).read_bytes()
+
+        with self.assertRaisesRegex(RuntimeError, "retired.md.*사용자 수정"):
+            install(self.target, project="demo", force=True)
+
+        self.assertEqual(retired.read_text(encoding="utf-8"), "사용자 수정\n")
+        self.assertFalse(desired.exists())
+        self.assertEqual((self.target / MANIFEST_FILENAME).read_bytes(), manifest_before)
+        self.assertEqual((self.target / CONFIG_FILENAME).read_bytes(), config_before)
+
+    def test_retired_symlink_and_parent_symlink_fail_closed(self):
+        install(self.target, project="demo")
+        with TemporaryDirectory() as outside_dir:
+            outside = Path(outside_dir)
+            outside_file = outside / "outside.md"
+            outside_file.write_text("outside\n", encoding="utf-8")
+
+            symlink_key = ".agents/skills/demo-brain-query/references/retired-link.md"
+            symlink = self._record_retired(symlink_key, create=False)
+            symlink.parent.mkdir(parents=True, exist_ok=True)
+            symlink.symlink_to(outside_file)
+            with self.assertRaisesRegex(RuntimeError, "retired-link.md.*심링크"):
+                install(self.target, project="demo")
+            symlink.unlink()
+
+            manifest = self._manifest()
+            manifest["files"].pop(symlink_key)
+            parent_key = ".agents/skills/demo-brain-query/references/linked/retired.md"
+            manifest["files"][parent_key] = hashlib.sha256(b"outside\n").hexdigest()
+            self._write_manifest(manifest)
+            linked_parent = self.target / ".agents/skills/demo-brain-query/references/linked"
+            linked_parent.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "linked/retired.md.*대상 루트 밖"):
+                install(self.target, project="demo")
+            self.assertEqual(outside_file.read_text(encoding="utf-8"), "outside\n")
+
+    def test_unsafe_retired_manifest_paths_fail_closed(self):
+        with TemporaryDirectory() as outside_dir:
+            outside = Path(outside_dir) / "outside.md"
+            outside.write_text("outside\n", encoding="utf-8")
+            unsafe_keys = (
+                str(outside),
+                "../outside.md",
+                ".agents/skills/not-a-managed-root/retired.md",
+            )
+            for index, unsafe_key in enumerate(unsafe_keys):
+                with self.subTest(unsafe_key=unsafe_key):
+                    target = self.target / f"unsafe-{index}"
+                    target.mkdir()
+                    install(target, project="demo")
+                    manifest_path = target / MANIFEST_FILENAME
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest["files"][unsafe_key] = hashlib.sha256(b"outside\n").hexdigest()
+                    manifest_path.write_text(
+                        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    before = manifest_path.read_bytes()
+                    with self.assertRaisesRegex(RuntimeError, "안전하지 않은 관리 경로"):
+                        install(target, project="demo")
+                    self.assertEqual(manifest_path.read_bytes(), before)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_template_move_creates_new_file_removes_old_and_second_run_is_idempotent(self):
+        import project_brain.installer as inst
+        templates = self.target / "move_templates"
+        old_source = templates / "query" / "references" / "old.md"
+        old_source.parent.mkdir(parents=True)
+        old_source.write_text("managed\n", encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            old_installed = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            new_installed = self._skill_dir("demo-brain-query") / "references" / "new.md"
+            old_source.unlink()
+            (old_source.parent / "new.md").write_text("managed\n", encoding="utf-8")
+
+            migrated = install(self.target, project="demo")
+            second = install(self.target, project="demo")
+
+            self.assertEqual(migrated["removed"], [str(old_installed)])
+            self.assertIn(str(new_installed), migrated["created"])
+            self.assertFalse(old_installed.exists())
+            self.assertTrue(new_installed.is_file())
+            for field in ("created", "updated", "removed", "adopted", "skipped"):
+                self.assertEqual(second[field], [], field)
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
 
     def test_existing_config_is_preserved(self):
         (self.target / CONFIG_FILENAME).write_text(
