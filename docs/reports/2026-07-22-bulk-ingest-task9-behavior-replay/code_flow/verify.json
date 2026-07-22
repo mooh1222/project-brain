@@ -1,0 +1,14 @@
+{
+  "groups": [{
+    "group": "runtime-flow",
+    "extract": {"atoms": []},
+    "verify": {"corrected_atoms": [{
+      "mapping_key": "runtime-call-flow",
+      "canonical_summary": "런타임 호출 흐름",
+      "meaning": "runtime::run은 dispatch를 호출하고, dispatch는 transform을 호출한다.",
+      "boundary": "runtime.cpp에서 확인한 run, dispatch, transform 호출 사슬에 한정한다.",
+      "code_anchors": [{"path": "source/runtime.cpp", "symbol": "runtime::run", "quote": "return dispatch(41);"}, {"path": "source/runtime.cpp", "symbol": "runtime::dispatch", "quote": "return transform(value);"}],
+      "glossary_terms": []
+    }]}
+  }]
+}

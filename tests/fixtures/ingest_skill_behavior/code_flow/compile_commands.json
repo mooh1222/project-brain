@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "source/runtime.cpp",
+    "arguments": ["clang++", "-std=c++17", "-c", "source/runtime.cpp"]
+  }
+]

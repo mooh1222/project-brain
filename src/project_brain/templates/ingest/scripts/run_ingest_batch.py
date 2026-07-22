@@ -79,6 +79,8 @@ def _load_manifest(path: Path) -> list[dict[str, Any]]:
         raise ValueError(f"manifest를 읽을 수 없습니다: {exc}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise ValueError("manifest.items는 배열이어야 합니다")
+    if not payload["items"]:
+        raise ValueError("manifest.items는 최소 1개여야 합니다")
 
     keys: set[str] = set()
     items: list[dict[str, Any]] = []

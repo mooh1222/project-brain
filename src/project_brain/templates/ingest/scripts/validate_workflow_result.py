@@ -17,8 +17,8 @@ def validate_result(payload: dict) -> list[str]:
     expected = payload.get("expected")
     items = payload.get("items")
     failures = payload.get("failures")
-    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
-        errors.append("expected는 0 이상의 정수여야 합니다")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected <= 0:
+        errors.append("expected는 1 이상의 정수여야 합니다")
     if not isinstance(items, list):
         errors.append("items는 배열이어야 합니다")
         items = []

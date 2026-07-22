@@ -1,0 +1,1 @@
+mapping key로 mapping.sample-a.core-behavior를 사용해 적재해 줘.

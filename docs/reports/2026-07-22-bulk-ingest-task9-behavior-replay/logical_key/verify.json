@@ -1,0 +1,14 @@
+{
+  "groups": [{
+    "group": "sample-a",
+    "extract": {"atoms": []},
+    "verify": {"corrected_atoms": [{
+      "mapping_key": "mapping.sample-a.core-behavior",
+      "canonical_summary": "입력값 증가",
+      "meaning": "sample_a::core_behavior는 받은 정수에 1을 더해 반환한다.",
+      "boundary": "sample_a::core_behavior 함수 본문에서 확인한 반환식에 한정한다.",
+      "code_anchors": [{"path": "source/sample_a.cpp", "symbol": "sample_a::core_behavior", "quote": "return value + 1;"}],
+      "glossary_terms": []
+    }]}
+  }]
+}

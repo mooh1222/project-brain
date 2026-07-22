@@ -19,6 +19,7 @@ description: |
 기본 source packet은 현재 {{DEFAULT_BRANCH}} 코드, 현행 기능 문서, 현재 운영·서비스 규칙이다.
 기본 목표는 현재 사실 적재이며, 이력 범위는 `references/scope.md`의 `history_coverage=unsearched`로 기록한다.
 기본 source packet을 선언한 뒤에만 코드와 문서를 탐색한다.
+소스 읽기 전에 사용자에게 보이는 첫 진행 보고에 `Source Intake`, `route=single|batch` 중 하나, `history_coverage=<값>`을 정확히 표기하고 대상·소스 묶음·코드 기준점을 남긴다; 보류해도 이 선언은 생략하지 않는다.
 
 소스 위치를 찾지 못했거나 사용자가 소스 범위를 제한했으면 필요한 범위만 짧게 확인한다.
 소스 충돌, 현행 소스 부재, 경계 불명확, 이력 근거 부족, 원자 승격이 결과를 바꾸는 경우만 예외 큐로 모은다.

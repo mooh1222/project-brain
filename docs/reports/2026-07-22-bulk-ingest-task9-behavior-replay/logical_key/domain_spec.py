@@ -1,0 +1,14 @@
+CTX = "sample-a"
+COMMIT = "32b33afe30787125a66078dd7c4e2911622558a0"
+REPO = "fixture/logical-key"
+MANIFESTS = {"code": "manifest.sample-a.code"}
+DISPLAY_NAME = "sample-a"
+BOUNDARY_SUMMARY = "현재 코드에서 확인한 sample_a::core_behavior 반환 동작"
+IN_SCOPE = ["sample_a::core_behavior"]
+OUT_OF_SCOPE = []
+GROUP_ORDER = ["sample-a"]
+EXCLUDE_TERMS = set()
+HISTORY_COVERAGE = "unsearched"
+NOW = "2026-07-22T00:00:00+09:00"
+CORRECTIONS = {}
+DECISIONS = []

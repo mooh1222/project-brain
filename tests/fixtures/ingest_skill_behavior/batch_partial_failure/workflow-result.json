@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "expected": 3,
+  "failures": [],
+  "items": [
+    {"key": "alpha", "extract_status": "ok", "verify_status": "ok", "verdict": "pass"},
+    {"key": "beta", "extract_status": "ok", "verify_status": "error", "verdict": "pass"},
+    {"key": "gamma", "extract_status": "ok", "verify_status": "ok", "verdict": "fixed"}
+  ]
+}

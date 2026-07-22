@@ -232,6 +232,21 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
         self.assertEqual(missing_path.returncode, 1, missing_path.stderr)
         self.assertEqual(self._calls(), [])
 
+    def test_empty_manifest_is_rejected_before_runner_or_finalizer(self):
+        self._copy_runtime_scripts()
+        manifest = self.manifest_dir / "empty-batch.json"
+        manifest.write_text(json.dumps({"items": []}), encoding="utf-8")
+        report = self.root / "empty-report.json"
+
+        result = self._run_batch(manifest, report)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(any("최소 1개" in error for error in payload["errors"]))
+        self.assertEqual(self._calls(), [])
+        self.assertFalse(report.exists())
+
     def test_invalid_report_target_fails_before_any_item_with_json_error(self):
         self._copy_runtime_scripts()
         report_directory = self.root / "report-directory"
@@ -277,6 +292,27 @@ class WorkflowResultValidatorTest(unittest.TestCase):
         payload["items"].pop()
         payload["status"] = "completed"
         self.assertTrue(self._validate(payload))
+
+    def test_cli_rejects_empty_completed_workflow_result(self):
+        payload = {"status": "completed", "expected": 0, "items": [], "failures": []}
+        with TemporaryDirectory() as td:
+            path = Path(td) / "empty-result.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(VALIDATOR_SCRIPT), str(path)],
+                                    text=True, capture_output=True, check=False)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertFalse(output["ok"])
+        self.assertTrue(any("1 이상의 정수" in error for error in output["errors"]))
+
+    def test_rejects_invalid_expected_scalars(self):
+        for expected in (False, -1, "3", None):
+            with self.subTest(expected=expected):
+                payload = self._valid_payload()
+                payload["expected"] = expected
+                errors = self._validate(payload)
+                self.assertTrue(any("1 이상의 정수" in error for error in errors))
 
     def test_rejects_duplicate_item_keys(self):
         payload = self._valid_payload()

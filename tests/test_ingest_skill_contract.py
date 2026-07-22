@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from project_brain.installer import install
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +29,39 @@ REQUIRED_REFERENCES = (
     "worked-example.md",
     "ingest-case-log.md",
 )
+SOURCE_INTAKE_REPORT_TOKENS = (
+    "사용자에게 보이는 첫 진행 보고",
+    "Source Intake",
+    "route=single|batch",
+    "history_coverage=<값>",
+    "보류해도 이 선언은 생략하지 않는다",
+)
+RAW_SANITIZATION_TOKENS = (
+    "소문자 ASCII 영숫자와 하이픈",
+    "`[^a-z0-9]+`",
+    "fallback `document`",
+    "`Legacy Plan 01.md` → `legacy-plan-01.md`",
+    "`Collision Notes.md` → `collision-notes.md`",
+    "Source Intake에서 선언한 source bundle root",
+    "root 아래 상대경로",
+    "절대경로와 `..` 탈출",
+    "`.` component",
+    "Unicode NFC",
+    "경로 구분자는 `/`",
+    "대소문자는 바꾸지 않고",
+    "canonical relative path 문자열의 UTF-8 바이트",
+    "파일 내용의 SHA-256이 아니다",
+    "suffix를 늘리고 매번 유일성을 확인",
+    "심볼릭 링크는 거부한다",
+    "64 hex 글자까지",
+    "비어 있지 않으면 fail-closed",
+)
+
+
+def _raw_policy_section(text: str) -> str:
+    start = text.index("## 기획서 원문 보관")
+    end = text.index("파일 기반 manifest", start)
+    return text[start:end]
 
 
 class IngestSkillContractTest(unittest.TestCase):
@@ -60,6 +96,41 @@ class IngestSkillContractTest(unittest.TestCase):
         for detail in ("spec-v<N>.md", "sanitized-original-basename", "analyze-spec-ppt"):
             self.assertNotIn(detail, skill)
             self.assertIn(detail, ingest_tools)
+
+    def test_raw_filename_sanitization_contract_survives_install(self):
+        canonical = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
+        canonical_section = _raw_policy_section(canonical)
+        for token in RAW_SANITIZATION_TOKENS:
+            self.assertIn(token, canonical_section)
+
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo")
+            rendered = (
+                target
+                / ".agents"
+                / "skills"
+                / "demo-brain-ingest"
+                / "references"
+                / "ingest-tools.md"
+            ).read_text(encoding="utf-8")
+        rendered_section = _raw_policy_section(rendered)
+        for token in RAW_SANITIZATION_TOKENS:
+            self.assertIn(token, rendered_section)
+
+    def test_source_intake_report_contract_survives_install(self):
+        canonical = SKILL.read_text(encoding="utf-8")
+        for token in SOURCE_INTAKE_REPORT_TOKENS:
+            self.assertIn(token, canonical)
+
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo")
+            rendered = (
+                target / ".agents" / "skills" / "demo-brain-ingest" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+        for token in SOURCE_INTAKE_REPORT_TOKENS:
+            self.assertIn(token, rendered)
 
 
 if __name__ == "__main__":

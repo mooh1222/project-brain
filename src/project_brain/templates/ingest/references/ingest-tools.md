@@ -175,10 +175,16 @@ keyword-only 필수다.
   버전을 덮어쓰지 않는다.
 - 서로 다른 옛 문서를 대량 보관하거나 내부 버전을 알 수 없으면
   `<sanitized-original-basename>.md`를 쓴다. 원본 이름을 안전하게 정리한 basename이므로 서로 다른
-  원본이 충돌하지 않게 확인한다. 같은 basename이 이미 있으면 원본 source locator/path의 SHA-256 앞
+  원본이 충돌하지 않게 확인한다. 확장자를 뺀 이름은 소문자 ASCII 영숫자와 하이픈만 남기며, `[^a-z0-9]+`는
+  하이픈 하나로 바꾸고 양끝 하이픈은 제거한다. 결과가 비면 fallback `document`를 쓴다. 예: `Legacy Plan 01.md` → `legacy-plan-01.md`, `Collision Notes.md` → `collision-notes.md`.
+  같은 basename이 이미 있으면 원본 source locator/path의 SHA-256 앞
   12글자를 붙인 `<sanitized-original-basename>-<sha256-12>.md`를 쓴다. 쓰기 전에 최종 후보 경로의
-  유일성을 확인하고, 접미사까지 충돌하면 SHA-256 접미사를 결정론적으로 늘린다. 기존 raw 파일은 절대
-  덮어쓰지 않는다.
+  해시는 Source Intake에서 선언한 source bundle root를 기준으로 한다. 입력은 그 root 아래 상대경로여야 하며,
+  절대경로와 `..` 탈출은 거부한다. `.` component는 제거하고 각 component는 Unicode NFC로 정규화하며 경로 구분자는 `/`를
+  쓴다. 대소문자는 바꾸지 않고 이 canonical relative path 문자열의 UTF-8 바이트를 SHA-256 입력으로 쓴다. 파일 내용의 SHA-256이 아니다.
+  최종 후보가 충돌하면 suffix를 늘리고 매번 유일성을 확인한다. suffix는 12글자부터 64 hex 글자까지
+  늘리며, 그 범위를 모두 써도 충돌하면 오류로 끝낸다. source bundle root 자체와 그 아래 경로의 심볼릭 링크는 거부한다.
+  재생 드라이버는 raw target이 비어 있지 않으면 fail-closed로 중단한다. 기존 raw 파일은 절대 덮어쓰지 않는다.
 
 파일 기반 manifest에는 `build_manifests()`가 보존하는 필드에만 다음 출처 정보를 기록한다.
 

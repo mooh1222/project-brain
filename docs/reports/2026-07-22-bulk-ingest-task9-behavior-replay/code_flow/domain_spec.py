@@ -1,0 +1,14 @@
+CTX = "runtime-flow"
+COMMIT = "5c880d519c6bc3ae1a0cbcdc4e1d831241ba084f"
+REPO = "fixture/code-flow"
+MANIFESTS = {"code": "manifest.runtime-flow.code"}
+DISPLAY_NAME = "runtime-flow"
+BOUNDARY_SUMMARY = "runtime.cpp에서 확인한 일반 함수 호출 사슬"
+IN_SCOPE = ["runtime::run", "runtime::dispatch", "runtime::transform"]
+OUT_OF_SCOPE = ["다른 번역 단위"]
+GROUP_ORDER = ["runtime-flow"]
+EXCLUDE_TERMS = set()
+HISTORY_COVERAGE = "unsearched"
+NOW = "2026-07-22T00:00:00+09:00"
+CORRECTIONS = {}
+DECISIONS = []

@@ -1,0 +1,14 @@
+CTX = "sample-a"
+COMMIT = "8362e8d9d09600cd8468e28e5a49c02dd78bd892"
+REPO = "fixture/single"
+MANIFESTS = {"code": "manifest.sample-a.code"}
+DISPLAY_NAME = "sample-a"
+BOUNDARY_SUMMARY = "현재 코드에서 확인한 sample_a::core_behavior 반환 동작"
+IN_SCOPE = ["sample_a::core_behavior"]
+OUT_OF_SCOPE = ["변경 이력"]
+GROUP_ORDER = ["sample-a"]
+EXCLUDE_TERMS = set()
+HISTORY_COVERAGE = "unsearched"
+NOW = "2026-07-22T00:00:00+09:00"
+CORRECTIONS = {}
+DECISIONS = []
