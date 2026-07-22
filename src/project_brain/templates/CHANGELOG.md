@@ -10,6 +10,10 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-07-22 — 대량 적재 완료 계약 강화
+
+완성 ID를 논리 key로 넣지 못하게 막고, raw 청크의 토큰 수는 보수적으로 추정해 과대 단위를 안전하게 나누며, 개정 기획서의 `spec-v<N>.md`와 대량·이전 자료 보관용 정리된 원본 basename 규칙(충돌 시 SHA-256 접미사)을 분리했다. 여러 항목은 `run_ingest_batch.py`가 처리하고 모두 성공한 뒤 `finalize_ingest.sh`는 한 번만 수행한다. 동적 workflow 결과는 `validate_workflow_result.py`를 통과해야 다음 단계로 간다. 코드 기반 작업은 선택적 `references/project-code-verification.md`를 읽어 그 계약을 동적 workflow와 하위 작업자에게 전달한다. SKILL.md는 실행 경로 중심 146줄로 줄였다.
+
 ## 2026-07-01 — 적대검증 진정성 문구 보강 + 안전장치 B 폐기(엔진 변경 없음)
 
 completeness-checklist 8번: 적대검증을 의무로 못 박아도 "완료" 도장으로 퇴화하면 무의미 — 핵심은 단계 존재가 아니라 실제 반박 시도, 코드로 강제 못 하는 행동 완화책임을 한 줄 보강. 안전장치로 검토하던 DecisionRecord.verification_note 하드 게이트(설계 B)는 4렌즈+surface 교차검증 결과 헛도장(빈값 검사는 구문 층이라 "근거 있는데 모순"에 못 닿음)으로 판정해 **폐기 — 엔진 변경 없음**. 결정 근거·후속 위생 티켓은 `docs/plans/2026-06-30-ingest-skill-retro-improvements.md`("P0 후속") + `docs/plans/2026-07-01-decisionrecord-evidence-refs-hygiene.md`.
