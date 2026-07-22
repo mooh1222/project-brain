@@ -21,4 +21,13 @@ DECISIONS = []               # decisions[] 노트 그대로(엔진 build_decisio
                               #      "spec_reflected"?, "affects":[mapping_key...],
                               #      "evidence":[{"type":"commit|jira|pr","ref","summary"?,"locator"?}]}
                               #   (commit: locator={repo,sha} 자동. jira/pr: locator=인스턴스 URL을 직접 적는다.)
+FINALIZATION = {             # 고정 샘플 질의 금지: 이 적재가 실제로 회수해야 할 ID를 선언
+    "recall_checks": [{
+        "key": "",          # 이 적재 안에서 중복 없는 검사 key
+        "query": "",        # 새 도메인을 실제로 묻는 질문
+        "expected_object_ids": [],
+        "require_code_locators": True,
+    }],
+    "intentional_terminal_ids": [],  # 새 고립 중 근거를 남긴 의도적 종착점만
+}
 # HOOK = lambda atoms: atoms  # (선택) 선언적으로 안 되는 그 적재 한정 변칙. 쓰면 ingest-case-log.md에 기록.

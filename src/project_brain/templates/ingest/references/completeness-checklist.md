@@ -19,11 +19,15 @@
 ## 실행 후 일곱 게이트
 
 1. 동적 workflow 결과가 있으면 `scripts/validate_workflow_result.py <결과.json>`이 통과했다. 직접 단건 실행이면 `해당 없음`으로 기록한다.
-2. batch 모드면 `batch-report.json`에서 `expected == len(succeeded)`, `failed=[]`, `finalized=true`다. 직접 단건 실행이면 `해당 없음`으로 기록한다.
+2. batch 모드면 `batch-report.json`에서 `expected == len(succeeded)`, `failed=[]`, `finalized=true`,
+   `finalization.ok=true`다. 최초 `isolation_baseline`이 보존됐고 finalization 계약을 포함한
+   `manifest_fingerprint`가 resume 입력과 일치한다. 직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.
 3. lint 결과가 0건이다.
 4. `project-brain eval`이 모두 통과했다.
-5. `project-brain graph isolated`에 이번 적재로 새로 생긴 분류되지 않은 고립 객체가 0개다. `ingest-tools.md`에 따라 객체 ID·분류·근거를 기록한 의도적 종착점만 허용하며, 0개를 만들려고 의미 없는 연결은 추가하지 않는다.
+5. finalization의 `unexpected_new_ids=[]`다. 이번 적재로 새로 생긴 고립 객체 중
+   `intentional_terminal_ids`에 객체 ID·분류·근거를 기록한 의도적 종착점만 허용하며, 0개를 만들려고 의미 없는 연결은 추가하지 않는다.
 6. `python3 -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"`가 통과했다.
-7. `project-brain search "<도메인 질문>"` 결과에 mapping과 연결된 code locator가 함께 나온다.
+7. 모든 recall check의 `missing_object_ids=[]`, `missing_code_locator_object_ids=[]`다. 즉 manifest에
+   선언한 도메인 질문이 기대 객체를 회수하고, 요구한 mapping에는 연결된 code locator가 함께 나온다.
 
 하나라도 실패하면 완료로 처리하지 말고 실패 항목, 근거, 같은 입력으로 재개할 절차를 보고한다.

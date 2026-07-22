@@ -113,6 +113,8 @@ def main(argv):
     ap.add_argument("verify_json")
     ap.add_argument("domain_spec_py")
     ap.add_argument("-o", "--out", default="notes.json")
+    ap.add_argument("--finalization-out",
+                    help="domain spec의 FINALIZATION을 semantic gate JSON으로 저장")
     args = ap.parse_args(argv)
     with open(args.verify_json, encoding="utf-8") as f:
         verify_data = json.load(f)
@@ -120,6 +122,12 @@ def main(argv):
     notes = assemble_notes(verify_data, spec)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(notes, f, ensure_ascii=False, indent=2)
+    if args.finalization_out:
+        if "FINALIZATION" not in spec:
+            raise SystemExit("domain spec에 FINALIZATION이 없습니다")
+        with open(args.finalization_out, "w", encoding="utf-8") as f:
+            json.dump(spec["FINALIZATION"], f, ensure_ascii=False, indent=2)
+            f.write("\n")
     print(f"notes 조립: mappings={len(notes['mappings'])} anchors={len(notes['code_anchors'])} "
           f"terms={len(notes['glossary'])} decisions={len(notes['decisions'])} → {args.out}")
 

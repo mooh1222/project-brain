@@ -236,6 +236,20 @@ class IngestSkillContractTest(unittest.TestCase):
             self.assertIn(artifact, checklist)
         self.assertNotIn("docs/superpowers/plans/", ingest_tools)
 
+    def test_semantic_finalization_is_manifest_driven_and_evidence_bearing(self):
+        ingest_tools = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
+        checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
+        scripts = "\n".join(
+            path.read_text(encoding="utf-8") for path in (TEMPLATE_ROOT / "scripts").glob("*.py")
+        )
+        for token in ("recall_checks", "expected_object_ids", "require_code_locators",
+                      "intentional_terminal_ids", "isolation_baseline", "manifest_fingerprint"):
+            self.assertIn(token, ingest_tools)
+        for token in ("finalization.ok", "unexpected_new_ids", "missing_object_ids",
+                      "missing_code_locator_object_ids"):
+            self.assertIn(token, checklist)
+        self.assertNotIn("이 컨텍스트 핵심 동작", scripts)
+
 
 if __name__ == "__main__":
     unittest.main()

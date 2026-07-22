@@ -22,12 +22,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NOTES="$(mktemp -t notes.XXXXXX.json)"
 OBJS="$(mktemp -t objects.XXXXXX.json)"
 BUILD_REPORT="$(mktemp -t build-report.XXXXXX.json)"
-trap 'rm -f "$NOTES" "$OBJS" "$BUILD_REPORT"' EXIT
+FINALIZATION_CONFIG="$(mktemp -t finalization.XXXXXX.json)"
+ISOLATION_BASELINE="$(mktemp -t isolation-baseline.XXXXXX.json)"
+trap 'rm -f "$NOTES" "$OBJS" "$BUILD_REPORT" "$FINALIZATION_CONFIG" "$ISOLATION_BASELINE"' EXIT
 
 step() { echo "── [$1] ──"; }
 
 step "assemble_notes"
-python3 "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES"
+ASSEMBLE=(python3 "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES")
+if [ "$DRY" = "0" ] && [ "$DEFER_FINALIZE" = "0" ]; then
+  ASSEMBLE+=(--finalization-out "$FINALIZATION_CONFIG")
+fi
+"${ASSEMBLE[@]}"
+if [ "$DRY" = "0" ] && [ "$DEFER_FINALIZE" = "0" ]; then
+  python3 "$HERE/finalize_ingest.py" --validate-config "$FINALIZATION_CONFIG" >/dev/null
+fi
 
 step "build"
 project-brain build --notes "$NOTES" --objects-file "$OBJS" | tee "$BUILD_REPORT"
@@ -35,6 +44,11 @@ project-brain build --notes "$NOTES" --objects-file "$OBJS" | tee "$BUILD_REPORT
 if [ "$DRY" = "1" ]; then
   echo "── [dry] build까지 OK (ingest/finalize 생략) ──"
   exit 0
+fi
+
+if [ "$DEFER_FINALIZE" = "0" ]; then
+  step "isolation baseline"
+  "$HERE/finalize_ingest.sh" --capture-baseline > "$ISOLATION_BASELINE"
 fi
 
 step "ingest"
@@ -45,4 +59,4 @@ if [ "$DEFER_FINALIZE" = "1" ]; then
   exit 0
 fi
 
-"$HERE/finalize_ingest.sh"
+"$HERE/finalize_ingest.sh" --config "$FINALIZATION_CONFIG" --baseline "$ISOLATION_BASELINE"

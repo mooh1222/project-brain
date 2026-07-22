@@ -444,7 +444,7 @@ class InstallTest(unittest.TestCase):
         second = install(self.target, project="demo")
 
         scripts = self._skill_dir("demo-brain-ingest") / "scripts"
-        for name in ("run_ingest.sh", "finalize_ingest.sh", "run_ingest_batch.py",
+        for name in ("run_ingest.sh", "finalize_ingest.sh", "finalize_ingest.py", "run_ingest_batch.py",
                      "validate_workflow_result.py"):
             with self.subTest(name=name):
                 script = scripts / name

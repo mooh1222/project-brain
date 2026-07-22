@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -14,7 +15,8 @@ from typing import Any, Callable
 
 
 ItemRunner = Callable[[dict[str, Any]], Any]
-Finalizer = Callable[[], Any]
+Finalizer = Callable[[dict[str, Any], list[str]], Any]
+BaselineCollector = Callable[[], Any]
 
 _UNSUPPORTED_PARENT_FSYNC_ERRNOS = {errno.EINVAL}
 for _errno_name in ("ENOTSUP", "EOPNOTSUPP"):
@@ -71,7 +73,17 @@ def _write_report(path: Path, report: dict) -> None:
                 pass
 
 
-def _load_manifest(path: Path) -> list[dict[str, Any]]:
+def _finalizer_module():
+    script = Path(__file__).resolve().with_name("finalize_ingest.py")
+    spec = importlib.util.spec_from_file_location("project_brain_semantic_finalizer", script)
+    if spec is None or spec.loader is None:
+        raise ValueError("semantic finalizer를 불러올 수 없습니다")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_manifest(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         with path.open(encoding="utf-8") as f:
             payload = json.load(f)
@@ -103,10 +115,14 @@ def _load_manifest(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"items[{index}].{field} 경로가 없습니다: {source_path}")
             resolved[field] = source_path
         items.append(resolved)
-    return items
+    try:
+        finalization = _finalizer_module().validate_contract(payload.get("finalization"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"manifest.finalization이 올바르지 않습니다: {exc}") from exc
+    return items, finalization
 
 
-def _manifest_fingerprint(items: list[dict[str, Any]]) -> str:
+def _manifest_fingerprint(items: list[dict[str, Any]], finalization: dict[str, Any]) -> str:
     fingerprint_items = []
     for item in items:
         try:
@@ -121,7 +137,8 @@ def _manifest_fingerprint(items: list[dict[str, Any]]) -> str:
             "domain_spec_py_path": str(item["domain_spec_py"]),
             "domain_spec_py_sha256": hashlib.sha256(domain_spec_content).hexdigest(),
         })
-    canonical = json.dumps(fingerprint_items, ensure_ascii=True, sort_keys=True,
+    canonical = json.dumps({"items": fingerprint_items, "finalization": finalization},
+                           ensure_ascii=True, sort_keys=True,
                            separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -136,9 +153,23 @@ def _default_item_runner(item: dict[str, Any]) -> subprocess.CompletedProcess[st
     )
 
 
-def _default_finalizer() -> subprocess.CompletedProcess[str]:
+def _default_baseline_collector() -> subprocess.CompletedProcess[str]:
     script = Path(__file__).resolve().with_name("finalize_ingest.sh")
-    return subprocess.run([str(script)], text=True, capture_output=True, check=False)
+    return subprocess.run([str(script), "--capture-baseline"], text=True,
+                          capture_output=True, check=False)
+
+
+def _default_finalizer(contract: dict[str, Any], baseline: list[str]) -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).resolve().with_name("finalize_ingest.sh")
+    with tempfile.TemporaryDirectory(prefix="project-brain-finalize-") as td:
+        root = Path(td)
+        config_path = root / "config.json"
+        baseline_path = root / "baseline.json"
+        config_path.write_text(json.dumps(contract, ensure_ascii=False), encoding="utf-8")
+        baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
+        return subprocess.run(
+            [str(script), "--config", str(config_path), "--baseline", str(baseline_path)],
+            text=True, capture_output=True, check=False)
 
 
 def _result_details(result: Any) -> tuple[bool, int, str]:
@@ -162,14 +193,65 @@ def _run_item(runner: ItemRunner, item: dict[str, Any]) -> tuple[int, str]:
         return 1, str(exc)
 
 
-def _load_resume_succeeded(path: Path, *, expected: int, valid_keys: set[str],
-                           manifest_fingerprint: str) -> set[str]:
+def _json_payload(result: Any) -> tuple[dict[str, Any] | None, int, str]:
+    if isinstance(result, dict):
+        payload = result
+        exit_code = 0 if payload.get("ok") is True else 1
+        return payload, exit_code, ""
+    if isinstance(result, subprocess.CompletedProcess):
+        exit_code = (result.returncode if isinstance(result.returncode, int)
+                     and not isinstance(result.returncode, bool) else 1)
+        try:
+            stdout = _stderr_text(result.stdout)
+            payload = json.loads(stdout)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        return payload if isinstance(payload, dict) else None, exit_code, _stderr_text(result.stderr)
+    return None, 1, f"구조화 JSON 실행 결과가 아님: {result!r}"
+
+
+def _baseline_details(result: Any) -> tuple[list[str] | None, str]:
+    payload, exit_code, stderr = _json_payload(result)
+    isolated = payload.get("isolated_ids") if isinstance(payload, dict) else None
+    if (exit_code != 0 or not isinstance(payload, dict) or payload.get("ok") is not True
+            or not isinstance(isolated, list)
+            or any(not isinstance(item, str) or not item for item in isolated)
+            or len(isolated) != len(set(isolated))):
+        return None, stderr or "고립 baseline 결과가 올바르지 않습니다"
+    return sorted(isolated), ""
+
+
+def _finalization_details(result: Any) -> tuple[dict[str, Any], int, str]:
+    payload, exit_code, stderr = _json_payload(result)
+    required = {"ok", "commands", "isolation", "recall_checks", "errors"}
+    valid = (isinstance(payload, dict) and set(payload) == required
+             and isinstance(payload.get("ok"), bool)
+             and isinstance(payload.get("commands"), dict)
+             and isinstance(payload.get("isolation"), dict)
+             and isinstance(payload.get("recall_checks"), list)
+             and isinstance(payload.get("errors"), list)
+             and all(isinstance(error, str) for error in payload.get("errors", [])))
+    if not valid:
+        failure = {"ok": False, "commands": {}, "isolation": {}, "recall_checks": [],
+                   "errors": [stderr or "finalizer가 구조화 결과를 반환하지 않았습니다"]}
+        return failure, 1, stderr
+    if payload["ok"] is not (exit_code == 0):
+        payload = dict(payload)
+        payload["ok"] = False
+        payload["errors"] = [*payload["errors"], "finalizer 종료 코드와 ok가 일치하지 않습니다"]
+        return payload, 1, stderr
+    return payload, exit_code, stderr
+
+
+def _load_resume_state(path: Path, *, expected: int, valid_keys: set[str],
+                       manifest_fingerprint: str) -> tuple[set[str], list[str]]:
     try:
         with path.open(encoding="utf-8") as f:
             previous = json.load(f)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"resume report를 읽을 수 없습니다: {exc}") from exc
-    required = {"expected", "succeeded", "failed", "finalized", "manifest_fingerprint"}
+    required = {"expected", "succeeded", "failed", "finalized", "manifest_fingerprint",
+                "isolation_baseline"}
     if not isinstance(previous, dict) or not required.issubset(previous):
         raise ValueError("resume report에 필수 상태 필드가 없습니다")
     if (not isinstance(previous["expected"], int)
@@ -203,11 +285,16 @@ def _load_resume_succeeded(path: Path, *, expected: int, valid_keys: set[str],
         failed_keys.add(key)
     if not isinstance(previous["finalized"], bool):
         raise ValueError("resume report의 finalized는 bool이어야 합니다")
-    return set(succeeded)
+    baseline = previous["isolation_baseline"]
+    if (not isinstance(baseline, list)
+            or any(not isinstance(item, str) or not item for item in baseline)
+            or len(baseline) != len(set(baseline))):
+        raise ValueError("resume report의 isolation_baseline이 올바르지 않습니다")
+    return set(succeeded), sorted(baseline)
 
 
 def run_batch(manifest_path, report_path, *, resume_path=None,
-              item_runner=None, finalizer=None) -> dict:
+              item_runner=None, finalizer=None, baseline_collector=None) -> dict:
     """manifest의 항목을 실행하고 항목마다 원자적으로 report를 갱신한다.
 
     ``item_runner``는 절대 경로가 들어간 ``key``, ``verify_json``, ``domain_spec_py`` 항목 dict를
@@ -216,22 +303,36 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
     """
     manifest = Path(manifest_path).resolve()
     report_file = Path(report_path).resolve()
-    items = _load_manifest(manifest)  # 실행 전 전체 입력을 검사한다.
-    manifest_fingerprint = _manifest_fingerprint(items)
+    if report_file.exists() and report_file.is_dir():
+        raise ValueError(f"report 경로가 디렉터리입니다: {report_file}")
+    items, finalization_contract = _load_manifest(manifest)  # 실행 전 전체 입력을 검사한다.
+    manifest_fingerprint = _manifest_fingerprint(items, finalization_contract)
 
     prior_succeeded: set[str] = set()
+    isolation_baseline: list[str]
     if resume_path is not None:
         valid_keys = {item["key"] for item in items}
-        prior_succeeded = _load_resume_succeeded(
+        prior_succeeded, isolation_baseline = _load_resume_state(
             Path(resume_path), expected=len(items), valid_keys=valid_keys,
             manifest_fingerprint=manifest_fingerprint)
+    else:
+        collect: BaselineCollector = (_default_baseline_collector if baseline_collector is None
+                                      else baseline_collector)
+        try:
+            isolation_baseline, baseline_error = _baseline_details(collect())
+        except Exception as exc:
+            isolation_baseline, baseline_error = None, str(exc)
+        if isolation_baseline is None:
+            raise ValueError(f"적재 전 isolation baseline 수집 실패: {baseline_error}")
 
     report = {
         "expected": len(items),
         "manifest_fingerprint": manifest_fingerprint,
         "succeeded": [item["key"] for item in items if item["key"] in prior_succeeded],
         "failed": [],
+        "isolation_baseline": isolation_baseline,
         "finalized": False,
+        "finalization": None,
         "finalize_failure": None,
     }
     _write_report(report_file, report)
@@ -255,11 +356,15 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
 
     finish: Finalizer = _default_finalizer if finalizer is None else finalizer
     try:
-        _, final_exit_code, final_stderr = _result_details(finish())
+        finalization, final_exit_code, final_stderr = _finalization_details(
+            finish(finalization_contract, isolation_baseline))
     except Exception as exc:
+        finalization = {"ok": False, "commands": {}, "isolation": {},
+                        "recall_checks": [], "errors": [str(exc)]}
         final_exit_code = 1
         final_stderr = str(exc)
-    report["finalized"] = final_exit_code == 0
+    report["finalization"] = finalization
+    report["finalized"] = final_exit_code == 0 and finalization["ok"] is True
     if not report["finalized"]:
         report["finalize_failure"] = {
             "exit_code": final_exit_code,

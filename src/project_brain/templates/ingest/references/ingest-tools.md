@@ -21,7 +21,7 @@
 ```
 
 - `ingest`: 묶음을 받아 **per-object 스키마 검증 → 병합 store 연결무결성 lint → 파일 저장** 순서로 처리한다. 저장 전 검증은 묶음 전체지만 파일 쓰기는 rollback transaction이 아니다.
-  어느 게이트든 실패하면 `IngestError`를 내고 **아무것도 안 쓴다**. status는 호출자가 박는다 — 검증 통과 매핑을
+  저장 전 두 게이트가 실패하면 `IngestError`를 내고 파일 쓰기를 시작하지 않는다. status는 호출자가 박는다 — 검증 통과 매핑을
   `reviewed`로 넣으면 그대로 검수됨(B), 후퇴(reviewed→candidate)만 거부한다. §6.4로 reviewed `DomainMapping`·
   `GlossaryTerm`은 `evidence_refs` non-empty여야 통과한다(코드앵커는 비강제).
 - `promote`: candidate 객체를 reviewed로 승격하고 (승격 객체 + ReviewRecord)를 돌려주는 **함수**. 저장은 안 하니
@@ -38,7 +38,7 @@
 #    context는 key·commit 필수. now는 선택 — 생략하면 엔진이 현재 KST(+09:00)를
 #    created_at/updated_at/verified_at에 자동으로 박는다(적으면 그 값으로 override = 소급·테스트용).
 #    (decisions[]는 build_decisions가 DecisionRecord + commit/jira/pr EvidenceRef로 조립하고
-#     affects 역채움까지 한다. 노트 스키마 정본은 이 skill의 domain-spec.md와
+#     affects 역채움까지 한다. 노트 입력은 scripts/domain_spec.template.py와
 #     project-brain build --help에서 확인한다.)
 # 2) build — 묶음(out.json) 생성. 리포트(diff·resolved_refs·preconditions)는 stdout → 파일로 저장
 project-brain build --notes notes.json --objects-file out.json > report.json
@@ -215,31 +215,56 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 ## 조립·적재 스크립트 (scripts/)
 
 손으로 조립 스크립트를 새로 짜지 않는다. 적재마다:
-1. `scripts/domain_spec.template.py`를 복사해 의미 데이터를 채운다(CTX/COMMIT/MANIFESTS/경계/GROUP_ORDER/EXCLUDE_TERMS/HISTORY_COVERAGE/NOW/CORRECTIONS/DECISIONS). 조립 로직은 넣지 않는다.
+1. `scripts/domain_spec.template.py`를 복사해 의미 데이터와 `FINALIZATION`을 채운다. 조립 로직은 넣지 않는다.
+   `FINALIZATION.recall_checks[]`마다 중복 없는 `key`, 실제 도메인 `query`, 비어 있지 않은
+   `expected_object_ids`, `require_code_locators`를 선언한다. 새 고립 중 근거를 남긴 의도적 종착점만
+   `intentional_terminal_ids`에 넣는다. 고정 샘플 질의나 결과 개수만으로 완료를 판정하지 않는다.
 2. 추출은 `scripts/extract_template.js`(채워넣기)로 group별 extract→verify → verify.json.
-3. 단건은 아래처럼 실행한다. 중간 비파괴 검증은 `--dry`를 쓴다.
+3. 단건 기본 실행은 FINALIZATION schema를 먼저 검사하고 build 뒤 ingest 전에 `isolation_baseline`을
+   수집한다. ingest가 성공하면 같은 baseline과 config로 semantic finalizer를 실행한다. config가
+   없거나 틀리면 build·ingest 전에 실패한다. 중간 비파괴 검증은 `--dry`를 쓴다.
 
    ```bash
    scripts/run_ingest.sh verify.json domain_spec.py
    ```
 
-4. 대량은 아래처럼 실행한다. 각 item은 build→ingest만 하고 색인을 만들지 않는다. 모든 item이 성공한
+4. 대량은 아래처럼 실행한다. `batch.json`은 item 목록과 top-level `finalization` 계약을 함께 둔다.
+   각 item은 build→ingest만 하고 색인을 만들지 않는다. 모든 item이 성공한
    뒤에만 batch runner가 finalization을 한 번 실행한다. 실패가 있으면 finalization을 호출하지 않는다.
+
+   ```json
+   {
+     "items": [{"key": "a", "verify_json": "a.json", "domain_spec_py": "a.py"}],
+     "finalization": {
+       "recall_checks": [{
+         "key": "a", "query": "A의 핵심 동작은?",
+         "expected_object_ids": ["mapping.a.core"],
+         "require_code_locators": true
+       }],
+       "intentional_terminal_ids": []
+     }
+   }
+   ```
 
    ```bash
    scripts/run_ingest_batch.py batch.json --report batch-report.json
    scripts/run_ingest_batch.py batch.json --report batch-report.json --resume batch-report.json
    ```
 
-   재개는 같은 batch 입력과 report를 사용하며, 이미 성공한 item만 건너뛴다.
+   첫 실행은 어떤 item보다 먼저 `isolation_baseline`을 report에 저장한다. 재개는 같은 batch 입력과
+   report를 사용하며 이미 성공한 item만 건너뛰고 최초 baseline을 재사용한다. resolved input 내용과
+   finalization 계약은 `manifest_fingerprint`에 함께 들어가므로 query·expected ID 변경도 다른 입력으로
+   거부한다. 완료 증거는 `finalized=true` 하나가 아니라 `finalization.ok=true`,
+   `finalization.isolation.unexpected_new_ids=[]`, 각 recall check의 누락 목록이 빈 상태까지 포함한다.
 
 5. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
 
 채운 예(형태): 14결정·{groups} 래핑형 / 0결정·list형(CORRECTIONS 사용). 변칙 누적은 `references/ingest-case-log.md` 참고.
 
-## 적재 후 확인 — lint → 색인 → 골든셋 → 회상 → 고립 재점검
+## 적재 후 확인 — semantic finalization
 
-적재가 끝나면 다섯 단계로 확인한다(검색층이 생겨 색인·회귀가 필수가 됐다):
+`scripts/finalize_ingest.py`는 아래 게이트를 실행하고 `commands`, `isolation`, `recall_checks`, `errors`를
+가진 JSON 한 개를 낸다. runner는 종료 코드만 보지 않고 이 schema와 `ok`를 함께 확인한다.
 
 1. **lint clean** — ingest가 성공했으면 연결무결성은 통과한 것. 별도 일괄 작업을 했다면
    `lint_store` 문제 0건 재확인.
@@ -257,12 +282,12 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    project-brain eval
    python3 -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"  # 표준 unittest — pytest 불필요
    ```
-4. **샘플 회상** — 새 도메인 질의가 매핑/용어를 코드 위치(linked.code_locators)와 함께
-   회수하는지:
+4. **계약 회상** — `recall_checks`의 각 query가 모든 `expected_object_ids`를 회수하고,
+   `require_code_locators=true`면 각 기대 객체의 `linked.code_locators`가 비어 있지 않은지 확인한다.
    ```bash
    project-brain search "<도메인 관련 질문>"
    ```
-5. **고립 잎 재점검** — `project-brain graph isolated`로 신규/잔여 고립 객체(아무도 안
+5. **고립 잎 재점검** — 적재 전후 `project-brain graph isolated` 차이로 신규 고립 객체(아무도 안
    가리키는 잎)를 나열하고, 각각 (a) 의미 있는 관계가 있으면 연결 (b) 의도적 종착점으로 분류
    (c) rejected·제거 중 하나로 처리한다. 의도적 종착점은 적재 결과 기록에 객체 ID, 분류, 근거를
    남긴 경우에만 허용한다. 0개로 만들려고 의미 없는 연결을 추가하지 않는다 — 검수 정책 B+C:

@@ -19,6 +19,22 @@ SCRIPTS = Path(__file__).resolve().parent
 BATCH_SCRIPT = SCRIPTS / "run_ingest_batch.py"
 VALIDATOR_SCRIPT = SCRIPTS / "validate_workflow_result.py"
 FAILURE_SUFFIX = "::failed-item-stderr-tail::\n"
+FINALIZATION = {
+    "recall_checks": [{
+        "key": "feature-a",
+        "query": "기능 A 핵심 동작",
+        "expected_object_ids": ["mapping.a"],
+        "require_code_locators": True,
+    }],
+    "intentional_terminal_ids": [],
+}
+FINALIZATION_RESULT = {
+    "ok": True,
+    "commands": {},
+    "isolation": {},
+    "recall_checks": [],
+    "errors": [],
+}
 
 
 def load_script(path: Path, module_name: str):
@@ -58,6 +74,7 @@ class BatchRunnerCliTest(unittest.TestCase):
         self.assertTrue(VALIDATOR_SCRIPT.is_file(), "Task 5 workflow validator is missing")
         shutil.copy2(BATCH_SCRIPT, self.runtime / BATCH_SCRIPT.name)
         shutil.copy2(VALIDATOR_SCRIPT, self.runtime / VALIDATOR_SCRIPT.name)
+        shutil.copy2(SCRIPTS / "finalize_ingest.py", self.runtime / "finalize_ingest.py")
         self._write_executable(
             "run_ingest.sh",
             """#!/usr/bin/env python3
@@ -96,11 +113,19 @@ import sys
 import json
 from pathlib import Path
 
+kind = "baseline" if "--capture-baseline" in sys.argv else "finalize"
 with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
-    print(json.dumps({"kind": "finalize", "argv": sys.argv[1:]}), file=log)
+    print(json.dumps({"kind": kind, "argv": sys.argv[1:]}), file=log)
+if kind == "baseline":
+    print(json.dumps({"ok": True, "isolated_ids": ["code.before"]}))
+    raise SystemExit(0)
 if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
+    print(json.dumps({"ok": False, "commands": {}, "isolation": {},
+                      "recall_checks": [], "errors": ["finalizer failed"]}))
     print("finalizer failed", file=sys.stderr)
     raise SystemExit(23)
+print(json.dumps({"ok": True, "commands": {}, "isolation": {},
+                  "recall_checks": [], "errors": []}))
 """,
         )
 
@@ -119,7 +144,8 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
                 "domain_spec_py": str(domain_spec.relative_to(self.manifest_dir)),
             })
         manifest = self.manifest_dir / "batch.json"
-        manifest.write_text(json.dumps({"items": items}), encoding="utf-8")
+        manifest.write_text(json.dumps({"items": items, "finalization": FINALIZATION}),
+                            encoding="utf-8")
         return manifest
 
     def _run_batch(self, manifest: Path, report: Path, *, resume: bool = False,
@@ -180,7 +206,8 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
         self.assertEqual(failed["stderr"], self._failure_stderr("c")[-2_000:])
         self.assertFalse(report["finalized"])
         calls = self._calls()
-        self.assertEqual([call["kind"] for call in calls], ["item", "item", "item"])
+        self.assertEqual([call["kind"] for call in calls],
+                         ["baseline", "item", "item", "item"])
         self._assert_item_invocations(calls, manifest, ("a", "b", "c"))
 
     def test_resume_retries_only_the_failed_item(self):
@@ -194,12 +221,13 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         calls = self._calls()
         self.assertEqual([call["kind"] for call in calls],
-                         ["item", "item", "item", "item", "finalize"])
+                         ["baseline", "item", "item", "item", "item", "finalize"])
         self._assert_item_invocations(calls, manifest, ("a", "b", "c", "c"))
         saved = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(saved["succeeded"], ["a", "b", "c"])
         self.assertEqual(saved["failed"], [])
         self.assertTrue(saved["finalized"])
+        self.assertEqual(saved["isolation_baseline"], ["code.before"])
 
     def test_finalizer_failure_returns_one_without_marking_report_finalized(self):
         self._copy_runtime_scripts()
@@ -211,8 +239,9 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
         self.assertFalse(report["finalized"])
         self.assertEqual(report["finalize_failure"],
                          {"exit_code": 23, "stderr": "finalizer failed\n"})
+        self.assertFalse(report["finalization"]["ok"])
         self.assertEqual([call["kind"] for call in self._calls()],
-                         ["item", "item", "item", "finalize"])
+                         ["baseline", "item", "item", "item", "finalize"])
 
     def test_preflight_rejects_duplicate_keys_and_missing_paths_before_running(self):
         self._copy_runtime_scripts()
@@ -225,6 +254,19 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
         self.assertEqual(duplicate.returncode, 1, duplicate.stderr)
         self.assertEqual(self._calls(), [])
 
+    def test_preflight_rejects_missing_semantic_finalization_before_running(self):
+        self._copy_runtime_scripts()
+        manifest = self._manifest()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload.pop("finalization")
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = self._run_batch(manifest, self.root / "missing-finalization.json")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self._calls(), [])
+        self.assertIn("manifest.finalization", json.loads(result.stdout)["errors"][0])
+
         payload["items"][1]["key"] = "b"
         payload["items"][1]["verify_json"] = "inputs/missing.json"
         manifest.write_text(json.dumps(payload), encoding="utf-8")
@@ -235,7 +277,7 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
     def test_empty_manifest_is_rejected_before_runner_or_finalizer(self):
         self._copy_runtime_scripts()
         manifest = self.manifest_dir / "empty-batch.json"
-        manifest.write_text(json.dumps({"items": []}), encoding="utf-8")
+        manifest.write_text(json.dumps({"items": [], "finalization": FINALIZATION}), encoding="utf-8")
         report = self.root / "empty-report.json"
 
         result = self._run_batch(manifest, report)
@@ -397,13 +439,15 @@ class BatchRunnerApiTest(unittest.TestCase):
         self.manifest = self.manifest_dir / "batch.json"
         self.manifest.write_text(json.dumps({"items": [{
             "key": "one", "verify_json": "verify.json", "domain_spec_py": "domain.py",
-        }]}), encoding="utf-8")
+        }], "finalization": FINALIZATION}), encoding="utf-8")
 
     def tearDown(self):
         self._td.cleanup()
 
     def _module(self):
-        return load_script(BATCH_SCRIPT, "run_ingest_batch_under_test")
+        module = load_script(BATCH_SCRIPT, "run_ingest_batch_under_test")
+        module._default_baseline_collector = lambda: {"ok": True, "isolated_ids": ["code.before"]}
+        return module
 
     def test_unknown_or_bool_injected_results_fail_closed(self):
         module = self._module()
@@ -413,11 +457,36 @@ class BatchRunnerApiTest(unittest.TestCase):
                 report = module.run_batch(
                     self.manifest, self.root / f"unknown-{index}.json",
                     item_runner=lambda item, value=result: value,
-                    finalizer=lambda: 0,
+                finalizer=lambda *_: FINALIZATION_RESULT,
                 )
                 self.assertEqual(report["succeeded"], [])
                 self.assertFalse(report["finalized"])
                 self.assertEqual(report["failed"][0]["key"], "one")
+
+    def test_exit_zero_without_structured_finalization_fails_closed(self):
+        module = self._module()
+        report = module.run_batch(
+            self.manifest, self.root / "exit-only-finalizer.json",
+            item_runner=lambda item: 0,
+            finalizer=lambda *_: 0,
+        )
+
+        self.assertFalse(report["finalized"])
+        self.assertFalse(report["finalization"]["ok"])
+        self.assertTrue(report["finalization"]["errors"])
+
+    def test_baseline_failure_blocks_items_and_report_creation(self):
+        module = self._module()
+        calls = []
+        report_path = self.root / "baseline-failure.json"
+        with self.assertRaises(ValueError):
+            module.run_batch(
+                self.manifest, report_path,
+                item_runner=lambda item: calls.append(item["key"]) or 0,
+                baseline_collector=lambda: {"ok": False, "error": "graph failed"},
+            )
+        self.assertEqual(calls, [])
+        self.assertFalse(report_path.exists())
 
     def test_supported_injected_results_and_falsey_callables_succeed(self):
         module = self._module()
@@ -437,7 +506,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         for index, result in enumerate((0, (0, ""), subprocess.CompletedProcess([], 0, stderr=""))):
             with self.subTest(result=repr(result)):
                 runner = FalseyCallable(result)
-                finalizer = FalseyCallable(result)
+                finalizer = FalseyCallable(FINALIZATION_RESULT)
                 report = module.run_batch(self.manifest, self.root / f"accepted-{index}.json",
                                           item_runner=runner, finalizer=finalizer)
                 self.assertEqual(report["succeeded"], ["one"])
@@ -449,7 +518,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         item_failure = module.run_batch(
             self.manifest, self.root / "item-exception.json",
             item_runner=lambda item: (_ for _ in ()).throw(RuntimeError("item boom")),
-            finalizer=lambda: 0,
+            finalizer=lambda *_: FINALIZATION_RESULT,
         )
         self.assertEqual(item_failure["failed"][0]["stderr"], "item boom")
         self.assertFalse(item_failure["finalized"])
@@ -457,7 +526,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         finalizer_failure = module.run_batch(
             self.manifest, self.root / "finalizer-exception.json",
             item_runner=lambda item: 0,
-            finalizer=lambda: (_ for _ in ()).throw(RuntimeError("finalizer boom")),
+            finalizer=lambda *_: (_ for _ in ()).throw(RuntimeError("finalizer boom")),
         )
         self.assertTrue(finalizer_failure["succeeded"])
         self.assertFalse(finalizer_failure["finalized"])
@@ -512,7 +581,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         resumed = module.run_batch(report_path=report_path, manifest_path=self.manifest,
                                    resume_path=report_path,
                                    item_runner=lambda item: calls.append(item["key"]) or 0,
-                                   finalizer=lambda: 0)
+                                   finalizer=lambda *_: FINALIZATION_RESULT)
         self.assertEqual(calls, ["one"])
         self.assertTrue(resumed["finalized"])
         self.assertIsInstance(resumed["manifest_fingerprint"], str)
@@ -530,6 +599,19 @@ class BatchRunnerApiTest(unittest.TestCase):
                              item_runner=lambda item: calls.append(item["key"]) or 0)
         self.assertEqual(calls, [])
 
+    def test_resume_rejects_changed_finalization_contract_before_execution(self):
+        module = self._module()
+        report_path = self.root / "changed-finalization-report.json"
+        module.run_batch(self.manifest, report_path, item_runner=lambda item: 9)
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["finalization"]["recall_checks"][0]["query"] = "달라진 질의"
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        calls = []
+        with self.assertRaises(ValueError):
+            module.run_batch(self.manifest, report_path, resume_path=report_path,
+                             item_runner=lambda item: calls.append(item["key"]) or 0)
+        self.assertEqual(calls, [])
+
     def test_resume_rejects_same_key_with_different_resolved_input(self):
         module = self._module()
         report_path = self.root / "different-path-report.json"
@@ -539,7 +621,7 @@ class BatchRunnerApiTest(unittest.TestCase):
                                 encoding="utf-8")
         self.manifest.write_text(json.dumps({"items": [{
             "key": "one", "verify_json": "other-verify.json", "domain_spec_py": "domain.py",
-        }]}), encoding="utf-8")
+        }], "finalization": FINALIZATION}), encoding="utf-8")
         calls: list[str] = []
         with self.assertRaises(ValueError):
             module.run_batch(self.manifest, report_path, resume_path=report_path,
@@ -609,11 +691,55 @@ class RunIngestCleanupTest(unittest.TestCase):
         shutil.copy2(SCRIPTS / "run_ingest.sh", self.runtime / "run_ingest.sh")
         (self.runtime / "assemble_notes.py").write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
+            import json
+            import os
             import sys
             from pathlib import Path
             Path(sys.argv[sys.argv.index("-o") + 1]).write_text("notes", encoding="utf-8")
+            if "--finalization-out" in sys.argv and os.environ.get("FAKE_OMIT_FINALIZATION") != "1":
+                payload = {} if os.environ.get("FAKE_INVALID_FINALIZATION") == "1" else {
+                    "recall_checks": [{"key": "one", "query": "one query",
+                                       "expected_object_ids": ["mapping.one"],
+                                       "require_code_locators": True}],
+                    "intentional_terminal_ids": [],
+                }
+                Path(sys.argv[sys.argv.index("--finalization-out") + 1]).write_text(
+                    json.dumps(payload), encoding="utf-8")
         """), encoding="utf-8")
-        (self.runtime / "finalize_ingest.sh").write_text("#!/usr/bin/env bash\nexit \"${FAKE_FINALIZER_EXIT:-0}\"\n", encoding="utf-8")
+        (self.runtime / "finalize_ingest.py").write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
+                print(json.dumps({"kind": "validate", "args": sys.argv[1:]}), file=log)
+            payload = json.loads(Path(sys.argv[sys.argv.index("--validate-config") + 1]).read_text())
+            if not payload.get("recall_checks"):
+                raise SystemExit(31)
+            print(json.dumps({"ok": True, "validated": True}))
+        """), encoding="utf-8")
+        (self.runtime / "finalize_ingest.sh").write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            kind = ("validate" if "--validate-config" in sys.argv else
+                    "baseline" if "--capture-baseline" in sys.argv else "finalize")
+            with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
+                print(json.dumps({"kind": kind, "args": sys.argv[1:]}), file=log)
+            if kind == "validate":
+                payload = json.loads(Path(sys.argv[sys.argv.index("--validate-config") + 1]).read_text())
+                if not payload.get("recall_checks"):
+                    raise SystemExit(31)
+                print(json.dumps({"ok": True, "validated": True}))
+                raise SystemExit(0)
+            if kind == "baseline":
+                print(json.dumps({"ok": True, "isolated_ids": ["code.before"]}))
+                raise SystemExit(0)
+            raise SystemExit(int(os.environ.get("FAKE_FINALIZER_EXIT", "0")))
+        """), encoding="utf-8")
         (self.bin_dir / "project-brain").write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
             import json
@@ -628,7 +754,7 @@ class RunIngestCleanupTest(unittest.TestCase):
                 print(json.dumps({"ok": True, "preconditions": {"expected": "fresh"}}))
                 raise SystemExit(int(os.environ.get("FAKE_BUILD_EXIT", "0")))
             if command == "ingest":
-                observed = {"args": args}
+                observed = {"kind": "ingest", "args": args}
                 if "--preconditions-file" in args:
                     report = Path(args[args.index("--preconditions-file") + 1])
                     observed["preconditions"] = report.read_text(encoding="utf-8")
@@ -651,13 +777,16 @@ class RunIngestCleanupTest(unittest.TestCase):
         text = (SCRIPTS / "run_ingest.sh").read_text(encoding="utf-8")
         self.assertNotIn('exec "$HERE/finalize_ingest.sh"', text)
 
-    def _run(self, flags=(), *, finalizer_exit=0, ingest_exit=0, build_exit=0):
+    def _run(self, flags=(), *, finalizer_exit=0, ingest_exit=0, build_exit=0,
+             invalid_finalization=False, omit_finalization=False):
         env = dict(os.environ, TMPDIR=str(self.tmp_dir),
                    PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
                    FAKE_CALL_LOG=str(self.call_log),
                    FAKE_FINALIZER_EXIT=str(finalizer_exit),
                    FAKE_INGEST_EXIT=str(ingest_exit),
-                   FAKE_BUILD_EXIT=str(build_exit))
+                   FAKE_BUILD_EXIT=str(build_exit),
+                   FAKE_INVALID_FINALIZATION="1" if invalid_finalization else "0",
+                   FAKE_OMIT_FINALIZATION="1" if omit_finalization else "0")
         return subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
                                str(self.verify), str(self.spec)],
                               env=env, text=True, capture_output=True, check=False)
@@ -671,6 +800,31 @@ class RunIngestCleanupTest(unittest.TestCase):
         self.assertIn("--preconditions-file", calls[0]["args"])
         self.assertEqual(json.loads(calls[0]["preconditions"]),
                          {"ok": True, "preconditions": {"expected": "fresh"}})
+
+    def test_single_run_captures_baseline_before_ingest_and_passes_semantic_inputs(self):
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([call["kind"] for call in calls],
+                         ["validate", "baseline", "ingest", "finalize"])
+        final_args = calls[-1]["args"]
+        self.assertIn("--config", final_args)
+        self.assertIn("--baseline", final_args)
+
+    def test_invalid_single_run_finalization_blocks_before_build_or_ingest(self):
+        result = self._run(invalid_finalization=True)
+
+        self.assertEqual(result.returncode, 31, result.stderr)
+        calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([call["kind"] for call in calls], ["validate"])
+
+    def test_missing_single_run_finalization_cannot_close_successfully(self):
+        result = self._run(omit_finalization=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([call["kind"] for call in calls], ["validate"])
 
     def test_all_exit_paths_remove_all_temporary_files(self):
         cases = (
@@ -689,7 +843,9 @@ class RunIngestCleanupTest(unittest.TestCase):
                            FAKE_CALL_LOG=str(self.call_log),
                            FAKE_FINALIZER_EXIT=str(finalizer_exit),
                            FAKE_INGEST_EXIT=str(ingest_exit),
-                           FAKE_BUILD_EXIT=str(build_exit))
+                           FAKE_BUILD_EXIT=str(build_exit),
+                           FAKE_INVALID_FINALIZATION="0",
+                           FAKE_OMIT_FINALIZATION="0")
                 result = subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
                                          str(self.verify), str(self.spec)],
                                         env=env, text=True, capture_output=True, check=False)
@@ -697,6 +853,8 @@ class RunIngestCleanupTest(unittest.TestCase):
                 self.assertEqual(list(self.tmp_dir.glob("notes.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("objects.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("build-report.*")), [])
+                self.assertEqual(list(self.tmp_dir.glob("finalization.*")), [])
+                self.assertEqual(list(self.tmp_dir.glob("isolation-baseline.*")), [])
 
 
 if __name__ == "__main__":
