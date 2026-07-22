@@ -115,6 +115,19 @@ def _managed_roots(project: str) -> tuple[Path, ...]:
     )
 
 
+def _preflight_control_file(path: Path) -> bool:
+    """제어 파일을 따라가지 않고 검사하고, 존재 여부를 돌려준다."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(mode):
+        raise InstallConflictError(f"{path.name}: 제어 경로가 심링크임")
+    if not stat.S_ISREG(mode):
+        raise InstallConflictError(f"{path.name}: 제어 경로가 일반 파일이 아님")
+    return True
+
+
 def _safe_managed_path(target_root: Path, rel_key: str,
                        allowed_roots: tuple[Path, ...]) -> Path:
     if not isinstance(rel_key, str) or not rel_key:
@@ -129,9 +142,17 @@ def _safe_managed_path(target_root: Path, rel_key: str,
     cursor = target_root
     for part in rel.parts[:-1]:
         cursor = cursor / part
-        if cursor.is_symlink():
+        try:
+            mode = cursor.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
             raise InstallConflictError(
                 f"{rel_key}: 부모 심링크가 대상 루트 밖 또는 다른 위치를 가리킴"
+            )
+        if not stat.S_ISDIR(mode):
+            raise InstallConflictError(
+                f"{rel_key}: 부모 경로 {cursor}가 디렉터리가 아님"
             )
     dst = target_root / rel
     if dst.is_symlink():
@@ -207,10 +228,14 @@ def install(target, *, project: str, brain_root: str = "brain",
     report = {"config": "kept", "created": [], "updated": [],
               "removed": [], "adopted": [], "skipped": []}
 
-    # 1. config를 읽고 유효값만 계산한다. retired preflight 전에는 쓰지 않는다.
     cfg_path = target / CONFIG_FILENAME
+    manifest_path = target / MANIFEST_FILENAME
+    config_exists = _preflight_control_file(cfg_path)
+    manifest_exists = _preflight_control_file(manifest_path)
+
+    # 1. config를 읽고 유효값만 계산한다. retired preflight 전에는 쓰지 않는다.
     config_bytes = None
-    if cfg_path.exists():
+    if config_exists:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         project = cfg.get("project") or project
         brain_root = cfg.get("brain_root", brain_root)
@@ -235,9 +260,8 @@ def install(target, *, project: str, brain_root: str = "brain",
         report["config"] = "created"
 
     # 2. manifest와 현재 템플릿의 원하는 파일 집합을 계산한다.
-    manifest_path = target / MANIFEST_FILENAME
     manifest = {"files": {}}
-    if manifest_path.exists():
+    if manifest_exists:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest.setdefault("files", {})  # 구버전·손상 manifest 방어(KeyError 차단)
     if not isinstance(manifest.get("files"), dict):

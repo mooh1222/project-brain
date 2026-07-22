@@ -201,6 +201,75 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["config"], "created")
         self.assertEqual(len(report["created"]), self._expected_count())
 
+    def test_config_symlink_fails_closed_before_any_read_or_write(self):
+        with TemporaryDirectory() as outside_dir:
+            external = Path(outside_dir) / "external-config.json"
+            external.write_text(
+                json.dumps({"project": "outside", "brain_root": "brain"}),
+                encoding="utf-8",
+            )
+            external_before = external.read_bytes()
+            config_path = self.target / CONFIG_FILENAME
+            config_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                    InstallConflictError, r"\.project-brain\.json.*심링크"):
+                install(self.target, project="demo", repo="would-have-been-backfilled")
+
+            self.assertTrue(config_path.is_symlink())
+            self.assertEqual(external.read_bytes(), external_before)
+            self.assertFalse((self.target / MANIFEST_FILENAME).exists())
+            self.assertFalse((self.target / ".agents").exists())
+
+    def test_manifest_symlink_fails_closed_before_config_backfill_or_other_writes(self):
+        config_path = self.target / CONFIG_FILENAME
+        config_path.write_text(
+            json.dumps({"project": "demo", "brain_root": "brain"}),
+            encoding="utf-8",
+        )
+        config_before = config_path.read_bytes()
+        with TemporaryDirectory() as outside_dir:
+            external = Path(outside_dir) / "external-manifest.json"
+            external.write_text('{"files": {}}\n', encoding="utf-8")
+            external_before = external.read_bytes()
+            manifest_path = self.target / MANIFEST_FILENAME
+            manifest_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                    InstallConflictError, r"\.project-brain-manifest\.json.*심링크"):
+                install(self.target, project="demo", repo="would-have-been-backfilled")
+
+            self.assertTrue(manifest_path.is_symlink())
+            self.assertEqual(external.read_bytes(), external_before)
+            self.assertEqual(config_path.read_bytes(), config_before)
+            self.assertFalse((self.target / ".agents").exists())
+
+    def test_control_file_directories_fail_closed_before_other_writes(self):
+        for control_name in (CONFIG_FILENAME, MANIFEST_FILENAME):
+            with self.subTest(control_name=control_name):
+                target = self.target / control_name.removeprefix(".").removesuffix(".json")
+                target.mkdir()
+                if control_name == MANIFEST_FILENAME:
+                    (target / CONFIG_FILENAME).write_text(
+                        json.dumps({"project": "demo", "brain_root": "brain"}),
+                        encoding="utf-8",
+                    )
+                control_path = target / control_name
+                control_path.mkdir()
+                config_before = (
+                    (target / CONFIG_FILENAME).read_bytes()
+                    if control_name == MANIFEST_FILENAME else None
+                )
+
+                with self.assertRaisesRegex(
+                        InstallConflictError, rf"{control_name}.*일반 파일이 아님"):
+                    install(target, project="demo", repo="would-have-been-backfilled")
+
+                self.assertTrue(control_path.is_dir())
+                if config_before is not None:
+                    self.assertEqual((target / CONFIG_FILENAME).read_bytes(), config_before)
+                self.assertFalse((target / ".agents").exists())
+
     def test_reinstall_is_idempotent(self):
         install(self.target, project="demo")
         report = install(self.target, project="demo")
@@ -366,6 +435,49 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(new_installed.read_bytes(), before["new"])
             self.assertEqual(config_path.read_bytes(), before["config"])
             self.assertEqual(manifest_path.read_bytes(), before["manifest"])
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
+
+    def test_template_move_file_parent_conflict_fails_before_any_write(self):
+        import project_brain.installer as inst
+        templates = self.target / "move_parent_conflict_templates"
+        refs = templates / "query" / "references"
+        refs.mkdir(parents=True)
+        old_source = refs / "old.md"
+        old_source.write_text("managed old\n", encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            old_installed = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            new_installed = self._skill_dir("demo-brain-query") / "references" / "new" / "leaf.md"
+            old_source.unlink()
+            new_source = refs / "new" / "leaf.md"
+            new_source.parent.mkdir()
+            new_source.write_text("managed new\n", encoding="utf-8")
+            blocker = new_installed.parent
+            blocker.write_text("user-owned blocker\n", encoding="utf-8")
+            config_path = self.target / CONFIG_FILENAME
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.pop("repo")
+            config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+            manifest_path = self.target / MANIFEST_FILENAME
+            before = {
+                "old": old_installed.read_bytes(),
+                "blocker": blocker.read_bytes(),
+                "config": config_path.read_bytes(),
+                "manifest": manifest_path.read_bytes(),
+            }
+
+            with self.assertRaisesRegex(
+                    InstallConflictError, r"new/leaf\.md.*부모 경로.*디렉터리가 아님"):
+                install(self.target, project="demo", repo="would-have-been-backfilled")
+
+            self.assertEqual(old_installed.read_bytes(), before["old"])
+            self.assertEqual(blocker.read_bytes(), before["blocker"])
+            self.assertEqual(config_path.read_bytes(), before["config"])
+            self.assertEqual(manifest_path.read_bytes(), before["manifest"])
+            self.assertFalse(new_installed.exists())
         finally:
             inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
 
