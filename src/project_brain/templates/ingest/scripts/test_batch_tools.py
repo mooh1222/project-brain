@@ -605,6 +605,7 @@ class RunIngestCleanupTest(unittest.TestCase):
         self.bin_dir.mkdir()
         self.tmp_dir = self.root / "tmp"
         self.tmp_dir.mkdir()
+        self.call_log = self.root / "calls.jsonl"
         shutil.copy2(SCRIPTS / "run_ingest.sh", self.runtime / "run_ingest.sh")
         (self.runtime / "assemble_notes.py").write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
@@ -614,15 +615,26 @@ class RunIngestCleanupTest(unittest.TestCase):
         """), encoding="utf-8")
         (self.runtime / "finalize_ingest.sh").write_text("#!/usr/bin/env bash\nexit \"${FAKE_FINALIZER_EXIT:-0}\"\n", encoding="utf-8")
         (self.bin_dir / "project-brain").write_text(textwrap.dedent("""\
-            #!/usr/bin/env bash
-            if [ "$1" = "build" ]; then
-              shift
-              while [ "$#" -gt 0 ]; do
-                if [ "$1" = "--objects-file" ]; then : > "$2"; exit 0; fi
-                shift
-              done
-            fi
-            if [ "$1" = "ingest" ]; then exit "${FAKE_INGEST_EXIT:-0}"; fi
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            command, *args = sys.argv[1:]
+            if command == "build":
+                objects = Path(args[args.index("--objects-file") + 1])
+                objects.write_text("[]\\n", encoding="utf-8")
+                print(json.dumps({"ok": True, "preconditions": {"expected": "fresh"}}))
+                raise SystemExit(int(os.environ.get("FAKE_BUILD_EXIT", "0")))
+            if command == "ingest":
+                observed = {"args": args}
+                if "--preconditions-file" in args:
+                    report = Path(args[args.index("--preconditions-file") + 1])
+                    observed["preconditions"] = report.read_text(encoding="utf-8")
+                with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
+                    print(json.dumps(observed), file=log)
+                raise SystemExit(int(os.environ.get("FAKE_INGEST_EXIT", "0")))
         """), encoding="utf-8")
         for path in (self.runtime / "run_ingest.sh", self.runtime / "finalize_ingest.sh",
                      self.bin_dir / "project-brain"):
@@ -639,20 +651,52 @@ class RunIngestCleanupTest(unittest.TestCase):
         text = (SCRIPTS / "run_ingest.sh").read_text(encoding="utf-8")
         self.assertNotIn('exec "$HERE/finalize_ingest.sh"', text)
 
-    def test_all_exit_paths_remove_both_temporary_files(self):
-        cases = (([], 0, 0), ([], 23, 0), (["--defer-finalize"], 0, 0), (["--dry"], 0, 0))
-        for flags, finalizer_exit, ingest_exit in cases:
-            with self.subTest(flags=flags, finalizer_exit=finalizer_exit, ingest_exit=ingest_exit):
+    def _run(self, flags=(), *, finalizer_exit=0, ingest_exit=0, build_exit=0):
+        env = dict(os.environ, TMPDIR=str(self.tmp_dir),
+                   PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
+                   FAKE_CALL_LOG=str(self.call_log),
+                   FAKE_FINALIZER_EXIT=str(finalizer_exit),
+                   FAKE_INGEST_EXIT=str(ingest_exit),
+                   FAKE_BUILD_EXIT=str(build_exit))
+        return subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
+                               str(self.verify), str(self.spec)],
+                              env=env, text=True, capture_output=True, check=False)
+
+    def test_build_report_is_forwarded_to_ingest_as_preconditions(self):
+        result = self._run(["--defer-finalize"])
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--preconditions-file", calls[0]["args"])
+        self.assertEqual(json.loads(calls[0]["preconditions"]),
+                         {"ok": True, "preconditions": {"expected": "fresh"}})
+
+    def test_all_exit_paths_remove_all_temporary_files(self):
+        cases = (
+            ([], 0, 0, 0, 0),
+            ([], 23, 0, 0, 23),
+            (["--defer-finalize"], 0, 0, 0, 0),
+            (["--dry"], 0, 0, 0, 0),
+            ([], 0, 17, 0, 17),
+            ([], 0, 0, 19, 19),
+        )
+        for flags, finalizer_exit, ingest_exit, build_exit, expected_exit in cases:
+            with self.subTest(flags=flags, finalizer_exit=finalizer_exit,
+                              ingest_exit=ingest_exit, build_exit=build_exit):
                 env = dict(os.environ, TMPDIR=str(self.tmp_dir),
                            PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
+                           FAKE_CALL_LOG=str(self.call_log),
                            FAKE_FINALIZER_EXIT=str(finalizer_exit),
-                           FAKE_INGEST_EXIT=str(ingest_exit))
+                           FAKE_INGEST_EXIT=str(ingest_exit),
+                           FAKE_BUILD_EXIT=str(build_exit))
                 result = subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
                                          str(self.verify), str(self.spec)],
                                         env=env, text=True, capture_output=True, check=False)
-                self.assertEqual(result.returncode, finalizer_exit, result.stderr)
-                self.assertEqual(list(self.tmp_dir.glob("notes.*.json")), [])
-                self.assertEqual(list(self.tmp_dir.glob("objects.*.json")), [])
+                self.assertEqual(result.returncode, expected_exit, result.stderr)
+                self.assertEqual(list(self.tmp_dir.glob("notes.*")), [])
+                self.assertEqual(list(self.tmp_dir.glob("objects.*")), [])
+                self.assertEqual(list(self.tmp_dir.glob("build-report.*")), [])
 
 
 if __name__ == "__main__":

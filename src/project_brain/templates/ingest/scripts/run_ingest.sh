@@ -21,7 +21,8 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NOTES="$(mktemp -t notes.XXXXXX.json)"
 OBJS="$(mktemp -t objects.XXXXXX.json)"
-trap 'rm -f "$NOTES" "$OBJS"' EXIT
+BUILD_REPORT="$(mktemp -t build-report.XXXXXX.json)"
+trap 'rm -f "$NOTES" "$OBJS" "$BUILD_REPORT"' EXIT
 
 step() { echo "── [$1] ──"; }
 
@@ -29,7 +30,7 @@ step "assemble_notes"
 python3 "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES"
 
 step "build"
-project-brain build --notes "$NOTES" --objects-file "$OBJS"
+project-brain build --notes "$NOTES" --objects-file "$OBJS" | tee "$BUILD_REPORT"
 
 if [ "$DRY" = "1" ]; then
   echo "── [dry] build까지 OK (ingest/finalize 생략) ──"
@@ -37,7 +38,7 @@ if [ "$DRY" = "1" ]; then
 fi
 
 step "ingest"
-project-brain ingest --objects-file "$OBJS"
+project-brain ingest --objects-file "$OBJS" --preconditions-file "$BUILD_REPORT"
 
 if [ "$DEFER_FINALIZE" = "1" ]; then
   echo "── [defer-finalize] ingest까지 OK ──"
