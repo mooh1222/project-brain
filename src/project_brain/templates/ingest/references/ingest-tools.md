@@ -5,6 +5,14 @@
 어떤 가드가 있는지 정리한다. 코드 계약이 어긋나 보이면 엔진 레포의
 `src/project_brain/ingest.py`·`promote.py`·`cli.py`·`store.py`를 직접 읽어 확인하라.
 
+## 목차
+
+- [build](#build--구조화-노트--객체-묶음-조립-자동화-2026-06-16)
+- [ingest와 promote](#ingest--cli로-부르기)
+- [저장 레이아웃과 raw 원문](#기획서-원문-보관-2026-06-10-확정)
+- [단건·대량 실행](#조립적재-스크립트-scripts)
+- [적재 후 확인](#적재-후-확인--lint--색인--골든셋--회상--고립-재점검)
+
 ## 큰 그림 (B+C 검수, design-hub §8)
 
 ```
@@ -160,11 +168,29 @@ keyword-only 필수다.
 
 ## 기획서 원문 보관 (2026-06-10 확정)
 
-기획서 마크다운 원문은 `{{BRAIN_ROOT}}/raw/sources/<context-slug>/<원본 파일명>`에 보관한다
-(예: `raw/sources/sally-canoe/spec-v8.md`). 텍스트만 git 추적하고 바이너리(PPT·이미지)는
-로컬 보관, 파일 기반 manifest의 `locator`는 brain root 기준 **상대 경로**로 적는다(머신
-절대경로 금지). 규약 정본은 `{{BRAIN_ROOT}}/README.md`. 서버 위키·세션은
-링크만(`EvidenceManifest.locator`).
+기획서 마크다운 원문은 `{{BRAIN_ROOT}}/raw/sources/<context-slug>/`에 보관한다. 파일 이름은 자료의
+성격에 따라 둘 중 하나를 쓴다.
+
+- 한 기능의 개정 기획서는 `spec-v<N>.md`를 쓴다. 번호는 `analyze-spec-ppt` 규약을 따르고 이전
+  버전을 덮어쓰지 않는다.
+- 서로 다른 옛 문서를 대량 보관하거나 내부 버전을 알 수 없으면
+  `<sanitized-original-basename>.md`를 쓴다. 원본 이름을 안전하게 정리한 basename이므로 서로 다른
+  원본이 충돌하지 않게 확인한다. 같은 basename이 이미 있으면 원본 source locator/path의 SHA-256 앞
+  12글자를 붙인 `<sanitized-original-basename>-<sha256-12>.md`를 쓴다. 쓰기 전에 최종 후보 경로의
+  유일성을 확인하고, 접미사까지 충돌하면 SHA-256 접미사를 결정론적으로 늘린다. 기존 raw 파일은 절대
+  덮어쓰지 않는다.
+
+파일 기반 manifest에는 `build_manifests()`가 보존하는 필드에만 다음 출처 정보를 기록한다.
+
+| EvidenceManifest 필드 | 기록값 |
+|---|---|
+| `title` | 원본 파일명 그대로 |
+| `captured_by` | 변환 도구 이름/버전 |
+| `captured_at` | 캡처 시각 |
+| `locator` | brain root 기준 최종 raw 상대 경로 |
+
+새 엔진 필드는 만들지 않는다. 텍스트만 Git으로 추적하고 바이너리(PPT·이미지)는 계속 미추적으로 로컬 보관한다. 규약 정본은
+`{{BRAIN_ROOT}}/README.md`이며 서버 위키·세션은 링크만(`EvidenceManifest.locator`) 남긴다.
 
 ## promote-auto — 매핑 보증 용어 일괄 승격
 
@@ -185,8 +211,23 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 손으로 조립 스크립트를 새로 짜지 않는다. 적재마다:
 1. `scripts/domain_spec.template.py`를 복사해 의미 데이터를 채운다(CTX/COMMIT/MANIFESTS/경계/GROUP_ORDER/EXCLUDE_TERMS/HISTORY_COVERAGE/NOW/CORRECTIONS/DECISIONS). 조립 로직은 넣지 않는다.
 2. 추출은 `scripts/extract_template.js`(채워넣기)로 group별 extract→verify → verify.json.
-3. `scripts/run_ingest.sh <verify.json> <domain_spec.py>` 로 build→ingest→index→lint→eval→unittest→search→graph까지 한 번에(중간 비파괴 검증은 `--dry`).
-4. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
+3. 단건은 아래처럼 실행한다. 중간 비파괴 검증은 `--dry`를 쓴다.
+
+   ```bash
+   scripts/run_ingest.sh verify.json domain_spec.py
+   ```
+
+4. 대량은 아래처럼 실행한다. 각 item은 build→ingest만 하고 색인을 만들지 않는다. 모든 item이 성공한
+   뒤에만 batch runner가 finalization을 한 번 실행한다. 실패가 있으면 finalization을 호출하지 않는다.
+
+   ```bash
+   scripts/run_ingest_batch.py batch.json --report batch-report.json
+   scripts/run_ingest_batch.py batch.json --report batch-report.json --resume batch-report.json
+   ```
+
+   재개는 같은 batch 입력과 report를 사용하며, 이미 성공한 item만 건너뛴다.
+
+5. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
 
 채운 예(형태): 14결정·{groups} 래핑형 / 0결정·list형(CORRECTIONS 사용). 변칙 누적은 `references/ingest-case-log.md` 참고.
 
@@ -216,12 +257,14 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    project-brain search "<도메인 관련 질문>"
    ```
 5. **고립 잎 재점검** — `project-brain graph isolated`로 신규/잔여 고립 객체(아무도 안
-   가리키는 잎)를 나열하고, 각각 (a) 즉시 연결 (b) 의도적 종착점이라 둠 (c) rejected·제거 중
-   하나로 처리한다 — 검수 정책 B+C: 명백한 건 에이전트가 자동으로, 애매한 것만 사용자 확인
-   (코드는 나열만, 어느 매핑에 union할지 판정은 에이전트 몫, 애매하면 사용자). EvidenceRef는
-   `evidence_refs`로만, GlossaryTerm은 `glossary_term_ids`로만 가리켜지므로 그 연결 누락이 여기
-   잡힌다 — "고립 정비가 새 매핑 적재로 번질 수 있음" 교훈의 사후 가드. 연결할 때의 정책
-   (primary/공동primary 기준·`history_coverage=complete` 판정)은 SKILL.md "절대 규칙" 7번이 정본:
+   가리키는 잎)를 나열하고, 각각 (a) 의미 있는 관계가 있으면 연결 (b) 의도적 종착점으로 분류
+   (c) rejected·제거 중 하나로 처리한다. 의도적 종착점은 적재 결과 기록에 객체 ID, 분류, 근거를
+   남긴 경우에만 허용한다. 0개로 만들려고 의미 없는 연결을 추가하지 않는다 — 검수 정책 B+C:
+   명백한 건 에이전트가 자동으로, 애매한 것만 사용자 확인(코드는 나열만, 어느 매핑에 union할지
+   판정은 에이전트 몫, 애매하면 사용자). EvidenceRef는 `evidence_refs`로만, GlossaryTerm은
+   `glossary_term_ids`로만 가리켜지므로 그 연결 누락이 여기 잡힌다 — "고립 정비가 새 매핑 적재로
+   번질 수 있음" 교훈의 사후 가드. 연결할 때의 정책(primary/공동primary 기준·
+   `history_coverage=complete` 판정)은 SKILL.md "절대 규칙" 7번이 정본:
    ```bash
    project-brain graph isolated
    ```
