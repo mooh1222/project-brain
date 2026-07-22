@@ -12,6 +12,7 @@ import stat
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from project_brain.config import CONFIG_FILENAME
 from project_brain.installer import InstallConflictError, MANIFEST_FILENAME, install, render_text
@@ -164,8 +165,12 @@ class InstallTest(unittest.TestCase):
             adopted.parent.mkdir(parents=True)
             adopted.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
             adopted.chmod(adopted.stat().st_mode & ~stat.S_IXUSR)
-            install(adopted_target, project="demo")
-            self.assertFalse(adopted.stat().st_mode & stat.S_IXUSR)  # matching untracked adopt
+            adopted_report = install(adopted_target, project="demo")
+            self.assertTrue(adopted.stat().st_mode & stat.S_IXUSR)  # matching untracked adopt
+            self.assertIn(str(adopted), adopted_report["adopted"])
+            second_adopt = install(adopted_target, project="demo")
+            for field in ("created", "updated", "removed", "adopted", "skipped"):
+                self.assertEqual(second_adopt[field], [])
 
             skipped_target = self.target / "skipped"
             skipped_target.mkdir()
@@ -353,6 +358,43 @@ class InstallTest(unittest.TestCase):
 
         self.assertEqual(report["removed"], [])
         self.assertNotIn(rel_key, self._manifest()["files"])
+
+    def test_desired_write_failure_preserves_retired_config_and_manifest(self):
+        import project_brain.installer as inst
+        templates = self.target / "write_failure_templates"
+        old_source = templates / "query" / "references" / "old.md"
+        old_source.parent.mkdir(parents=True)
+        old_source.write_bytes(b"retired managed bytes\n")
+        (self.target / CONFIG_FILENAME).write_text(
+            json.dumps({"project": "demo", "brain_root": "brain"}), encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            retired = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            new_installed = self._skill_dir("demo-brain-query") / "references" / "new.md"
+            old_source.unlink()
+            (old_source.parent / "new.md").write_bytes(b"new desired bytes\n")
+            config_before = (self.target / CONFIG_FILENAME).read_bytes()
+            manifest_before = (self.target / MANIFEST_FILENAME).read_bytes()
+            retired_before = retired.read_bytes()
+            original_write_bytes = Path.write_bytes
+
+            def fail_new_desired_write(path, data):
+                if data == b"new desired bytes\n":
+                    raise OSError("injected desired write failure")
+                return original_write_bytes(path, data)
+
+            with mock.patch.object(Path, "write_bytes", new=fail_new_desired_write):
+                with self.assertRaisesRegex(OSError, "injected desired write failure"):
+                    install(self.target, project="demo", repo="backfill-repo")
+
+            self.assertEqual(retired.read_bytes(), retired_before)
+            self.assertFalse(new_installed.exists())
+            self.assertEqual((self.target / CONFIG_FILENAME).read_bytes(), config_before)
+            self.assertEqual((self.target / MANIFEST_FILENAME).read_bytes(), manifest_before)
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
 
     def test_modified_retired_file_fails_before_any_write_even_with_force(self):
         install(self.target, project="demo")

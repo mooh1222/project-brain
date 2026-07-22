@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
+import tempfile
 from pathlib import Path
 
 from project_brain.config import CONFIG_FILENAME
@@ -83,6 +85,36 @@ def _preserve_executable_mode(src: Path, dst: Path) -> bool:
         return False
     dst.chmod(desired_mode)
     return True
+
+
+def _atomic_write_bytes(dst: Path, data: bytes, *, src: Path | None = None) -> None:
+    """같은 디렉터리의 완성된 임시 파일을 교체해 관리 파일을 기록한다."""
+    executable_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if dst.exists():
+        destination_mode = stat.S_IMODE(dst.stat().st_mode)
+    else:
+        destination_mode = 0o644
+    if src is not None:
+        source_mode = stat.S_IMODE(src.stat().st_mode)
+        destination_mode = ((destination_mode & ~executable_bits)
+                            | (source_mode & executable_bits))
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=dst.parent, prefix=f".{dst.name}.", suffix=".tmp")
+    os.close(fd)
+    temporary_path = Path(temporary_name)
+    try:
+        temporary_path.write_bytes(data)
+        temporary_path.chmod(destination_mode)
+        with temporary_path.open("rb") as f:
+            os.fsync(f.fileno())
+        os.replace(temporary_path, dst)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _desired_files(*, project: str, brain_root: str,
@@ -293,16 +325,8 @@ def install(target, *, project: str, brain_root: str = "brain",
         retired, manifest["files"], desired, desired_paths, force=force,
     )
 
-    if config_bytes is not None:
-        cfg_path.write_bytes(config_bytes)
-
-    for rel_key, dst, exists in retired:
-        if exists:
-            dst.unlink()
-            report["removed"].append(str(dst))
-        manifest["files"].pop(rel_key, None)
-
-    # 4. 원하는 파일을 주입한다(기존 파일 보존 의미는 유지).
+    # 4. 원하는 파일을 주입한다(기존 파일 보존 의미는 유지). 이 단계가 실패하면
+    # retired·config·manifest 정본은 아직 건드리지 않아 재실행할 수 있다.
     for rel_key, (src, rendered, rendered_hash) in desired.items():
         dst = desired_paths[rel_key]
         recorded = manifest["files"].get(rel_key)
@@ -310,25 +334,31 @@ def install(target, *, project: str, brain_root: str = "brain",
             on_disk = _sha256_bytes(dst.read_bytes())
             if on_disk == rendered_hash:
                 if recorded != rendered_hash:
+                    _preserve_executable_mode(src, dst)
                     report["adopted"].append(str(dst))
                 elif _preserve_executable_mode(src, dst):
                     report["updated"].append(str(dst))
                 manifest["files"][rel_key] = rendered_hash
                 continue
             if recorded == on_disk or (recorded is not None and force):
-                dst.write_bytes(rendered)
-                _preserve_executable_mode(src, dst)
+                _atomic_write_bytes(dst, rendered, src=src)
                 report["updated"].append(str(dst))
             else:
                 report["skipped"].append(str(dst))
                 continue
         else:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(rendered)
-            _preserve_executable_mode(src, dst)
+            _atomic_write_bytes(dst, rendered, src=src)
             report["created"].append(str(dst))
         manifest["files"][rel_key] = rendered_hash
 
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # 5. config까지 안전하게 기록한 뒤에만 retired를 제거하고 manifest를 확정한다.
+    if config_bytes is not None:
+        _atomic_write_bytes(cfg_path, config_bytes)
+    for rel_key, dst, exists in retired:
+        if exists:
+            dst.unlink()
+            report["removed"].append(str(dst))
+        manifest["files"].pop(rel_key, None)
+    manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    _atomic_write_bytes(manifest_path, manifest_bytes)
     return report
