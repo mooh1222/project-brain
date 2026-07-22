@@ -270,6 +270,58 @@ class InstallTest(unittest.TestCase):
                     self.assertEqual((target / CONFIG_FILENAME).read_bytes(), config_before)
                 self.assertFalse((target / ".agents").exists())
 
+    def test_desired_directory_fails_closed_before_config_or_managed_writes(self):
+        install(self.target, project="demo")
+        destination = self._skill("demo-brain-query")
+        destination.unlink()
+        destination.mkdir()
+        sentinel = destination / "user-data.txt"
+        sentinel.write_text("user-owned directory\n", encoding="utf-8")
+        other_managed = self._skill("demo-brain-ingest")
+        config_path = self.target / CONFIG_FILENAME
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config.pop("repo")
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        manifest_path = self.target / MANIFEST_FILENAME
+        before = {
+            "config": config_path.read_bytes(),
+            "manifest": manifest_path.read_bytes(),
+            "sentinel": sentinel.read_bytes(),
+            "other": other_managed.read_bytes(),
+        }
+
+        with self.assertRaises(Exception) as raised:
+            install(self.target, project="demo", repo="would-have-been-backfilled")
+
+        self.assertEqual(config_path.read_bytes(), before["config"])
+        self.assertEqual(manifest_path.read_bytes(), before["manifest"])
+        self.assertTrue(destination.is_dir())
+        self.assertEqual(sentinel.read_bytes(), before["sentinel"])
+        self.assertEqual(other_managed.read_bytes(), before["other"])
+        self.assertIsInstance(raised.exception, InstallConflictError)
+        self.assertRegex(
+            str(raised.exception), r"brain-query/SKILL\.md.*관리 경로가 일반 파일이 아님",
+        )
+
+    def test_desired_fifo_preflight_rejects_without_reading_it(self):
+        import os
+        import project_brain.installer as inst
+
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO를 지원하지 않는 플랫폼")
+        install(self.target, project="demo")
+        destination = self._skill("demo-brain-query")
+        destination.unlink()
+        os.mkfifo(destination)
+        rel_key = str(destination.relative_to(self.target))
+
+        with self.assertRaisesRegex(
+                InstallConflictError, r"brain-query/SKILL\.md.*관리 경로가 일반 파일이 아님"):
+            inst._safe_managed_path(
+                self.target, rel_key, inst._managed_roots("demo"),
+                require_regular_leaf=True,
+            )
+
     def test_reinstall_is_idempotent(self):
         install(self.target, project="demo")
         report = install(self.target, project="demo")

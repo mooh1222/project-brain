@@ -129,7 +129,8 @@ def _preflight_control_file(path: Path) -> bool:
 
 
 def _safe_managed_path(target_root: Path, rel_key: str,
-                       allowed_roots: tuple[Path, ...]) -> Path:
+                       allowed_roots: tuple[Path, ...],
+                       *, require_regular_leaf: bool = False) -> Path:
     if not isinstance(rel_key, str) or not rel_key:
         raise InstallConflictError(f"{rel_key!r}: 안전하지 않은 관리 경로")
     rel = Path(rel_key)
@@ -155,8 +156,14 @@ def _safe_managed_path(target_root: Path, rel_key: str,
                 f"{rel_key}: 부모 경로 {cursor}가 디렉터리가 아님"
             )
     dst = target_root / rel
-    if dst.is_symlink():
+    try:
+        mode = dst.lstat().st_mode
+    except FileNotFoundError:
+        return dst
+    if stat.S_ISLNK(mode):
         raise InstallConflictError(f"{rel_key}: 관리 파일이 심링크임")
+    if require_regular_leaf and not stat.S_ISREG(mode):
+        raise InstallConflictError(f"{rel_key}: 관리 경로가 일반 파일이 아님")
     return dst
 
 
@@ -277,7 +284,9 @@ def install(target, *, project: str, brain_root: str = "brain",
         target, manifest["files"], set(desired), allowed_roots,
     )
     desired_paths = {
-        rel_key: _safe_managed_path(target, rel_key, allowed_roots)
+        rel_key: _safe_managed_path(
+            target, rel_key, allowed_roots, require_regular_leaf=True,
+        )
         for rel_key in desired
     }
     _preflight_migration_destinations(
