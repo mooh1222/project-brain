@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 SCRIPT = Path(__file__).with_name("finalize_ingest.py")
+WRAPPER = Path(__file__).with_name("finalize_ingest.sh")
 
 
 def load_module():
@@ -124,6 +128,77 @@ class SemanticFinalizerTest(unittest.TestCase):
         }):
             with self.subTest(contract=contract), self.assertRaises(ValueError):
                 module.validate_contract(contract)
+
+    def test_real_wrapper_accepts_single_envelope_and_batch_list_baselines(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "project-brain"
+            fake.write_text("""#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args[:2] == ["graph", "isolated"]:
+    payload = {"ok": True, "isolated": ["code.before"]}
+elif args[:1] == ["search"]:
+    payload = {"ok": True, "results": [{
+        "object_id": "mapping.a",
+        "linked": {"code_locators": [{"object_id": "code.a"}]},
+    }]}
+elif args[:2] == ["index", "rebuild"]:
+    payload = {"ok": True, "indexed": 1}
+elif args[:1] == ["lint"]:
+    payload = {"ok": True, "problems": []}
+elif args[:1] == ["eval"]:
+    payload = {"ok": True, "summary": {"failed": 0}}
+else:
+    payload = {"ok": False, "error": f"unexpected command: {args}"}
+print(json.dumps(payload))
+raise SystemExit(0 if payload["ok"] else 1)
+""", encoding="utf-8")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            checks = root / "{{BRAIN_ROOT}}" / "checks"
+            checks.mkdir(parents=True)
+            config = root / "config.json"
+            config.write_text(json.dumps(self.contract), encoding="utf-8")
+            env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+            for name, baseline in (
+                ("single-envelope", {"ok": True, "isolated_ids": ["code.before"]}),
+                ("batch-list", ["code.before"]),
+            ):
+                with self.subTest(name=name):
+                    baseline_path = root / f"{name}.json"
+                    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+                    result = subprocess.run(
+                        [str(WRAPPER), "--config", str(config),
+                         "--baseline", str(baseline_path)],
+                        cwd=root, env=env, text=True, capture_output=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                    self.assertTrue(json.loads(result.stdout)["ok"])
+
+    def test_invalid_baseline_envelopes_fail_before_commands(self):
+        module = load_module()
+        invalid = (
+            {},
+            {"ok": False, "isolated_ids": []},
+            {"ok": True, "isolated_ids": [], "extra": True},
+            {"ok": True, "isolated_ids": [""]},
+            {"ok": True, "isolated_ids": ["code.a", "code.a"]},
+            [""],
+            ["code.a", "code.a"],
+        )
+        for baseline in invalid:
+            calls = []
+            with self.subTest(baseline=baseline), self.assertRaises(ValueError):
+                module.run_finalization(
+                    self.contract, baseline,
+                    runner=lambda command: calls.append(command),
+                )
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

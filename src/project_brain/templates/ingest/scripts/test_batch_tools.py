@@ -488,6 +488,21 @@ class BatchRunnerApiTest(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(report_path.exists())
 
+    def test_batch_passes_normalized_baseline_list_to_finalizer(self):
+        module = self._module()
+        observed = []
+        report = module.run_batch(
+            self.manifest, self.root / "baseline-list.json",
+            item_runner=lambda item: 0,
+            baseline_collector=lambda: {"ok": True, "isolated_ids": ["code.before"]},
+            finalizer=lambda contract, baseline: (
+                observed.append((contract, baseline)) or FINALIZATION_RESULT
+            ),
+        )
+
+        self.assertTrue(report["finalized"])
+        self.assertEqual(observed[0][1], ["code.before"])
+
     def test_supported_injected_results_and_falsey_callables_succeed(self):
         module = self._module()
 

@@ -60,6 +60,17 @@ def validate_contract(contract: Any) -> dict[str, Any]:
     return {"recall_checks": checks, "intentional_terminal_ids": terminals}
 
 
+def normalize_baseline(value: Any) -> list[str]:
+    """단건 capture envelope와 batch가 저장한 raw ID list를 같은 계약으로 만든다."""
+    if isinstance(value, dict):
+        if set(value) != {"ok", "isolated_ids"}:
+            raise ValueError("isolation baseline envelope 필드가 정확하지 않습니다")
+        if value.get("ok") is not True:
+            raise ValueError("isolation baseline envelope의 ok가 true가 아닙니다")
+        value = value.get("isolated_ids")
+    return _string_list(value, "isolation baseline")
+
+
 def _default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
@@ -110,7 +121,7 @@ def capture_isolation_baseline(runner: CommandRunner = _default_runner) -> dict:
 def run_finalization(contract: Any, baseline_ids: Any,
                      runner: CommandRunner = _default_runner) -> dict:
     config = validate_contract(contract)
-    baseline = _string_list(baseline_ids, "isolation baseline")
+    baseline = normalize_baseline(baseline_ids)
     commands = {
         "index_rebuild": _run_command(
             runner, ["project-brain", "index", "rebuild"], json_output=True),
