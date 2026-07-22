@@ -21,6 +21,10 @@ Brain은 BB2 프로젝트 지식의 단일 저장소다(검수 상태·근거가
 project-brain search "<질문>"
 ```
 
+일반 현재 회수는 `search`, 시간·왜·언제·이전 값 질문은 라우터의 이력 경로를 쓰는
+`project-brain query "<시간·이력 질문>"`, 특정 객체 본문과 이웃은
+`project-brain show <object_id>`로 구분한다.
+
 - 엔진은 글로벌 도구 `project-brain`(2-레포 분리, 2026-06-11). 미설치면(`which project-brain`이
   비면) 레포 루트에서 `./{{BRAIN_ROOT}}/install.sh` 한 번 실행 — uv 전제로 엔진 클론·편집 설치·색인을
   자동화한다. 설치되면 레포 안 어느 디렉토리에서든 실행 가능 — 루트 `.project-brain.json`
@@ -52,8 +56,10 @@ project-brain search "<질문>"
 | `projection_reuse` | 재사용 후보(미검증, 이전 착수 브리핑) | 단정 답 아님 — **"재사용 후보(미검증)" 라벨 필수**. 확신은 정본 객체(results) 적중으로 확인 |
 | `needs_clarification: true` | 게이트 통과 reviewed 0건 | 아래 4번 — "없다"가 답이거나 질문을 좁힌다 (raw 발췌만 있으면 발췌 인용+"검수된 답 없음" 명시) |
 
-superseded(대체됨) 객체는 위 채널 어디에도 안 나온다 — 현재 사실은 대체한 새 객체가 답하고,
-"왜/언제 바뀌었어"는 새 객체의 supersedes 사슬(연결된 DecisionRecord·EventLedgerRecord)이 답한다.
+search는 superseded 객체나 supersedes 사슬을 확장하지 않는다. DomainMapping 변경 이유는 query가
+질의와 연결된 reviewed DecisionRecord를 회수할 때 답할 수 있다. TemporalFact의 이전 값은 reviewed
+EventLedgerRecord에서 파생된 새 fact의 supersedes 사슬과, `valid_until`로 닫힌 옛 reviewed fact가
+함께 있을 때 query의 이력 결과에 나타난다.
 
 ## 4. 없으면 "brain에 없다"를 명시한 뒤 폴백
 

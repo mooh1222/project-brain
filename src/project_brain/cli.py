@@ -972,6 +972,8 @@ def main() -> int:
         # 첫 인자가 서브커맨드면 해당 경로, 아니면 기존 query 경로 호환 유지(AC6)
         if argv and argv[0] == "build":
             return _run_build(argv[1:])
+        if argv and argv[0] == "query":
+            return _run_query(argv[1:])
         if argv and argv[0] == "ingest":
             return _run_ingest(argv[1:])
         if argv and argv[0] == "index":

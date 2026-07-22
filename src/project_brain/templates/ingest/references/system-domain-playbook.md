@@ -59,17 +59,17 @@ Workflow로 컨텍스트/그룹별 병렬 처리한다(`pipeline`):
 읽은 프로젝트 검증 계약은 동적 workflow와 하위 작업자의 프롬프트에도 그대로 전달한다. 코드로 확인할 수
 있는데 계약에 맞는 확인 기록이 없으면 `needs_user`가 아니라 검증 실패다.
 
-- **extract** (`model: 'opus'`): 담당 그룹의 코드를 읽고 위 노트 스키마로 의미 원자를 뽑는다.
-- **verify** (`agentType: 'Explore'` + `model: 'opus'`): extract 노트를 받아 각 `code_anchor`를 실제
+- **extract**: 담당 그룹의 코드를 읽고 위 노트 스키마로 의미 원자를 뽑는다.
+- **verify**: 읽기 전용 검증자로 extract 노트를 받아 각 `code_anchor`를 실제
   파일에서 열어 라인·심볼·quote 일치를 확인하고, `meaning`의 과장·근거 초과·중복·경계 침범을
   적발·수정한다. 반환에 `issues[]` + `verdict`(pass/fixed/needs_user)를 담게 한다.
 
 verify가 **적대검증 역할**을 한다(라인 어긋남·과장·날조를 이미 본다). 따라서 **별도 critic 워크플로우는
-대개 중복**이다 — verify를 돌렸으면 critic은 생략하고, reviewer를 `claude-extract-verify-workflow`로
+대개 중복**이다 — verify를 돌렸으면 critic은 생략하고, reviewer를 `extract-verify-workflow`로
 정직하게 기록한다. critic은 verify를 못 돌렸거나 "묶음 전체를 가로지르는 중복·일관성"이 꼭 필요할 때만.
 
-리뷰어(verify·critic)는 반드시 읽기 전용(`agentType: 'Explore'`)으로 — 쓰기 도구를 주면 실파일을
-오염시킨다(반복 사고). Explore는 모델이 Haiku로 떨어지니 `model: 'opus'`를 같이 박는다.
+리뷰어(verify·critic)는 반드시 읽기 전용으로 둔다. 쓰기 도구를 주면 검증 대상인 실파일을
+오염시킬 수 있다. 실행 환경에 맞는 읽기 전용 작업자나 권한 설정을 사용한다.
 
 ## 3. 대량 워크플로우 완료와 재개
 
@@ -81,44 +81,20 @@ extract/verify `ok`, `pass` 또는 `fixed` verdict를 확인한 뒤에만 조립
 같은 입력**으로 실패 항목을 재개하고, 새 결과 JSON에 validator를 다시 실행해 통과할 때만 다음 단계로
 간다.
 
-## 4. promote에 많은 id 넘기기 — 셸 단어분리 주의(엔진 정상), 또는 함수 호출
+## 4. promote에 많은 id 넘기기 — 셸 단어분리 주의
 
 `promote --ids`는 `nargs='+'`로 여러 인자를 정상으로 받는다(리터럴 `--ids a b c` → 3개로 인식,
 엔진 버그 아님). 함정은 **셸**이다: **zsh는 비따옴표 변수(`--ids $VAR`)를 단어분리하지 않아**(bash와
-다름) 전체가 한 id로 들어가 "unknown ids"로 실패한다. 해결은 셋 중 하나 — id를 리터럴로 나열,
-zsh면 `${=VAR}`나 배열로 분리, 또는 **id가 많고 매핑 묶음 승격→용어 자동승격을 한 흐름으로 돌려야
-하면 promote 함수를 직접 부른다**(reviewer·scope·backfill을 한 토막에 묶을 수 있어 편하다). 도구
-venv python으로:
+다름) 전체가 한 id로 들어가 "unknown ids"로 실패한다. id를 리터럴로 나열하거나 zsh 배열을 쓰고,
+매핑 묶음 승격 뒤에는 공개 CLI인 `promote-auto`로 보증된 용어를 승격한다.
 
-```python
-# 도구 venv: $(head -1 "$(which project-brain)" | sed 's/^#!//')  (보통 ~/.local/share/uv/tools/project-brain/bin/python3)
-import json
-from pathlib import Path
-from project_brain.promote import promote, select_vouched_candidates, backfill_evidence
-from project_brain.ingest import ingest
-
-BR = Path("<repo>/brain")
-objs = json.load(open("<조립한 객체파일>.json"))
-
-# 매핑: 컨텍스트별 mapping_bundle 승격
-for ctx, bkey in [("context.x", "bundle.x.domain-mapping"), ...]:
-    ids = [o["id"] for o in objs if o["kind"] == "DomainMapping" and o["context_id"] == ctx]
-    subset = [o for o in objs if o["id"] in ids]
-    promoted, reviews = promote(subset, ids, "mapping_bundle", bundle_key=bkey,
-                                reviewer="claude-extract-verify-workflow", reviewed_at="<ISO8601>")
-    ingest(BR, promoted + reviews)          # 함수 ingest는 저장까지 함
-
-# 용어: 매핑이 reviewed 된 뒤 promote-auto 로직 재현 (cli.py _run_promote_auto와 동일)
-store = BrainStore.load(BR)                  # 매핑 reviewed 반영된 새 store
-sel = select_vouched_candidates(store)       # {term_id: [보증 매핑 id]}
-eligible = [t for t in term_ids
-            if t in sel and backfill_evidence(store.get(t), store).get("evidence_refs")]
-objects = [backfill_evidence(store.get(t), store) for t in eligible]
-review_extra = {t: {"vouched_by_mapping_ids": sel[t]} for t in eligible}
-promoted, records = promote(objects, eligible, "single_object",
-                            reviewer="auto:mapping-vouched", reviewed_at="<ISO8601>",
-                            review_extra_by_id=review_extra)
-ingest(BR, promoted + records)
+```bash
+project-brain promote \
+  --ids mapping.example.one mapping.example.two \
+  --scope mapping_bundle \
+  --bundle-key bundle.example.domain-mapping \
+  --reviewer extract-verify-workflow
+project-brain promote-auto --ids g.example.one g.example.two
 ```
 
 용어 `eligible` 가드(매핑 보증 없음·근거 없음으로 빠지는 것)는 곧 **고아 진단**이다 — unref/no_evidence가
@@ -139,9 +115,9 @@ ingest(BR, promoted + records)
 
 ## 6. 한 묶음 원자 ingest (슬라이스 분할 금지)
 
-`ingest`는 묶음 전체의 연결무결성을 한 번에 검사하므로, **한 파일에 전 객체(컨텍스트·매핑·용어·코드·
-근거·매니페스트)를 담아 한 번에 넣으면** 객체 생성 순서와 무관하게 통과한다(실패 시 아무것도 안 씀 —
-원자적). context→manifest→code→term→evref→mapping 식으로 여러 묶음에 나눠 순차 ingest할 필요가 없다.
+`ingest`는 묶음 전체의 연결무결성을 저장 전에 한 번에 검사하므로, **한 파일에 전 객체(컨텍스트·매핑·용어·코드·
+근거·매니페스트)를 담아 한 번에 넣으면** 객체 생성 순서와 무관하게 검증한다. 다만 파일 저장은 rollback
+transaction이 아니다. context→manifest→code→term→evref→mapping 식으로 여러 묶음에 나눠 순차 ingest할 필요가 없다.
 나누면 "참조 대상이 먼저 들어와야 한다"는 순서 부담만 생긴다.
 
 ## Common Mistakes (baseline 실측)
@@ -152,9 +128,9 @@ ingest(BR, promoted + records)
 | `promote --ids $VAR` (zsh 비따옴표 변수) | zsh는 단어분리 안 함 — 리터럴/`${=VAR}`/배열, id 많으면 함수 호출 (§4) |
 | 추출물을 자유 텍스트 초안으로 | Workflow `schema`로 구조화 노트 강제 (§1·§2) |
 | critic 워크플로우 무조건 추가 | verify가 코드대조 적대검증이면 critic 중복 — 생략하고 reviewer 정직 기록 (§2) |
-| 객체를 7단계 슬라이스로 나눠 순차 ingest | 한 묶음에 다 넣으면 순서 무관·원자적 (§6) |
+| 객체를 7단계 슬라이스로 나눠 순차 ingest | 한 묶음에 다 넣어 저장 전 전체 연결을 검증 (§6) |
 | 확장 적재인데 기존 용어를 새로 정의 | 기존 id 재사용·기존 컨텍스트 멱등 갱신 (§5) |
-| 리뷰어 에이전트에 쓰기 도구 부여 | `agentType: 'Explore'`(읽기전용) + `model: 'opus'` (§2) |
+| 리뷰어 에이전트에 쓰기 도구 부여 | 실행 환경의 읽기 전용 작업자나 권한 설정을 사용 (§2) |
 
 완료 게이트는 `completeness-checklist.md`, 실행 명령과 저장 절차는 `ingest-tools.md`가 맡는다.
 여기서는 그 계약을 반복하지 않는다.

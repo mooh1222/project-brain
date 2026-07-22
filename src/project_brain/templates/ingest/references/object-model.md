@@ -9,7 +9,9 @@
 - 주요 kind별 필수 필드
 - 연결과 reviewed 근거
 - EvidenceManifest redaction
-- DecisionRecord와 Insight
+- TemporalFact 시간·연결 계약
+- DecisionRecord
+- Insight 적재 규칙
 - 논리 key와 완성 ID
 - synonyms와 aliases 게이트
 
@@ -73,7 +75,17 @@ raw_local, staged, approved, rejected
 기본값을 추측하지 않는다. 특히 오래된 `none` 값은 허용되지 않는다.
 답변에 원문 근거를 제한 없이 쓸 수 있는 상태는 `approved`뿐이며, 나머지는 접근 제한 표기를 유발할 수 있다.
 
-## DecisionRecord와 Insight
+## TemporalFact 시간·연결 계약
+
+`scope`는 release·environment 같은 차원을 담는 객체다. `valid_from`은 현재 값이 시작된 시점이고,
+`valid_until`이 없으면 open current fact다. 값 변경을 완료할 때 옛 fact는 reviewed를 유지하고
+`valid_until`로 닫는다. `old status=superseded`는 기본 전환이 아니다.
+
+새 fact의 `supersedes`는 옛 fact ID 하나를 담는 scalar이고, `derived_from_event_id`는 변경 사건인
+EventLedgerRecord ID다. 현재 엔진의 대상 kind·존재·cycle 검증 빈틈과 실제 갱신 묶음은
+`update-rules.md`를 따른다.
+
+## DecisionRecord
 
 `DecisionRecord`는 결정의 내용과 영향을 기록한다.
 `source_object_ids`가 정본 근거 연결이며, `evidence_refs`가 빈 경우도 있을 수 있다.
@@ -81,9 +93,19 @@ raw_local, staged, approved, rejected
 `hotfix_change`, `naming_decision`, `implementation_boundary` 중 하나를 쓴다.
 `spec_reflected`는 `yes`, `no`, `unknown`, `not_applicable` 중 하나고, `no`는 독립 적대 검증 대상이다.
 
-`Insight`는 단일 객체의 재진술이 아닌 교차 관찰이나 운영 교훈이다.
-candidate Insight는 적재하지 않으며, `cross-cutting-risk`면 `source_object_ids`가 둘 이상 필요하다.
-다른 Insight도 최소 하나의 source 객체를 연결하고, 근거 없는 해석은 만들지 않는다.
+DecisionRecord와 EventLedgerRecord는 역할이 다르며 모든 변경에 자동으로 만들지 않는다.
+
+## Insight 적재 규칙
+
+Insight는 단일 객체의 재진술이 아니라 여러 객체·구현·결정을 가로지르는 검증된 위험이나 교훈이다.
+
+- candidate Insight는 엔진이 거부하므로 검증 뒤 `status=reviewed`로 직접 적재한다.
+- `insight_type`은 `cross-cutting-risk` 또는 `operational-lesson`이다. 전자는 `source_object_ids`가 둘 이상, 후자는 최소 하나 필요하다.
+- `scope`는 적용 범위이며, `code_locator_ids`는 선택 코드 앵커다.
+- `source_object_ids`는 내용을 뒷받침하는 기존 객체이고 `evidence_refs`는 진술 출처다. 둘을 바꾸어 쓰지 않는다.
+- 사용자 진술이 출처면 approved session EvidenceManifest와 session_turn EvidenceRef를 연결한다.
+- source 또는 code locator dangling은 lint가 막는다. 먼저 근거 객체를 적재하지 못하면 backlog에 둔다.
+- 저장 뒤 Insight는 일반 results가 아니라 `advisories` 회상 통로에 나온다.
 
 ## 논리 key
 

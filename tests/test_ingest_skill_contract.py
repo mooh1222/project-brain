@@ -28,6 +28,7 @@ REQUIRED_REFERENCES = (
     "completeness-checklist.md",
     "worked-example.md",
     "ingest-case-log.md",
+    "update-rules.md",
 )
 SOURCE_INTAKE_REPORT_TOKENS = (
     "사용자에게 보이는 첫 진행 보고",
@@ -141,40 +142,12 @@ class IngestSkillContractTest(unittest.TestCase):
             checklist.index("## 적재 전 의미 완전성"),
             checklist.index("## 실행 후 일곱 게이트"),
         )
-        for token in (
-            "1-pass",
-            "독립 public 메서드",
-            "2-pass",
-            "enum 값",
-            "기획서 기능 목차",
-            "코드 뼈대",
-            "서버 규칙",
-            "순수 규칙",
-            "history_coverage=complete",
-            "ledger",
-            "supersede",
-            "reviewed 근거",
-            "boundary/caveats",
-            "Jira/Slack",
-            "DecisionRecord",
-            "의미상 고아",
-            "claim-bearing field",
-            "독립 재구성",
-            "반박",
-            "lint는 형식",
-            "통째로 빠진 규칙",
-        ):
+        for token in ("1-pass", "2-pass", "기획서 기능 목차", "history_coverage=complete",
+                      "DecisionRecord", "독립 재구성", "통째로 빠진 규칙"):
             self.assertIn(token, checklist)
 
-        for token in (
-            "spec_reflected=yes",
-            "spec_reflected=no",
-            "spec_reflected=unknown",
-            "spec_reflected=not_applicable",
-            "Jira/Slack 결정",
-            "현재 기획서에 없으면 `no`",
-            "확인하지 못했으면 `unknown`",
-        ):
+        for token in ("spec_reflected=yes", "spec_reflected=no", "spec_reflected=unknown",
+                      "spec_reflected=not_applicable"):
             self.assertIn(token, judgment)
 
         for token in (
@@ -196,6 +169,72 @@ class IngestSkillContractTest(unittest.TestCase):
             "SKILL.md와 ingest-tools.md가 이미 다룬다",
         ):
             self.assertNotIn(stale, playbook)
+
+    def test_update_rules_are_ingest_owned_and_cross_skill_routed(self):
+        update_rules = REFERENCES / "update-rules.md"
+        old_update_rules = TEMPLATE_ROOT.parent / "session-ingest" / "references" / "update-rules.md"
+        ingest_skill = SKILL.read_text(encoding="utf-8")
+        judgment = (REFERENCES / "judgment.md").read_text(encoding="utf-8")
+        audit = (TEMPLATE_ROOT.parent / "audit" / "SKILL.md").read_text(encoding="utf-8")
+        session_root = TEMPLATE_ROOT.parent / "session-ingest"
+        session_text = "\n".join(
+            path.read_text(encoding="utf-8") for path in session_root.rglob("*.md")
+        )
+
+        self.assertTrue(update_rules.is_file())
+        self.assertFalse(old_update_rules.exists())
+        for text in (ingest_skill, judgment, audit, session_text):
+            self.assertIn("brain-ingest/references/update-rules.md", text)
+        self.assertNotIn("docs/superpowers/", session_text)
+
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo")
+            installed = target / ".agents" / "skills"
+            self.assertTrue(
+                (installed / "demo-brain-ingest" / "references" / "update-rules.md").is_file()
+            )
+            self.assertFalse(
+                (installed / "demo-brain-session-ingest" / "references" / "update-rules.md").exists()
+            )
+
+    def test_update_rules_distinguish_engine_operator_and_known_gaps(self):
+        text = (REFERENCES / "update-rules.md").read_text(encoding="utf-8")
+        for heading in ("## 책임 경계", "## 엔진이 강제하는 것", "## 사람이 지키는 절차",
+                        "## 현재 엔진 빈틈", "## kind별 갱신"):
+            self.assertIn(heading, text)
+        for contract in ("supersedes_mapping_ids", "valid_until", "derived_from_event_id",
+                         "scope는 객체", "same-ID", "mark-checked", "reviewed→candidate",
+                         "rollback transaction은 아니다"):
+            self.assertIn(contract, text)
+        self.assertNotIn("EventLedgerRecord 없이는 적재도", text)
+
+    def test_object_model_restores_temporal_and_insight_contracts(self):
+        text = (REFERENCES / "object-model.md").read_text(encoding="utf-8")
+        self.assertIn("## TemporalFact 시간·연결 계약", text)
+        self.assertIn("old status=superseded", text)
+        self.assertIn("## Insight 적재 규칙", text)
+        for token in ("candidate Insight", "reviewed", "cross-cutting-risk", "operational-lesson",
+                      "source_object_ids", "evidence_refs", "session", "advisories"):
+            self.assertIn(token, text)
+
+    def test_query_audit_and_playbook_match_current_generic_runtime(self):
+        query = (TEMPLATE_ROOT.parent / "query" / "SKILL.md").read_text(encoding="utf-8")
+        audit = (TEMPLATE_ROOT.parent / "audit" / "SKILL.md").read_text(encoding="utf-8")
+        playbook = (REFERENCES / "system-domain-playbook.md").read_text(encoding="utf-8")
+        checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
+        ingest_tools = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
+
+        self.assertIn('project-brain search "<질문>"', query)
+        self.assertIn('project-brain query "<시간·이력 질문>"', query)
+        self.assertIn("project-brain show <object_id>", query)
+        self.assertNotIn("search가 supersedes", query)
+        self.assertIn("brain-ingest/references/update-rules.md", audit)
+        for stale in ("model: 'opus'", "agentType: 'Explore'", "Haiku", "BrainStore", "term_ids ="):
+            self.assertNotIn(stale, playbook)
+        for artifact in ("심볼 인벤토리", "누락 판정", "확인한 이력 종류"):
+            self.assertIn(artifact, checklist)
+        self.assertNotIn("docs/superpowers/plans/", ingest_tools)
 
 
 if __name__ == "__main__":

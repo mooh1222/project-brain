@@ -42,8 +42,8 @@ project-brain audit --no-stale  # git 없는 환경 — lint·isolated만
 audit이 캐시를 쓰면 그 다음부터 query/show에 `stale_advisory`(코드 바뀐 매핑 표시)가 뜬다.
 코드를 직접 보고 판정한다 — **자동 supersede는 없다, 에이전트가 B+C로 판정**한다.
 
-- 의미가 정말 낡았으면 → `{{PROJECT}}-brain-session-ingest`의 "갱신 운용 규약"대로 supersede(매핑)/
-  제자리 수정 + DecisionRecord 연결.
+- 의미가 정말 낡았으면 → `{{PROJECT}}-brain-ingest/references/judgment.md`로 의미를 판정하고
+  `{{PROJECT}}-brain-ingest/references/update-rules.md`의 kind별 흐름으로 넘긴다. audit은 자동 판정·갱신하지 않는다.
 - 바뀐 게 의미 무관(리팩터·이동·테스트 변경)이면 → 의미는 그대로니 `mark-checked`로 그 시점
   {{DEFAULT_BRANCH}} sha 기준 검토 완료 표시(스냅샷만 갱신, 의미 불변):
   ```bash

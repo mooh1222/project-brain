@@ -66,7 +66,7 @@ description: |
 3. **원자 추출.** 심볼은 발견 단위로 쓰고, 저장은 의미 원자 단위로 한다. 불명확한 사실은 예외 목록으로 분리한다.
 4. **연결 조립.** 논리 key 노트와 근거를 만든 뒤 build로 ID와 연결을 조립한다. 객체 필드와 연결은 `references/object-model.md`를 따른다.
 5. **적대 검증.** 별도 검증자가 근거, 경계, 코드 앵커, 중복을 반박하며 확인한다. 변경 이력의 결론은 `references/judgment.md`로 판정한다.
-6. **수정 또는 보류.** 검증이 고친 원자는 다시 확인하고, 근거가 없는 항목은 억지로 채우지 않는다.
+6. **수정 또는 보류.** 기존 사실을 갱신하거나 대체하면 `references/update-rules.md`의 kind별 묶음을 따른다. 근거가 없는 항목은 억지로 채우지 않는다.
 7. **적재.** build 오류가 없고 완료 조건을 만족할 때만 한 묶음으로 ingest한다.
 8. **마무리.** 적재 뒤 검증과 회상 확인은 `references/completeness-checklist.md` 및 `references/ingest-tools.md`를 따른다.
 
@@ -131,6 +131,7 @@ workflow 최상위 상태만으로 완료를 선언하지 않는다.
 - `references/scope.md`: 적용 시나리오, 세 상태축, 머지 전·후 경계가 필요할 때 읽는다.
 - `references/object-model.md`: 필수 필드, enum, 연결, 논리 key, 완성 ID, 코드 앵커 key, 동의어·별칭을 다룰 때 읽는다.
 - `references/judgment.md`: 변경이 기존 사실을 대체·보완·충돌시키는지 판정할 때 읽는다.
+- `references/update-rules.md`(설치 후 `{{PROJECT}}-brain-ingest/references/update-rules.md`): 기존 객체를 kind별로 갱신·대체할 실제 묶음과 엔진 빈틈을 확인할 때 읽는다.
 - `references/ingest-tools.md`: build, ingest, raw 보관, 단건·대량 실행과 마무리 명령이 필요할 때 읽는다.
 - `references/system-domain-playbook.md`: 큰 도메인 분할, 동적 workflow, 재개 운영이 필요할 때 읽는다.
 - `references/completeness-checklist.md`: 적재 직전과 직후의 통과 조건을 점검할 때 읽는다.

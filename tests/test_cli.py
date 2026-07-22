@@ -52,6 +52,13 @@ class TestCli(unittest.TestCase):
         # answer JSON이 나옴(QueryRouter.answer 결과 형태)
         self.assertIn("intents", answer)
 
+    def test_explicit_query_subcommand_routes_without_becoming_query_text(self):
+        with mock.patch.object(cli, "_run_query", return_value=0) as run_query, \
+             mock.patch("sys.argv", ["cli", "query", "왜 바뀌었어?"]):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        run_query.assert_called_once_with(["왜 바뀌었어?"])
+
     def test_cli_query_with_db_enables_recall(self):
         # 후속 c(2026-06-11): cli query에 --db·--stub-embedder 배선 — 색인을 주면
         # 라우터 recall이 켜져 top-K로 좁힌다(전량 12 아님). --db 없는 기존 경로는

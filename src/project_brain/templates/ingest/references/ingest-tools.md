@@ -20,7 +20,7 @@
 근거 약함/충돌/검증 실패 ──ingest(status:candidate)──▶ store 저장 ──질의 시 "확인 필요" 노출──▶ project-brain promote(사용 시점) ──▶ reviewed   ← C
 ```
 
-- `ingest`: 묶음을 받아 **per-object 스키마 검증 → 병합 store 연결무결성 lint → 저장**을 원자적으로 묶는다.
+- `ingest`: 묶음을 받아 **per-object 스키마 검증 → 병합 store 연결무결성 lint → 파일 저장** 순서로 처리한다. 저장 전 검증은 묶음 전체지만 파일 쓰기는 rollback transaction이 아니다.
   어느 게이트든 실패하면 `IngestError`를 내고 **아무것도 안 쓴다**. status는 호출자가 박는다 — 검증 통과 매핑을
   `reviewed`로 넣으면 그대로 검수됨(B), 후퇴(reviewed→candidate)만 거부한다. §6.4로 reviewed `DomainMapping`·
   `GlossaryTerm`은 `evidence_refs` non-empty여야 통과한다(코드앵커는 비강제).
@@ -38,8 +38,8 @@
 #    context는 key·commit 필수. now는 선택 — 생략하면 엔진이 현재 KST(+09:00)를
 #    created_at/updated_at/verified_at에 자동으로 박는다(적으면 그 값으로 override = 소급·테스트용).
 #    (decisions[]는 build_decisions가 DecisionRecord + commit/jira/pr EvidenceRef로 조립하고
-#     affects 역채움까지 한다. 노트 스키마 정본은
-#     docs/superpowers/plans/2026-06-16-project-brain-assembly-build.md 의 "노트 스키마" 블록)
+#     affects 역채움까지 한다. 노트 스키마 정본은 이 skill의 domain-spec.md와
+#     project-brain build --help에서 확인한다.)
 # 2) build — 묶음(out.json) 생성. 리포트(diff·resolved_refs·preconditions)는 stdout → 파일로 저장
 project-brain build --notes notes.json --objects-file out.json > report.json
 # 3) report.json의 diff 확인 (특히 updates의 기존 객체 before/after 값)
