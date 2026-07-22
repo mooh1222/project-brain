@@ -132,6 +132,71 @@ class IngestSkillContractTest(unittest.TestCase):
         for token in SOURCE_INTAKE_REPORT_TOKENS:
             self.assertIn(token, rendered)
 
+    def test_semantic_completeness_and_concept_domain_contracts(self):
+        checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
+        judgment = (REFERENCES / "judgment.md").read_text(encoding="utf-8")
+        playbook = (REFERENCES / "system-domain-playbook.md").read_text(encoding="utf-8")
+
+        self.assertLess(
+            checklist.index("## 적재 전 의미 완전성"),
+            checklist.index("## 실행 후 일곱 게이트"),
+        )
+        for token in (
+            "1-pass",
+            "독립 public 메서드",
+            "2-pass",
+            "enum 값",
+            "기획서 기능 목차",
+            "코드 뼈대",
+            "서버 규칙",
+            "순수 규칙",
+            "history_coverage=complete",
+            "ledger",
+            "supersede",
+            "reviewed 근거",
+            "boundary/caveats",
+            "Jira/Slack",
+            "DecisionRecord",
+            "의미상 고아",
+            "claim-bearing field",
+            "독립 재구성",
+            "반박",
+            "lint는 형식",
+            "통째로 빠진 규칙",
+        ):
+            self.assertIn(token, checklist)
+
+        for token in (
+            "spec_reflected=yes",
+            "spec_reflected=no",
+            "spec_reflected=unknown",
+            "spec_reflected=not_applicable",
+            "Jira/Slack 결정",
+            "현재 기획서에 없으면 `no`",
+            "확인하지 못했으면 `unknown`",
+        ):
+            self.assertIn(token, judgment)
+
+        for token in (
+            "기획서가 없으면",
+            "개발 완료 코드",
+            "데이터 소스",
+            "구조/표시 패턴",
+            "확장 지점",
+            "규칙/함정",
+            "과거 결정",
+            "확장 지점 종합 매핑",
+            "공통분모만",
+            "기능별 차이",
+        ):
+            self.assertIn(token, playbook)
+        for stale in (
+            "SKILL.md §11.4",
+            "SKILL.md 분기만으로 충분",
+            "SKILL.md와 ingest-tools.md가 이미 다룬다",
+        ):
+            self.assertNotIn(stale, playbook)
+
 
 if __name__ == "__main__":
     unittest.main()
