@@ -3,8 +3,9 @@
 `brain/raw/sources/<context>/*.md`(P1 규약 — 텍스트 원문만 추적)를 헤더 기준으로
 청크해 색인 행으로 만든다. hwi_PKM chunker 채택(task 참조 지도 소비 기록):
 헤더(#~######) 1차 섹션화 → 목표 토큰 초과 섹션만 문장 경계 2차 분할 + 15% 겹침.
-토큰은 정밀 토크나이저가 아니라 근사(영문 단어수 + 한글 글자수/2) — 난수·시각
-없이 완전 결정론이라 같은 입력이면 항상 같은 청크(재생성 가능 색인의 전제, §4).
+토큰은 정밀 토크나이저가 아니라 보수적 근사(영문 단어수 + 한글 글자수 +
+ASCII·한글 이외 비공백 기호 2개당 1토큰)다. 난수·시각 없이 완전 결정론이라
+같은 입력이면 항상 같은 청크(재생성 가능 색인의 전제, §4).
 
 청크 행 메타(§2.2): kind="raw_chunk", status="raw", context_id="context.<디렉토리명>"
 (실코퍼스 규약 — raw/sources/mina-kayak ↔ context.mina-kayak), id는
@@ -25,15 +26,17 @@ RAW_STATUS = "raw"
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HANGUL_RE = re.compile(r"[가-힣]")
+_OTHER_NONSPACE_RE = re.compile(r"[^\sA-Za-z0-9_가-힣]")
 # 문장 경계: 종결 부호 뒤 공백. 마크다운 표·목록처럼 부호 없는 줄은 줄 자체가 유닛.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def approx_tokens(text: str) -> int:
-    """토큰 수 근사 — 영문 단어수 + 한글 글자수/2 (hwi_PKM 동일 근사)."""
+    """토큰 수의 보수적 근사 — 영문 단어, 한글 글자, 나머지 기호를 센다."""
     ascii_words = len(_ASCII_WORD_RE.findall(text))
     hangul_chars = len(_HANGUL_RE.findall(text))
-    return ascii_words + hangul_chars // 2
+    other_chars = len(_OTHER_NONSPACE_RE.findall(text))
+    return ascii_words + hangul_chars + ((other_chars + 1) // 2)
 
 
 def _split_sections(text: str) -> list[str]:
@@ -66,9 +69,31 @@ def _units(section_text: str) -> list[str]:
     return units
 
 
+def _split_oversized_unit(unit: str, target: int) -> list[str]:
+    """목표를 넘는 단일 유닛을 문자 경계에서 보수적으로 나눈다."""
+    out, buf = [], []
+    for ch in unit:
+        candidate = "".join(buf) + ch
+        if buf and approx_tokens(candidate) > target:
+            out.append("".join(buf))
+            buf = [ch]
+        else:
+            buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
 def _windows(units: list[str], target: int, overlap_ratio: float) -> list[str]:
     """유닛을 토큰 예산 창으로 묶는다. 다음 창은 직전 창 꼬리 ~15% 토큰 분량을
     다시 포함(겹침). i가 항상 전진하므로 무한 루프 없음 — 결정론."""
+    units = [
+        piece
+        for unit in units
+        for piece in (_split_oversized_unit(unit, target)
+                      if approx_tokens(unit) > target else [unit])
+        if piece
+    ]
     out: list[str] = []
     i, n = 0, len(units)
     overlap_budget = int(target * overlap_ratio)

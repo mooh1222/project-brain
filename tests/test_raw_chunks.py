@@ -1,7 +1,8 @@
 """raw 원문 청커 (스펙 §2.2, P4 raw 본문 색인 — 2026-06-11).
 
 hwi_PKM chunker 채택(task 참조 지도): 헤더 기준 1차 섹션화 → 토큰 초과 섹션만
-문장 경계 2차 분할 + 15% 겹침. 토큰은 근사(영문 단어수 + 한글 글자수/2).
+문장 경계 2차 분할 + 15% 겹침. 토큰은 보수적 근사(영문 단어수 + 한글 글자수 +
+ASCII·한글 이외 비공백 기호 2개당 1토큰).
 난수·시각 없이 완전 결정론 — 같은 입력이면 항상 같은 청크.
 """
 
@@ -21,9 +22,8 @@ class ApproxTokensTest(unittest.TestCase):
     def test_ascii_words_counted(self):
         self.assertEqual(approx_tokens("hello world foo"), 3)
 
-    def test_hangul_chars_halved(self):
-        # 한글 4글자 → 2토큰 근사(hwi_PKM 동일 근사).
-        self.assertEqual(approx_tokens("가나다라"), 2)
+    def test_hangul_chars_counted_conservatively(self):
+        self.assertEqual(approx_tokens("가나다라"), 4)
 
     def test_hangul_is_counted_conservatively(self):
         self.assertEqual(approx_tokens("가나다라"), 4)
@@ -32,7 +32,7 @@ class ApproxTokensTest(unittest.TestCase):
         self.assertGreaterEqual(approx_tokens("|---|---|---|"), 4)
 
     def test_mixed(self):
-        self.assertEqual(approx_tokens("hello 가나다라"), 3)
+        self.assertEqual(approx_tokens("hello 가나다라"), 5)
 
 
 class SplitMarkdownTest(unittest.TestCase):
