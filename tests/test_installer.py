@@ -7,6 +7,7 @@ hwi_PKM manifest 멱등 패턴의 파일 단위 적용.
 from __future__ import annotations
 
 import json
+import stat
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -223,6 +224,30 @@ class InstallTest(unittest.TestCase):
                 # 합성 렌더에서 project-kkk가 나타난다(정상 리터럴에선 부재).
                 self.assertNotIn("project-kkk", out,
                                  f"도구명 오염(project-brain→project-<root>): {src}")
+
+    def test_ingest_runtime_scripts_install_without_claiming_project_overlay(self):
+        overlay = (self._skill_dir("demo-brain-ingest") / "references" /
+                   "project-code-verification.md")
+        overlay.parent.mkdir(parents=True)
+        overlay.write_text("프로젝트가 소유하는 코드 검증 규칙\n", encoding="utf-8")
+
+        install(self.target, project="demo")
+        second = install(self.target, project="demo")
+
+        scripts = self._skill_dir("demo-brain-ingest") / "scripts"
+        for name in ("run_ingest.sh", "finalize_ingest.sh", "run_ingest_batch.py",
+                     "validate_workflow_result.py"):
+            with self.subTest(name=name):
+                script = scripts / name
+                self.assertTrue(script.is_file())
+                if name.endswith(".sh") and script.is_file():
+                    self.assertTrue(script.stat().st_mode & stat.S_IXUSR)
+        self.assertFalse((scripts / "test_batch_tools.py").exists())
+        self.assertEqual(overlay.read_text(encoding="utf-8"),
+                         "프로젝트가 소유하는 코드 검증 규칙\n")
+        self.assertNotIn(str(overlay.relative_to(self.target)),
+                         json.loads((self.target / MANIFEST_FILENAME).read_text(encoding="utf-8"))["files"])
+        self.assertEqual(second["skipped"], [])
 
 
 if __name__ == "__main__":
