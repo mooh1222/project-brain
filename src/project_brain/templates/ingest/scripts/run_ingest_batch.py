@@ -143,6 +143,15 @@ def _manifest_fingerprint(items: list[dict[str, Any]], finalization: dict[str, A
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _reject_report_input_collision(report_path: Path, manifest_path: Path,
+                                   items: list[dict[str, Any]]) -> None:
+    inputs = [manifest_path]
+    for item in items:
+        inputs.extend((item["verify_json"], item["domain_spec_py"]))
+    if any(report_path == input_path for input_path in inputs):
+        raise ValueError("report 경로가 manifest 또는 항목 입력과 같습니다")
+
+
 def _default_item_runner(item: dict[str, Any]) -> subprocess.CompletedProcess[str]:
     script = Path(__file__).resolve().with_name("run_ingest.sh")
     return subprocess.run(
@@ -306,6 +315,7 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
     if report_file.exists() and report_file.is_dir():
         raise ValueError(f"report 경로가 디렉터리입니다: {report_file}")
     items, finalization_contract = _load_manifest(manifest)  # 실행 전 전체 입력을 검사한다.
+    _reject_report_input_collision(report_file, manifest, items)
     manifest_fingerprint = _manifest_fingerprint(items, finalization_contract)
 
     prior_succeeded: set[str] = set()

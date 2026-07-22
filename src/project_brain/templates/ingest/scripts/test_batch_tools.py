@@ -301,6 +301,36 @@ print(json.dumps({"ok": True, "commands": {}, "isolation": {},
         self.assertFalse(payload["ok"])
         self.assertTrue(payload["errors"])
 
+    def test_cli_rejects_report_paths_that_alias_manifest_inputs_before_runtime(self):
+        self._copy_runtime_scripts()
+        manifest = self._manifest()
+        inputs = manifest.parent / "inputs"
+        verify = inputs / "a.json"
+        domain_spec = inputs / "a.py"
+        report_alias = self.root / "report-alias.json"
+        report_alias.symlink_to(verify)
+        original_inputs = {
+            manifest: manifest.read_bytes(),
+            verify: verify.read_bytes(),
+            domain_spec: domain_spec.read_bytes(),
+        }
+        for label, report_path, source in (
+            ("manifest", manifest, manifest),
+            ("verify", verify, verify),
+            ("domain", domain_spec, domain_spec),
+            ("symlink", report_alias, verify),
+        ):
+            with self.subTest(label=label):
+                for path, data in original_inputs.items():
+                    path.write_bytes(data)
+                self.log.write_text("", encoding="utf-8")
+                before = source.read_bytes()
+                result = self._run_batch(manifest, report_path)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(source.read_bytes(), before)
+                self.assertEqual(self._calls(), [])
+                self.assertIn("report", json.loads(result.stdout)["errors"][0])
+
     def test_unreadable_resume_report_returns_json_error_before_any_item(self):
         self._copy_runtime_scripts()
         resume_directory = self.root / "resume-directory"
@@ -487,6 +517,39 @@ class BatchRunnerApiTest(unittest.TestCase):
             )
         self.assertEqual(calls, [])
         self.assertFalse(report_path.exists())
+
+    def test_api_rejects_report_paths_that_alias_manifest_inputs_before_callbacks(self):
+        module = self._module()
+        verify = self.manifest_dir / "verify.json"
+        domain_spec = self.manifest_dir / "domain.py"
+        report_alias = self.root / "report-alias.json"
+        report_alias.symlink_to(verify)
+        original_inputs = {
+            self.manifest: self.manifest.read_bytes(),
+            verify: verify.read_bytes(),
+            domain_spec: domain_spec.read_bytes(),
+        }
+        for label, report_path, source in (
+            ("manifest", self.manifest, self.manifest),
+            ("verify", verify, verify),
+            ("domain", domain_spec, domain_spec),
+            ("symlink", report_alias, verify),
+        ):
+            with self.subTest(label=label):
+                for path, data in original_inputs.items():
+                    path.write_bytes(data)
+                before = source.read_bytes()
+                calls = []
+                with self.assertRaisesRegex(ValueError, "report.*입력"):
+                    module.run_batch(
+                        self.manifest, report_path,
+                        baseline_collector=lambda: calls.append("baseline") or {
+                            "ok": True, "isolated_ids": []},
+                        item_runner=lambda item: calls.append("item") or 0,
+                        finalizer=lambda *_: calls.append("finalizer") or FINALIZATION_RESULT,
+                    )
+                self.assertEqual(source.read_bytes(), before)
+                self.assertEqual(calls, [])
 
     def test_batch_passes_normalized_baseline_list_to_finalizer(self):
         module = self._module()
