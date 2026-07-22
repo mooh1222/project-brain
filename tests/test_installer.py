@@ -14,7 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from project_brain.config import CONFIG_FILENAME
-from project_brain.installer import MANIFEST_FILENAME, install, render_text
+from project_brain.installer import InstallConflictError, MANIFEST_FILENAME, install, render_text
 
 
 class RenderTextTest(unittest.TestCase):
@@ -328,6 +328,131 @@ class InstallTest(unittest.TestCase):
             self.assertTrue(new_installed.is_file())
             for field in ("created", "updated", "removed", "adopted", "skipped"):
                 self.assertEqual(second[field], [], field)
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
+
+    def test_template_move_user_owned_destination_conflict_fails_before_any_write(self):
+        import project_brain.installer as inst
+        templates = self.target / "move_conflict_templates"
+        old_source = templates / "query" / "references" / "old.md"
+        old_source.parent.mkdir(parents=True)
+        old_source.write_text("managed old\n", encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            old_installed = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            new_installed = self._skill_dir("demo-brain-query") / "references" / "new.md"
+            old_source.unlink()
+            (old_source.parent / "new.md").write_text("managed new\n", encoding="utf-8")
+            new_installed.write_text("user destination\n", encoding="utf-8")
+            config_path = self.target / CONFIG_FILENAME
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.pop("repo")
+            config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+            manifest_path = self.target / MANIFEST_FILENAME
+            before = {
+                "old": old_installed.read_bytes(),
+                "new": new_installed.read_bytes(),
+                "config": config_path.read_bytes(),
+                "manifest": manifest_path.read_bytes(),
+            }
+
+            with self.assertRaisesRegex(
+                    InstallConflictError, r"new\.md.*manifest 밖.*사용자"):
+                install(self.target, project="demo", repo="would-have-been-backfilled")
+
+            self.assertEqual(old_installed.read_bytes(), before["old"])
+            self.assertEqual(new_installed.read_bytes(), before["new"])
+            self.assertEqual(config_path.read_bytes(), before["config"])
+            self.assertEqual(manifest_path.read_bytes(), before["manifest"])
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
+
+    def test_retired_file_plus_modified_tracked_destination_fails_before_any_write(self):
+        import project_brain.installer as inst
+        templates = self.target / "tracked_conflict_templates"
+        refs = templates / "query" / "references"
+        refs.mkdir(parents=True)
+        (refs / "old.md").write_text("managed old\n", encoding="utf-8")
+        (refs / "kept.md").write_text("managed kept\n", encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            old_installed = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            kept_installed = self._skill_dir("demo-brain-query") / "references" / "kept.md"
+            (refs / "old.md").unlink()
+            kept_installed.write_text("user modified tracked\n", encoding="utf-8")
+            config_path = self.target / CONFIG_FILENAME
+            manifest_path = self.target / MANIFEST_FILENAME
+            before = {
+                "old": old_installed.read_bytes(),
+                "kept": kept_installed.read_bytes(),
+                "config": config_path.read_bytes(),
+                "manifest": manifest_path.read_bytes(),
+            }
+
+            with self.assertRaisesRegex(
+                    InstallConflictError, r"kept\.md.*manifest 추적.*사용자 수정"):
+                install(self.target, project="demo")
+
+            self.assertEqual(old_installed.read_bytes(), before["old"])
+            self.assertEqual(kept_installed.read_bytes(), before["kept"])
+            self.assertEqual(config_path.read_bytes(), before["config"])
+            self.assertEqual(manifest_path.read_bytes(), before["manifest"])
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
+
+    def test_template_move_matching_user_destination_is_adopted(self):
+        import project_brain.installer as inst
+        templates = self.target / "move_adopt_templates"
+        old_source = templates / "query" / "references" / "old.md"
+        old_source.parent.mkdir(parents=True)
+        old_source.write_text("managed\n", encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            old_installed = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            new_installed = self._skill_dir("demo-brain-query") / "references" / "new.md"
+            old_source.unlink()
+            (old_source.parent / "new.md").write_text("managed\n", encoding="utf-8")
+            new_installed.write_text("managed\n", encoding="utf-8")
+
+            report = install(self.target, project="demo")
+
+            self.assertEqual(report["removed"], [str(old_installed)])
+            self.assertEqual(report["adopted"], [str(new_installed)])
+            self.assertEqual(report["skipped"], [])
+            self.assertFalse(old_installed.exists())
+            self.assertEqual(new_installed.read_text(encoding="utf-8"), "managed\n")
+        finally:
+            inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
+
+    def test_force_updates_modified_tracked_destination_during_migration(self):
+        import project_brain.installer as inst
+        templates = self.target / "force_move_templates"
+        refs = templates / "query" / "references"
+        refs.mkdir(parents=True)
+        (refs / "old.md").write_text("managed old\n", encoding="utf-8")
+        (refs / "kept.md").write_text("managed v1\n", encoding="utf-8")
+        original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+        inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+        try:
+            install(self.target, project="demo")
+            old_installed = self._skill_dir("demo-brain-query") / "references" / "old.md"
+            kept_installed = self._skill_dir("demo-brain-query") / "references" / "kept.md"
+            (refs / "old.md").unlink()
+            (refs / "kept.md").write_text("managed v2\n", encoding="utf-8")
+            kept_installed.write_text("user modified tracked\n", encoding="utf-8")
+
+            report = install(self.target, project="demo", force=True)
+
+            self.assertEqual(report["removed"], [str(old_installed)])
+            self.assertEqual(report["updated"], [str(kept_installed)])
+            self.assertFalse(old_installed.exists())
+            self.assertEqual(kept_installed.read_text(encoding="utf-8"), "managed v2\n")
         finally:
             inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
 

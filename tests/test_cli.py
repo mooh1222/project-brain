@@ -803,6 +803,54 @@ class TestCliInstallDoctor(unittest.TestCase):
             self.assertIn("사용자 수정", payload["error"])
             self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_install_migration_destination_conflict_returns_json_error_before_write(self):
+        import project_brain.installer as inst
+        from project_brain.installer import MANIFEST_FILENAME, install
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td)
+            templates = target / "templates"
+            old_source = templates / "query" / "references" / "old.md"
+            old_source.parent.mkdir(parents=True)
+            old_source.write_text("managed old\n", encoding="utf-8")
+            original_dir, original_skills = inst._TEMPLATES_DIR, inst._SKILLS
+            inst._TEMPLATES_DIR, inst._SKILLS = templates, {"query": "brain-query"}
+            try:
+                install(target, project="demo")
+                old_installed = (target / ".agents" / "skills" / "demo-brain-query" /
+                                 "references" / "old.md")
+                new_installed = old_installed.with_name("new.md")
+                old_source.unlink()
+                old_source.with_name("new.md").write_text("managed new\n", encoding="utf-8")
+                new_installed.write_text("user destination\n", encoding="utf-8")
+                config_path = target / ".project-brain.json"
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                config.pop("repo")
+                config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+                config_before = config_path.read_bytes()
+                manifest_path = target / MANIFEST_FILENAME
+                manifest_before = manifest_path.read_bytes()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                argv = ["install", "--target", td, "--project", "demo",
+                        "--repo", "would-have-been-backfilled"]
+
+                with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(stdout), \
+                     redirect_stderr(stderr):
+                    rc = cli.main()
+
+                self.assertNotEqual(rc, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertIn("new.md", payload["error"])
+                self.assertIn("manifest 밖", payload["error"])
+                self.assertEqual(old_installed.read_text(encoding="utf-8"), "managed old\n")
+                self.assertEqual(new_installed.read_text(encoding="utf-8"), "user destination\n")
+                self.assertEqual(config_path.read_bytes(), config_before)
+                self.assertEqual(manifest_path.read_bytes(), manifest_before)
+                self.assertNotIn("Traceback", stderr.getvalue())
+            finally:
+                inst._TEMPLATES_DIR, inst._SKILLS = original_dir, original_skills
+
     def test_doctor_subcommand_runs(self):
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli", "doctor"]), redirect_stdout(out):

@@ -162,6 +162,40 @@ def _preflight_retired(target_root: Path, manifest_files: dict,
     return retired
 
 
+def _preflight_migration_destinations(
+        retired: list[tuple[str, Path, bool]], manifest_files: dict,
+        desired: dict[str, tuple[Path, bytes, str]], desired_paths: dict[str, Path],
+        *, force: bool) -> None:
+    """retired 정본을 지우기 전에 desired 목적지가 전부 적용 가능한지 확인한다.
+
+    retired가 없는 일반 재설치는 사용자 파일을 ``skipped``하는 기존 정책을 유지한다.
+    migration 중에는 그 skip이 정본 유실을 만들 수 있으므로 같은 상태를 충돌로 승격한다.
+    """
+    if not retired:
+        return
+    for rel_key, (_, _, rendered_hash) in desired.items():
+        dst = desired_paths[rel_key]
+        if not dst.exists():
+            continue
+        if not dst.is_file():
+            raise InstallConflictError(
+                f"{rel_key}: migration 목적지 충돌 — 일반 파일이 아님; retired 파일을 보존하고 중단"
+            )
+        on_disk = _sha256_bytes(dst.read_bytes())
+        if on_disk == rendered_hash:
+            continue  # manifest 밖이라도 렌더 결과와 같으면 이후 adopt 가능
+        recorded = manifest_files.get(rel_key)
+        if recorded == on_disk or (recorded is not None and force):
+            continue
+        if recorded is None:
+            reason = "manifest 밖 사용자 파일이며 렌더 결과와 다름"
+        else:
+            reason = "manifest 추적 파일이 사용자 수정됐고 force=false"
+        raise InstallConflictError(
+            f"{rel_key}: migration 목적지 충돌 — {reason}; retired 파일을 보존하고 중단"
+        )
+
+
 def install(target, *, project: str, brain_root: str = "brain",
             default_branch: str = "", repo: str = "", force: bool = False) -> dict:
     """target에 설치한다.
@@ -222,6 +256,9 @@ def install(target, *, project: str, brain_root: str = "brain",
         rel_key: _safe_managed_path(target, rel_key, allowed_roots)
         for rel_key in desired
     }
+    _preflight_migration_destinations(
+        retired, manifest["files"], desired, desired_paths, force=force,
+    )
 
     if config_bytes is not None:
         cfg_path.write_bytes(config_bytes)
