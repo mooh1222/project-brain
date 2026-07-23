@@ -10,6 +10,17 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-07-23 — 코드 앵커 SHA 머지 규칙 정정
+
+커밋 SHA는 머지로 바뀌지 않으며, fast-forward와 일반 merge에서는 작업 브랜치 커밋이
+기본 브랜치 이력에 그대로 포함되므로 기존 `commit_sha`를 유지한다. 머지 뒤
+`git merge-base --is-ancestor`와 앵커 대상 코드를 다시 확인하고, squash·rebase·cherry-pick
+또는 충돌 해결로 기존 SHA가 기본 브랜치 이력에 없거나 코드가 달라진 경우에만 갱신한다.
+
+ingest의 `SKILL.md`·`scope.md`·`object-model.md`·`domain_spec.template.py`와
+session-ingest의 `dev-ingest.md`를 같은 규칙으로 맞추고, 엔진 템플릿과 렌더된 설치본에서
+이 문구가 유지되는 회귀 검사를 추가했다. 엔진 `d320b1f`, BB2 설치본 `d71d2a8e24`.
+
 ## 2026-07-23 — 대량 적재 최종 안전 보강
 
 kind별 기존 객체 갱신 규칙의 단일 원본을 ingest `references/update-rules.md`로 옮기고
@@ -34,6 +45,8 @@ completeness-checklist 8번: 적대검증을 의무로 못 박아도 "완료" �
 ## 2026-06-30 — 적재 회고 반영: 적대검증 의무화 + 머지 전 앵커 경계 + PR/evref 문서 보강
 
 completeness-checklist 8번: 고위험 객체(DecisionRecord·supersede·code anchor·history_coverage=complete) 재구성 감사를 "선택"→"필수"로, 메모리 서사를 결정에 옮길 땐 코드/원문 대조 적대검증 의무를 명시(메모리 기반 허위 DecisionRecord 방지 — 럭키박스 세션 실측). scope.md: 기본은 머지 후 앵커 / 머지 전 PR HEAD SHA는 그 PR이 merge-commit으로 머지될 게 확실할 때만(머지 방식은 레포 속성 아닌 per-PR 선택, 죽은 SHA는 lint dangling에 안 걸려 조용히 깨짐) 경계 추가. domain_spec.template.py·ingest-tools.md: PR manifest 예시 + commit(locator={repo,sha} auto)/jira·pr(locator 수동) 형식·evref `<ctx>.<type>-<ref>` id 형식 명시. run_ingest.sh: EXPECTED_RAW_CHUNKS 드리프트 ≠ 적재 실패 주석. 근거: `docs/plans/2026-06-30-ingest-skill-retro-improvements.md`.
+
+위 머지 경계의 현재 규칙은 2026-07-23 후속 정정을 따른다.
 
 ## 2026-06-29 — 디렉토리 통째 주입 + bb2 정합본 역수입 + 변수화
 

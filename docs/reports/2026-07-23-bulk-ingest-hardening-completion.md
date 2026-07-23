@@ -4,6 +4,7 @@
 **엔진 브랜치:** `main`
 **기능 브랜치 최종 코드:** `182e650`
 **merge 후 테스트 호환성 수정:** `f3a7053`
+**코드 앵커 SHA 규칙 후속 수정:** 엔진 `d320b1f` / BB2 `d71d2a8e24`
 **상태:** Task 1~12 구현·명세 검토·품질 검토 완료
 
 ## 1. 결과 요약
@@ -136,6 +137,7 @@ BB2 작업은 `/Users/al03040455/Desktop/bb2_client`의
 | `1d1faa77` | 네 brain 스킬 구조·ingest runtime·update-rules 소유권 동기화 |
 | `e3e4cd30` | 보수적 청커에 맞춰 real corpus raw chunk guard를 1,577로 갱신 |
 | `6022287c` | report 입력 충돌 차단 runtime과 manifest hash 최종 동기화 |
+| `d71d2a8e24` | 일반 merge에서 기존 코드 앵커 SHA를 유지하도록 설치본·manifest 동기화 |
 
 installer를 force 없이 다시 실행했을 때 `created/updated/removed/adopted/skipped`가 모두
 빈 배열이었다. BB2 전용 overlay 해시는 유지됐고 manifest에는 들어가지 않았다.
@@ -209,3 +211,19 @@ report 입력 충돌, 실행 비트 채택과 Python 버전 독립 fixture까지
   올바른 feature 엔진의 실모델 rebuild는 한 번 수행했고, 최종 문서·installer 검증에서는
   index를 다시 만들지 않고 기존 DB와 캐시를 읽었다.
 - 기능 브랜치와 worktree는 복구·감사를 위해 보존했다.
+
+## 10. 후속 정정 — 코드 앵커 SHA 머지 규칙
+
+완료 보고 뒤 인게임 확장 프로토를 진행 중 적재하는 과정에서, session-ingest의
+`머지 정정 때 develop sha로 교체` 문장이 일반 merge에도 SHA 교체가 필요하다는 오판을
+유도하는 것이 확인됐다. 커밋 SHA는 불변이고, fast-forward와 일반 merge에서는 기존 작업
+커밋이 develop 이력에 그대로 포함되므로 단순히 머지했다는 이유로 교체하지 않는다.
+
+엔진 템플릿은 기존 SHA가 기본 브랜치 이력에서 도달 가능하고 앵커 대상 코드가 같은지
+확인하도록 정정했다. squash·rebase·cherry-pick 또는 충돌 해결로 기존 SHA가 이력에 없거나
+코드가 달라진 경우에만 다시 확인한 SHA와 스냅샷으로 갱신한다.
+
+- 엔진: `d320b1f` — 템플릿 5곳과 설치 결과 회귀 검사
+- BB2: `d71d2a8e24` — installer가 설치본 5곳과 manifest 해시를 동기화
+- 설치 검증: 첫 실행 `adopted=5`, `skipped=[]`; 두 번째 실행은 모든 변경 배열이 비어 있음
+- 최종 검증: `612 passed, 26 subtests passed`; BB2 `agents-doctor` 이상 없음

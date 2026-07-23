@@ -87,6 +87,12 @@ project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매
 
 **점검·진단 4종**(모두 읽기 전용 이상 감지): `lint`(끊긴 참조=아웃바운드) · `graph isolated`(고립=인바운드) · `stale-check`(코드 변경→갱신 후보) · `doctor`(환경). `mark-checked`가 stale 해소(쓰기)다. `stale-check`은 미머지 앵커(작업 브랜치 커밋이 develop 조상 아님)를 변경과 별개로 `unmerged_anchors`에 라벨해 거짓 신호를 거른다. `--write-cache`로 떨군 캐시는 `query`/`show`가 읽어 매핑별 `stale_advisory`(코드 변경 감지)를 곁들인다. stale 자동화 설계는 [docs/plans/2026-06-25-brain-stale-automation-bc.md](docs/plans/2026-06-25-brain-stale-automation-bc.md), Step 1·2 구현 계획은 [docs/plans/2026-06-25-brain-stale-step12-impl-plan.md](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
 
+**코드 앵커 SHA 원칙:** 한번 만들어진 커밋 SHA는 머지해도 바뀌지 않는다. fast-forward와
+일반 merge에서는 작업 브랜치 커밋이 기본 브랜치 이력에 그대로 포함되므로 기존
+`commit_sha`를 유지한다. 머지 뒤 `git merge-base --is-ancestor <commit_sha> <default-branch-ref>`와
+앵커 대상 코드를 대조하고, squash·rebase·cherry-pick 또는 충돌 해결로 기존 SHA가 기본
+브랜치 이력에 없거나 코드가 달라진 경우에만 다시 확인한 SHA로 갱신한다.
+
 전체 명령 목록은 `project-brain --help`, 각 명령 상세는 `project-brain <명령> --help`로 본다.
 
 ## 적재 실행 경로

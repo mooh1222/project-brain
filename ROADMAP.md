@@ -343,6 +343,20 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - 행동 증거: [Task 9 report](docs/reports/2026-07-22-bulk-ingest-task9-behavior-evidence.md)
 - 최종 결과: [completion report](docs/reports/2026-07-23-bulk-ingest-hardening-completion.md)
 
+### 코드 앵커 SHA 머지 규칙 정정 (2026-07-23)
+
+- **원인**: session-ingest에 `머지 정정 때 기본 브랜치 SHA로 교체`라는 무조건형 문장이
+  남아 있어, 일반 merge 뒤에도 작업 브랜치 SHA를 버리는 것으로 해석됐다. 이는 이미
+  [stale 자동화 계획](docs/plans/2026-06-25-brain-stale-automation-bc.md)에 기록된
+  “원커밋 해시를 보존하는 머지는 정정 불필요” 결론과 충돌했다.
+- **현재 규칙**: 커밋 SHA 자체는 바뀌지 않는다. fast-forward와 일반 merge 뒤 기존 SHA가
+  기본 브랜치의 조상이고 앵커 대상 코드가 같으면 그대로 쓴다. squash·rebase·cherry-pick
+  또는 충돌 해결로 SHA 도달 가능성이나 코드가 달라진 경우에만 갱신한다.
+- **전파**: 엔진 템플릿 5곳과 설치 계약 회귀 검사를 `d320b1f`에 반영하고, installer로
+  BB2 설치본 5곳과 manifest를 갱신해 `d71d2a8e24`로 커밋했다. force 없이 첫 실행은
+  5개 파일을 `adopted`, 두 번째 실행은 모든 변경 배열이 빈 상태였다.
+- **검증**: 엔진 `pytest` 612 + subtests 26, BB2 `agents-doctor` 통과.
+
 ---
 
 ## 미뤄둔 작업 (최종 관리)
