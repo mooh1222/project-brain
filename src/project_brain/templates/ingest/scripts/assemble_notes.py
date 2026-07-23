@@ -77,8 +77,12 @@ def build_notes(atoms, spec):
     for tk, info in glossary.items():
         ak = term_first_anchor[tk]
         ev = [f"evref.{ctx}.{ak}"] if ak else []
-        glossary_section.append({"key": tk, "term": info["term"],
-                                 "definition": info["definition"], "evidence_refs": ev})
+        term = {"key": tk, "term": info["term"],
+                "definition": info["definition"], "evidence_refs": ev}
+        for field in ("status", "candidate"):
+            if field in info:
+                term[field] = info[field]
+        glossary_section.append(term)
         gids.append(f"g.{ctx}.{tk}")
     context = {"key": ctx, "commit": spec["COMMIT"], "repo": spec.get("REPO", "{{REPO}}"),
                "display_name": spec["DISPLAY_NAME"], "boundary_summary": spec["BOUNDARY_SUMMARY"],

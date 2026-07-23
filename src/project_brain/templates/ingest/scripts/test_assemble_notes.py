@@ -72,6 +72,33 @@ class BuildNotesTest(unittest.TestCase):
         self.assertEqual(notes["sources"][0]["captured_at"], "2026-07-23T00:00:00+09:00")
         self.assertEqual(notes["code_anchors"][0]["verified_at"], "2026-07-23T00:01:00+09:00")
 
+    def test_glossary_candidate_metadata_passes_through_from_first_definition(self):
+        candidate = {
+            "candidate_state": "ready_for_review",
+            "candidate_source": "code",
+            "promotion_criteria": ["verified source"],
+        }
+        first = _atom("m1", terms=[])
+        first["glossary_terms"] = [
+            {"term_key": "candidate-term", "term": "후보", "definition": "첫 정의",
+             "status": "candidate", "candidate": candidate},
+            {"term_key": "ordinary-term", "term": "일반", "definition": "일반 정의"},
+        ]
+        duplicate = _atom("m2", terms=[])
+        duplicate["glossary_terms"] = [
+            {"term_key": "candidate-term", "term": "후보", "definition": "뒤 정의",
+             "status": "reviewed"},
+        ]
+
+        notes = build_notes([first, duplicate], SPEC)
+        terms = {term["key"]: term for term in notes["glossary"]}
+
+        self.assertEqual(terms["candidate-term"]["definition"], "첫 정의")
+        self.assertEqual(terms["candidate-term"]["status"], "candidate")
+        self.assertEqual(terms["candidate-term"]["candidate"], candidate)
+        self.assertNotIn("status", terms["ordinary-term"])
+        self.assertNotIn("candidate", terms["ordinary-term"])
+
     def test_anchor_quote_is_preserved_exactly(self):
         quote = "\tfirst();\r\n\tsecond();"
         atom = _atom("m1", anchors=0)
