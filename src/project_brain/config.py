@@ -88,10 +88,11 @@ def resolve_scenarios_path(explicit=None, start=None) -> Path:
 
 
 def resolve_default_branch(explicit=None, *, start=None) -> str:
-    """명시값, 프로젝트 설정, 기존 기본값 순으로 기본 브랜치를 고른다."""
-    if explicit is not None:
-        return explicit
+    """비어 있지 않은 명시값, 프로젝트 설정, 기존 기본값 순으로 기본 브랜치를 고른다."""
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
     cfg = load_config(start=start)
-    if cfg is not None and cfg["default_branch"] is not None:
-        return cfg["default_branch"]
+    configured = cfg["default_branch"] if cfg is not None else None
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
     return "develop"

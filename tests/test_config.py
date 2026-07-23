@@ -137,6 +137,20 @@ class ResolveTest(unittest.TestCase):
         with TemporaryDirectory() as td:
             self.assertEqual(resolve_default_branch(start=Path(td)), "develop")
 
+    def test_default_branch_ignores_blank_explicit_and_config_values(self):
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            write_config(root, {"default_branch": "trunk"})
+            self.assertEqual(resolve_default_branch("", start=root), "trunk")
+            self.assertEqual(resolve_default_branch("  \t", start=root), "trunk")
+            write_config(root, {"default_branch": ""})
+            self.assertEqual(resolve_default_branch(start=root), "develop")
+            write_config(root, {"default_branch": "  \t"})
+            self.assertEqual(resolve_default_branch(start=root), "develop")
+        with TemporaryDirectory() as td:
+            self.assertEqual(resolve_default_branch("", start=Path(td)), "develop")
+            self.assertEqual(resolve_default_branch("  \t", start=Path(td)), "develop")
+
     def test_no_explicit_no_config_raises_with_guidance(self):
         with TemporaryDirectory() as td:
             for fn in (resolve_brain_root, resolve_db_path, resolve_scenarios_path):
