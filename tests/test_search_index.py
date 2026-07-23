@@ -154,6 +154,36 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(self.db.read_bytes(), before)
         self.assertEqual(self._temporary_rebuild_files(), [])
 
+    def test_rebuild_integrity_check_failure_preserves_live_db_and_cleans_temp(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+
+        from project_brain import search_index
+        real_connect = search_index._connect
+
+        class IntegrityFailingConnection:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, statement, *args, **kwargs):
+                if statement == "PRAGMA integrity_check":
+                    return mock.Mock(fetchall=lambda: [("injected corruption",)])
+                return self._conn.execute(statement, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        with mock.patch(
+            "project_brain.search_index._connect",
+            side_effect=lambda path: IntegrityFailingConnection(real_connect(path)),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "integrity_check"):
+                rebuild(self.brain, self.db)
+
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self._temporary_rebuild_files(), [])
+
     def test_rebuild_replaces_only_after_valid_temp_and_fsyncs_directory(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
         rebuild(self.brain, self.db)

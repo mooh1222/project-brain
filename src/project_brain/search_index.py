@@ -176,7 +176,10 @@ def _validate_rebuilt_index(
     try:
         quick_check = conn.execute("PRAGMA quick_check").fetchall()
         if quick_check != [("ok",)]:
-            raise RuntimeError(f"색인 임시 DB 무결성 검사 실패: {quick_check!r}")
+            raise RuntimeError(f"색인 임시 DB quick_check 실패: {quick_check!r}")
+        integrity_check = conn.execute("PRAGMA integrity_check").fetchall()
+        if integrity_check != [("ok",)]:
+            raise RuntimeError(f"색인 임시 DB integrity_check 실패: {integrity_check!r}")
 
         counts = {
             "documents": conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
