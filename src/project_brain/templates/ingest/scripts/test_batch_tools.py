@@ -27,11 +27,13 @@ FINALIZATION = {
         "require_code_locators": True,
     }],
     "intentional_terminal_ids": [],
+    "expected_unmerged_locator_ids": [],
 }
 FINALIZATION_RESULT = {
     "ok": True,
     "commands": {},
     "isolation": {},
+    "unmerged": {},
     "recall_checks": [],
     "errors": [],
 }
@@ -117,14 +119,15 @@ kind = "baseline" if "--capture-baseline" in sys.argv else "finalize"
 with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
     print(json.dumps({"kind": kind, "argv": sys.argv[1:]}), file=log)
 if kind == "baseline":
-    print(json.dumps({"ok": True, "isolated_ids": ["code.before"]}))
+    print(json.dumps({"ok": True, "isolated_ids": ["code.before"],
+                      "target_head": "TARGET", "unmerged_locator_ids": []}))
     raise SystemExit(0)
 if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
-    print(json.dumps({"ok": False, "commands": {}, "isolation": {},
+    print(json.dumps({"ok": False, "commands": {}, "isolation": {}, "unmerged": {},
                       "recall_checks": [], "errors": ["finalizer failed"]}))
     print("finalizer failed", file=sys.stderr)
     raise SystemExit(23)
-print(json.dumps({"ok": True, "commands": {}, "isolation": {},
+print(json.dumps({"ok": True, "commands": {}, "isolation": {}, "unmerged": {},
                   "recall_checks": [], "errors": []}))
 """,
         )
@@ -227,7 +230,10 @@ print(json.dumps({"ok": True, "commands": {}, "isolation": {},
         self.assertEqual(saved["succeeded"], ["a", "b", "c"])
         self.assertEqual(saved["failed"], [])
         self.assertTrue(saved["finalized"])
-        self.assertEqual(saved["isolation_baseline"], ["code.before"])
+        self.assertEqual(saved["isolation_baseline"], {
+            "ok": True, "isolated_ids": ["code.before"],
+            "target_head": "TARGET", "unmerged_locator_ids": [],
+        })
 
     def test_finalizer_failure_returns_one_without_marking_report_finalized(self):
         self._copy_runtime_scripts()
@@ -476,7 +482,10 @@ class BatchRunnerApiTest(unittest.TestCase):
 
     def _module(self):
         module = load_script(BATCH_SCRIPT, "run_ingest_batch_under_test")
-        module._default_baseline_collector = lambda: {"ok": True, "isolated_ids": ["code.before"]}
+        module._default_baseline_collector = lambda: {
+            "ok": True, "isolated_ids": ["code.before"],
+            "target_head": "TARGET", "unmerged_locator_ids": [],
+        }
         return module
 
     def test_unknown_or_bool_injected_results_fail_closed(self):
@@ -544,27 +553,72 @@ class BatchRunnerApiTest(unittest.TestCase):
                     module.run_batch(
                         self.manifest, report_path,
                         baseline_collector=lambda: calls.append("baseline") or {
-                            "ok": True, "isolated_ids": []},
+                            "ok": True, "isolated_ids": [], "target_head": "TARGET",
+                            "unmerged_locator_ids": []},
                         item_runner=lambda item: calls.append("item") or 0,
                         finalizer=lambda *_: calls.append("finalizer") or FINALIZATION_RESULT,
                     )
                 self.assertEqual(source.read_bytes(), before)
                 self.assertEqual(calls, [])
 
-    def test_batch_passes_normalized_baseline_list_to_finalizer(self):
+    def test_batch_passes_normalized_git_baseline_envelope_to_finalizer(self):
         module = self._module()
         observed = []
         report = module.run_batch(
             self.manifest, self.root / "baseline-list.json",
             item_runner=lambda item: 0,
-            baseline_collector=lambda: {"ok": True, "isolated_ids": ["code.before"]},
+            baseline_collector=lambda: {
+                "ok": True, "isolated_ids": ["code.before"],
+                "target_head": "TARGET", "unmerged_locator_ids": ["code.before-unmerged"],
+            },
             finalizer=lambda contract, baseline: (
                 observed.append((contract, baseline)) or FINALIZATION_RESULT
             ),
         )
 
         self.assertTrue(report["finalized"])
-        self.assertEqual(observed[0][1], ["code.before"])
+        self.assertEqual(observed[0][1], {
+            "ok": True, "isolated_ids": ["code.before"],
+            "target_head": "TARGET", "unmerged_locator_ids": ["code.before-unmerged"],
+        })
+
+    def test_expected_unmerged_rejects_legacy_baseline_before_items(self):
+        module = self._module()
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["finalization"]["expected_unmerged_locator_ids"] = ["code.new"]
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        calls = []
+
+        with self.assertRaisesRegex(ValueError, "Git baseline"):
+            module.run_batch(
+                self.manifest, self.root / "expected-unmerged.json",
+                baseline_collector=lambda: {"ok": True, "isolated_ids": []},
+                item_runner=lambda item: calls.append(item["key"]) or 0,
+            )
+        self.assertEqual(calls, [])
+
+    def test_empty_expected_preserves_legacy_baseline_for_finalizer_and_resume(self):
+        module = self._module()
+        observed = []
+        report_path = self.root / "legacy-baseline.json"
+        report = module.run_batch(
+            self.manifest, report_path,
+            baseline_collector=lambda: {"ok": True, "isolated_ids": ["code.before"]},
+            item_runner=lambda item: 9,
+        )
+        self.assertFalse(report["finalized"])
+        self.assertEqual(report["isolation_baseline"],
+                         {"ok": True, "isolated_ids": ["code.before"]})
+
+        resumed = module.run_batch(
+            self.manifest, report_path, resume_path=report_path,
+            item_runner=lambda item: 0,
+            finalizer=lambda _contract, baseline: (
+                observed.append(baseline) or FINALIZATION_RESULT
+            ),
+        )
+        self.assertTrue(resumed["finalized"])
+        self.assertEqual(observed, [{"ok": True, "isolated_ids": ["code.before"]}])
 
     def test_supported_injected_results_and_falsey_callables_succeed(self):
         module = self._module()

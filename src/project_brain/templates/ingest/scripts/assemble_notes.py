@@ -114,6 +114,22 @@ def assemble_notes(verify_data, spec):
     return build_notes(normalize(verify_data, spec), spec)
 
 
+def finalization_contract(notes, spec):
+    """조립된 CodeLocator 앵커에서 finalizer의 기대 미머지 ID를 만든다."""
+    contract = dict(spec["FINALIZATION"])
+    if spec.get("EXPECT_UNMERGED_ANCHORS", False):
+        # engine의 단일 ID 규약을 그대로 쓴다. template에 접두사 규약을 복제하지 않는다.
+        from project_brain.assembly import derive_id
+        ctx = notes["context"]["key"]
+        contract["expected_unmerged_locator_ids"] = [
+            derive_id("CodeLocator", ctx, anchor["key"])
+            for anchor in notes["code_anchors"]
+        ]
+    else:
+        contract["expected_unmerged_locator_ids"] = []
+    return contract
+
+
 def _load_spec(path):
     ns = {}
     with open(path, encoding="utf-8") as f:
@@ -140,7 +156,7 @@ def main(argv):
         if "FINALIZATION" not in spec:
             raise SystemExit("domain spec에 FINALIZATION이 없습니다")
         with open(args.finalization_out, "w", encoding="utf-8") as f:
-            json.dump(spec["FINALIZATION"], f, ensure_ascii=False, indent=2)
+            json.dump(finalization_contract(notes, spec), f, ensure_ascii=False, indent=2)
             f.write("\n")
     print(f"notes 조립: mappings={len(notes['mappings'])} anchors={len(notes['code_anchors'])} "
           f"terms={len(notes['glossary'])} decisions={len(notes['decisions'])} → {args.out}")

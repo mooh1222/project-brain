@@ -25,8 +25,10 @@ def _string_list(value: Any, field: str, *, nonempty: bool = False) -> list[str]
 def validate_contract(contract: Any) -> dict[str, Any]:
     if not isinstance(contract, dict):
         raise ValueError("finalization은 객체여야 합니다")
-    if set(contract) != {"recall_checks", "intentional_terminal_ids"}:
-        raise ValueError("finalization 필드는 recall_checks, intentional_terminal_ids만 허용합니다")
+    allowed_fields = {"recall_checks", "intentional_terminal_ids", "expected_unmerged_locator_ids"}
+    if set(contract) not in (allowed_fields, allowed_fields - {"expected_unmerged_locator_ids"}):
+        raise ValueError("finalization 필드는 recall_checks, intentional_terminal_ids, "
+                         "expected_unmerged_locator_ids만 허용합니다")
     raw_checks = contract.get("recall_checks")
     if not isinstance(raw_checks, list) or not raw_checks:
         raise ValueError("finalization.recall_checks는 최소 1개여야 합니다")
@@ -57,18 +59,43 @@ def validate_contract(contract: Any) -> dict[str, Any]:
         })
     terminals = _string_list(contract.get("intentional_terminal_ids", []),
                              "finalization.intentional_terminal_ids")
-    return {"recall_checks": checks, "intentional_terminal_ids": terminals}
+    expected_unmerged = _string_list(contract.get("expected_unmerged_locator_ids", []),
+                                     "finalization.expected_unmerged_locator_ids")
+    return {"recall_checks": checks, "intentional_terminal_ids": terminals,
+            "expected_unmerged_locator_ids": expected_unmerged}
 
 
-def normalize_baseline(value: Any) -> list[str]:
-    """단건 capture envelope와 batch가 저장한 raw ID list를 같은 계약으로 만든다."""
+def normalize_baseline(value: Any, expected_unmerged_locator_ids: Any = ()) -> dict[str, Any]:
+    """새 Git baseline과 기대 미머지 ID를 검증하고, 구형 baseline은 빈 기대값만 허용한다."""
+    expected = _string_list(expected_unmerged_locator_ids,
+                            "finalization.expected_unmerged_locator_ids")
     if isinstance(value, dict):
-        if set(value) != {"ok", "isolated_ids"}:
+        if set(value) == {"ok", "isolated_ids"}:
+            if value.get("ok") is not True:
+                raise ValueError("isolation baseline envelope의 ok가 true가 아닙니다")
+            isolated = _string_list(value.get("isolated_ids"), "isolation baseline")
+            if expected:
+                raise ValueError("expected_unmerged_locator_ids에는 Git baseline envelope가 필요합니다")
+            return {"ok": True, "isolated_ids": isolated, "target_head": None,
+                    "unmerged_locator_ids": [], "git_baseline_available": False}
+        if set(value) != {"ok", "isolated_ids", "target_head", "unmerged_locator_ids"}:
             raise ValueError("isolation baseline envelope 필드가 정확하지 않습니다")
         if value.get("ok") is not True:
             raise ValueError("isolation baseline envelope의 ok가 true가 아닙니다")
-        value = value.get("isolated_ids")
-    return _string_list(value, "isolation baseline")
+        target_head = value.get("target_head")
+        if not isinstance(target_head, str) or not target_head:
+            raise ValueError("isolation baseline target_head가 없습니다")
+        return {"ok": True,
+                "isolated_ids": _string_list(value.get("isolated_ids"), "isolation baseline"),
+                "target_head": target_head,
+                "unmerged_locator_ids": _string_list(value.get("unmerged_locator_ids"),
+                                                      "unmerged locator baseline"),
+                "git_baseline_available": True}
+    isolated = _string_list(value, "isolation baseline")
+    if expected:
+        raise ValueError("expected_unmerged_locator_ids에는 Git baseline envelope가 필요합니다")
+    return {"ok": True, "isolated_ids": isolated, "target_head": None,
+            "unmerged_locator_ids": [], "git_baseline_available": False}
 
 
 def _default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -108,20 +135,46 @@ def _run_command(runner: CommandRunner, command: list[str], *, json_output: bool
             "payload": payload, "stderr": stderr}
 
 
+def _audit_git_state(result: dict) -> dict[str, Any] | None:
+    """audit JSON의 실제 stale 출력에서 target head와 미머지 CodeLocator ID를 읽는다."""
+    payload = result.get("payload")
+    stale = payload.get("stale") if isinstance(payload, dict) else None
+    target_head = stale.get("target_head") if isinstance(stale, dict) else None
+    anchors = stale.get("unmerged_anchors") if isinstance(stale, dict) else None
+    if not isinstance(target_head, str) or not target_head or not isinstance(anchors, list):
+        return None
+    locator_ids = []
+    for anchor in anchors:
+        locator_id = anchor.get("locator_id") if isinstance(anchor, dict) else None
+        if not isinstance(locator_id, str) or not locator_id:
+            return None
+        locator_ids.append(locator_id)
+    if len(locator_ids) != len(set(locator_ids)):
+        return None
+    return {"target_head": target_head, "unmerged_locator_ids": sorted(locator_ids)}
+
+
 def capture_isolation_baseline(runner: CommandRunner = _default_runner) -> dict:
     result = _run_command(runner, ["project-brain", "graph", "isolated"], json_output=True)
+    audit = _run_command(runner, ["project-brain", "audit", "--no-fetch"], json_output=True)
     payload = result.get("payload")
     isolated = payload.get("isolated") if isinstance(payload, dict) else None
     if (not result["ok"] or not isinstance(isolated, list)
             or any(not isinstance(item, str) for item in isolated)):
         return {"ok": False, "isolated_ids": [], "error": result["stderr"] or "고립 baseline 수집 실패"}
-    return {"ok": True, "isolated_ids": sorted(set(isolated))}
+    git_state = _audit_git_state(audit)
+    if not audit["ok"] or git_state is None:
+        return {"ok": False, "isolated_ids": [],
+                "error": audit["stderr"] or "Git baseline 수집 실패"}
+    return {"ok": True, "isolated_ids": sorted(set(isolated)),
+            "target_head": git_state["target_head"],
+            "unmerged_locator_ids": git_state["unmerged_locator_ids"]}
 
 
 def run_finalization(contract: Any, baseline_ids: Any,
                      runner: CommandRunner = _default_runner) -> dict:
     config = validate_contract(contract)
-    baseline = normalize_baseline(baseline_ids)
+    baseline = normalize_baseline(baseline_ids, config["expected_unmerged_locator_ids"])
     commands = {
         "index_rebuild": _run_command(
             runner, ["project-brain", "index", "rebuild"], json_output=True),
@@ -129,6 +182,7 @@ def run_finalization(contract: Any, baseline_ids: Any,
         "eval": _run_command(runner, ["project-brain", "eval"], json_output=True),
         "graph_isolated": _run_command(
             runner, ["project-brain", "graph", "isolated"], json_output=True),
+        "audit": _run_command(runner, ["project-brain", "audit", "--no-fetch"], json_output=True),
         "corpus_tests": _run_command(
             runner,
             ["python3", "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
@@ -145,7 +199,7 @@ def run_finalization(contract: Any, baseline_ids: Any,
         errors.append("graph_isolated payload failed")
         raw_current = []
     current = sorted(set(item for item in raw_current if isinstance(item, str)))
-    baseline_set = set(baseline)
+    baseline_set = set(baseline["isolated_ids"])
     new_ids = sorted(set(current) - baseline_set)
     terminal_set = set(config["intentional_terminal_ids"])
     allowed = sorted(set(new_ids) & terminal_set)
@@ -162,6 +216,50 @@ def run_finalization(contract: Any, baseline_ids: Any,
     }
     if unexpected:
         errors.append(f"unexpected isolated ids: {unexpected}")
+
+    audit_state = _audit_git_state(commands["audit"])
+    if audit_state is None:
+        commands["audit"]["ok"] = False
+        errors.append("audit payload failed")
+        current_unmerged: set[str] = set()
+        current_target_head = None
+    else:
+        current_unmerged = set(audit_state["unmerged_locator_ids"])
+        current_target_head = audit_state["target_head"]
+    baseline_unmerged = set(baseline["unmerged_locator_ids"])
+    expected_unmerged = set(config["expected_unmerged_locator_ids"])
+    expected_current = baseline_unmerged | expected_unmerged
+    new_unmerged = sorted(current_unmerged - baseline_unmerged)
+    resolved_unmerged = sorted(baseline_unmerged - current_unmerged)
+    missing_expected = sorted(expected_unmerged - current_unmerged)
+    unexpected_unmerged = sorted(current_unmerged - expected_current)
+    target_head_changed = (baseline["git_baseline_available"]
+                           and current_target_head != baseline["target_head"])
+    unmerged_ok = commands["audit"]["ok"] and audit_state is not None
+    if baseline["git_baseline_available"]:
+        unmerged_ok = (unmerged_ok and not resolved_unmerged and not missing_expected
+                       and not unexpected_unmerged and not target_head_changed)
+        if unexpected_unmerged:
+            errors.append(f"unexpected unmerged locator ids: {unexpected_unmerged}")
+        if resolved_unmerged:
+            errors.append(f"baseline unmerged locator ids disappeared: {resolved_unmerged}")
+        if missing_expected:
+            errors.append(f"expected unmerged locator ids missing: {missing_expected}")
+        if target_head_changed:
+            errors.append("target head changed: "
+                          f"baseline={baseline['target_head']} current={current_target_head}")
+    unmerged = {
+        "ok": unmerged_ok,
+        "baseline_ids": sorted(baseline_unmerged),
+        "current_ids": sorted(current_unmerged),
+        "expected_ids": sorted(expected_unmerged),
+        "new_ids": new_unmerged,
+        "resolved_ids": resolved_unmerged,
+        "missing_expected_ids": missing_expected,
+        "unexpected_new_ids": unexpected_unmerged,
+        "baseline_target_head": baseline["target_head"],
+        "current_target_head": current_target_head,
+    }
 
     recall_reports = []
     for check in config["recall_checks"]:
@@ -194,6 +292,7 @@ def run_finalization(contract: Any, baseline_ids: Any,
             errors.append(f"recall check failed: {check['key']}")
 
     return {"ok": not errors, "commands": commands, "isolation": isolation,
+            "unmerged": unmerged,
             "recall_checks": recall_reports, "errors": errors}
 
 
@@ -226,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--config와 --baseline이 필요합니다")
             report = run_finalization(_read_json(args.config), _read_json(args.baseline))
     except ValueError as exc:
-        report = {"ok": False, "commands": {}, "isolation": {},
+        report = {"ok": False, "commands": {}, "isolation": {}, "unmerged": {},
                   "recall_checks": [], "errors": [str(exc)]}
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report.get("ok") is True else 1

@@ -34,10 +34,12 @@ class SemanticFinalizerTest(unittest.TestCase):
                 "require_code_locators": True,
             }],
             "intentional_terminal_ids": ["code.allowed"],
+            "expected_unmerged_locator_ids": [],
         }
 
     @staticmethod
-    def _runner(*, current_isolated=None, search_results=None, failures=()):
+    def _runner(*, current_isolated=None, search_results=None, failures=(),
+                target_head="TARGET", unmerged_locator_ids=()):
         current_isolated = ["code.before"] if current_isolated is None else current_isolated
         search_results = ([{
             "object_id": "mapping.a",
@@ -54,6 +56,17 @@ class SemanticFinalizerTest(unittest.TestCase):
                 payload = {"ok": True, "summary": {"failed": 0}}
             elif command[:3] == ["project-brain", "graph", "isolated"]:
                 payload = {"ok": True, "isolated": current_isolated}
+            elif command == ["project-brain", "audit", "--no-fetch"]:
+                payload = {
+                    "ok": True,
+                    "stale": {
+                        "target_head": target_head,
+                        "unmerged_anchors": [
+                            {"locator_id": locator_id, "reason": "not_ancestor"}
+                            for locator_id in unmerged_locator_ids
+                        ],
+                    },
+                }
             elif command[:2] == ["project-brain", "search"]:
                 payload = {"ok": True, "results": search_results}
             else:
@@ -70,10 +83,11 @@ class SemanticFinalizerTest(unittest.TestCase):
             self.contract, ["code.before"], runner=self._runner()
         )
 
-        self.assertEqual(set(report), {"ok", "commands", "isolation", "recall_checks", "errors"})
+        self.assertEqual(set(report),
+                         {"ok", "commands", "isolation", "unmerged", "recall_checks", "errors"})
         self.assertTrue(report["ok"])
         self.assertEqual(set(report["commands"]),
-                         {"index_rebuild", "lint", "eval", "graph_isolated", "corpus_tests"})
+                         {"index_rebuild", "lint", "eval", "graph_isolated", "audit", "corpus_tests"})
         for command in report["commands"].values():
             self.assertEqual(set(command), {"ok", "exit_code", "payload", "stderr"})
         self.assertEqual(report["isolation"], {
@@ -87,6 +101,113 @@ class SemanticFinalizerTest(unittest.TestCase):
         })
         self.assertEqual(report["recall_checks"][0]["missing_object_ids"], [])
         self.assertEqual(report["recall_checks"][0]["missing_code_locator_object_ids"], [])
+
+    def test_unmerged_expected_ids_are_compared_as_exact_union(self):
+        module = load_module()
+        contract = dict(self.contract, expected_unmerged_locator_ids=["code.new"])
+        baseline = {
+            "ok": True,
+            "isolated_ids": ["code.before"],
+            "target_head": "TARGET",
+            "unmerged_locator_ids": ["code.existing"],
+        }
+        report = module.run_finalization(
+            contract, baseline,
+            runner=self._runner(unmerged_locator_ids=["code.existing", "code.new"]),
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["unmerged"], {
+            "ok": True,
+            "baseline_ids": ["code.existing"],
+            "current_ids": ["code.existing", "code.new"],
+            "expected_ids": ["code.new"],
+            "new_ids": ["code.new"],
+            "resolved_ids": [],
+            "missing_expected_ids": [],
+            "unexpected_new_ids": [],
+            "baseline_target_head": "TARGET",
+            "current_target_head": "TARGET",
+        })
+
+    def test_unmerged_expected_id_already_in_baseline_passes(self):
+        module = load_module()
+        contract = dict(self.contract, expected_unmerged_locator_ids=["code.existing"])
+        baseline = {
+            "ok": True,
+            "isolated_ids": ["code.before"],
+            "target_head": "TARGET",
+            "unmerged_locator_ids": ["code.existing"],
+        }
+        report = module.run_finalization(
+            contract, baseline,
+            runner=self._runner(unmerged_locator_ids=["code.existing"]),
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["unmerged"]["new_ids"], [])
+
+    def test_unmerged_reports_exact_addition_disappearance_and_head_differences(self):
+        module = load_module()
+        baseline = {
+            "ok": True,
+            "isolated_ids": ["code.before"],
+            "target_head": "TARGET",
+            "unmerged_locator_ids": ["code.before-unmerged"],
+        }
+        report = module.run_finalization(
+            self.contract, baseline,
+            runner=self._runner(target_head="CHANGED", unmerged_locator_ids=["code.extra"]),
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["unmerged"]["resolved_ids"], ["code.before-unmerged"])
+        self.assertEqual(report["unmerged"]["unexpected_new_ids"], ["code.extra"])
+        self.assertEqual(report["unmerged"]["baseline_target_head"], "TARGET")
+        self.assertEqual(report["unmerged"]["current_target_head"], "CHANGED")
+        self.assertIn("unexpected unmerged locator ids: ['code.extra']", report["errors"])
+        self.assertIn("baseline unmerged locator ids disappeared: ['code.before-unmerged']",
+                      report["errors"])
+        self.assertIn("target head changed: baseline=TARGET current=CHANGED", report["errors"])
+
+    def test_audit_failure_blocks_even_when_other_gates_pass(self):
+        module = load_module()
+        report = module.run_finalization(
+            self.contract,
+            {"ok": True, "isolated_ids": ["code.before"], "target_head": "TARGET",
+             "unmerged_locator_ids": []},
+            runner=self._runner(failures=("project-brain audit --no-fetch",)),
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["commands"]["audit"]["ok"])
+        self.assertIn("audit failed", report["errors"])
+
+    def test_capture_baseline_uses_graph_and_no_fetch_audit_state(self):
+        module = load_module()
+        baseline = module.capture_isolation_baseline(
+            runner=self._runner(current_isolated=["code.before"], target_head="TARGET",
+                                unmerged_locator_ids=["code.work"]),
+        )
+
+        self.assertEqual(baseline, {
+            "ok": True,
+            "isolated_ids": ["code.before"],
+            "target_head": "TARGET",
+            "unmerged_locator_ids": ["code.work"],
+        })
+
+    def test_legacy_baseline_is_allowed_only_without_expected_unmerged_ids(self):
+        module = load_module()
+        legacy = {"ok": True, "isolated_ids": ["code.before"]}
+        allowed = module.run_finalization(self.contract, legacy, runner=self._runner())
+        self.assertTrue(allowed["ok"])
+
+        calls = []
+        contract = dict(self.contract, expected_unmerged_locator_ids=["code.new"])
+        with self.assertRaisesRegex(ValueError, "Git baseline"):
+            module.run_finalization(contract, legacy, runner=lambda command: calls.append(command))
+        self.assertEqual(calls, [])
 
     def test_new_isolation_is_blocking_except_declared_terminal(self):
         module = load_module()
@@ -153,6 +274,8 @@ elif args[:1] == ["lint"]:
     payload = {"ok": True, "problems": []}
 elif args[:1] == ["eval"]:
     payload = {"ok": True, "summary": {"failed": 0}}
+elif args[:1] == ["audit"]:
+    payload = {"ok": True, "stale": {"target_head": "TARGET", "unmerged_anchors": []}}
 else:
     payload = {"ok": False, "error": f"unexpected command: {args}"}
 print(json.dumps(payload))

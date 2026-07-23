@@ -1,5 +1,5 @@
 import unittest
-from assemble_notes import normalize, build_notes, assemble_notes
+from assemble_notes import normalize, build_notes, assemble_notes, finalization_contract
 
 SPEC = {
     "CTX": "ctx", "COMMIT": "abc123", "REPO": "{{REPO}}",
@@ -165,6 +165,29 @@ class EndToEndTest(unittest.TestCase):
         notes = assemble_notes(groups, spec)
         self.assertEqual(notes["mappings"][0]["key"], "m1")
         self.assertEqual(notes["context"]["now"], spec["NOW"])
+
+
+class FinalizationContractTest(unittest.TestCase):
+    def test_true_derives_unmerged_locator_ids_from_generated_anchor_keys(self):
+        notes = build_notes([_atom("m1", anchors=2), _atom("m2", anchors=1)], SPEC)
+        contract = finalization_contract(
+            notes,
+            dict(SPEC, EXPECT_UNMERGED_ANCHORS=True,
+                 FINALIZATION={"recall_checks": [], "intentional_terminal_ids": []}),
+        )
+
+        self.assertEqual(contract["expected_unmerged_locator_ids"],
+                         ["code.ctx.m1--0", "code.ctx.m1--1", "code.ctx.m2--0"])
+
+    def test_false_or_missing_unmerged_expectation_is_empty(self):
+        notes = build_notes([_atom("m1")], SPEC)
+        for spec in (
+            dict(SPEC, FINALIZATION={"recall_checks": [], "intentional_terminal_ids": []}),
+            dict(SPEC, EXPECT_UNMERGED_ANCHORS=False,
+                 FINALIZATION={"recall_checks": [], "intentional_terminal_ids": []}),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(finalization_contract(notes, spec)["expected_unmerged_locator_ids"], [])
 
 
 if __name__ == "__main__":
