@@ -1,8 +1,11 @@
 """CodeLocator의 opt-in 원문 인용구를 Git blob 바이트로 검증한다."""
 
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
-from project_brain.code_verify import verify_code_quotes
+from project_brain.code_verify import make_git_blob_reader, verify_code_quotes
 from project_brain.stale_check import GitError
 
 
@@ -18,6 +21,50 @@ def locator(locator_id, **extra):
 
 
 class VerifyCodeQuotesTest(unittest.TestCase):
+    def _git(self, repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    def _committed_repo(self, files):
+        td = tempfile.TemporaryDirectory()
+        repo = Path(td.name)
+        self._git(repo, "init")
+        self._git(repo, "config", "user.email", "test@example.com")
+        self._git(repo, "config", "user.name", "Test User")
+        for path, content in files.items():
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-m", "fixture")
+        sha = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+        return td, repo, sha
+
+    def test_default_reader_uses_committed_blob_not_modified_working_tree(self):
+        td, repo, sha = self._committed_repo({"src/example.cpp": b"return committed;\r\n"})
+        self.addCleanup(td.cleanup)
+        (repo / "src/example.cpp").write_bytes(b"return working-tree-only;\r\n")
+
+        result = verify_code_quotes(
+            [locator("code.committed", commit_sha=sha, path="src/example.cpp",
+                     verified_quote="return committed;\r\n")],
+            blob_reader=make_git_blob_reader(repo),
+        )
+
+        self.assertEqual(result, {"ok": True, "checked": 1, "skipped": 0, "failures": []})
+
+    def test_default_reader_rejects_directory_tree_even_if_listing_matches_quote(self):
+        td, repo, sha = self._committed_repo({"src/quoted-name.cpp": b"return content;\n"})
+        self.addCleanup(td.cleanup)
+
+        result = verify_code_quotes(
+            [locator("code.tree", commit_sha=sha, path="src", verified_quote="quoted-name.cpp")],
+            blob_reader=make_git_blob_reader(repo),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failures"][0]["locator_id"], "code.tree")
+        self.assertEqual(result["failures"][0]["reason"], "blob_read_failed")
+
     def test_matches_tabs_newlines_and_crlf_as_exact_bytes(self):
         quote = "if (ready)\r\n\treturn value;\r\n"
         calls = []

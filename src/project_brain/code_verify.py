@@ -16,18 +16,20 @@ BlobReader = Callable[[str, str], bytes]
 
 
 def make_git_blob_reader(repo_root: Path, *, timeout: int = 60) -> BlobReader:
-    """``git show <commit>:<path>``의 원시 stdout 바이트를 읽는 리더를 만든다."""
+    """``git cat-file blob <commit>:<path>``의 원시 stdout 바이트를 읽는다."""
     def read_blob(commit: str, path: str) -> bytes:
         revision = f"{commit}:{path}"
         try:
             result = subprocess.run(
-                ["git", "show", revision], capture_output=True,
+                ["git", "cat-file", "blob", revision], capture_output=True,
                 cwd=str(repo_root), timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            raise GitError(f"git show {revision} timed out after {timeout}s") from exc
+            raise GitError(f"git cat-file blob {revision} timed out after {timeout}s") from exc
+        except OSError as exc:
+            raise GitError(f"git cat-file blob {revision} could not start: {exc}") from exc
         if result.returncode != 0:
             stderr = result.stderr.decode("utf-8", errors="replace").strip()
-            raise GitError(f"git show {revision} failed: {stderr}")
+            raise GitError(f"git cat-file blob {revision} failed: {stderr}")
         return result.stdout
     return read_blob
 

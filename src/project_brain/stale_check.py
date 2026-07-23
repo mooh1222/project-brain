@@ -82,6 +82,8 @@ def make_git_runner(repo_root, *, timeout=60):
                 cwd=str(repo_root), timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise GitError(f"git {' '.join(args)} timed out after {timeout}s") from exc
+        except OSError as exc:
+            raise GitError(f"git {' '.join(args)} could not start: {exc}") from exc
         if result.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
         return result.stdout

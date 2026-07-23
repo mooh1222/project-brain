@@ -142,6 +142,14 @@ class CoverageReportTest(unittest.TestCase):
 
 
 class GitDetectionTest(unittest.TestCase):
+    def test_make_git_runner_wraps_process_start_oserror(self):
+        from project_brain.stale_check import GitError, make_git_runner
+        with mock.patch("project_brain.stale_check.subprocess.run",
+                        side_effect=FileNotFoundError("git executable missing")):
+            with self.assertRaises(GitError) as ctx:
+                make_git_runner("/tmp/repo")(["rev-parse", "HEAD"])
+        self.assertIn("could not start", str(ctx.exception))
+
     def test_resolve_target_head_uses_configured_branch(self):
         from project_brain.stale_check import resolve_target_head
         runner = fake_git_runner("TARGETSHA", {})

@@ -837,6 +837,19 @@ class TestCliSearch(unittest.TestCase):
         self.assertFalse(payload["stale_status"]["ok"])
         self.assertEqual(payload["stale"]["error"], "fetch failed")
 
+    def test_audit_serializes_git_process_start_failure(self):
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.subprocess.run",
+                        side_effect=FileNotFoundError("git executable missing")), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
+             redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["stale_status"]["ok"])
+        self.assertIn("could not start", payload["stale"]["error"])
+
     def test_audit_fails_closed_on_unverifiable_anchor(self):
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
                  "unmerged_anchors": [{"locator_id": "code.unknown", "path": "a/X.cpp",
