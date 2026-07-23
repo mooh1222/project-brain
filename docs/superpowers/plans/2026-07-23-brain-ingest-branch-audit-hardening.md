@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Preserve valid commit SHA anchors across ordinary merges, expose unmerged branch scope independently from evidence review status, make audit/finalization fail closed, and safely refresh the BB2 skills and in-game expansion ingestion through the engine installer.
+**Goal:** Preserve valid commit SHA anchors across ordinary merges, expose unmerged branch scope independently from evidence review status, make audit/finalization fail closed, and safely refresh the BB2 skills through the engine installer without regenerating the existing in-game ingestion.
 
 **Architecture:** Project Brain remains the source of truth for templates and runtime behavior. Git reachability, exact code-quote verification, and index durability are strengthened in the engine first; the updated skills are then installed into BB2 without `--force`. `reviewed` continues to mean that the evidence and interpretation were verified, while branch reachability is reported as a separate advisory axis.
 
@@ -34,6 +34,7 @@ This plan records the three-party agreement between the implementing agent, the 
 
 - Do not rewrite a SHA merely because a branch was merged.
 - Do not globally replace BB2 ACL values. Only the two current in-game expansion manifests receive the explicit `bb2-team` ACL.
+- Do not regenerate, rebuild, re-ingest, audit, or eval the existing 101 in-game expansion objects in this workstream. Their targeted data correction is deferred until the next authorized ingestion.
 - Do not change the global `session-snapshot` skill's local-command filtering in this workstream. It needs a separate plan.
 - Do not add a `datetime.UTC` compatibility task. BB2 HEAD `3c86db389e` already removed that failure path and the stale runtime command works with system Python 3.9.
 - Do not reset, amend, or revert BB2 commit `3c86db389e`.
@@ -76,17 +77,11 @@ This plan records the three-party agreement between the implementing agent, the 
 - `src/project_brain/templates/ingest/scripts/test_finalize_ingest.py`
 - `src/project_brain/templates/ingest/scripts/test_batch_tools.py`
 
-### BB2 generated skills and ingestion data
+### BB2 generated skills
 
 - `/Users/al03040455/Desktop/bb2_client/.agents/skills/bb2-brain-ingest/`
 - `/Users/al03040455/Desktop/bb2_client/.agents/skills/bb2-brain-session-ingest/`
 - `/Users/al03040455/Desktop/bb2_client/.agents/skills/bb2-brain-audit/`
-- `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/domain_spec.py`
-- `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/notes-base.json`
-- `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/notes.json`
-- `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/objects.json`
-- `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/finalization.json`
-- `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/verify.json`
 
 ## Task 1: Make the configured default branch authoritative
 
@@ -812,162 +807,25 @@ This plan records the three-party agreement between the implementing agent, the 
 
   Expected: the commit contains generated skill/runtime changes only, not ingestion data and not unrelated BB2 work.
 
-## Task 10: Regenerate and verify the BB2 in-game expansion ingestion
+## Deferred BB2 Data Follow-up
 
-**Files:**
+The following work is intentionally not executed by this plan:
 
-- Modify: `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/domain_spec.py`
-- Modify generated artifacts under: `/Users/al03040455/Desktop/bb2_client/brain/.brain-local/ingest-ingame-area-expansion/`
-- Modify expected tracked data: 30 `CodeLocator` files, 3 `EvidenceRef` files, and 2 manifest files
+- regenerating `notes-base.json`, `notes.json`, or `objects.json`;
+- rebuilding or re-ingesting the existing 101 in-game expansion objects;
+- running full BB2 Brain audit, eval, corpus, recall, or finalization gates;
+- updating the 30 locators, 3 evidence references, or 2 manifests identified by the review;
+- post-merge validation of those 30 locators.
 
-- [ ] **Step 1: Update only explicit in-game domain inputs**
+When the user separately authorizes the next real ingestion, carry forward these requirements:
 
-  Keep all 101 objects `reviewed`. Set:
-
-  ```python
-  CLAIM_STATUS = "reviewed"
-  SOURCE_ACL = ["bb2-team"]
-  CAPTURED_AT = "2026-07-23T18:02:33+09:00"
-  VERIFIED_AT = "2026-07-23T18:02:33+09:00"
-  EXPECT_UNMERGED_ANCHORS = True
-  ```
-
-  Preserve commit `c97c0422d7`, history coverage `complete`, and existing deterministic object creation/update timestamps. Do not rewrite other BB2 manifests that still use `demo-team`.
-
-- [ ] **Step 2: Correct the three byte-exact evidence blocks**
-
-  Use the exact source indentation and newlines:
-
-  ```python
-  "\tbool isFinalBoss = (startObject->getBossType() == BOSS_TYPE::BIG_HEAD);\n"
-  "\tGameConstantsHelper::initExpandedGameArea(isFinalBoss);"
-  ```
-
-  ```python
-  "\tGAME_CONSTANTS::isExpanded = isValid;\n"
-  "\tGAME_CONSTANTS::isFinalBossMode = isBossMode;"
-  ```
-
-  ```python
-  "\t\texpandedArea = CCRectMake(0.f, 0.f,\n"
-  "\t\t\tGAME_CONSTANTS::expandedBallMoveAreaSize.width,\n"
-  "\t\t\tGAME_CONSTANTS::expandedBallMoveAreaSize.height);"
-  ```
-
-  Update the corresponding `EvidenceRef` summary/title fields without collapsing whitespace.
-
-- [ ] **Step 3: Regenerate notes while preserving the five extra ledger records**
-
-  Back up the current `notes.json`, regenerate `notes-base.json`, and copy only its five `extra_objects` into the new `notes.json`:
-
-  ```bash
-  cd /Users/al03040455/Desktop/bb2_client
-  BB2_INGEST_DIR="$PWD/brain/.brain-local/ingest-ingame-area-expansion"
-  BB2_NOTES_BACKUP="$(mktemp -t ingame-area-expansion-notes.XXXXXX.json)"
-  cp "$BB2_INGEST_DIR/notes.json" "$BB2_NOTES_BACKUP"
-
-  python3 .agents/skills/bb2-brain-ingest/scripts/assemble_notes.py \
-    "$BB2_INGEST_DIR/verify.json" \
-    "$BB2_INGEST_DIR/domain_spec.py" \
-    --out "$BB2_INGEST_DIR/notes-base.json" \
-    --finalization-out "$BB2_INGEST_DIR/finalization.json"
-
-  jq --slurpfile previous "$BB2_NOTES_BACKUP" \
-    '. + {extra_objects: $previous[0].extra_objects}' \
-    "$BB2_INGEST_DIR/notes-base.json" \
-    > "$BB2_INGEST_DIR/notes.json"
-
-  test "$(jq '.extra_objects | length' "$BB2_INGEST_DIR/notes.json")" -eq 5
-  test "$(jq '[.extra_objects[] | select(.kind == "EventLedgerRecord")] | length' \
-    "$BB2_INGEST_DIR/notes.json")" -eq 5
-  ```
-
-  Do not hand-delete or silently lose those records.
-
-  Expected changed tracked data:
-
-  - 30 code locators gain `verified_quote` and `verified_at`;
-  - 3 evidence references receive exact multi-line source text;
-  - 2 manifests receive `acl=["bb2-team"]` and the recorded capture time.
-
-- [ ] **Step 4: Run audit and finalization**
-
-  Rebuild the objects from the merged notes, capture the pre-ingest baseline, ingest, and run the generated finalizer:
-
-  ```bash
-  cd /Users/al03040455/Desktop/bb2_client
-  BB2_INGEST_DIR="$PWD/brain/.brain-local/ingest-ingame-area-expansion"
-
-  project-brain build \
-    --notes "$BB2_INGEST_DIR/notes.json" \
-    --objects-file "$BB2_INGEST_DIR/objects.json" \
-    | tee "$BB2_INGEST_DIR/build-report.json"
-
-  .agents/skills/bb2-brain-ingest/scripts/finalize_ingest.sh \
-    --capture-baseline \
-    > "$BB2_INGEST_DIR/isolation-baseline.json"
-
-  project-brain ingest \
-    --objects-file "$BB2_INGEST_DIR/objects.json" \
-    --preconditions-file "$BB2_INGEST_DIR/build-report.json"
-
-  .agents/skills/bb2-brain-ingest/scripts/finalize_ingest.sh \
-    --config "$BB2_INGEST_DIR/finalization.json" \
-    --baseline "$BB2_INGEST_DIR/isolation-baseline.json" \
-    | tee "$BB2_INGEST_DIR/finalization-report.json"
-  ```
-
-  The result must prove:
-
-  - code quotes: 30 checked, 30 exact, 0 failures;
-  - top-level audit: `ok=true`;
-  - no Git error and no `anchor_unverifiable`;
-  - the unmerged baseline-union contract holds even though these 30 locators may already be in the baseline;
-  - query/show exposes `unmerged_anchor=true` without changing `reviewed`;
-  - lint succeeds;
-  - eval reports 15/15;
-  - all corpus checks pass;
-  - all 4 recall checks pass;
-  - isolation reports no unexpected IDs.
-
-- [ ] **Step 5: Review the exact BB2 data diff**
-
-  ```bash
-  git -C /Users/al03040455/Desktop/bb2_client status --short
-  git -C /Users/al03040455/Desktop/bb2_client diff --check
-  ```
-
-  Confirm there are exactly 35 intended tracked object/manifest changes. Local ingestion-run artifacts remain ignored workflow evidence and must not be force-added. Stage explicit paths only; do not use `git add -A`.
-
-- [ ] **Step 6: Commit the data correction separately**
-
-  ```bash
-  git commit -m "fix(brain): verify in-game expansion code anchors"
-  ```
-
-  Expected: this commit follows the skill-install commit and contains no engine files or unrelated BB2 changes.
-
-## Task 11: Record the post-merge verification procedure
-
-**Files:**
-
-- Verify only after the feature branch is later integrated into BB2 `develop`
-
-- [ ] **Step 1: Rerun audit against the new configured target head**
-
-  Fetch `develop` through the normal audit path. Do not edit locators before seeing the reachability and exact-quote results.
-
-- [ ] **Step 2: Check only the 30 feature locator IDs**
-
-  Expected after an ordinary merge: those 30 IDs disappear from the unmerged advisory set. Do not require the repository-wide unmerged set to become empty because unrelated prototypes may remain.
-
-- [ ] **Step 3: Preserve reachable SHAs**
-
-  If audit shows the original `c97c0422d7`-based anchors are ancestors and their exact quotes still match, make no SHA changes.
-
-- [ ] **Step 4: Inspect before any re-anchor**
-
-  If a squash/rebase/cherry-pick made the original SHA unreachable, or a conflict resolution changed an anchored path, inspect the integrated source. Re-anchor only the affected locator and update its verified quote/time. A normal merge plus code change may produce both a reachable SHA and `code_changed`; treat that as an inspection candidate, not an automatic rewrite.
+- keep all 101 existing objects `reviewed`;
+- use byte-exact source text for the three known collapsed quotes;
+- add `verified_quote` and `verified_at` to the 30 code locators;
+- use `acl=["bb2-team"]` and the recorded capture time only for the two relevant manifests;
+- preserve the five existing `EventLedgerRecord` extra objects;
+- after an ordinary merge, keep the original reachable SHA and check only whether these 30 locators leave the unmerged set;
+- after squash/rebase/cherry-pick or a material conflict resolution, inspect affected code before re-anchoring.
 
 ## Final Completion Checklist
 
@@ -979,6 +837,6 @@ This plan records the three-party agreement between the implementing agent, the 
 - [ ] Disposable installation is idempotent.
 - [ ] BB2 installation came from the exact Project Brain checkout command without `--force`.
 - [ ] BB2 agents-doctor passes and the second install is a no-op.
-- [ ] The BB2 data correction preserves five extra ledger objects and changes only the expected domain artifacts.
+- [ ] Existing BB2 Brain objects and local ingestion artifacts are unchanged.
 - [ ] Project Brain and BB2 changes are committed separately with explicit staging.
 - [ ] Neither repository is pushed without a new explicit user instruction.
