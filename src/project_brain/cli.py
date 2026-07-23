@@ -485,10 +485,11 @@ def _run_lint(argv) -> int:
 
 
 def _run_audit(argv) -> int:
-    """코퍼스 감사 — lint(무결성) + graph isolated(고아 잎) + stale-check(코드 드리프트)를
-    한 패스로 묶는다. stale는 결과를 캐시에 써 query/show가 advisory를 읽게 하는 '도는 주체'다
-    (읽기·쓰기 양끝은 있는데 캐시를 채울 주체가 없던 갭을 메움). lint 문제 있으면 rc=1; isolated·
-    stale은 곁들임 보고라 rc에 안 넣는다. git 없는 환경은 --no-stale로 lint·isolated만 돈다."""
+    """lint·고립 객체·코드 드리프트·opt-in 원문 인용구를 함께 감사한다.
+
+    ``--no-stale``만 Git 없이 실행하는 명시적 모드다. 그 외에는 도달성 검증 불가와
+    원문 인용구 검증 실패를 모두 차단 결과로 낸다. ``not_ancestor``는 안내만 한다.
+    """
     parser = argparse.ArgumentParser(prog="cli audit")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모)")
@@ -511,8 +512,14 @@ def _run_audit(argv) -> int:
         by_kind[k] = by_kind.get(k, 0) + 1
 
     stale = None
+    stale_status = None
     cache_written = None
-    if not args.no_stale:
+    code_quotes = None
+    if args.no_stale:
+        stale_status = {"ok": True, "skipped": True, "reason": "no_stale"}
+        code_quotes = {"ok": True, "checked": 0, "skipped": 0,
+                       "check_skipped": True, "failures": []}
+    else:
         from project_brain.stale_check import (
             GitError,
             build_stale_set,
@@ -520,6 +527,7 @@ def _run_audit(argv) -> int:
             stale_check,
             write_stale_set,
         )
+        from project_brain.code_verify import make_git_blob_reader, verify_code_quotes
         repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
         git_runner = make_git_runner(repo_root)
         try:
@@ -529,17 +537,34 @@ def _run_audit(argv) -> int:
             cache_written = str(write_stale_set(brain_root, build_stale_set(stale, now=now_kst())))
         except GitError as exc:
             stale = {"error": str(exc)}
+            stale_status = {"ok": False, "skipped": False}
+        else:
+            stale_status = {
+                "ok": not any(
+                    anchor.get("reason") == "anchor_unverifiable"
+                    for anchor in stale.get("unmerged_anchors") or []
+                ),
+                "skipped": False,
+            }
+        code_quotes = verify_code_quotes(
+            store.by_kind("CodeLocator"),
+            blob_reader=make_git_blob_reader(repo_root),
+        )
+
+    ok = not problems and stale_status["ok"] and code_quotes["ok"]
 
     print(json.dumps(
-        {"ok": not problems,
+        {"ok": ok,
          "lint": {"ok": not problems, "problems": problems},
          "isolated": {"isolated_count": len(isolated),
                       "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
                       "isolated": isolated},
          "stale": stale,
+         "stale_status": stale_status,
+         "code_quotes": code_quotes,
          "cache_written": cache_written},
         ensure_ascii=False, indent=2))
-    return 0 if not problems else 1
+    return 0 if ok else 1
 
 
 def _run_install(argv) -> int:

@@ -793,8 +793,126 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(rc, 0)  # lint clean → rc 0
         self.assertTrue(payload["lint"]["ok"])
         self.assertIn("g.orphan", payload["isolated"]["isolated"])
-        self.assertIsNone(payload["stale"])        # --no-stale
+        self.assertIsNone(payload["stale"])        # 기존 --no-stale 계약 보존
+        self.assertTrue(payload["stale_status"]["ok"])
+        self.assertTrue(payload["stale_status"]["skipped"])
+        self.assertTrue(payload["code_quotes"]["check_skipped"])
+        self.assertEqual(payload["code_quotes"]["checked"], 0)
         self.assertIsNone(payload["cache_written"])
+
+    def test_audit_succeeds_when_stale_and_exact_quote_checks_pass(self):
+        from tests.test_stale_check import code_locator
+        loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
+        loc["verified_quote"] = "return exact;"
+        BrainStore.save_object(self.brain, loc)
+        stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
+                 "unmerged_anchors": [], "coverage": {"covered_mappings": [],
+                                                        "uncovered_mappings": []}}
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
+             mock.patch("project_brain.code_verify.make_git_blob_reader",
+                        return_value=lambda _commit, _path: b"return exact;"), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["stale_status"]["ok"])
+        self.assertEqual(payload["code_quotes"],
+                         {"ok": True, "checked": 1, "skipped": 0, "failures": []})
+
+    def test_audit_fails_closed_on_global_git_error(self):
+        from project_brain.stale_check import GitError
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", side_effect=GitError("fetch failed")), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["stale_status"]["ok"])
+        self.assertEqual(payload["stale"]["error"], "fetch failed")
+
+    def test_audit_fails_closed_on_unverifiable_anchor(self):
+        stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
+                 "unmerged_anchors": [{"locator_id": "code.unknown", "path": "a/X.cpp",
+                                        "from_commit": "MISSING", "reason": "anchor_unverifiable",
+                                        "blocking_affected_mapping_ids": [],
+                                        "nonblocking_affected_mapping_ids": []}],
+                 "coverage": {"covered_mappings": [], "uncovered_mappings": []}}
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["stale_status"]["ok"])
+
+    def test_audit_keeps_not_ancestor_as_successful_advisory(self):
+        stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
+                 "unmerged_anchors": [{"locator_id": "code.work", "path": "a/X.cpp",
+                                        "from_commit": "WORK", "reason": "not_ancestor",
+                                        "blocking_affected_mapping_ids": [],
+                                        "nonblocking_affected_mapping_ids": []}],
+                 "coverage": {"covered_mappings": [], "uncovered_mappings": []}}
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["stale_status"]["ok"])
+
+    def test_audit_fails_when_verified_quote_is_missing_from_blob(self):
+        from tests.test_stale_check import code_locator
+        loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
+        loc["verified_quote"] = "return exact;"
+        BrainStore.save_object(self.brain, loc)
+        stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
+                 "unmerged_anchors": [], "coverage": {"covered_mappings": [],
+                                                        "uncovered_mappings": []}}
+        out = io.StringIO()
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
+             mock.patch("project_brain.code_verify.make_git_blob_reader",
+                        return_value=lambda _commit, _path: b"return changed;"), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code_quotes"]["failures"], [
+            {"locator_id": "code.quoted", "reason": "quote_not_found"},
+        ])
+
+    def test_audit_no_stale_skips_both_git_dependent_checks(self):
+        from tests.test_stale_check import code_locator
+        loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
+        loc["verified_quote"] = "return exact;"
+        BrainStore.save_object(self.brain, loc)
+        out = io.StringIO()
+        with mock.patch("project_brain.code_verify.make_git_blob_reader") as blob_reader, \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-stale"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertIsNone(payload["stale"])
+        self.assertTrue(payload["stale_status"]["skipped"])
+        self.assertTrue(payload["code_quotes"]["check_skipped"])
+        blob_reader.assert_not_called()
 
     def test_search_missing_index_errors(self):
         argv = ["search", "레인", "--db", str(self.db),
