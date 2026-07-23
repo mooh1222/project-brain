@@ -42,9 +42,14 @@
 
 ## 머지 전·후 경계
 
-코드 앵커는 기본적으로 {{DEFAULT_BRANCH}}에 머지된 commit SHA와 심볼을 쓴다.
-머지 전 PR HEAD는 머지 뒤에도 같은 SHA가 유지된다고 확인할 수 있을 때만 예외로 쓴다.
-머지 방식이 불명확하거나 squash·rebase 가능성이 있으면 머지 뒤에 다시 확인한다.
+커밋 SHA는 한번 만들어지면 바뀌지 않는다. 코드 앵커는 {{DEFAULT_BRANCH}} 이력에서 도달 가능한 commit SHA와
+확인한 심볼을 쓴다. fast-forward와 일반 merge에서는 작업 브랜치의 기존 커밋과 SHA가 {{DEFAULT_BRANCH}}
+이력에 그대로 포함되므로, 머지했다는 이유만으로 {{DEFAULT_BRANCH}} 끝의 새 SHA로 교체하지 않는다.
+
+머지 전 PR HEAD를 임시 앵커로 썼다면 머지 뒤 `git merge-base --is-ancestor <commit_sha> <{{DEFAULT_BRANCH}}-ref>`로
+기존 SHA가 {{DEFAULT_BRANCH}} 이력에서 도달 가능한지 확인하고, 앵커 대상 코드도 다시 대조한다. 둘 다 유지되면
+기존 SHA를 그대로 쓴다. squash·rebase·cherry-pick 또는 충돌 해결로 기존 SHA가 {{DEFAULT_BRANCH}} 이력에 없거나
+코드가 달라진 경우에만 {{DEFAULT_BRANCH}}에서 다시 확인한 commit SHA와 스냅샷으로 갱신한다.
 
 이 경계는 객체 ID가 살아 있어도 실제 코드를 가리키지 못하는 조용한 손상을 막는다.
-작업 브랜치의 편의상 SHA를 현재 사실의 앵커로 쓰지 않는다.
+작업 브랜치 SHA라는 이유만으로 버리거나, 새 {{DEFAULT_BRANCH}} 끝의 SHA라는 이유만으로 교체하지 않는다.

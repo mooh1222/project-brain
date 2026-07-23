@@ -39,7 +39,7 @@ description: |
 1. Source Intake를 먼저 선언하고, 대상과 이번 소스 묶음을 분리한다.
 2. 사실의 우선순위는 코드 동작, 주석, 보조 문서 순서다.
 3. 메모리, handoff, 이전 대화는 원문 근거가 아니며 이번 소스 묶음으로 다시 확인한다.
-4. 코드 앵커는 {{DEFAULT_BRANCH}}의 commit SHA와 확인한 심볼을 함께 남긴다.
+4. 코드 앵커는 {{DEFAULT_BRANCH}} 이력에서 도달 가능한 commit SHA와 확인한 심볼을 함께 남긴다.
 5. 독립 질문·근거·변경 이력이 있는 것만 의미 원자로 객체화한다.
 6. 논리 key 자리에 완성 ID를 넣지 않으며, 형식과 예외는 `references/object-model.md`를 따른다.
 7. 고아를 남기지 않고, 연결은 primary 하나와 실제 공동 primary까지만 둔다.

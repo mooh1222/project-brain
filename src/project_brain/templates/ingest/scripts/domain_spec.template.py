@@ -1,7 +1,7 @@
 # 적재별 데이터 한 장(코드 아님 — 의미 데이터만). assemble_notes.py가 읽는다.
 # 조립 로직은 절대 여기 넣지 않는다(그건 assemble_notes.py). 채우는 건 데이터뿐.
 CTX = ""                       # 컨텍스트 키 (예: "ball-select")
-COMMIT = ""                    # {{DEFAULT_BRANCH}} 앵커 커밋 (git rev-parse --short=10)
+COMMIT = ""                    # {{DEFAULT_BRANCH}} 이력에서 도달 가능한 앵커 커밋 (git rev-parse --short=10)
 REPO = "{{REPO}}"
 MANIFESTS = {                  # sources[]가 될 매니페스트. 키=종류, 값=manifest id
     "code": "manifest.<ctx>.code",

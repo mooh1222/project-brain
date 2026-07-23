@@ -17,6 +17,7 @@ from project_brain.installer import install
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_ROOT = ROOT / "src" / "project_brain" / "templates" / "ingest"
+SESSION_TEMPLATE_ROOT = ROOT / "src" / "project_brain" / "templates" / "session-ingest"
 SKILL = TEMPLATE_ROOT / "SKILL.md"
 REFERENCES = TEMPLATE_ROOT / "references"
 REQUIRED_REFERENCES = (
@@ -132,6 +133,69 @@ class IngestSkillContractTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
         for token in SOURCE_INTAKE_REPORT_TOKENS:
             self.assertIn(token, rendered)
+
+    def test_merge_anchor_sha_contract_survives_install(self):
+        canonical_files = {
+            "ingest/SKILL.md": SKILL,
+            "ingest/references/scope.md": REFERENCES / "scope.md",
+            "ingest/references/object-model.md": REFERENCES / "object-model.md",
+            "ingest/scripts/domain_spec.template.py":
+                TEMPLATE_ROOT / "scripts" / "domain_spec.template.py",
+            "session-ingest/references/dev-ingest.md":
+                SESSION_TEMPLATE_ROOT / "references" / "dev-ingest.md",
+        }
+        canonical = {
+            name: path.read_text(encoding="utf-8")
+            for name, path in canonical_files.items()
+        }
+
+        for name in (
+            "ingest/SKILL.md",
+            "ingest/references/object-model.md",
+            "ingest/scripts/domain_spec.template.py",
+        ):
+            self.assertIn(
+                "{{DEFAULT_BRANCH}} 이력에서 도달 가능한",
+                canonical[name],
+                name,
+            )
+        for token in (
+            "커밋 SHA는 한번 만들어지면 바뀌지 않는다",
+            "fast-forward와 일반 merge",
+            "머지했다는 이유만으로",
+            "git merge-base --is-ancestor",
+            "경우에만",
+        ):
+            self.assertIn(token, canonical["ingest/references/scope.md"])
+        for token in (
+            "머지 자체는 기존 커밋 SHA를 바꾸지 않는다",
+            "경우에만",
+        ):
+            self.assertIn(token, canonical["session-ingest/references/dev-ingest.md"])
+        self.assertNotIn("머지 정정 때", "\n".join(canonical.values()))
+
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo", default_branch="develop")
+            installed = target / ".agents" / "skills"
+            rendered_files = (
+                installed / "demo-brain-ingest" / "SKILL.md",
+                installed / "demo-brain-ingest" / "references" / "scope.md",
+                installed / "demo-brain-ingest" / "references" / "object-model.md",
+                installed / "demo-brain-ingest" / "scripts" / "domain_spec.template.py",
+                installed / "demo-brain-session-ingest" / "references" / "dev-ingest.md",
+            )
+            rendered = "\n".join(
+                path.read_text(encoding="utf-8") for path in rendered_files
+            )
+
+        self.assertNotIn("{{DEFAULT_BRANCH}}", rendered)
+        self.assertIn("develop 이력에서 도달 가능한", rendered)
+        self.assertIn("머지 자체는 기존 커밋 SHA를 바꾸지 않는다", rendered)
+        self.assertIn("머지했다는 이유만으로", rendered)
+        self.assertIn("git merge-base --is-ancestor", rendered)
+        self.assertIn("경우에만", rendered)
+        self.assertNotIn("머지 정정 때", rendered)
 
     def test_semantic_completeness_and_concept_domain_contracts(self):
         checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")

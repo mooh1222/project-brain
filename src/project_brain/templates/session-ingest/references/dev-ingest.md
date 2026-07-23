@@ -6,9 +6,12 @@
    적재. 코드 앵커 없이 가능(candidate는 evidence 강제 없음). EvidenceRef는 기획서
    (raw/sources/<context>/ 보관 — 규약 {{BRAIN_ROOT}}/README.md). DomainContext도 이때 신설.
 2. **코드 연결** (개발 중): 코드가 생기면 CodeLocator 추가 + 매핑 연결. locator는 경로+심볼
-   힌트(라인=조사 당시 스냅샷, verified_at이 시점) — 작업 브랜치 기준으로 달고, {{DEFAULT_BRANCH}} 머지
-   시 스냅샷 갱신(제자리)으로 정정한다. `commit_sha`는 여기서도 기입 의무(라인을 확인한
-   그 브랜치 커밋 — 머지 정정 때 {{DEFAULT_BRANCH}} sha로 교체). 비우면 변경 감지 기준점이 없다.
+   힌트(라인=조사 당시 스냅샷, verified_at이 시점)를 작업 브랜치 기준으로 달고, `commit_sha`에는
+   그 코드를 확인한 작업 브랜치 커밋을 기록한다. 머지 자체는 기존 커밋 SHA를 바꾸지 않는다.
+   머지 뒤 기존 SHA가 {{DEFAULT_BRANCH}} 이력에서 도달 가능하고 앵커 대상 코드가 같으면 그대로 둔다.
+   squash·rebase·cherry-pick 또는 충돌 해결로 기존 SHA가 {{DEFAULT_BRANCH}} 이력에 없거나 코드가 달라진
+   경우에만 {{DEFAULT_BRANCH}}에서 다시 확인한 SHA와 스냅샷으로 제자리 갱신한다. `commit_sha`를 비우면
+   변경 감지 기준점이 없으므로 여기서도 기입은 의무다.
 3. **갱신**: 바뀐 범위의 단어로 기존 객체를 search하고, 있으면 `{{PROJECT}}-brain-ingest/references/update-rules.md`의 kind별 흐름을 따른다. 없으면 신설한다.
 4. **완료 마무리**: reviewed 승격과 history를 보강한 뒤 `{{PROJECT}}-brain-ingest/references/completeness-checklist.md`로 닫는다.
 
