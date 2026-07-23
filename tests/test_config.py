@@ -17,6 +17,7 @@ from project_brain.config import (
     find_config,
     load_config,
     resolve_brain_root,
+    resolve_default_branch,
     resolve_db_path,
     resolve_scenarios_path,
 )
@@ -74,6 +75,14 @@ class LoadConfigTest(unittest.TestCase):
             self.assertEqual(cfg["scenarios"], root / "data" / "golden.json")
             self.assertEqual(cfg["project"], "demo")
 
+    def test_preserves_repo_and_default_branch(self):
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            write_config(root, {"repo": "bb2-client", "default_branch": "main"})
+            cfg = load_config(start=root)
+            self.assertEqual(cfg["repo"], "bb2-client")
+            self.assertEqual(cfg["default_branch"], "main")
+
     def test_db_default_follows_explicit_brain_root(self):
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
@@ -118,6 +127,15 @@ class ResolveTest(unittest.TestCase):
                 resolve_scenarios_path(None, start=root),
                 root / "brain" / "eval_scenarios.json",
             )
+
+    def test_default_branch_explicit_then_config_then_legacy_default(self):
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            write_config(root, {"default_branch": "trunk"})
+            self.assertEqual(resolve_default_branch("main", start=root), "main")
+            self.assertEqual(resolve_default_branch(start=root), "trunk")
+        with TemporaryDirectory() as td:
+            self.assertEqual(resolve_default_branch(start=Path(td)), "develop")
 
     def test_no_explicit_no_config_raises_with_guidance(self):
         with TemporaryDirectory() as td:

@@ -88,14 +88,14 @@ def make_git_runner(repo_root, *, timeout=60):
     return run
 
 
-def resolve_target_head(git_runner, *, fetch=True):
-    """origin/develop의 현재 sha. fetch=True면 먼저 origin develop을 가져온다.
+def resolve_target_head(git_runner, *, default_branch="develop", fetch=True):
+    """origin/<default_branch>의 현재 sha. fetch=True면 먼저 그 브랜치를 가져온다.
 
-    brain 브랜치 워킹트리는 develop보다 구버전이라 비교 기준은 항상 origin/develop.
+    brain 브랜치 워킹트리는 기준 브랜치보다 구버전일 수 있어 비교 기준은 항상 origin/<default_branch>.
     """
     if fetch:
-        git_runner(["fetch", "origin", "develop"])
-    return git_runner(["rev-parse", "origin/develop"]).strip()
+        git_runner(["fetch", "origin", default_branch])
+    return git_runner(["rev-parse", f"origin/{default_branch}"]).strip()
 
 
 def path_changed(git_runner, from_commit, target_head, path):
@@ -121,7 +121,7 @@ def anchor_merged(git_runner, from_commit, target_head):
     return base.startswith(from_commit)
 
 
-def stale_check(store, *, git_runner, target_head=None, fetch=True):
+def stale_check(store, *, git_runner, target_head=None, default_branch="develop", fetch=True):
     """바뀐 파일을 가리키는 매핑 후보 + locator_group + coverage + target_head.
 
     target_head를 주면 git fetch/rev-parse를 건너뛴다(테스트·재실행). 읽기 전용 —
@@ -129,7 +129,8 @@ def stale_check(store, *, git_runner, target_head=None, fetch=True):
     commit_sha 다른 locator가 가리키면 각각 판정).
     """
     if target_head is None:
-        target_head = resolve_target_head(git_runner, fetch=fetch)
+        target_head = resolve_target_head(
+            git_runner, default_branch=default_branch, fetch=fetch)
 
     change_cache = {}  # (path, commit_sha) → change_type or None
     ancestor_cache = {}  # from_commit → bool(머지됨) / None(검증 불가)

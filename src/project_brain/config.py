@@ -39,7 +39,7 @@ def find_config(start=None) -> Path | None:
 def load_config(start=None) -> dict | None:
     """config를 읽어 경로 필드를 절대화해 돌려준다. 파일이 없으면 None.
 
-    반환: {path, root, brain_root, db, scenarios, project}
+    반환: {path, root, brain_root, db, scenarios, project, repo, default_branch}
     """
     cfg_path = find_config(start=start)
     if cfg_path is None:
@@ -58,6 +58,8 @@ def load_config(start=None) -> dict | None:
         "db": db,
         "scenarios": scenarios,
         "project": raw.get("project"),
+        "repo": raw.get("repo"),
+        "default_branch": raw.get("default_branch"),
     }
 
 
@@ -83,3 +85,13 @@ def resolve_db_path(explicit=None, start=None) -> Path:
 
 def resolve_scenarios_path(explicit=None, start=None) -> Path:
     return _resolve(explicit, "scenarios", "골든셋 시나리오", start=start)
+
+
+def resolve_default_branch(explicit=None, *, start=None) -> str:
+    """명시값, 프로젝트 설정, 기존 기본값 순으로 기본 브랜치를 고른다."""
+    if explicit is not None:
+        return explicit
+    cfg = load_config(start=start)
+    if cfg is not None and cfg["default_branch"] is not None:
+        return cfg["default_branch"]
+    return "develop"

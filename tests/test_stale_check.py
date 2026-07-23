@@ -5,6 +5,7 @@ spec: docs/superpowers/specs/2026-06-14-project-brain-stale-check-design.md
 """
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -141,6 +142,14 @@ class CoverageReportTest(unittest.TestCase):
 
 
 class GitDetectionTest(unittest.TestCase):
+    def test_resolve_target_head_uses_configured_branch(self):
+        from project_brain.stale_check import resolve_target_head
+        runner = fake_git_runner("TARGETSHA", {})
+        head = resolve_target_head(runner, default_branch="main", fetch=True)
+        self.assertEqual(head, "TARGETSHA")
+        self.assertEqual(runner.calls[0], ["fetch", "origin", "main"])
+        self.assertEqual(runner.calls[1], ["rev-parse", "origin/main"])
+
     def test_resolve_target_head_fetches_then_rev_parse(self):
         from project_brain.stale_check import resolve_target_head
         runner = fake_git_runner("TARGETSHA", {})
@@ -170,6 +179,104 @@ class GitDetectionTest(unittest.TestCase):
         from project_brain.stale_check import path_changed
         runner = fake_git_runner("TARGET", {("SHA1", "a/X.cpp"): "R100"})
         self.assertEqual(path_changed(runner, "SHA1", "TARGET", "a/X.cpp"), "R100")
+
+
+class GitDagReachabilityTest(unittest.TestCase):
+    def _git(self, cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def _commit_file(self, work, path, content, message):
+        (work / path).write_text(content, encoding="utf-8")
+        self._git(work, "add", path)
+        self._git(work, "commit", "-m", message)
+        return self._git(work, "rev-parse", "HEAD")
+
+    def test_anchor_reachability_uses_real_main_and_trunk_dags(self):
+        from project_brain.stale_check import anchor_merged, make_git_runner, resolve_target_head
+
+        for default_branch in ("main", "trunk"):
+            with self.subTest(default_branch=default_branch), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                origin = root / "origin.git"
+                work = root / "work"
+                self._git(root, "init", "--bare", str(origin))
+                self._git(root, "clone", str(origin), str(work))
+                self._git(work, "config", "user.name", "Test User")
+                self._git(work, "config", "user.email", "test@example.com")
+                self._git(work, "checkout", "-b", default_branch)
+                self._commit_file(work, "base.txt", "base\n", "base")
+                self._git(work, "push", "-u", "origin", default_branch)
+
+                # fast-forward와 일반 merge는 원래 앵커가 최종 브랜치의 조상으로 남는다.
+                self._git(work, "checkout", "-b", "fast-forward")
+                fast_forward_anchor = self._commit_file(
+                    work, "fast-forward.txt", "ff\n", "fast forward anchor")
+                self._git(work, "checkout", default_branch)
+                self._git(work, "merge", "--ff-only", "fast-forward")
+
+                self._git(work, "checkout", "-b", "normal-merge")
+                normal_merge_anchor = self._commit_file(
+                    work, "normal.txt", "normal\n", "normal merge anchor")
+                self._git(work, "checkout", default_branch)
+                self._commit_file(work, "main-only.txt", "main\n", "advance main")
+                self._git(work, "merge", "--no-ff", "normal-merge", "-m", "normal merge")
+
+                # 충돌을 해결한 일반 merge도 앵커는 보존하지만 파일 내용은 달라질 수 있다.
+                self._commit_file(work, "conflict.txt", "base\n", "conflict base")
+                self._git(work, "checkout", "-b", "conflict-merge")
+                conflict_anchor = self._commit_file(
+                    work, "conflict.txt", "feature\n", "conflict anchor")
+                self._git(work, "checkout", default_branch)
+                self._commit_file(work, "conflict.txt", "main\n", "main conflict change")
+                conflict = subprocess.run(
+                    ["git", "merge", "--no-ff", "conflict-merge", "-m", "conflict merge"],
+                    cwd=work, capture_output=True, text=True,
+                )
+                self.assertNotEqual(conflict.returncode, 0)
+                self._commit_file(work, "conflict.txt", "resolved\n", "resolve conflict")
+
+                # squash, rebase, cherry-pick은 원래 commit 객체를 조상으로 보존하지 않는다.
+                self._git(work, "checkout", "-b", "squash-source")
+                squash_anchor = self._commit_file(work, "squash.txt", "squash\n", "squash anchor")
+                self._git(work, "checkout", default_branch)
+                self._git(work, "merge", "--squash", "squash-source")
+                self._git(work, "commit", "-m", "squash merge")
+
+                self._git(work, "checkout", "-b", "rebase-source")
+                rebase_anchor = self._commit_file(work, "rebase.txt", "rebase\n", "rebase anchor")
+                self._git(work, "checkout", default_branch)
+                self._commit_file(work, "after-rebase.txt", "main\n", "advance for rebase")
+                self._git(work, "checkout", "rebase-source")
+                self._git(work, "rebase", default_branch)
+                self._git(work, "checkout", default_branch)
+                self._git(work, "merge", "--ff-only", "rebase-source")
+
+                self._git(work, "checkout", "-b", "cherry-source")
+                cherry_anchor = self._commit_file(work, "cherry.txt", "cherry\n", "cherry anchor")
+                self._git(work, "checkout", default_branch)
+                self._commit_file(work, "before-cherry.txt", "main\n", "advance for cherry-pick")
+                self._git(work, "cherry-pick", cherry_anchor)
+                self._git(work, "push", "origin", default_branch)
+
+                runner = make_git_runner(work)
+                target_head = resolve_target_head(runner, default_branch=default_branch)
+                self.assertEqual(target_head, self._git(work, "rev-parse", f"origin/{default_branch}"))
+                self.assertNotEqual(
+                    subprocess.run(
+                        ["git", "rev-parse", "--verify", "origin/develop"],
+                        cwd=work, capture_output=True, text=True,
+                    ).returncode,
+                    0,
+                )
+                self.assertTrue(anchor_merged(runner, fast_forward_anchor, target_head))
+                self.assertTrue(anchor_merged(runner, normal_merge_anchor, target_head))
+                self.assertTrue(anchor_merged(runner, conflict_anchor, target_head))
+                self.assertEqual((work / "conflict.txt").read_text(encoding="utf-8"), "resolved\n")
+                self.assertFalse(anchor_merged(runner, squash_anchor, target_head))
+                self.assertFalse(anchor_merged(runner, rebase_anchor, target_head))
+                self.assertFalse(anchor_merged(runner, cherry_anchor, target_head))
 
 
 class StaleCheckTest(unittest.TestCase):

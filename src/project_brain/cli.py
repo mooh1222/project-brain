@@ -3,7 +3,12 @@ import json
 import sys
 from pathlib import Path
 
-from project_brain.config import ConfigError, resolve_brain_root, resolve_scenarios_path
+from project_brain.config import (
+    ConfigError,
+    resolve_brain_root,
+    resolve_default_branch,
+    resolve_scenarios_path,
+)
 from project_brain.embedder import get_embedder
 from project_brain.eval_harness import (
     evaluate,
@@ -493,6 +498,7 @@ def _run_audit(argv) -> int:
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
+    default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
 
     problems = lint_store(store)
@@ -517,7 +523,9 @@ def _run_audit(argv) -> int:
         repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
         git_runner = make_git_runner(repo_root)
         try:
-            stale = stale_check(store, git_runner=git_runner, fetch=not args.no_fetch)
+            stale = stale_check(
+                store, git_runner=git_runner, default_branch=default_branch,
+                fetch=not args.no_fetch)
             cache_written = str(write_stale_set(brain_root, build_stale_set(stale, now=now_kst())))
         except GitError as exc:
             stale = {"error": str(exc)}
@@ -889,11 +897,14 @@ def _run_stale_check(argv) -> int:
     )
 
     brain_root = resolve_brain_root(args.brain_root)
+    default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
     repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
     git_runner = make_git_runner(repo_root)
     try:
-        report = stale_check(store, git_runner=git_runner, fetch=not args.no_fetch)
+        report = stale_check(
+            store, git_runner=git_runner, default_branch=default_branch,
+            fetch=not args.no_fetch)
     except GitError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
@@ -913,10 +924,10 @@ def _run_mark_checked(argv) -> int:
     parser.add_argument("--mappings", required=True, nargs="+",
                         help="'의미 그대로'로 검토 완료한 매핑 id 목록")
     parser.add_argument("--checked-head", required=True,
-                        help="검토 기준 develop sha (stale-check가 낸 target_head)")
+                        help="검토 기준 기본 브랜치 sha (stale-check가 낸 target_head)")
     parser.add_argument("--no-fetch", action="store_true",
                         help="git fetch 생략(오프라인·테스트). 주의: write 명령이라 "
-                             "checked_head 경합 가드가 로컬 origin/develop 기준으로 약해진다")
+                             "checked_head 경합 가드가 로컬 기본 브랜치 기준으로 약해진다")
     args = parser.parse_args(argv)
 
     from project_brain.stale_check import (
@@ -927,14 +938,16 @@ def _run_mark_checked(argv) -> int:
     )
 
     brain_root = resolve_brain_root(args.brain_root)
+    default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
     repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
     git_runner = make_git_runner(repo_root)
     if args.no_fetch:
-        print("warning: --no-fetch는 checked_head 경합 가드를 로컬 origin/develop 기준으로 "
-              "약화시킨다(쓰기 명령 — 최신 develop 미반영 위험).", file=sys.stderr)
+        print(f"warning: --no-fetch는 checked_head 경합 가드를 로컬 origin/{default_branch} 기준으로 "
+              f"약화시킨다(쓰기 명령 — 최신 {default_branch} 미반영 위험).", file=sys.stderr)
     try:
-        current_head = resolve_target_head(git_runner, fetch=not args.no_fetch)
+        current_head = resolve_target_head(
+            git_runner, default_branch=default_branch, fetch=not args.no_fetch)
     except GitError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1

@@ -105,6 +105,51 @@ class TestCli(unittest.TestCase):
         m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
         self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
 
+    def test_audit_stale_check_and_mark_checked_use_configured_default_branch(self):
+        project = self.root / "project"
+        brain = project / "brain"
+        project.mkdir()
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain", "default_branch": "trunk"}),
+            encoding="utf-8",
+        )
+        stale_calls = []
+        head_calls = []
+
+        def fake_stale_check(store, **kwargs):
+            stale_calls.append(kwargs)
+            return {"target_head": "HEAD", "candidates": [], "locator_group": [],
+                    "unmerged_anchors": [], "coverage": {"covered_mappings": [],
+                                                        "uncovered_mappings": []}}
+
+        def fake_target_head(git_runner, **kwargs):
+            head_calls.append(kwargs)
+            return "HEAD"
+
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", side_effect=fake_stale_check), \
+             mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(brain), "--no-fetch"]), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(stale_calls[-1]["default_branch"], "trunk")
+
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.stale_check", side_effect=fake_stale_check), \
+             mock.patch("sys.argv", ["cli", "stale-check", "--brain-root", str(brain), "--no-fetch"]), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(stale_calls[-1]["default_branch"], "trunk")
+
+        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.stale_check.resolve_target_head", side_effect=fake_target_head), \
+             mock.patch("project_brain.stale_check.mark_checked",
+                        return_value={"ok": True, "updated": [], "blocked": [], "warnings": []}), \
+             mock.patch("sys.argv", ["cli", "mark-checked", "--brain-root", str(brain),
+                                      "--mappings", "m.any", "--checked-head", "HEAD", "--no-fetch"]), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(head_calls[-1]["default_branch"], "trunk")
+
     def test_cli_ingest_subcommand_writes(self):
         bundle = [manifest(), evidence_ref(), candidate_term()]
         objects_file = self.input_dir / "bundle.json"
