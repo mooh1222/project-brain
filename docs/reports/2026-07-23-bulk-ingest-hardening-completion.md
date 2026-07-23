@@ -227,3 +227,9 @@ report 입력 충돌, 실행 비트 채택과 Python 버전 독립 fixture까지
 - BB2: `d71d2a8e24` — installer가 설치본 5곳과 manifest 해시를 동기화
 - 설치 검증: 첫 실행 `adopted=5`, `skipped=[]`; 두 번째 실행은 모든 변경 배열이 비어 있음
 - 최종 검증: `612 passed, 26 subtests passed`; BB2 `agents-doctor` 이상 없음
+
+이 정정은 이후 Git 도달성·정확 인용문·finalization·색인 내구성을 함께 다룬
+branch-aware audit hardening으로 확장됐다. Project Brain `6bed114`와 BB2 설치본
+`4894337958`까지의 최종 구현·검증·push 이력, 그리고 의도적으로 실행하지 않은 BB2 Brain
+재적재 범위는
+[별도 완료 보고서](2026-07-23-brain-ingest-branch-audit-hardening-completion.md)를 본다.

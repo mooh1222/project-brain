@@ -1,5 +1,25 @@
 # Branch-Aware Brain Ingest Audit Hardening Implementation Plan
 
+> **완료 기록 — 2026-07-23:** Task 1~9 구현과 설계·품질 검토를 완료했다. 아래
+> 체크박스와 RED/GREEN 명령은 당시 실행 계획을 보존하는 이력이며, 다음 세션이 다시
+> 실행할 작업 목록이 아니다.
+>
+> Project Brain 작업은 `feat/brain-ingest-branch-audit-hardening`에서 `6bed114`까지
+> 구현한 뒤 `main`에 fast-forward merge하고 `origin/main`으로 push했다. 최종 검증은
+> pytest 674 + subtests 32, 설치 runtime unittest 75, shell syntax와 `git diff --check`
+> 통과다. 기능 worktree와 merge된 로컬 브랜치는 정리했다.
+>
+> BB2는 `/Users/al03040455/Desktop/bb2_client`의
+> `docs/bb2-brain-object-model`에서 엔진 installer로만 갱신했다. 설치 커밋
+> `5e3d5c4a6f`, manifest 기록 `8a7d56323a`, 최종 runtime 동기화 `4894337958`을
+> `origin/docs/bb2-brain-object-model`로 push했다. 두 번째 install은 변경 없음,
+> `agents-doctor`는 통과했다. 기존 `Podfile.lock` 수정은 보존했고, BB2 Brain 객체
+> 재생성·재적재·audit·eval은 비용과 승인 범위 때문에 실행하지 않았다.
+>
+> 전체 결과와 다음 적재로 넘긴 항목은
+> [완료 보고서](../../reports/2026-07-23-brain-ingest-branch-audit-hardening-completion.md)를
+> 본다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve valid commit SHA anchors across ordinary merges, expose unmerged branch scope independently from evidence review status, make audit/finalization fail closed, and safely refresh the BB2 skills through the engine installer without regenerating the existing in-game ingestion.

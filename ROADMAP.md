@@ -352,9 +352,15 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - **현재 규칙**: 커밋 SHA 자체는 바뀌지 않는다. fast-forward와 일반 merge 뒤 기존 SHA가
   기본 브랜치의 조상이고 앵커 대상 코드가 같으면 그대로 쓴다. squash·rebase·cherry-pick
   또는 충돌 해결로 SHA 도달 가능성이나 코드가 달라진 경우에만 갱신한다.
-- **엔진 계약**: 템플릿과 installer 계약 검사는 엔진을 단일 원본으로 삼는다. 소비 프로젝트는
-  `--force` 없는 install 뒤 두 번째 실행에서 변경 배열이 비는지 각자 확인한다.
-- **범위**: 이 항목은 소비 프로젝트의 기존 객체 재생성·감사·설치 실행을 기록하지 않는다.
+- **안전 보강**: config의 기본 브랜치를 판정 기준으로 고정하고, `reviewed`와 미머지
+  도달성을 분리했다. Git·정확 인용문 검증 불가 상태는 audit/finalization에서 닫힌 쪽으로
+  실패시키며, 색인 재구축은 잠금·검사·원자 교체로 기존 DB를 보존한다.
+- **완료 이력**: Project Brain `6bed114`를 `main`에 fast-forward merge·push했다. BB2는
+  엔진 installer만 사용해 `4894337958`까지
+  `docs/bb2-brain-object-model`에 설치·push했으며, 기존 Brain 객체 재생성·재적재·audit·eval은
+  실행하지 않았다.
+- 계획: [branch-aware audit hardening plan](docs/superpowers/plans/2026-07-23-brain-ingest-branch-audit-hardening.md)
+- 최종 결과: [completion report](docs/reports/2026-07-23-brain-ingest-branch-audit-hardening-completion.md)
 
 ---
 
