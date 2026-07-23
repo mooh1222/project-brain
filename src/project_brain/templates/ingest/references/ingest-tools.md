@@ -280,7 +280,7 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 
 ## 적재 후 확인 — semantic finalization
 
-`scripts/finalize_ingest.py`는 아래 게이트를 실행하고 `commands`, `isolation`, `recall_checks`, `errors`를
+`scripts/finalize_ingest.py`는 아래 게이트를 실행하고 `commands`, `isolation`, `unmerged`, `recall_checks`, `errors`를
 가진 JSON 한 개를 낸다. runner는 종료 코드만 보지 않고 이 schema와 `ok`를 함께 확인한다.
 
 1. **lint clean** — ingest가 성공했으면 연결무결성은 통과한 것. 별도 일괄 작업을 했다면

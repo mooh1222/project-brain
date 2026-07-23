@@ -287,6 +287,12 @@ class IngestSkillContractTest(unittest.TestCase):
         self.assertIn("null", rendered)
         self.assertIn("audit/stale 오류", rendered)
         self.assertNotIn("stale.detail", rendered)
+        finalizer_start = rendered.index("`scripts/finalize_ingest.py`")
+        finalizer_schema = rendered[finalizer_start:rendered.index(
+            "1. **lint clean**", finalizer_start
+        )]
+        for field in ("`commands`", "`isolation`", "`unmerged`", "`recall_checks`", "`errors`"):
+            self.assertIn(field, finalizer_schema)
 
     def test_semantic_completeness_and_concept_domain_contracts(self):
         checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
