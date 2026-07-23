@@ -280,6 +280,23 @@ class TestCli(unittest.TestCase):
         self.assertTrue(payload["embed_model"].startswith("stub:"))
         self.assertTrue(db.exists())
 
+    def test_cli_index_rebuild_lock_contention_is_normal_json_failure(self):
+        from project_brain.search_index import IndexRebuildInProgressError
+
+        argv = ["index", "rebuild", "--brain-root", str(self.root),
+                "--db", str(self.input_dir / "index.db"), "--stub-embedder"]
+        out = io.StringIO()
+        with mock.patch.object(
+            cli, "index_rebuild",
+            side_effect=IndexRebuildInProgressError("색인 재구축이 이미 진행 중입니다"),
+        ), mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(out.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertIn("진행 중", payload["error"])
+
     def test_cli_lint_clean_store_ok(self):
         # 깨끗한 store(서로 참조 정상) → lint ok=true, problems 0 (test_lint.py와 동일 조합)
         for obj in (manifest(), evidence_ref(), candidate_term()):

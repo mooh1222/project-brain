@@ -25,7 +25,7 @@ from project_brain.promote import (
 )
 from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
-from project_brain.search_index import rebuild as index_rebuild
+from project_brain.search_index import IndexRebuildInProgressError, rebuild as index_rebuild
 from project_brain.store import BrainStore
 
 
@@ -268,7 +268,7 @@ def _run_index(argv) -> int:
     """FTS + 벡터 색인 빌드 (스펙 §3.3·§4·§6, 슬라이스 2·3). 현재 하위명령은 rebuild만.
 
     `index rebuild [--brain-root <path>] [--db <path>] [--stub-embedder]` — brain/ 전
-    객체에서 전체 재구축(DB 삭제 후 재생성). 미지정 경로는 config에서 해석.
+    객체에서 전체 재구축(검증한 새 DB로 원자 교체). 미지정 경로는 config에서 해석.
 
     임베딩: 기본은 실모델(bge-m3) — 수백 개 배치 임베딩이라 시간이 걸리는 게 정상(§11).
     --stub-embedder 플래그 또는 PROJECT_BRAIN_EMBEDDER=stub 환경변수면 stub(테스트·CI용).
@@ -283,7 +283,11 @@ def _run_index(argv) -> int:
 
     # --stub-embedder 플래그면 강제 stub, 아니면 환경 플래그로 판정(get_embedder 기본).
     embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
-    stats = index_rebuild(args.brain_root, args.db, embedder=embedder)
+    try:
+        stats = index_rebuild(args.brain_root, args.db, embedder=embedder)
+    except IndexRebuildInProgressError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 1
     # raw_chunks를 함께 내보낸다 — 데이터 레포 쪽 실측 가드가 객체/raw 행 수를
     # 이 출력만으로 검증한다(엔진 import 없는 CLI 가드).
     print(json.dumps(

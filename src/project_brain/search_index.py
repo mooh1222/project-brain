@@ -11,14 +11,18 @@ FLOAT[1024])에 저장한다 — 임베딩은 형태소 분리 전 자연문이 
 rowid 기반이라 documents 행마다 정수 rowid(row_id 컬럼)를 부여해 KNN 결과를
 object_id로 되짚는다. embedder가 주어질 때만 벡터를 색인한다(embedder=None이면 FTS만).
 
-★재생성 가능 = 1급 불변조건★(§4): 전체 재구축은 DB 파일을 삭제 후 재생성한다.
-색인은 진실의 원본(SoR)이 아니라 brain/에서 따라 만드는 로컬 파생물이다 — DB 삭제는
-데이터 손실이 아니다.
+★재생성 가능 = 1급 불변조건★(§4): 전체 재구축은 새 DB를 만든 뒤 원자적으로 교체한다.
+색인은 진실의 원본(SoR)이 아니라 brain/에서 따라 만드는 로컬 파생물이다.
 """
 
+import errno
+import fcntl
 import hashlib
 import math
+import os
 import sqlite3
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from project_brain.config import resolve_brain_root, resolve_db_path
@@ -32,6 +36,10 @@ from project_brain.tokenize_ko import active_backend, tokenize
 
 class StaleIndexError(RuntimeError):
     """색인이 코퍼스/엔진과 안 맞아 rebuild가 해결책인 오류 — cli가 정상 안내로 처리."""
+
+
+class IndexRebuildInProgressError(RuntimeError):
+    """같은 색인 DB를 다른 프로세스가 재구축 중일 때의 정상 안내용 오류."""
 
 
 # 색인 스키마 자체의 버전(테이블 구조 변경 시 올린다 — meta 불일치 감지용).
@@ -108,11 +116,93 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+@contextmanager
+def _rebuild_lock(db_path: Path):
+    """DB와 같은 디렉터리의 advisory lock으로 재구축을 하나만 허용한다."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = db_path.with_name(f"{db_path.name}.lock")
+    lock_file = lock_path.open("a+")
+    try:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise IndexRebuildInProgressError(
+                    "색인 재구축이 이미 진행 중입니다. 잠시 후 `index rebuild`를 다시 실행하세요."
+                ) from exc
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def _create_rebuild_temp_path(db_path: Path) -> Path:
+    """live DB와 같은 파일시스템에서 원자 교체할 명시적 임시 DB 파일을 만든다."""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{db_path.name}.rebuild-", suffix=".tmp", dir=db_path.parent,
+    )
+    os.close(fd)
+    return Path(temp_name)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("rb") as file_obj:
+        os.fsync(file_obj.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _cleanup_rebuild_temp(temp_path: Path) -> None:
+    """임시 DB와 SQLite가 곁에 남길 수 있는 저널 파일만 정리한다."""
+    for path in (temp_path, Path(f"{temp_path}-journal"),
+                 Path(f"{temp_path}-wal"), Path(f"{temp_path}-shm")):
+        path.unlink(missing_ok=True)
+
+
+def _validate_rebuilt_index(
+    db_path: Path, *, expected_documents: int, expected_vectors: int,
+) -> None:
+    """교체 전에 새 DB의 무결성과 생성 시점 행 수 불변조건을 확인한다."""
+    conn = _connect(db_path)
+    try:
+        quick_check = conn.execute("PRAGMA quick_check").fetchall()
+        if quick_check != [("ok",)]:
+            raise RuntimeError(f"색인 임시 DB 무결성 검사 실패: {quick_check!r}")
+
+        counts = {
+            "documents": conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
+            "fts": conn.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0],
+            "vectors": conn.execute("SELECT COUNT(*) FROM documents_vec").fetchone()[0],
+            "metadata": conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0],
+        }
+        expected = {
+            "documents": expected_documents,
+            "fts": expected_documents,
+            "vectors": expected_vectors,
+            "metadata": 1,
+        }
+        if counts != expected:
+            raise RuntimeError(
+                f"색인 임시 DB 행 수 불일치: expected={expected}, actual={counts}"
+            )
+    finally:
+        conn.close()
+
+
 def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
     """brain/ 전 객체에서 FTS(+벡터) 색인을 전체 재구축한다(§4).
 
-    ★전체 재구축 = DB 삭제 후 재생성★ — 재생성 가능 1급 불변조건. extract_surface가
-    None을 돌려주는 객체(색인 제외 kind·빈 표면)는 색인하지 않는다.
+    새 DB를 같은 디렉터리에 완성·검증한 뒤에만 원자 교체한다. extract_surface가 None을
+    돌려주는 객체(색인 제외 kind·빈 표면)는 색인하지 않는다.
 
     brain_root/db_path 미지정이면 config(.project-brain.json)에서 해석한다.
 
@@ -123,101 +213,114 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
     반환: {indexed, total_objects, skipped, tokenizer, embed_model, db} 통계.
     """
     db_path = resolve_db_path(db_path)
-    if db_path.exists():
-        db_path.unlink()
-
-    # resolve 결과를 양쪽(store 로드 + raw 소스 순회)이 같이 쓴다 — 원래 인자
-    # (None일 수 있음)를 raw 순회에 흘리면 안 된다.
     brain_root = resolve_brain_root(brain_root)
-    store = BrainStore.load(brain_root)
-    tokenizer = active_backend()
-    embed_model = embedder.model_name if embedder is not None else ""
 
-    conn = _connect(db_path)
-    try:
-        _create_schema(conn)
+    with _rebuild_lock(db_path):
+        temp_path = _create_rebuild_temp_path(db_path)
+        try:
+            # resolve 결과를 양쪽(store 로드 + raw 소스 순회)이 같이 쓴다 — 원래 인자
+            # (None일 수 있음)를 raw 순회에 흘리면 안 된다.
+            store = BrainStore.load(brain_root)
+            tokenizer = active_backend()
+            embed_model = embedder.model_name if embedder is not None else ""
 
-        # 색인 대상을 먼저 모은다(임베딩은 배치라 표면 원문을 따로 보관). row_id는
-        # 등장 순서대로 1부터 부여 — store.all()은 dict 삽입 순서라 결정론(멱등).
-        indexed = 0
-        total = 0
-        pending_vectors: list[tuple[int, str]] = []  # (row_id, 표면 원문)
-        for obj in store.all():
-            total += 1
-            # 낡은 ContextProjection(구성 객체가 바뀌어 source_content_hash 불일치)은
-            # 색인 제외 — 이전 착수 브리핑이 더는 정확하지 않다. fingerprint도 동일.
-            if obj.get("kind") == "ContextProjection" and not projection_is_fresh(store, obj):
-                continue
-            surface = extract_surface(obj, store)
-            if surface is None:
-                continue
-            tokens = tokenize(surface)
-            if not tokens:
-                continue
-            tokenized_text = " ".join(tokens)
-            indexed += 1
-            row_id = indexed
-            conn.execute(
-                "INSERT INTO documents (row_id, object_id, kind, status, context_id, "
-                "content_hash, tokenized_text, surface_text) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (row_id, obj["id"], obj.get("kind"), obj.get("status"),
-                 obj.get("context_id"), content_hash(obj, store), tokenized_text, surface),
+            conn = _connect(temp_path)
+            try:
+                _create_schema(conn)
+
+                # 색인 대상을 먼저 모은다(임베딩은 배치라 표면 원문을 따로 보관). row_id는
+                # 등장 순서대로 1부터 부여 — store.all()은 dict 삽입 순서라 결정론(멱등).
+                indexed = 0
+                total = 0
+                pending_vectors: list[tuple[int, str]] = []  # (row_id, 표면 원문)
+                for obj in store.all():
+                    total += 1
+                    # 낡은 ContextProjection(구성 객체가 바뀌어 source_content_hash 불일치)은
+                    # 색인 제외 — 이전 착수 브리핑이 더는 정확하지 않다. fingerprint도 동일.
+                    if obj.get("kind") == "ContextProjection" and not projection_is_fresh(store, obj):
+                        continue
+                    surface = extract_surface(obj, store)
+                    if surface is None:
+                        continue
+                    tokens = tokenize(surface)
+                    if not tokens:
+                        continue
+                    tokenized_text = " ".join(tokens)
+                    indexed += 1
+                    row_id = indexed
+                    conn.execute(
+                        "INSERT INTO documents (row_id, object_id, kind, status, context_id, "
+                        "content_hash, tokenized_text, surface_text) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (row_id, obj["id"], obj.get("kind"), obj.get("status"),
+                         obj.get("context_id"), content_hash(obj, store), tokenized_text, surface),
+                    )
+                    conn.execute(
+                        "INSERT INTO documents_fts (object_id, tokenized_text) VALUES (?, ?)",
+                        (obj["id"], tokenized_text),
+                    )
+                    if embedder is not None:
+                        pending_vectors.append((row_id, surface))
+                object_indexed = indexed
+                # raw 원문 청크(§2.2): raw/sources/<ctx>/*.md를 같은 색인에 넣는다 —
+                # kind=raw_chunk, status=raw, 원문은 surface_text로 운반(store에 없는 행).
+                # content_hash는 객체 행의 공식(표면+status SHA-256)과 동형으로 텍스트에서 계산.
+                raw_chunks = 0
+                for ch in iter_raw_sources(Path(brain_root)):
+                    tokens = tokenize(ch["text"])
+                    if not tokens:
+                        continue
+                    tokenized_text = " ".join(tokens)
+                    indexed += 1
+                    raw_chunks += 1
+                    row_id = indexed
+                    chunk_hash = hashlib.sha256(
+                        (ch["text"] + "\n" + RAW_STATUS).encode("utf-8")).hexdigest()
+                    conn.execute(
+                        "INSERT INTO documents (row_id, object_id, kind, status, context_id, "
+                        "content_hash, tokenized_text, surface_text) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (row_id, ch["chunk_id"], RAW_KIND, RAW_STATUS,
+                         ch["context_id"], chunk_hash, tokenized_text, ch["text"]),
+                    )
+                    conn.execute(
+                        "INSERT INTO documents_fts (object_id, tokenized_text) VALUES (?, ?)",
+                        (ch["chunk_id"], tokenized_text),
+                    )
+                    if embedder is not None:
+                        pending_vectors.append((row_id, ch["text"]))
+                # 벡터는 ★토큰화 전 원문 표면★을 embed_many로 한 번에 배치 임베딩(§3.3) —
+                # 실모델(bge-m3)에서 객체당 encode 1회보다 훨씬 빠르다(2026-06-10 리뷰 반영:
+                # 주석만 "배치"라던 것을 실구현으로).
+                if embedder is not None and pending_vectors:
+                    vectors = embedder.embed_many([s for _, s in pending_vectors])
+                    conn.executemany(
+                        "INSERT INTO documents_vec (rowid, embedding) VALUES (?, ?)",
+                        [(row_id, _serialize(v))
+                         for (row_id, _), v in zip(pending_vectors, vectors)],
+                    )
+                # 지문은 색인 대상을 모두 INSERT한 뒤 계산해 meta 단일 행에 기록한다(§7).
+                fingerprint = compute_corpus_fingerprint(store, Path(brain_root))
+                conn.execute(
+                    "INSERT INTO meta (schema_version, embed_model, tokenizer, "
+                    "extractor_version, corpus_fingerprint) VALUES (?, ?, ?, ?, ?)",
+                    (SCHEMA_VERSION, embed_model, tokenizer, EXTRACTOR_VERSION, fingerprint),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            _validate_rebuilt_index(
+                temp_path,
+                expected_documents=indexed,
+                expected_vectors=len(pending_vectors),
             )
-            conn.execute(
-                "INSERT INTO documents_fts (object_id, tokenized_text) VALUES (?, ?)",
-                (obj["id"], tokenized_text),
-            )
-            if embedder is not None:
-                pending_vectors.append((row_id, surface))
-        object_indexed = indexed
-        # raw 원문 청크(§2.2): raw/sources/<ctx>/*.md를 같은 색인에 넣는다 —
-        # kind=raw_chunk, status=raw, 원문은 surface_text로 운반(store에 없는 행).
-        # content_hash는 객체 행의 공식(표면+status SHA-256)과 동형으로 텍스트에서 계산.
-        raw_chunks = 0
-        for ch in iter_raw_sources(Path(brain_root)):
-            tokens = tokenize(ch["text"])
-            if not tokens:
-                continue
-            tokenized_text = " ".join(tokens)
-            indexed += 1
-            raw_chunks += 1
-            row_id = indexed
-            chunk_hash = hashlib.sha256(
-                (ch["text"] + "\n" + RAW_STATUS).encode("utf-8")).hexdigest()
-            conn.execute(
-                "INSERT INTO documents (row_id, object_id, kind, status, context_id, "
-                "content_hash, tokenized_text, surface_text) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (row_id, ch["chunk_id"], RAW_KIND, RAW_STATUS,
-                 ch["context_id"], chunk_hash, tokenized_text, ch["text"]),
-            )
-            conn.execute(
-                "INSERT INTO documents_fts (object_id, tokenized_text) VALUES (?, ?)",
-                (ch["chunk_id"], tokenized_text),
-            )
-            if embedder is not None:
-                pending_vectors.append((row_id, ch["text"]))
-        # 벡터는 ★토큰화 전 원문 표면★을 embed_many로 한 번에 배치 임베딩(§3.3) —
-        # 실모델(bge-m3)에서 객체당 encode 1회보다 훨씬 빠르다(2026-06-10 리뷰 반영:
-        # 주석만 "배치"라던 것을 실구현으로).
-        if embedder is not None and pending_vectors:
-            vectors = embedder.embed_many([s for _, s in pending_vectors])
-            conn.executemany(
-                "INSERT INTO documents_vec (rowid, embedding) VALUES (?, ?)",
-                [(row_id, _serialize(v))
-                 for (row_id, _), v in zip(pending_vectors, vectors)],
-            )
-        # 지문은 색인 대상을 모두 INSERT한 뒤 계산해 meta 단일 행에 기록한다(§7).
-        fingerprint = compute_corpus_fingerprint(store, Path(brain_root))
-        conn.execute(
-            "INSERT INTO meta (schema_version, embed_model, tokenizer, "
-            "extractor_version, corpus_fingerprint) VALUES (?, ?, ?, ?, ?)",
-            (SCHEMA_VERSION, embed_model, tokenizer, EXTRACTOR_VERSION, fingerprint),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+            _fsync_file(temp_path)
+            os.replace(temp_path, db_path)
+            _fsync_directory(db_path.parent)
+        except BaseException:
+            _cleanup_rebuild_temp(temp_path)
+            raise
 
     return {
         # indexed = 객체 행 + raw 청크 행(전체 색인 행 수). skipped는 객체 기준.

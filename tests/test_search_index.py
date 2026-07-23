@@ -8,14 +8,17 @@ spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 (실코퍼스 행 수 가드는 데이터 레포 쪽 CLI 가드로 옮겨졌다 — 2-레포 분리.)
 """
 
+import fcntl
 import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from project_brain.embedder import EMBED_DIM, StubEmbedder
 from project_brain.objbase import base
 from project_brain.search_index import (
+    IndexRebuildInProgressError,
     SCHEMA_VERSION,
     StaleIndexError,
     _bm25_rank_scoped,
@@ -106,6 +109,96 @@ class RebuildTest(unittest.TestCase):
     def tearDown(self):
         self._td.cleanup()
 
+    def _temporary_rebuild_files(self):
+        return list(self.db.parent.glob(f".{self.db.name}.rebuild-*"))
+
+    def test_rebuild_failure_leaves_seeded_database_byte_for_byte_unchanged(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+
+        with mock.patch(
+            "project_brain.search_index.extract_surface",
+            side_effect=RuntimeError("injected build failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected build failure"):
+                rebuild(self.brain, self.db)
+
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self._temporary_rebuild_files(), [])
+
+    def test_rebuild_count_validation_failure_leaves_seeded_database_unchanged(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+
+        from project_brain import search_index
+        real_validate = search_index._validate_rebuilt_index
+
+        def inject_fts_count_mismatch(temp_path, **kwargs):
+            conn = search_index._connect(temp_path)
+            try:
+                conn.execute("DELETE FROM documents_fts")
+                conn.commit()
+            finally:
+                conn.close()
+            real_validate(temp_path, **kwargs)
+
+        with mock.patch(
+            "project_brain.search_index._validate_rebuilt_index",
+            side_effect=inject_fts_count_mismatch,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "행 수 불일치"):
+                rebuild(self.brain, self.db)
+
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self._temporary_rebuild_files(), [])
+
+    def test_rebuild_replaces_only_after_valid_temp_and_fsyncs_directory(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+        BrainStore.save_object(self.brain, glossary_term("g.reward", term="보상"))
+
+        from project_brain import search_index
+        real_replace = search_index.os.replace
+        replaced = []
+        boundary_events = []
+
+        def check_replace(source, destination):
+            self.assertEqual(Path(destination), self.db)
+            self.assertEqual(self.db.read_bytes(), before)
+            self.assertTrue(Path(source).exists())
+            replaced.append((Path(source), Path(destination)))
+            boundary_events.append("replace")
+            real_replace(source, destination)
+
+        def check_directory_fsync(directory):
+            self.assertEqual(directory, self.db.parent)
+            boundary_events.append("directory_fsync")
+
+        with mock.patch("project_brain.search_index.os.replace", side_effect=check_replace), \
+             mock.patch("project_brain.search_index._fsync_directory",
+                        side_effect=check_directory_fsync) as fsync_directory:
+            rebuild(self.brain, self.db)
+
+        self.assertEqual(len(replaced), 1)
+        fsync_directory.assert_called_once_with(self.db.parent)
+        self.assertEqual(boundary_events, ["replace", "directory_fsync"])
+        self.assertEqual(self._temporary_rebuild_files(), [])
+        self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
+
+    def test_held_rebuild_lock_fails_without_waiting_and_releases_cleanly(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        lock_path = self.db.with_name(f"{self.db.name}.lock")
+        with lock_path.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(IndexRebuildInProgressError):
+                rebuild(self.brain, self.db)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+        self.assertEqual(rebuild(self.brain, self.db)["indexed"], 1)
+
     def test_rebuild_indexes_only_supported_kinds(self):
         build_store_dir(self.brain, [
             glossary_term("g.race", term="레이스", definition="카약 경주"),
@@ -152,8 +245,8 @@ class RebuildTest(unittest.TestCase):
         self.assertIsNotNone(row[4])
         self.assertEqual(len(row[4]), 64)
 
-    def test_rebuild_deletes_and_recreates_db(self):
-        # 첫 빌드 → 객체 줄여 재빌드하면 옛 행이 남지 않는다(DB 삭제 후 재생성, §4)
+    def test_rebuild_replaces_prior_db_without_old_rows(self):
+        # 첫 빌드 → 객체 줄여 재빌드하면 옛 행이 남지 않는다.
         build_store_dir(self.brain, [
             glossary_term("g.race", term="레이스"),
             glossary_term("g.reward", term="보상"),
