@@ -211,6 +211,73 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertNotIn("target head changed", "\n".join(report["errors"]))
         self.assertIn("audit stale error: git state unavailable", report["errors"])
 
+    def test_non_not_ancestor_reasons_make_entire_audit_state_unavailable(self):
+        module = load_module()
+        baseline = {
+            "ok": True,
+            "isolated_ids": ["code.before"],
+            "target_head": "TARGET",
+            "unmerged_locator_ids": ["code.before-unmerged"],
+        }
+        contract = dict(
+            self.contract,
+            expected_unmerged_locator_ids=["code.expected-unmerged"],
+        )
+        cases = {
+            "unverifiable": (
+                [{"locator_id": "code.unknown", "reason": "anchor_unverifiable"}],
+                "reason=anchor_unverifiable locator_id=code.unknown",
+            ),
+            "mixed": (
+                [
+                    {"locator_id": "code.work", "reason": "not_ancestor"},
+                    {"locator_id": "code.unknown", "reason": "anchor_unverifiable"},
+                ],
+                "reason=anchor_unverifiable locator_id=code.unknown",
+            ),
+            "missing-reason": (
+                [{"locator_id": "code.unknown"}],
+                "reason=<missing> locator_id=code.unknown",
+            ),
+            "unknown-reason": (
+                [{"locator_id": "code.unknown", "reason": "future_reason"}],
+                "reason=future_reason locator_id=code.unknown",
+            ),
+        }
+
+        for name, (anchors, diagnostic) in cases.items():
+            with self.subTest(name=name):
+                report = module.run_finalization(
+                    contract,
+                    baseline,
+                    runner=self._runner(
+                        audit_payload={
+                            "ok": True,
+                            "stale": {
+                                "target_head": "TARGET",
+                                "unmerged_anchors": anchors,
+                            },
+                        },
+                    ),
+                )
+
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["unmerged"]["current_state_available"])
+                for field in (
+                    "current_target_head",
+                    "current_ids",
+                    "new_ids",
+                    "resolved_ids",
+                    "missing_expected_ids",
+                    "unexpected_new_ids",
+                ):
+                    self.assertIsNone(report["unmerged"][field], field)
+                self.assertTrue(any(
+                    "audit unmerged anchor state unavailable" in error
+                    and diagnostic in error
+                    for error in report["errors"]
+                ), report["errors"])
+
     def test_capture_baseline_uses_graph_and_no_fetch_audit_state(self):
         module = load_module()
         baseline = module.capture_isolation_baseline(

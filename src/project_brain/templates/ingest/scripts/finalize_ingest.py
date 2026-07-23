@@ -149,8 +149,19 @@ def _audit_git_state(result: dict) -> tuple[dict[str, Any] | None, str]:
     locator_ids = []
     for anchor in anchors:
         locator_id = anchor.get("locator_id") if isinstance(anchor, dict) else None
+        reason = anchor.get("reason") if isinstance(anchor, dict) else None
+        if reason != "not_ancestor":
+            reason_text = "<missing>" if reason is None else str(reason)
+            locator_text = "<missing>" if locator_id is None else str(locator_id)
+            return None, (
+                "audit unmerged anchor state unavailable: "
+                f"reason={reason_text} locator_id={locator_text}"
+            )
         if not isinstance(locator_id, str) or not locator_id:
-            return None, "audit stale state unavailable"
+            return None, (
+                "audit unmerged anchor state unavailable: "
+                "reason=not_ancestor locator_id=<invalid>"
+            )
         locator_ids.append(locator_id)
     if len(locator_ids) != len(set(locator_ids)):
         return None, "audit stale state unavailable"
