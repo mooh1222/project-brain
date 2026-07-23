@@ -129,6 +129,29 @@ class TestCli(unittest.TestCase):
         self.assertTrue(any("not yet reachable" in w for w in answer["warnings"]))
         self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
 
+    def test_cli_query_surfaces_unverifiable_anchor_without_changing_status(self):
+        from project_brain.stale_check import write_stale_set
+        from tests.test_search import domain_mapping, glossary_term
+        for obj in (glossary_term("g.boost", term="강화폭탄"),
+                    domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
+                                   glossary_term_ids=["g.boost"])):
+            BrainStore.save_object(self.root, obj)
+        write_stale_set(self.root, {
+            "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
+            "detail": {"m.boost": {"code_changed": False, "unmerged_anchor": True,
+                                   "unmerged_reasons": ["anchor_unverifiable"],
+                                   "locator_ids": ["code.unknown"], "from_commits": ["UNKNOWN"],
+                                   "change_types": [], "paths": ["a/Work.cpp"]}}})
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
+             redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+        answer = json.loads(out.getvalue())
+        warning = next(w for w in answer["warnings"] if "could not be verified" in w)
+        self.assertNotIn("Verified", warning)
+        self.assertNotIn("unmerged", warning.lower())
+        self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
+
     def test_audit_stale_check_and_mark_checked_use_configured_default_branch(self):
         project = self.root / "project"
         brain = project / "brain"

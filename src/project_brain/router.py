@@ -320,13 +320,19 @@ class QueryRouter:
                     # 기준 시점(computed_at)을 문구에 넣어 advisory를 펼치기 전에도 "언제 기준"인지 보이게 한다.
                     as_of = code_changed_mappings[0]["stale_advisory"].get("computed_at")
                     warnings.append(f"코드 변경 감지된 매핑 포함 — stale-check 기준({as_of}) 확인 필요")
-                unmerged_mappings = [
-                    m for m in mapping_details
+                unmerged_reasons = {
+                    reason
+                    for m in mapping_details
                     if m.get("stale_advisory", {}).get("unmerged_anchor")
-                ]
-                if unmerged_mappings:
+                    for reason in m["stale_advisory"].get("unmerged_reasons", [])
+                }
+                if "not_ancestor" in unmerged_reasons:
                     warnings.append(
                         "Verified code anchor is not yet reachable from the configured default branch."
+                    )
+                if "anchor_unverifiable" in unmerged_reasons:
+                    warnings.append(
+                        "Code anchor reachability could not be verified against the configured default branch."
                     )
                 summary = "Glossary definition (reviewed mappings prioritized)" if matched_mappings else "Glossary definition"
                 # 검수/후보 구분은 키로: object_ids·mappings = 검수됨, candidate_terms = 후보(각 trust_label).

@@ -165,8 +165,41 @@ class TestStaleAdvisory(unittest.TestCase):
         answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
         self.assertTrue(gm["mappings"][0]["stale_advisory"]["unmerged_anchor"])
-        self.assertTrue(any("not yet reachable" in w for w in answer["warnings"]))
+        self.assertIn(
+            "Verified code anchor is not yet reachable from the configured default branch.",
+            answer["warnings"],
+        )
         self.assertFalse(any("코드 변경 감지" in w for w in answer["warnings"]))
+
+    def test_anchor_unverifiable_warning_is_distinct_and_reason_order_is_stable(self):
+        advisories = {
+            "m.boost": {"code_changed": True, "unmerged_anchor": True,
+                        "unmerged_reasons": ["not_ancestor", "anchor_unverifiable"],
+                        "locator_ids": ["code.work"], "from_commits": ["WORK"],
+                        "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
+        }
+        answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
+        verified = "Verified code anchor is not yet reachable from the configured default branch."
+        unverifiable = (
+            "Code anchor reachability could not be verified against the configured default branch."
+        )
+        branch_warnings = [w for w in answer["warnings"] if w in {verified, unverifiable}]
+        self.assertEqual(branch_warnings, [verified, unverifiable])
+        self.assertEqual(branch_warnings.count(verified), 1)
+        self.assertEqual(branch_warnings.count(unverifiable), 1)
+        self.assertTrue(any("코드 변경 감지" in w for w in answer["warnings"]))
+
+    def test_anchor_unverifiable_warning_does_not_claim_verified_or_unmerged(self):
+        advisories = {
+            "m.boost": {"code_changed": False, "unmerged_anchor": True,
+                        "unmerged_reasons": ["anchor_unverifiable"],
+                        "locator_ids": ["code.unknown"], "from_commits": ["UNKNOWN"],
+                        "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
+        }
+        answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
+        warning = next(w for w in answer["warnings"] if "could not be verified" in w)
+        self.assertNotIn("Verified", warning)
+        self.assertNotIn("unmerged", warning.lower())
 
     def test_no_stale_advisory_without_cache(self):
         answer = QueryRouter(self._store()).answer("강화폭탄 무슨 뜻?")
