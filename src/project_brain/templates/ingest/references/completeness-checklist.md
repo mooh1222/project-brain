@@ -12,6 +12,9 @@
 - 기획서 기능 목차와 코드 뼈대를 대조해 서버 규칙과 순수 규칙이 통째로 빠지지 않았는지 확인한다.
 - `history_coverage=complete`인데 ledger가 없거나 결정 종류가 한쪽으로 편중되면 갭 신호다. 값 변경은 ledger와 supersede 체인을 함께 확인한다.
 - reviewed 근거를 확인하고 코드 앵커 없는 규칙은 없는 척하지 말고 그 이유를 boundary/caveats에 남긴다.
+- `reviewed`는 근거와 해석을 검증했다는 뜻이다. `unmerged`는 기본 브랜치 범위를 알리는 advisory일 뿐이므로,
+  검증된 prototype을 합쳐지지 않았다는 이유만으로 candidate로 내리지 않는다. candidate는 근거나 의미가
+  불확실할 때 쓴다.
 - Jira/Slack 등의 변경 흔적은 있는데 DecisionRecord가 없는 의미상 고아가 없는지 확인한다.
 - 메모리나 이전 서사의 claim-bearing field는 원문·코드로 독립 재구성하고 실제 반박을 시도한다. 근거 개수가 아니라 내용이 주장을 뒷받침하는지 본다.
 - lint는 형식과 끊긴 참조를 잡지만 통째로 빠진 규칙은 찾지 못하므로 수동 의미 검사가 필요하다.
@@ -21,7 +24,9 @@
 1. 동적 workflow 결과가 있으면 `scripts/validate_workflow_result.py <결과.json>`이 통과했다. 직접 단건 실행이면 `해당 없음`으로 기록한다.
 2. batch 모드면 `batch-report.json`에서 `expected == len(succeeded)`, `failed=[]`, `finalized=true`,
    `finalization.ok=true`다. 최초 `isolation_baseline`이 보존됐고 finalization 계약을 포함한
-   `manifest_fingerprint`가 resume 입력과 일치한다. 직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.
+   `manifest_fingerprint`가 resume 입력과 일치한다. post head == baseline head이고, post unmerged는
+   baseline union expected와 일치한다. legacy baseline은 그 제한을 그대로 적용하며, 사용할 수 없는
+   감사 상태를 만들어 내지 않는다. 직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.
 3. lint 결과가 0건이다.
 4. `project-brain eval`이 모두 통과했다.
 5. finalization의 `unexpected_new_ids=[]`다. 이번 적재로 새로 생긴 고립 객체 중

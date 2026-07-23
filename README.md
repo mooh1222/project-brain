@@ -47,7 +47,7 @@ project-brain doctor                      # 환경·프로젝트 상태 진단
 project-brain bootstrap                   # install → 색인 재구축 → doctor 한번에
 ```
 
-`install`은 `.agents/skills/<이름>-brain-{query,ingest,session-ingest,audit}/` 4종을 템플릿에서
+`install`은 `.agents/skills/<이름>-brain-{query,ingest,session-ingest,audit}/` 4종을 엔진 `templates/`에서
 렌더해 심는다 — SKILL.md 한 장이 아니라 `templates/<skill>/` 디렉토리 통째(SKILL.md +
 references/ + scripts/ 포함)를 주입한다. 설치 직후 어시스턴트(Claude 등)가 코퍼스를 보고 description 트리거
 어휘를 프로젝트 어휘로 맞춤 제안하는 단계까지가 온보딩이다 — 맞춤된 스킬 파일은
@@ -85,7 +85,7 @@ project-brain stale-check                # 코드 변경 → 갱신 필요 매�
 project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매핑의 commit_sha 갱신
 ```
 
-**점검·진단 4종**(모두 읽기 전용 이상 감지): `lint`(끊긴 참조=아웃바운드) · `graph isolated`(고립=인바운드) · `stale-check`(코드 변경→갱신 후보) · `doctor`(환경). `mark-checked`가 stale 해소(쓰기)다. `stale-check`은 미머지 앵커(작업 브랜치 커밋이 develop 조상 아님)를 변경과 별개로 `unmerged_anchors`에 라벨해 거짓 신호를 거른다. `--write-cache`로 떨군 캐시는 `query`/`show`가 읽어 매핑별 `stale_advisory`(코드 변경 감지)를 곁들인다. stale 자동화 설계는 [docs/plans/2026-06-25-brain-stale-automation-bc.md](docs/plans/2026-06-25-brain-stale-automation-bc.md), Step 1·2 구현 계획은 [docs/plans/2026-06-25-brain-stale-step12-impl-plan.md](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
+**점검·진단 4종**(모두 읽기 전용 이상 감지): `lint`(끊긴 참조=아웃바운드) · `graph isolated`(고립=인바운드) · `stale-check`(코드 변경→갱신 후보) · `doctor`(환경). `mark-checked`가 stale 해소(쓰기)다. `stale-check`은 미머지 앵커(작업 브랜치 커밋이 config의 `default_branch` 조상이 아님)를 변경과 별개로 `unmerged_anchors`에 라벨해 거짓 신호를 거른다. `--write-cache`로 떨군 캐시는 `query`/`show`가 읽어 매핑별 `stale_advisory`(코드 변경 감지)를 곁들인다. stale 자동화 설계는 [docs/plans/2026-06-25-brain-stale-automation-bc.md](docs/plans/2026-06-25-brain-stale-automation-bc.md), Step 1·2 구현 계획은 [docs/plans/2026-06-25-brain-stale-step12-impl-plan.md](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
 
 **코드 앵커 SHA 원칙:** 한번 만들어진 커밋 SHA는 머지해도 바뀌지 않는다. fast-forward와
 일반 merge에서는 작업 브랜치 커밋이 기본 브랜치 이력에 그대로 포함되므로 기존

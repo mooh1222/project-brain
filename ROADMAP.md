@@ -158,7 +158,7 @@ router는 object_id로 재조회). 합성 506 통과, route 적대 리뷰 APPROV
 설계(보류했던 자동화, 미뤄둔 작업 §6)의 **엔진 부분만** 구현. Step 3(에이전트 diff 자동
 정리)은 실코퍼스 회귀가 필요해 보류 유지.
 - **Step 1 — 미머지 앵커 라벨**: `stale-check`이 `git merge-base`로 앵커 `commit_sha`가
-  origin/develop 조상인지 판정해, 조상 아니면(PR 머지 전 작업 브랜치 커밋) candidate에서 빼고
+  config의 `default_branch` 조상인지 판정해, 조상 아니면(PR 머지 전 작업 브랜치 커밋) candidate에서 빼고
   새 키 `unmerged_anchors`(차단 아니라 라벨)로 분리. bb2 실행에서 본 거짓 'D'(삭제) 신호를
   근원 제거(머지되면 자동 해소). 약식 sha는 `base.startswith(from_commit)` prefix 비교로 처리.
 - **Step 2 — query/show 노출**: `stale-check --write-cache`가 stale-set을
@@ -173,7 +173,7 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 채울 주체가 없어** stale_advisory 채널이 죽어 있던 갭을 메움. `project-brain audit`이
 `lint`(무결성) + `graph isolated`(고아 잎) + `stale-check --write-cache`(코드 드리프트)를 한
 패스로 돌려 캐시를 채운다 — 셋은 "코퍼스 건강검진"이라는 같은 결이라 묶음. 관리 스킬
-`audit.md`(install 주입 4번째)로 어시스턴트가 develop 당긴 뒤·대량 적재 후 돌린다. 후보
+`audit.md`(install 주입 4번째)로 어시스턴트가 config의 `default_branch`를 당긴 뒤·대량 적재 후 돌린다. 후보
 처리는 검수 정책 B+C(자동 supersede 없음 — Step 3 여전히 보류, 에이전트가 advisory 보고 판정).
 - 검증: 합성 530 통과(신규 audit 1), 적대 검증 OK. 실 bb2 종단(audit→캐시 45건→`show`
   stale_advisory 실회수)로 죽은 채널 부활 입증.
@@ -343,7 +343,7 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - 행동 증거: [Task 9 report](docs/reports/2026-07-22-bulk-ingest-task9-behavior-evidence.md)
 - 최종 결과: [completion report](docs/reports/2026-07-23-bulk-ingest-hardening-completion.md)
 
-### 코드 앵커 SHA 머지 규칙 정정 (2026-07-23)
+### 코드 앵커 SHA 머지 안전 계약 (2026-07-23)
 
 - **원인**: session-ingest에 `머지 정정 때 기본 브랜치 SHA로 교체`라는 무조건형 문장이
   남아 있어, 일반 merge 뒤에도 작업 브랜치 SHA를 버리는 것으로 해석됐다. 이는 이미
@@ -352,10 +352,9 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - **현재 규칙**: 커밋 SHA 자체는 바뀌지 않는다. fast-forward와 일반 merge 뒤 기존 SHA가
   기본 브랜치의 조상이고 앵커 대상 코드가 같으면 그대로 쓴다. squash·rebase·cherry-pick
   또는 충돌 해결로 SHA 도달 가능성이나 코드가 달라진 경우에만 갱신한다.
-- **전파**: 엔진 템플릿 5곳과 설치 계약 회귀 검사를 `d320b1f`에 반영하고, installer로
-  BB2 설치본 5곳과 manifest를 갱신해 `d71d2a8e24`로 커밋했다. force 없이 첫 실행은
-  5개 파일을 `adopted`, 두 번째 실행은 모든 변경 배열이 빈 상태였다.
-- **검증**: 엔진 `pytest` 612 + subtests 26, BB2 `agents-doctor` 통과.
+- **엔진 계약**: 템플릿과 installer 계약 검사는 엔진을 단일 원본으로 삼는다. 소비 프로젝트는
+  `--force` 없는 install 뒤 두 번째 실행에서 변경 배열이 비는지 각자 확인한다.
+- **범위**: 이 항목은 소비 프로젝트의 기존 객체 재생성·감사·설치 실행을 기록하지 않는다.
 
 ---
 
@@ -420,7 +419,7 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
      "코드 변경" 노출(C). **남은 것 = Step 3(B)**: 에이전트가 diff 읽고 확실-불변 자동 갱신 /
      변경은 supersede 초안. 정밀화는 엔진 파서 아니라 에이전트 몫(줄번호 제거로 엔진은
      hunk→symbol 못 이음, bb2 84% 클러스터링 실측) — 실코퍼스 회귀 필요라 보류.
-   - 부수 요건(실코퍼스 발견) ✅ 해결(Step 1): stale-check이 "앵커 커밋이 develop 조상 아님
+   - 부수 요건(실코퍼스 발견) ✅ 해결(Step 1): stale-check이 "앵커 커밋이 config의 `default_branch` 조상 아님
      (미머지 적재)"을 삭제/변경과 별개 `unmerged_anchors`로 구분 표시해 거짓 stale를 안 낸다
      (bb2는 머지 커밋·직접 푸시 모두 원커밋 해시 보존=스쿼시/리베이스 아님이라 머지되면 자동 해소).
    - Step 3 착수 트리거: stale 수동 triage가 실제로 거슬릴 때.

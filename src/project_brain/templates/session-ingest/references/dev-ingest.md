@@ -9,7 +9,7 @@
    힌트(라인=조사 당시 스냅샷, verified_at이 시점)를 작업 브랜치 기준으로 달고, `commit_sha`에는
    그 코드를 확인한 작업 브랜치 커밋을 기록한다. 머지 자체는 기존 커밋 SHA를 바꾸지 않는다.
    머지 뒤 기존 SHA가 {{DEFAULT_BRANCH}} 이력에서 도달 가능하고 앵커 대상 코드가 같으면 그대로 둔다.
-   squash·rebase·cherry-pick 또는 충돌 해결로 기존 SHA가 {{DEFAULT_BRANCH}} 이력에 없거나 코드가 달라진
+   일반 merge나 fast-forward만으로 앵커를 다시 잡지 않는다. squash·rebase·cherry-pick 또는 충돌 해결이나 실질 코드 변경으로 기존 SHA가 {{DEFAULT_BRANCH}} 이력에 없거나 코드가 달라진
    경우에만 {{DEFAULT_BRANCH}}에서 다시 확인한 SHA와 스냅샷으로 제자리 갱신한다. `commit_sha`를 비우면
    변경 감지 기준점이 없으므로 여기서도 기입은 의무다.
 3. **갱신**: 바뀐 범위의 단어로 기존 객체를 search하고, 있으면 `{{PROJECT}}-brain-ingest/references/update-rules.md`의 kind별 흐름을 따른다. 없으면 신설한다.

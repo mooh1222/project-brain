@@ -18,8 +18,9 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 또는 충돌 해결로 기존 SHA가 기본 브랜치 이력에 없거나 코드가 달라진 경우에만 갱신한다.
 
 ingest의 `SKILL.md`·`scope.md`·`object-model.md`·`domain_spec.template.py`와
-session-ingest의 `dev-ingest.md`를 같은 규칙으로 맞추고, 엔진 템플릿과 렌더된 설치본에서
-이 문구가 유지되는 회귀 검사를 추가했다. 엔진 `d320b1f`, BB2 설치본 `d71d2a8e24`.
+session-ingest의 `dev-ingest.md`를 같은 규칙으로 맞춘다. 엔진 템플릿을 먼저 고치고, 소비 프로젝트는
+`--force` 없는 install과 두 번째 실행의 무변경 확인으로 받아들인다. 이 기록은 특정 소비 프로젝트의
+설치·객체 재생성·감사 실행을 뜻하지 않는다.
 
 ## 2026-07-23 — 대량 적재 최종 안전 보강
 

@@ -197,6 +197,70 @@ class IngestSkillContractTest(unittest.TestCase):
         self.assertIn("경우에만", rendered)
         self.assertNotIn("머지 정정 때", rendered)
 
+    def test_merge_review_and_audit_contracts_are_merge_safe(self):
+        audit = (TEMPLATE_ROOT.parent / "audit" / "SKILL.md").read_text(encoding="utf-8")
+        checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
+        tools = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
+        session = (SESSION_TEMPLATE_ROOT / "references" / "dev-ingest.md").read_text(encoding="utf-8")
+
+        self.assertIn("`reviewed`는 근거와 해석을 검증했다는 뜻", checklist)
+        self.assertIn("unmerged", checklist)
+        self.assertIn("candidate는 근거나 의미가", checklist)
+        self.assertIn("불확실할 때 쓴다", checklist)
+        for token in (
+            "일반 merge나 fast-forward만으로 앵커를 다시 잡지 않는다",
+            "squash·rebase·cherry-pick",
+            "충돌 해결이나 실질 코드 변경",
+            "{{DEFAULT_BRANCH}}",
+        ):
+            self.assertIn(token, session)
+        for token in (
+            "lint + Git stale/reachability + exact quote",
+            "stale.target_head",
+            "stale.unmerged_anchors",
+            "code_quotes",
+            "anchor_unverifiable",
+            "`not_ancestor`는",
+            "advisory이며",
+            "`--no-stale`는 Git 없는 환경에서만 명시적으로 건너뛴다",
+            "configured default_branch",
+            "Git blob",
+            "공백·줄바꿈을 정규화하지 않는다",
+        ):
+            self.assertIn(token, audit)
+        self.assertNotIn("stale.detail", audit)
+        for token in (
+            "post head == baseline head",
+            "baseline union",
+            "legacy baseline",
+            "사용할 수 없는 감사 상태를 만들어 내지 않는다",
+            "임시 파일",
+            "원자적으로 교체",
+            "교체 뒤 내구성",
+        ):
+            self.assertIn(token, tools)
+
+    def test_engine_templates_install_as_source_of_truth_without_session_snapshot_filtering(self):
+        audit = (TEMPLATE_ROOT.parent / "audit" / "SKILL.md").read_text(encoding="utf-8")
+        tools = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
+        self.assertIn("session-snapshot filtering은 Project Brain install 범위 밖", tools)
+
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            first = install(target, project="demo", default_branch="trunk")
+            second = install(target, project="demo", default_branch="trunk")
+            installed_audit = (
+                target / ".agents" / "skills" / "demo-brain-audit" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+
+        self.assertTrue(first["created"])
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+        self.assertIn("stale.target_head", installed_audit)
+        self.assertIn("trunk", installed_audit)
+        self.assertNotIn("{{DEFAULT_BRANCH}}", installed_audit)
+        self.assertNotIn("stale.detail", installed_audit)
+
     def test_semantic_completeness_and_concept_domain_contracts(self):
         checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
         judgment = (REFERENCES / "judgment.md").read_text(encoding="utf-8")

@@ -210,6 +210,22 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["config"], "created")
         self.assertEqual(len(report["created"]), self._expected_count())
 
+    def test_real_skill_install_is_idempotent_and_uses_engine_templates(self):
+        first = install(self.target, project="demo", default_branch="trunk")
+        second = install(self.target, project="demo", default_branch="trunk")
+        audit = self._skill("demo-brain-audit").read_text(encoding="utf-8")
+        ingest_tools = (
+            self._skill_dir("demo-brain-ingest") / "references" / "ingest-tools.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertTrue(first["created"])
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+        self.assertIn("stale.target_head", audit)
+        self.assertIn("trunk", audit)
+        self.assertNotIn("{{DEFAULT_BRANCH}}", audit)
+        self.assertIn("session-snapshot filtering은 Project Brain install 범위 밖", ingest_tools)
+
     def test_config_symlink_fails_closed_before_any_read_or_write(self):
         with TemporaryDirectory() as outside_dir:
             external = Path(outside_dir) / "external-config.json"

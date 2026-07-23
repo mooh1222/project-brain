@@ -254,7 +254,9 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    첫 실행은 어떤 item보다 먼저 `isolation_baseline`을 report에 저장한다. 재개는 같은 batch 입력과
    report를 사용하며 이미 성공한 item만 건너뛰고 최초 baseline을 재사용한다. resolved input 내용과
    finalization 계약은 `manifest_fingerprint`에 함께 들어가므로 query·expected ID 변경도 다른 입력으로
-   거부한다. 완료 증거는 `finalized=true` 하나가 아니라 `finalization.ok=true`,
+   거부한다. 완료 검사는 post head == baseline head와 post unmerged == baseline union expected를 함께
+   확인한다. legacy baseline은 당시 허용한 제한만 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
+   완료 증거는 `finalized=true` 하나가 아니라 `finalization.ok=true`,
    `finalization.isolation.unexpected_new_ids=[]`, 각 recall check의 누락 목록이 빈 상태까지 포함한다.
 
 5. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
@@ -273,6 +275,9 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    ```bash
    project-brain index rebuild
    ```
+   index rebuild는 잠금으로 동시 실행을 막고, 임시 파일에 완성본을 만든 뒤 유효성을 검사하고
+   원자적으로 교체한다. 교체 뒤 내구성 확인까지 끝나야 완료다. 교체 뒤 내구성 실패는 새 색인이
+   보이더라도 성공으로 숨기지 말고 `committed` 상태와 함께 보고한다.
 3. **골든셋 회귀 + 실코퍼스 가드** — 새 적재가 기존 회상을 깨뜨리지 않았는지(기능마다
    골든셋 시나리오를 늘려가는 게 P2 방침). 객체 색인 행은 가드가 디스크의 색인 대상 kind
    `.json` 수를 세서 `indexed - raw_chunks`와 자동 대조하니 손으로 갱신하지 않는다
@@ -312,3 +317,10 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 | ContextProjection | `format=prompt_payload`이고 fresh일 때만 색인(아니면 제외) |
 
 조회 쪽 계약(결과 해석·채널 라벨·사용 시점 promote)은 `{{PROJECT}}-brain-query` 스킬이 정본이다.
+
+## 설치 범위
+
+엔진 `templates/`가 생성 스킬의 단일 원본이다. 소비 프로젝트에서는 먼저 `project-brain install`을
+`--force` 없이 실행하고, 같은 입력으로 두 번째 실행했을 때 변경이 없음을 확인한다. 이 문서는 특정
+소비 프로젝트에서 설치·재생성·감사를 이미 했다고 주장하지 않는다. session-snapshot filtering은 Project Brain install 범위 밖이며,
+별도 도구의 책임으로 남긴다.
