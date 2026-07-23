@@ -25,11 +25,7 @@ from project_brain.promote import (
 )
 from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
-from project_brain.search_index import (
-    IndexRebuildDurabilityError,
-    IndexRebuildInProgressError,
-    rebuild as index_rebuild,
-)
+from project_brain.search_index import rebuild as index_rebuild
 from project_brain.store import BrainStore
 
 
@@ -81,7 +77,7 @@ def _run_query(argv) -> int:
     return 0
 
 
-def _index_rebuild_error_report(exc: RuntimeError) -> dict:
+def _index_rebuild_error_report(exc: Exception) -> dict:
     """재구축 실패의 교체 여부를 CLI JSON으로 명시한다."""
     return {
         "ok": False,
@@ -294,11 +290,11 @@ def _run_index(argv) -> int:
                         help="실모델 대신 stub 임베더 사용(테스트·CI 결정론, §5)")
     args = parser.parse_args(argv)
 
-    # --stub-embedder 플래그면 강제 stub, 아니면 환경 플래그로 판정(get_embedder 기본).
-    embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
     try:
+        # --stub-embedder 플래그면 강제 stub, 아니면 환경 플래그로 판정(get_embedder 기본).
+        embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
         stats = index_rebuild(args.brain_root, args.db, embedder=embedder)
-    except (IndexRebuildInProgressError, IndexRebuildDurabilityError) as exc:
+    except Exception as exc:
         print(json.dumps(_index_rebuild_error_report(exc), ensure_ascii=False, indent=2))
         return 1
     # raw_chunks를 함께 내보낸다 — 데이터 레포 쪽 실측 가드가 객체/raw 행 수를
@@ -647,10 +643,10 @@ def _run_bootstrap(argv) -> int:
     cfg = load_config()
     rebuilt = None
     if cfg is not None and (cfg["brain_root"] / "objects").exists():
-        embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
         try:
+            embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
             rebuilt = index_rebuild(cfg["brain_root"], cfg["db"], embedder=embedder)
-        except (IndexRebuildInProgressError, IndexRebuildDurabilityError) as exc:
+        except Exception as exc:
             print(json.dumps(_index_rebuild_error_report(exc), ensure_ascii=False, indent=2))
             return 1
         rebuilt = {"indexed": rebuilt["indexed"], "raw_chunks": rebuilt["raw_chunks"]}

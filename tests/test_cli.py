@@ -295,7 +295,41 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 1)
         payload = json.loads(out.getvalue())
         self.assertFalse(payload["ok"])
+        self.assertFalse(payload["committed"])
         self.assertIn("진행 중", payload["error"])
+
+    def test_cli_index_rebuild_structures_precommit_runtime_and_os_errors(self):
+        argv = ["index", "rebuild", "--brain-root", str(self.root),
+                "--db", str(self.input_dir / "index.db"), "--stub-embedder"]
+        cases = [
+            ("get_embedder", RuntimeError("injected embedder failure")),
+            ("index_rebuild", OSError("injected replace failure")),
+        ]
+        for target, error in cases:
+            with self.subTest(target=target):
+                out = io.StringIO()
+                err = io.StringIO()
+                with mock.patch.object(cli, target, side_effect=error), \
+                     mock.patch("sys.argv", ["cli"] + argv), \
+                     redirect_stdout(out), redirect_stderr(err):
+                    rc = cli.main()
+
+                self.assertEqual(rc, 1)
+                payload = json.loads(out.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertFalse(payload["committed"])
+                self.assertIn(str(error), payload["error"])
+                self.assertEqual(err.getvalue(), "")
+
+    def test_cli_index_rebuild_does_not_swallow_keyboard_interrupt(self):
+        argv = ["index", "rebuild", "--brain-root", str(self.root),
+                "--db", str(self.input_dir / "index.db"), "--stub-embedder"]
+        interrupted = KeyboardInterrupt("injected interrupt")
+        with mock.patch.object(cli, "index_rebuild", side_effect=interrupted), \
+             mock.patch("sys.argv", ["cli"] + argv):
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                cli.main()
+        self.assertIs(ctx.exception, interrupted)
 
     def test_cli_index_rebuild_durability_failure_reports_committed(self):
         from project_brain.search_index import IndexRebuildDurabilityError
@@ -335,6 +369,32 @@ class TestCli(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["committed"])
         self.assertIn("진행 중", payload["error"])
+
+    def test_cli_bootstrap_structures_precommit_runtime_and_os_errors(self):
+        brain = self.root / "brain"
+        (brain / "objects").mkdir(parents=True)
+        cfg = {"brain_root": brain, "db": self.input_dir / "index.db"}
+        cases = [
+            ("get_embedder", RuntimeError("injected embedder failure")),
+            ("index_rebuild", OSError("injected file fsync failure")),
+        ]
+        for target, error in cases:
+            with self.subTest(target=target):
+                out = io.StringIO()
+                err = io.StringIO()
+                with mock.patch("project_brain.installer.install", return_value={"ok": True}), \
+                     mock.patch("project_brain.config.load_config", return_value=cfg), \
+                     mock.patch.object(cli, target, side_effect=error), \
+                     mock.patch("sys.argv", ["cli", "bootstrap", "--stub-embedder"]), \
+                     redirect_stdout(out), redirect_stderr(err):
+                    rc = cli.main()
+
+                self.assertEqual(rc, 1)
+                payload = json.loads(out.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertFalse(payload["committed"])
+                self.assertIn(str(error), payload["error"])
+                self.assertEqual(err.getvalue(), "")
 
     def test_cli_lint_clean_store_ok(self):
         # 깨끗한 store(서로 참조 정상) → lint ok=true, problems 0 (test_lint.py와 동일 조합)
