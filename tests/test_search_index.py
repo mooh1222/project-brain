@@ -127,6 +127,23 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(self.db.read_bytes(), before)
         self.assertEqual(self._temporary_rebuild_files(), [])
 
+    def test_rebuild_keyboard_interrupt_preserves_live_db_and_cleans_temp(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+        interrupted = KeyboardInterrupt("injected interrupt")
+
+        with mock.patch(
+            "project_brain.search_index.extract_surface",
+            side_effect=interrupted,
+        ):
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                rebuild(self.brain, self.db)
+
+        self.assertIs(ctx.exception, interrupted)
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self._temporary_rebuild_files(), [])
+
     def test_rebuild_count_validation_failure_leaves_seeded_database_unchanged(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
         rebuild(self.brain, self.db)

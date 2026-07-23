@@ -177,7 +177,7 @@ def _cleanup_rebuild_temp(temp_path: Path) -> None:
 
 
 def _cleanup_rebuild_temp_preserving_failure(
-    temp_path: Path, primary_error: Exception,
+    temp_path: Path, primary_error: BaseException,
 ) -> None:
     """정리 오류를 보조 정보로 남기되 재구축의 원래 실패를 우선한다."""
     try:
@@ -351,7 +351,7 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                     "새 색인 DB는 이미 교체됐지만 디렉터리 동기화에 실패했습니다. "
                     "현재 DB는 조회할 수 있으나 전원 중단 전에 `index rebuild`를 다시 실행하세요."
                 ) from exc
-        except Exception as exc:
+        except BaseException as exc:
             _cleanup_rebuild_temp_preserving_failure(temp_path, exc)
             raise
 
