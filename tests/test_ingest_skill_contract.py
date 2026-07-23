@@ -261,6 +261,33 @@ class IngestSkillContractTest(unittest.TestCase):
         self.assertNotIn("{{DEFAULT_BRANCH}}", installed_audit)
         self.assertNotIn("stale.detail", installed_audit)
 
+    def test_installed_ingest_tools_explain_unmerged_finalization_report(self):
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo", default_branch="trunk")
+            rendered = (
+                target / ".agents" / "skills" / "demo-brain-ingest"
+                / "references" / "ingest-tools.md"
+            ).read_text(encoding="utf-8")
+
+        for field in (
+            "`unmerged`",
+            "`current_state_available`",
+            "`baseline_ids`",
+            "`current_ids`",
+            "`expected_ids`",
+            "`new_ids`",
+            "`resolved_ids`",
+            "`missing_expected_ids`",
+            "`unexpected_new_ids`",
+            "`baseline_target_head`",
+            "`current_target_head`",
+        ):
+            self.assertIn(field, rendered)
+        self.assertIn("null", rendered)
+        self.assertIn("audit/stale 오류", rendered)
+        self.assertNotIn("stale.detail", rendered)
+
     def test_semantic_completeness_and_concept_domain_contracts(self):
         checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
         judgment = (REFERENCES / "judgment.md").read_text(encoding="utf-8")

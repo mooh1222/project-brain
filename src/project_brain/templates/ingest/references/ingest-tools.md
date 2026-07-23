@@ -259,6 +259,21 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    완료 증거는 `finalized=true` 하나가 아니라 `finalization.ok=true`,
    `finalization.isolation.unexpected_new_ids=[]`, 각 recall check의 누락 목록이 빈 상태까지 포함한다.
 
+   finalizer JSON의 `unmerged` 블록은 이 Git 범위 검사의 실제 결과다. `ok`가 false면 완료가 아니다.
+   `baseline_ids`는 baseline에 있던 미머지 locator, `expected_ids`는 이번 계약이 허용한 locator,
+   `current_ids`는 사후 audit이 읽은 locator다. 비교 기준은 `baseline_ids ∪ expected_ids`다.
+
+   | `unmerged` 필드 | 뜻 |
+   |---|---|
+   | `current_state_available` | 사후 audit에서 Git 상태를 읽었는지 |
+   | `new_ids` / `resolved_ids` | baseline 뒤 새로 생긴 locator / baseline에서 사라진 locator |
+   | `missing_expected_ids` / `unexpected_new_ids` | 계약상 있어야 하지만 없는 locator / union 밖 새 locator |
+   | `baseline_target_head` / `current_target_head` | baseline과 사후 audit의 기본 브랜치 HEAD |
+
+   audit/stale 오류로 사후 상태를 읽지 못하면 `current_state_available=false`이고 `current_ids`,
+   `new_ids`, `resolved_ids`, `missing_expected_ids`, `unexpected_new_ids`, `current_target_head`는 `null`이다.
+   이때 `errors`의 audit/stale 오류를 확인해 Git 문제를 고친 뒤 같은 baseline으로 다시 실행한다.
+
 5. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
 
 채운 예(형태): 14결정·{groups} 래핑형 / 0결정·list형(CORRECTIONS 사용). 변칙 누적은 `references/ingest-case-log.md` 참고.
