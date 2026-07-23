@@ -135,23 +135,26 @@ def _run_command(runner: CommandRunner, command: list[str], *, json_output: bool
             "payload": payload, "stderr": stderr}
 
 
-def _audit_git_state(result: dict) -> dict[str, Any] | None:
+def _audit_git_state(result: dict) -> tuple[dict[str, Any] | None, str]:
     """audit JSON의 실제 stale 출력에서 target head와 미머지 CodeLocator ID를 읽는다."""
     payload = result.get("payload")
     stale = payload.get("stale") if isinstance(payload, dict) else None
+    stale_error = stale.get("error") if isinstance(stale, dict) else None
+    if isinstance(stale_error, str) and stale_error:
+        return None, f"audit stale error: {stale_error}"
     target_head = stale.get("target_head") if isinstance(stale, dict) else None
     anchors = stale.get("unmerged_anchors") if isinstance(stale, dict) else None
     if not isinstance(target_head, str) or not target_head or not isinstance(anchors, list):
-        return None
+        return None, "audit stale state unavailable"
     locator_ids = []
     for anchor in anchors:
         locator_id = anchor.get("locator_id") if isinstance(anchor, dict) else None
         if not isinstance(locator_id, str) or not locator_id:
-            return None
+            return None, "audit stale state unavailable"
         locator_ids.append(locator_id)
     if len(locator_ids) != len(set(locator_ids)):
-        return None
-    return {"target_head": target_head, "unmerged_locator_ids": sorted(locator_ids)}
+        return None, "audit stale state unavailable"
+    return {"target_head": target_head, "unmerged_locator_ids": sorted(locator_ids)}, ""
 
 
 def capture_isolation_baseline(runner: CommandRunner = _default_runner) -> dict:
@@ -162,10 +165,10 @@ def capture_isolation_baseline(runner: CommandRunner = _default_runner) -> dict:
     if (not result["ok"] or not isinstance(isolated, list)
             or any(not isinstance(item, str) for item in isolated)):
         return {"ok": False, "isolated_ids": [], "error": result["stderr"] or "고립 baseline 수집 실패"}
-    git_state = _audit_git_state(audit)
+    git_state, audit_diagnostic = _audit_git_state(audit)
     if not audit["ok"] or git_state is None:
         return {"ok": False, "isolated_ids": [],
-                "error": audit["stderr"] or "Git baseline 수집 실패"}
+                "error": audit_diagnostic or audit["stderr"] or "Git baseline 수집 실패"}
     return {"ok": True, "isolated_ids": sorted(set(isolated)),
             "target_head": git_state["target_head"],
             "unmerged_locator_ids": git_state["unmerged_locator_ids"]}
@@ -217,11 +220,11 @@ def run_finalization(contract: Any, baseline_ids: Any,
     if unexpected:
         errors.append(f"unexpected isolated ids: {unexpected}")
 
-    audit_state = _audit_git_state(commands["audit"])
+    audit_state, audit_diagnostic = _audit_git_state(commands["audit"])
     if audit_state is None:
         commands["audit"]["ok"] = False
-        errors.append("audit payload failed")
-        current_unmerged: set[str] = set()
+        errors.append(audit_diagnostic)
+        current_unmerged: set[str] | None = None
         current_target_head = None
     else:
         current_unmerged = set(audit_state["unmerged_locator_ids"])
@@ -229,14 +232,21 @@ def run_finalization(contract: Any, baseline_ids: Any,
     baseline_unmerged = set(baseline["unmerged_locator_ids"])
     expected_unmerged = set(config["expected_unmerged_locator_ids"])
     expected_current = baseline_unmerged | expected_unmerged
-    new_unmerged = sorted(current_unmerged - baseline_unmerged)
-    resolved_unmerged = sorted(baseline_unmerged - current_unmerged)
-    missing_expected = sorted(expected_unmerged - current_unmerged)
-    unexpected_unmerged = sorted(current_unmerged - expected_current)
-    target_head_changed = (baseline["git_baseline_available"]
-                           and current_target_head != baseline["target_head"])
+    if current_unmerged is None:
+        new_unmerged = None
+        resolved_unmerged = None
+        missing_expected = None
+        unexpected_unmerged = None
+        target_head_changed = False
+    else:
+        new_unmerged = sorted(current_unmerged - baseline_unmerged)
+        resolved_unmerged = sorted(baseline_unmerged - current_unmerged)
+        missing_expected = sorted(expected_unmerged - current_unmerged)
+        unexpected_unmerged = sorted(current_unmerged - expected_current)
+        target_head_changed = (baseline["git_baseline_available"]
+                               and current_target_head != baseline["target_head"])
     unmerged_ok = commands["audit"]["ok"] and audit_state is not None
-    if baseline["git_baseline_available"]:
+    if baseline["git_baseline_available"] and current_unmerged is not None:
         unmerged_ok = (unmerged_ok and not resolved_unmerged and not missing_expected
                        and not unexpected_unmerged and not target_head_changed)
         if unexpected_unmerged:
@@ -251,7 +261,8 @@ def run_finalization(contract: Any, baseline_ids: Any,
     unmerged = {
         "ok": unmerged_ok,
         "baseline_ids": sorted(baseline_unmerged),
-        "current_ids": sorted(current_unmerged),
+        "current_state_available": current_unmerged is not None,
+        "current_ids": sorted(current_unmerged) if current_unmerged is not None else None,
         "expected_ids": sorted(expected_unmerged),
         "new_ids": new_unmerged,
         "resolved_ids": resolved_unmerged,

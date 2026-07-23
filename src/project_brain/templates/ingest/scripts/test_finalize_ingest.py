@@ -39,7 +39,7 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     @staticmethod
     def _runner(*, current_isolated=None, search_results=None, failures=(),
-                target_head="TARGET", unmerged_locator_ids=()):
+                target_head="TARGET", unmerged_locator_ids=(), audit_payload=None):
         current_isolated = ["code.before"] if current_isolated is None else current_isolated
         search_results = ([{
             "object_id": "mapping.a",
@@ -57,7 +57,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             elif command[:3] == ["project-brain", "graph", "isolated"]:
                 payload = {"ok": True, "isolated": current_isolated}
             elif command == ["project-brain", "audit", "--no-fetch"]:
-                payload = {
+                payload = audit_payload if audit_payload is not None else {
                     "ok": True,
                     "stale": {
                         "target_head": target_head,
@@ -104,31 +104,33 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_unmerged_expected_ids_are_compared_as_exact_union(self):
         module = load_module()
-        contract = dict(self.contract, expected_unmerged_locator_ids=["code.new"])
+        baseline_ids = [f"code.baseline-{number:02d}" for number in range(1, 8)]
+        expected_ids = [f"code.expected-{number:02d}" for number in range(1, 31)]
+        contract = dict(self.contract, expected_unmerged_locator_ids=expected_ids)
         baseline = {
             "ok": True,
             "isolated_ids": ["code.before"],
             "target_head": "TARGET",
-            "unmerged_locator_ids": ["code.existing"],
+            "unmerged_locator_ids": baseline_ids,
         }
         report = module.run_finalization(
             contract, baseline,
-            runner=self._runner(unmerged_locator_ids=["code.existing", "code.new"]),
+            runner=self._runner(unmerged_locator_ids=[*baseline_ids, *expected_ids]),
         )
 
         self.assertTrue(report["ok"])
-        self.assertEqual(report["unmerged"], {
-            "ok": True,
-            "baseline_ids": ["code.existing"],
-            "current_ids": ["code.existing", "code.new"],
-            "expected_ids": ["code.new"],
-            "new_ids": ["code.new"],
-            "resolved_ids": [],
-            "missing_expected_ids": [],
-            "unexpected_new_ids": [],
-            "baseline_target_head": "TARGET",
-            "current_target_head": "TARGET",
-        })
+        self.assertTrue(report["unmerged"]["ok"])
+        self.assertEqual(report["unmerged"]["baseline_ids"], baseline_ids)
+        self.assertEqual(report["unmerged"]["expected_ids"], expected_ids)
+        self.assertEqual(report["unmerged"]["new_ids"], expected_ids)
+
+        blocked = module.run_finalization(
+            contract, baseline,
+            runner=self._runner(unmerged_locator_ids=[*baseline_ids, *expected_ids,
+                                                       "code.unexpected-31"]),
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["unmerged"]["unexpected_new_ids"], ["code.unexpected-31"])
 
     def test_unmerged_expected_id_already_in_baseline_passes(self):
         module = load_module()
@@ -182,6 +184,32 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertFalse(report["commands"]["audit"]["ok"])
         self.assertIn("audit failed", report["errors"])
+
+    def test_unavailable_audit_state_does_not_fabricate_unmerged_differences(self):
+        module = load_module()
+        baseline = {
+            "ok": True,
+            "isolated_ids": ["code.before"],
+            "target_head": "TARGET",
+            "unmerged_locator_ids": ["code.before-unmerged"],
+        }
+        report = module.run_finalization(
+            self.contract, baseline,
+            runner=self._runner(
+                failures=("project-brain audit --no-fetch",),
+                audit_payload={"ok": False, "stale": {"error": "git state unavailable"}},
+            ),
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["unmerged"]["current_state_available"])
+        self.assertIsNone(report["unmerged"]["current_ids"])
+        self.assertIsNone(report["unmerged"]["new_ids"])
+        self.assertIsNone(report["unmerged"]["resolved_ids"])
+        self.assertIsNone(report["unmerged"]["current_target_head"])
+        self.assertNotIn("baseline unmerged locator ids disappeared", "\n".join(report["errors"]))
+        self.assertNotIn("target head changed", "\n".join(report["errors"]))
+        self.assertIn("audit stale error: git state unavailable", report["errors"])
 
     def test_capture_baseline_uses_graph_and_no_fetch_audit_state(self):
         module = load_module()
