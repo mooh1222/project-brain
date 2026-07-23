@@ -371,6 +371,34 @@ class StaleCheckTest(unittest.TestCase):
         self.assertEqual(report["candidates"], [])          # 미머지 → 후보 아님
         self.assertEqual([u["locator_id"] for u in report["unmerged_anchors"]], ["code.work"])
         self.assertEqual(report["unmerged_anchors"][0]["reason"], "not_ancestor")
+        self.assertEqual(report["unmerged_anchors"][0]["blocking_affected_mapping_ids"], ["m.work"])
+
+    def test_stale_check_cache_keeps_code_and_branch_axes_independent(self):
+        from project_brain.stale_check import advisories_by_mapping, build_stale_set, stale_check
+        store = _store(
+            code_locator("code.changed", path="a/Changed.cpp", commit_sha="SHA1"),
+            code_locator("code.same", path="a/Same.cpp", commit_sha="SHA1"),
+            code_locator("code.work", path="a/Work.cpp", commit_sha="WORK"),
+            domain_mapping("m.changed", code_locator_ids=["code.changed"]),
+            domain_mapping("m.same", code_locator_ids=["code.same"]),
+            domain_mapping("m.unmerged", code_locator_ids=["code.work"]),
+            domain_mapping("m.both", code_locator_ids=["code.changed", "code.work"]),
+        )
+        report = stale_check(
+            store,
+            git_runner=fake_git_runner(
+                "TARGET", {("SHA1", "a/Changed.cpp"): "M"},
+                merge_base={"WORK": "OLDBASE"}),
+            target_head="TARGET",
+        )
+        adv = advisories_by_mapping(build_stale_set(report, now="t"))
+        self.assertNotIn("m.same", adv)  # unchanged + merged
+        self.assertEqual((adv["m.changed"]["code_changed"], adv["m.changed"]["unmerged_anchor"]),
+                         (True, False))  # changed + merged
+        self.assertEqual((adv["m.unmerged"]["code_changed"], adv["m.unmerged"]["unmerged_anchor"]),
+                         (False, True))  # unchanged + unmerged
+        self.assertEqual((adv["m.both"]["code_changed"], adv["m.both"]["unmerged_anchor"]),
+                         (True, True))  # changed + unmerged
 
     def test_abbreviated_anchor_sha_detected_as_merged(self):
         # 약식 sha 함정 회귀: commit_sha가 약식이고 merge-base가 전체 sha를 돌려줘도
@@ -493,7 +521,53 @@ class StaleSetCacheTest(unittest.TestCase):
         self.assertEqual(ss["target_head"], "TARGET")
         self.assertEqual(ss["computed_at"], "2026-06-25T12:00:00+09:00")
         self.assertEqual(ss["stale_mapping_ids"], ["m.a"])
-        self.assertEqual(ss["detail"]["m.a"], {"change_types": ["M"], "paths": ["a/X.cpp"]})
+        self.assertEqual(ss["detail"]["m.a"], {
+            "code_changed": True, "unmerged_anchor": False, "unmerged_reasons": [],
+            "locator_ids": ["code.x"], "from_commits": ["SHA1"],
+            "change_types": ["M"], "paths": ["a/X.cpp"],
+        })
+
+    def test_build_stale_set_preserves_independent_code_and_branch_axes(self):
+        from project_brain.stale_check import advisories_by_mapping, build_stale_set
+        report = {
+            "target_head": "TARGET",
+            "candidates": [
+                {"mapping_id": "m.changed", "stale_locators": [
+                    {"locator_id": "code.changed", "path": "a/Changed.cpp",
+                     "change_type": "M", "from_commit": "SHA1"}]},
+                {"mapping_id": "m.both", "stale_locators": [
+                    {"locator_id": "code.b", "path": "z/B.cpp",
+                     "change_type": "D", "from_commit": "SHA2"},
+                    {"locator_id": "code.a", "path": "a/A.cpp",
+                     "change_type": "M", "from_commit": "SHA1"}]},
+            ],
+            "unmerged_anchors": [
+                {"locator_id": "code.unmerged", "path": "u/Only.cpp", "from_commit": "WORK",
+                 "reason": "not_ancestor", "blocking_affected_mapping_ids": ["m.unmerged"]},
+                {"locator_id": "code.c", "path": "c/C.cpp", "from_commit": "SHA3",
+                 "reason": "anchor_unverifiable", "blocking_affected_mapping_ids": ["m.both"]},
+                {"locator_id": "code.a", "path": "a/A.cpp", "from_commit": "SHA1",
+                 "reason": "not_ancestor", "blocking_affected_mapping_ids": ["m.both"]},
+            ],
+        }
+        stale_set = build_stale_set(report, now="2026-07-23T12:00:00+09:00")
+        adv = advisories_by_mapping(stale_set)
+
+        self.assertEqual(stale_set["stale_mapping_ids"], ["m.both", "m.changed"])
+        self.assertNotIn("m.unchanged_merged", adv)
+        self.assertEqual(adv["m.changed"]["code_changed"], True)
+        self.assertEqual(adv["m.changed"]["unmerged_anchor"], False)
+        self.assertEqual(adv["m.unmerged"]["code_changed"], False)
+        self.assertEqual(adv["m.unmerged"]["unmerged_anchor"], True)
+        self.assertEqual(adv["m.both"]["code_changed"], True)
+        self.assertEqual(adv["m.both"]["unmerged_anchor"], True)
+        self.assertEqual(adv["m.both"]["unmerged_reasons"],
+                         ["anchor_unverifiable", "not_ancestor"])
+        self.assertEqual(adv["m.both"]["locator_ids"], ["code.a", "code.b", "code.c"])
+        self.assertEqual(adv["m.both"]["from_commits"], ["SHA1", "SHA2", "SHA3"])
+        self.assertEqual(adv["m.both"]["paths"], ["a/A.cpp", "c/C.cpp", "z/B.cpp"])
+        self.assertEqual(adv["m.both"]["target_head"], "TARGET")
+        self.assertEqual(adv["m.both"]["computed_at"], "2026-07-23T12:00:00+09:00")
 
     def test_write_then_load_roundtrip(self):
         from project_brain.stale_check import write_stale_set, load_stale_set, stale_set_path
@@ -510,8 +584,18 @@ class StaleSetCacheTest(unittest.TestCase):
               "detail": {"m.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}}}
         adv = advisories_by_mapping(ss)
         self.assertEqual(adv["m.a"], {
-            "code_changed": True, "change_types": ["M"], "paths": ["a/X.cpp"],
-            "target_head": "T", "computed_at": "t2"})
+            "code_changed": True, "unmerged_anchor": False, "unmerged_reasons": [],
+            "locator_ids": [], "from_commits": [], "change_types": ["M"],
+            "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t2"})
+
+    def test_advisories_by_mapping_accepts_legacy_cache_without_branch_fields(self):
+        from project_brain.stale_check import advisories_by_mapping
+        legacy = {"target_head": "T", "computed_at": "t2", "stale_mapping_ids": ["m.a"],
+                  "detail": {"m.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}}}
+        self.assertEqual(advisories_by_mapping(legacy)["m.a"], {
+            "code_changed": True, "unmerged_anchor": False, "unmerged_reasons": [],
+            "locator_ids": [], "from_commits": [], "change_types": ["M"],
+            "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t2"})
 
     def test_advisories_by_mapping_empty_when_no_cache(self):
         from project_brain.stale_check import advisories_by_mapping

@@ -428,7 +428,7 @@ def _run_show(argv) -> int:
             n = store.get(ref)
             neighbors.append({"edge": field, "object_id": ref,
                               "kind": n.get("kind"), "title": n.get("title")})
-    # stale-set 캐시에 이 객체가 들면 코드변경 advisory를 최상위에 곁들인다(객체 본문 불변).
+    # stale-set 캐시에 이 객체가 들면 코드 변경·브랜치 범위 advisory를 최상위에 곁들인다(객체 본문 불변).
     from project_brain.stale_check import advisories_by_mapping, load_stale_set
     payload = {"ok": True, "object": obj, "neighbors": neighbors}
     advisory = advisories_by_mapping(load_stale_set(brain_root)).get(args.id)

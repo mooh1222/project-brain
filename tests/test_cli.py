@@ -105,6 +105,30 @@ class TestCli(unittest.TestCase):
         m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
         self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
 
+    def test_cli_query_surfaces_unmerged_advisory_without_changing_status(self):
+        from project_brain.stale_check import write_stale_set
+        from tests.test_search import domain_mapping, glossary_term
+        for obj in (glossary_term("g.boost", term="강화폭탄"),
+                    domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
+                                   glossary_term_ids=["g.boost"])):
+            BrainStore.save_object(self.root, obj)
+        write_stale_set(self.root, {
+            "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
+            "detail": {"m.boost": {"code_changed": False, "unmerged_anchor": True,
+                                   "unmerged_reasons": ["not_ancestor"],
+                                   "locator_ids": ["code.work"], "from_commits": ["WORK"],
+                                   "change_types": [], "paths": ["a/Work.cpp"]}}})
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
+             redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+        answer = json.loads(out.getvalue())
+        mapping = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")["mappings"][0]
+        self.assertFalse(mapping["stale_advisory"]["code_changed"])
+        self.assertTrue(mapping["stale_advisory"]["unmerged_anchor"])
+        self.assertTrue(any("not yet reachable" in w for w in answer["warnings"]))
+        self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
+
     def test_audit_stale_check_and_mark_checked_use_configured_default_branch(self):
         project = self.root / "project"
         brain = project / "brain"
@@ -1364,6 +1388,26 @@ class TestCliShow(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(payload["stale_advisory"]["change_types"], ["M"])
         self.assertNotIn("stale_advisory", payload["object"])  # 객체 본문은 불변
+
+    def test_show_attaches_both_advisory_axes_without_changing_status(self):
+        from project_brain.stale_check import write_stale_set
+        from tests.test_search import build_store_dir, domain_mapping, glossary_term
+        build_store_dir(self.root, [
+            glossary_term("g.race", term="레이스"),
+            domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
+        ])
+        write_stale_set(self.root, {
+            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.x"],
+            "detail": {"m.x": {"code_changed": True, "unmerged_anchor": True,
+                               "unmerged_reasons": ["not_ancestor"],
+                               "locator_ids": ["code.changed", "code.work"],
+                               "from_commits": ["SHA1", "WORK"], "change_types": ["M"],
+                               "paths": ["a/Race.cpp"]}}})
+        rc, payload = self._show("m.x")
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["stale_advisory"]["code_changed"])
+        self.assertTrue(payload["stale_advisory"]["unmerged_anchor"])
+        self.assertEqual(payload["object"]["status"], "reviewed")
 
     def test_show_no_advisory_when_not_stale(self):
         from tests.test_search import build_store_dir, domain_mapping, glossary_term

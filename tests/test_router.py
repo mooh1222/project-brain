@@ -155,6 +155,19 @@ class TestStaleAdvisory(unittest.TestCase):
         self.assertTrue(any("코드 변경" in w and "2026-06-25T15:00:00+09:00" in w
                             for w in answer["warnings"]))
 
+    def test_branch_scope_warning_is_separate_from_code_change_warning(self):
+        advisories = {
+            "m.boost": {"code_changed": False, "unmerged_anchor": True,
+                        "unmerged_reasons": ["not_ancestor"], "locator_ids": ["code.work"],
+                        "from_commits": ["WORK"], "paths": ["a/X.cpp"],
+                        "target_head": "T", "computed_at": "t"},
+        }
+        answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
+        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
+        self.assertTrue(gm["mappings"][0]["stale_advisory"]["unmerged_anchor"])
+        self.assertTrue(any("not yet reachable" in w for w in answer["warnings"]))
+        self.assertFalse(any("코드 변경 감지" in w for w in answer["warnings"]))
+
     def test_no_stale_advisory_without_cache(self):
         answer = QueryRouter(self._store()).answer("강화폭탄 무슨 뜻?")
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")

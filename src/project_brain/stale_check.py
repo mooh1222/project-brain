@@ -152,9 +152,12 @@ def stale_check(store, *, git_runner, target_head=None, default_branch="develop"
         if merged is not True:
             # 미머지/검증불가 앵커: from..develop diff가 거짓 변경을 내므로 후보에서 빼고
             # 별개 범주로 라벨(차단 아님). 머지되면 다음 실행에서 자동 해소(설계 §5).
+            closure = compute_closure(store, loc["id"])
             unmerged_anchors.append({
                 "locator_id": loc["id"], "path": path, "from_commit": from_commit,
                 "reason": "not_ancestor" if merged is False else "anchor_unverifiable",
+                "blocking_affected_mapping_ids": list(closure["blocking"]),
+                "nonblocking_affected_mapping_ids": list(closure["nonblocking"]),
             })
             continue
         key = (path, from_commit)
@@ -203,15 +206,42 @@ def stale_check(store, *, git_runner, target_head=None, default_branch="develop"
 def build_stale_set(report, *, now):
     """stale_check() 리포트를 query 캐시 형태로 압축한다(순수). computed_at은 주입."""
     detail = {}
+
+    def entry(mapping_id):
+        return detail.setdefault(mapping_id, {
+            "code_changed": False,
+            "unmerged_anchor": False,
+            "unmerged_reasons": set(),
+            "locator_ids": set(),
+            "from_commits": set(),
+            "change_types": set(),
+            "paths": set(),
+        })
+
     for c in report["candidates"]:
-        detail[c["mapping_id"]] = {
-            "change_types": sorted({sl["change_type"] for sl in c["stale_locators"]}),
-            "paths": sorted({sl["path"] for sl in c["stale_locators"]}),
-        }
+        d = entry(c["mapping_id"])
+        d["code_changed"] = True
+        for sl in c["stale_locators"]:
+            d["locator_ids"].add(sl["locator_id"])
+            d["from_commits"].add(sl["from_commit"])
+            d["change_types"].add(sl["change_type"])
+            d["paths"].add(sl["path"])
+    for anchor in report.get("unmerged_anchors") or []:
+        for mapping_id in anchor.get("blocking_affected_mapping_ids") or []:
+            d = entry(mapping_id)
+            d["unmerged_anchor"] = True
+            d["unmerged_reasons"].add(anchor["reason"])
+            d["locator_ids"].add(anchor["locator_id"])
+            d["from_commits"].add(anchor["from_commit"])
+            d["paths"].add(anchor["path"])
+
+    for d in detail.values():
+        for key in ("unmerged_reasons", "locator_ids", "from_commits", "change_types", "paths"):
+            d[key] = sorted(d[key])
     return {
         "target_head": report["target_head"],
         "computed_at": now,
-        "stale_mapping_ids": sorted(detail),
+        "stale_mapping_ids": sorted(mid for mid, d in detail.items() if d["code_changed"]),
         "detail": detail,
     }
 
@@ -241,9 +271,15 @@ def advisories_by_mapping(stale_set):
     out = {}
     for mid, d in ((stale_set or {}).get("detail") or {}).items():
         out[mid] = {
-            "code_changed": True,
-            "change_types": d["change_types"],
-            "paths": d["paths"],
+            # 새 캐시의 false도 보존하되, 필드 없는 옛 캐시는 stale-set의 기존 뜻대로
+            # "코드 변경"으로 읽는다.
+            "code_changed": d.get("code_changed", True),
+            "unmerged_anchor": d.get("unmerged_anchor", False),
+            "unmerged_reasons": d.get("unmerged_reasons", []),
+            "locator_ids": d.get("locator_ids", []),
+            "from_commits": d.get("from_commits", []),
+            "change_types": d.get("change_types", []),
+            "paths": d.get("paths", []),
             "target_head": (stale_set or {}).get("target_head"),
             "computed_at": (stale_set or {}).get("computed_at"),
         }
