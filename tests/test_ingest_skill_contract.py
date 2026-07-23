@@ -222,7 +222,8 @@ class IngestSkillContractTest(unittest.TestCase):
             "anchor_unverifiable",
             "`not_ancestor`는",
             "advisory이며",
-            "`--no-stale`는 Git 없는 환경에서만 명시적으로 건너뛴다",
+            "`--no-stale`는 Git 없는 환경에서만",
+            "명시적으로 건너뛴다",
             "configured default_branch",
             "Git blob",
             "공백·줄바꿈을 정규화하지 않는다",
@@ -260,6 +261,26 @@ class IngestSkillContractTest(unittest.TestCase):
         self.assertIn("trunk", installed_audit)
         self.assertNotIn("{{DEFAULT_BRANCH}}", installed_audit)
         self.assertNotIn("stale.detail", installed_audit)
+
+    def test_audit_gitless_mode_skips_quotes_in_canonical_and_installed_skill(self):
+        canonical = (TEMPLATE_ROOT.parent / "audit" / "SKILL.md").read_text(encoding="utf-8")
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo", default_branch="trunk")
+            installed = (
+                target / ".agents" / "skills" / "demo-brain-audit" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+
+        for text in (canonical, installed):
+            intro = text[:text.index("## 언제")]
+            self.assertIn("세 건강 신호", intro)
+            self.assertIn("별도의 정확한 코드 인용 검증", intro)
+            start = text.index("project-brain audit --no-stale")
+            end = text.index("## 세 신호 읽기", start)
+            gitless = text[start:end]
+            for token in ("Git stale/reachability", "exact quote", "code_quotes", "건너"):
+                self.assertIn(token, gitless)
+            self.assertNotIn("code_quotes가 통과", gitless)
 
     def test_installed_ingest_tools_explain_unmerged_finalization_report(self):
         with TemporaryDirectory() as td:

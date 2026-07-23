@@ -10,7 +10,7 @@ description: |
 # {{PROJECT}} Brain 코퍼스 감사 (audit)
 
 코퍼스의 세 건강 신호를 한 패스로 본다 — 무결성(끊긴 참조) · 고아(아무도 안 가리키는 잎) ·
-코드 드리프트(brain이 가리키는 코드가 바뀜). stale은 결과를 캐시에 써서, 이후 query/show가
+코드 드리프트(brain이 가리키는 코드가 바뀜). 여기에 별도의 정확한 코드 인용 검증이 더해진다. stale은 결과를 캐시에 써서, 이후 query/show가
 `stale_advisory`로 곁들이게 하는 **도는 주체**다(읽기·쓰기 양끝은 있는데 캐시를 채울 주체가 없으면
 채널이 죽어 advisory가 한 번도 안 뜬다).
 
@@ -24,11 +24,12 @@ description: |
 
 ```bash
 project-brain audit             # lint + graph isolated + stale-check(캐시 기록)
-project-brain audit --no-stale  # Git 없는 환경에서만 stale/reachability를 명시적으로 건너뜀
+project-brain audit --no-stale  # Git 없는 환경: Git stale/reachability와 exact quote/code_quotes 검사를 함께 건너뜀
 ```
 
-출력은 `2>/dev/null | jq`로 읽는다(stdout=깨끗한 JSON, 노이즈는 stderr). 성공은 `lint + Git stale/reachability + exact quote`
-검사가 모두 통과한 경우다. `--no-stale`는 Git 없는 환경에서만 명시적으로 건너뛴다. Git 오류나
+출력은 `2>/dev/null | jq`로 읽는다(stdout=깨끗한 JSON, 노이즈는 stderr). 기본 audit의 성공은 `lint + Git stale/reachability + exact quote`
+검사가 모두 통과한 경우다. `--no-stale`는 Git 없는 환경에서만 Git stale/reachability와 exact quote/code_quotes
+검사를 함께 명시적으로 건너뛴다. 이때 `code_quotes.check_skipped=true`이며 코드 인용이 통과한 뜻이 아니다. Git 오류나
 `anchor_unverifiable`은 성공으로 처리하지 않는다. `not_ancestor`는 아직 기본 브랜치에 합쳐지지 않은
 앵커를 알리는 advisory이며, 그 자체로 실패나 상태 강등 사유가 아니다.
 
