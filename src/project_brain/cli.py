@@ -25,7 +25,11 @@ from project_brain.promote import (
 )
 from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
-from project_brain.search_index import IndexRebuildInProgressError, rebuild as index_rebuild
+from project_brain.search_index import (
+    IndexRebuildDurabilityError,
+    IndexRebuildInProgressError,
+    rebuild as index_rebuild,
+)
 from project_brain.store import BrainStore
 
 
@@ -75,6 +79,15 @@ def _run_query(argv) -> int:
     answer = router.answer(args.query)
     print(json.dumps(answer, ensure_ascii=False, indent=2))
     return 0
+
+
+def _index_rebuild_error_report(exc: RuntimeError) -> dict:
+    """재구축 실패의 교체 여부를 CLI JSON으로 명시한다."""
+    return {
+        "ok": False,
+        "error": str(exc),
+        "committed": getattr(exc, "committed", False),
+    }
 
 
 def _run_ingest(argv) -> int:
@@ -285,8 +298,8 @@ def _run_index(argv) -> int:
     embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
     try:
         stats = index_rebuild(args.brain_root, args.db, embedder=embedder)
-    except IndexRebuildInProgressError as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+    except (IndexRebuildInProgressError, IndexRebuildDurabilityError) as exc:
+        print(json.dumps(_index_rebuild_error_report(exc), ensure_ascii=False, indent=2))
         return 1
     # raw_chunks를 함께 내보낸다 — 데이터 레포 쪽 실측 가드가 객체/raw 행 수를
     # 이 출력만으로 검증한다(엔진 import 없는 CLI 가드).
@@ -635,7 +648,11 @@ def _run_bootstrap(argv) -> int:
     rebuilt = None
     if cfg is not None and (cfg["brain_root"] / "objects").exists():
         embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
-        rebuilt = index_rebuild(cfg["brain_root"], cfg["db"], embedder=embedder)
+        try:
+            rebuilt = index_rebuild(cfg["brain_root"], cfg["db"], embedder=embedder)
+        except (IndexRebuildInProgressError, IndexRebuildDurabilityError) as exc:
+            print(json.dumps(_index_rebuild_error_report(exc), ensure_ascii=False, indent=2))
+            return 1
         rebuilt = {"indexed": rebuilt["indexed"], "raw_chunks": rebuilt["raw_chunks"]}
 
     from project_brain.doctor import diagnose

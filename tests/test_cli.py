@@ -297,6 +297,45 @@ class TestCli(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("진행 중", payload["error"])
 
+    def test_cli_index_rebuild_durability_failure_reports_committed(self):
+        from project_brain.search_index import IndexRebuildDurabilityError
+
+        argv = ["index", "rebuild", "--brain-root", str(self.root),
+                "--db", str(self.input_dir / "index.db"), "--stub-embedder"]
+        out = io.StringIO()
+        with mock.patch.object(
+            cli, "index_rebuild",
+            side_effect=IndexRebuildDurabilityError("새 DB는 이미 교체됐습니다"),
+        ), mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(out.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["committed"])
+        self.assertIn("교체", payload["error"])
+
+    def test_cli_bootstrap_lock_contention_is_json_failure_with_uncommitted_state(self):
+        from project_brain.search_index import IndexRebuildInProgressError
+
+        brain = self.root / "brain"
+        (brain / "objects").mkdir(parents=True)
+        cfg = {"brain_root": brain, "db": self.input_dir / "index.db"}
+        out = io.StringIO()
+        with mock.patch("project_brain.installer.install", return_value={"ok": True}), \
+             mock.patch("project_brain.config.load_config", return_value=cfg), \
+             mock.patch.object(cli, "index_rebuild",
+                               side_effect=IndexRebuildInProgressError("색인 재구축이 진행 중")), \
+             mock.patch("sys.argv", ["cli", "bootstrap", "--stub-embedder"]), \
+             redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(out.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["committed"])
+        self.assertIn("진행 중", payload["error"])
+
     def test_cli_lint_clean_store_ok(self):
         # 깨끗한 store(서로 참조 정상) → lint ok=true, problems 0 (test_lint.py와 동일 조합)
         for obj in (manifest(), evidence_ref(), candidate_term()):

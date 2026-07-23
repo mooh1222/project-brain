@@ -42,6 +42,14 @@ class IndexRebuildInProgressError(RuntimeError):
     """같은 색인 DB를 다른 프로세스가 재구축 중일 때의 정상 안내용 오류."""
 
 
+class IndexRebuildDurabilityError(RuntimeError):
+    """DB 교체 뒤 디렉터리 동기화가 실패해 내구성만 확정하지 못한 오류."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.committed = True
+
+
 # 색인 스키마 자체의 버전(테이블 구조 변경 시 올린다 — meta 불일치 감지용).
 # v2: documents.row_id 컬럼 + documents_vec(vec0) 추가(슬라이스 3 벡터 색인).
 # v3: documents.surface_text 컬럼 + raw 청크 행(§2.2 raw 본문 색인 — raw 청크는
@@ -204,8 +212,10 @@ def _validate_rebuilt_index(
 def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
     """brain/ 전 객체에서 FTS(+벡터) 색인을 전체 재구축한다(§4).
 
-    새 DB를 같은 디렉터리에 완성·검증한 뒤에만 원자 교체한다. extract_surface가 None을
-    돌려주는 객체(색인 제외 kind·빈 표면)는 색인하지 않는다.
+    새 DB를 같은 디렉터리에 완성·검증한 뒤에만 원자 교체한다. os.replace 전 실패는
+    기존 live DB를 보존하고, 교체 뒤 디렉터리 동기화 실패는 새 DB가 이미 live임을 담은
+    IndexRebuildDurabilityError로 알린다. extract_surface가 None을 돌려주는 객체(색인
+    제외 kind·빈 표면)는 색인하지 않는다.
 
     brain_root/db_path 미지정이면 config(.project-brain.json)에서 해석한다.
 
@@ -320,7 +330,13 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
             )
             _fsync_file(temp_path)
             os.replace(temp_path, db_path)
-            _fsync_directory(db_path.parent)
+            try:
+                _fsync_directory(db_path.parent)
+            except OSError as exc:
+                raise IndexRebuildDurabilityError(
+                    "새 색인 DB는 이미 교체됐지만 디렉터리 동기화에 실패했습니다. "
+                    "현재 DB는 조회할 수 있으나 전원 중단 전에 `index rebuild`를 다시 실행하세요."
+                ) from exc
         except BaseException:
             _cleanup_rebuild_temp(temp_path)
             raise

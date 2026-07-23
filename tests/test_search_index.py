@@ -184,6 +184,56 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(self.db.read_bytes(), before)
         self.assertEqual(self._temporary_rebuild_files(), [])
 
+    def test_rebuild_file_fsync_failure_preserves_live_db_and_cleans_sidecars(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+
+        def fail_file_fsync(temp_path):
+            Path(f"{temp_path}-wal").touch()
+            raise OSError("injected file fsync failure")
+
+        with mock.patch("project_brain.search_index._fsync_file", side_effect=fail_file_fsync):
+            with self.assertRaisesRegex(OSError, "file fsync failure"):
+                rebuild(self.brain, self.db)
+
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self._temporary_rebuild_files(), [])
+
+    def test_rebuild_replace_failure_preserves_live_db_and_cleans_temp(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+
+        with mock.patch(
+            "project_brain.search_index.os.replace",
+            side_effect=OSError("injected replace failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "replace failure"):
+                rebuild(self.brain, self.db)
+
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self._temporary_rebuild_files(), [])
+
+    def test_rebuild_directory_fsync_failure_reports_committed_live_db(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        BrainStore.save_object(self.brain, glossary_term("g.reward", term="보상"))
+
+        from project_brain import search_index
+        with mock.patch(
+            "project_brain.search_index._fsync_directory",
+            side_effect=OSError("injected directory fsync failure"),
+        ):
+            with self.assertRaises(Exception) as ctx:
+                rebuild(self.brain, self.db)
+
+        self.assertIsInstance(ctx.exception, search_index.IndexRebuildDurabilityError)
+        self.assertTrue(ctx.exception.committed)
+        self.assertIn("이미 교체", str(ctx.exception))
+        self.assertEqual(self._temporary_rebuild_files(), [])
+        self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
+
     def test_rebuild_replaces_only_after_valid_temp_and_fsyncs_directory(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
         rebuild(self.brain, self.db)
