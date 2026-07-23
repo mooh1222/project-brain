@@ -54,6 +54,19 @@ references/ + scripts/ 포함)를 주입한다. 설치 직후 어시스턴트(Cl
 사용자 소유가 되고, 이후 `install` 재실행은 그 파일을 덮지 않는다(manifest 해시
 불일치 → skip 보고).
 
+installer의 파일 소유권 기준은 `.project-brain-manifest.json`이다.
+
+- manifest 해시와 디스크가 일치하는 관리 파일만 자동 갱신한다. 내용이 현재 템플릿과
+  같은 manifest 밖 파일은 채택(`adopted`)하고 실행 비트를 템플릿과 맞춘다.
+- 템플릿에서 사라진 관리 파일은 사용자가 수정하지 않았을 때만 설치본과 manifest에서
+  퇴역시킨다. 사용자 수정 파일은 충돌로 중단하고 보존한다.
+- 퇴역 원본은 곧바로 지우지 않고 같은 디렉토리의 backup으로 옮긴다. 여러 파일 처리나
+  manifest 확정이 실패하면 역순으로 원위치에 복원한다.
+- manifest 밖의 프로젝트 전용 overlay는 `--force`에서도 덮거나 삭제하지 않는다.
+  `skipped`가 있으면 먼저 diff를 확인하고, 원인을 모른 채 `--force`를 쓰지 않는다.
+- 제어 파일·관리 경로의 심링크, 상위 경로 탈출, 일반 파일이 아닌 목적지는 쓰기 전에
+  거부한다. 성공한 설치를 한 번 더 실행했을 때 변경 배열이 모두 비어야 한다.
+
 ## 주요 명령
 
 ```bash
@@ -76,9 +89,40 @@ project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매
 
 전체 명령 목록은 `project-brain --help`, 각 명령 상세는 `project-brain <명령> --help`로 본다.
 
+## 적재 실행 경로
+
+installer가 주입한 `<이름>-brain-ingest` 스킬은 단건과 묶음 실행을 분리한다.
+
+- **단건**: `scripts/run_ingest.sh <verify.json> <domain_spec.py>`가
+  assemble → build → ingest → semantic finalization을 수행한다. `--dry`는 쓰지 않고
+  조립·검증만 하며, `--defer-finalize`는 item ingest 뒤 멈춰 batch가 마지막 검증을
+  한 번만 수행하게 한다.
+- **묶음**: 먼저 `scripts/validate_workflow_result.py`로 workflow 결과를 검사하고,
+  `scripts/run_ingest_batch.py <manifest> --report <report>`를 실행한다. 중단 뒤에는 같은
+  report를 `--resume`으로 주면 성공한 item만 건너뛴다.
+- workflow의 최상위 `completed`만으로는 성공이 아니다. `expected`와 item 수가 같고,
+  각 item의 `extract_status`와 `verify_status`가 정확히 `ok`여야 한다.
+- batch는 item마다 `--defer-finalize`로 적재하고, 실패가 하나라도 있으면 finalization을
+  호출하지 않는다. 완료 기준은 `failed=[]`, 전체 key가 `succeeded`에 있으며
+  `finalized=true`인 report다.
+- manifest·verify JSON·domain spec과 같거나 심링크로 같은 위치를 가리키는 report 경로는
+  입력을 덮기 전에 거부한다.
+
+`context.key`, mapping·decision·glossary key와 연결 key는 조립 전 **logical key**만
+받는다. `mapping.<context>.<key>` 같은 완성 객체 ID를 넣으면 `build` 전에 실패한다.
+raw 보관은 개정본의 `spec-v<N>.md`와 이전 자료의 정리된 원본 basename을 구분하며,
+파일명 충돌은 원본 묶음 기준 상대경로의 SHA-256 접미사로 해결하고 기존 바이트를 덮지 않는다.
+설계와 최종 검증값은 [대량 적재 강화 완료 보고서](docs/reports/2026-07-23-bulk-ingest-hardening-completion.md)에 있다.
+
 ## 개발
 
 ```bash
 uv sync --extra mecab
-.venv/bin/python -m pytest tests/ -q     # 합성 데이터만 — 실코퍼스 불필요
+.venv/bin/python -m pytest -q
+.venv/bin/python -m unittest discover \
+  -s src/project_brain/templates/ingest/scripts -p 'test_*.py'
 ```
+
+첫 명령은 엔진 합성 회귀, 두 번째는 installer가 배포하는 ingest 런타임의 독립 unittest다.
+검색·청킹·색인 계약을 바꿨다면 소비 프로젝트의 `brain/checks/`, lint, eval, graph와
+필요한 경우 실모델 rebuild까지 별도로 검증한다.

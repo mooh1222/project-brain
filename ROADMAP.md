@@ -5,7 +5,7 @@
 
 - 설계 근거(정체성·철학·아키텍처·미결): [docs/design-canonical.md](docs/design-canonical.md)
 - 설치·사용: [README.md](README.md) · 개발 루프: [CLAUDE.md](CLAUDE.md)
-- 단계별 설계/계획 문서: `docs/specs/`(18) · `docs/plans/`(38) · `docs/skill-drafts/`(3)
+- 단계별 설계/계획 문서: `docs/specs/`(19) · `docs/plans/`(46) · `docs/skill-drafts/`(3)
 - 비교·검증 보고서: [docs/reports/](docs/reports/)
 - 데이터·적재 이력은 각 프로젝트 레포(`brain/`)에 있다. 이 로드맵은 **엔진 기능**만 다룬다.
   BB2(첫 데이터) 적재 작업 추적은 vault task `bb2-project-brain-build`에 남아 있다.
@@ -22,10 +22,10 @@
 |---|---|---|
 | L1 저장 엔진 | ✅ 완료 수준 | 18 kind + Insight·원자성 적재·promote·lint |
 | L1 인사이트 그릇 | ✅ `Insight` kind (2026-06-15) | advisories 별도 통로·candidate 적재 거부(1차) |
-| L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대 |
+| L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대·보수적 토큰 근사와 과대 유닛 분할 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
-| L4 적재 | ✅ 3경로 완성 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화(decisions[] 결정 조립 2026-06-26) + GlossaryTerm 동의어 통로(신규 적재분, 2026-06-26) |
+| L4 적재 | ✅ 3경로 + batch 완료 게이트 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·workflow validator·semantic finalization(2026-07-23) |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -66,7 +66,9 @@ df 흔들림 면역), candidate locator 노출, 시스템 도메인 적재.
 
 ### raw 본문 색인 + 정리
 raw 청커(헤더 1차·500토큰 근사·문장 경계·15% 겹침·결정론) + 별도 레인(과대적재 후 kind
-분리) + `raw_excerpts` 채널. store 재사용 주입, `cli query` 배선.
+분리) + `raw_excerpts` 채널. store 재사용 주입, `cli query` 배선. 2026-07-22부터 토큰 근사는
+ASCII 단어 1·한글 음절 1·그 밖의 비공백 기호 2글자당 1로 보수화했고, 표 한 줄처럼 분할
+경계가 없는 단일 유닛도 목표 크기 아래로 다시 나눈다.
 
 - 계획·설계: 검색층 스펙 §2.2 (위 1차 마일스톤 링크)
 
@@ -242,6 +244,12 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
   덮고, manifest 밖 파일은 force여도 보존.
 - **config 누락 키 backfill(footgun 차단)**: config가 없으면 생성, 있으면 보존하되 누락 키 중
   값이 있는 것만 채워 넣는다(기존 키·빈 값은 안 건드림). 빈 값을 기록해버리던 footgun을 막음.
+- **2026-07-23 안전 보강**: 템플릿에서 사라진 manifest 관리 파일은 미수정 상태일 때만
+  퇴역시킨다. manifest와 새 파일을 먼저 준비하고, 퇴역 원본은 같은 디렉토리의 backup으로
+  원자 이동한 뒤 manifest를 확정한다. 중간 이동·manifest 교체가 실패하면 역순 복원한다.
+  제어 파일·부모·leaf 심링크/비일반 파일/상위 경로 탈출은 쓰기 전에 거부하고, 내용이 같은
+  manifest 밖 스크립트를 채택할 때 실행 비트도 템플릿과 맞춘다. 프로젝트 overlay는 계속
+  manifest 밖 소유다.
 - 검증: 머지+origin 푸시(`edc2f88..c9eda64`), 합성 537 통과, bb2 채택 19파일 diff 0.
 - 계획: [engine-single-source(spec)](docs/plans/2026-06-29-engine-single-source-spec.md) ·
   [engine-single-source(plan)](docs/plans/2026-06-29-engine-single-source-plan.md) ·
@@ -300,6 +308,40 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
 - 계획: [registry-aware-anchor-gate](docs/plans/2026-07-06-registry-aware-anchor-gate.md) ·
   [bb2-anchor-golden-set-backfill](docs/plans/2026-07-06-bb2-anchor-golden-set-backfill.md) ·
   방향·근거: [deferred-items-and-anchor-decisions §2](docs/plans/2026-07-03-deferred-items-and-anchor-decisions.md)
+
+### 대량 적재 완료 계약 강화 (2026-07-22~23)
+
+136개 규모 적재와 MPS 메모리 사고에서 드러난 엔진·스킬·installer 경계를 한 번에
+보강했다. 판단은 스킬과 사람이 맡되, 재시작·완료·파일 소유권처럼 조용히 틀리면 안 되는
+경계는 엔진과 runtime이 fail-closed로 막는다.
+
+- **입력·자원 가드**: 조립 노트의 context/mapping/decision/glossary와 연결 key는 완성
+  객체 ID가 아닌 logical key만 허용한다. raw 토큰 근사는 한글과 마크다운 기호를
+  보수적으로 세고 과대 단일 유닛을 다시 분할한다. `RealEmbedder`는 배치 8에 더해
+  `max_seq_length=2048`을 최종 MPS 메모리 방어선으로 둔다.
+- **실행·완료 가드**: `run_ingest.sh --defer-finalize`가 item 적재까지만 수행하고,
+  `run_ingest_batch.py`가 manifest 상대경로·fingerprint·baseline·성공/실패 report와
+  `--resume`을 관리한다. 모든 item이 성공한 뒤 `finalize_ingest.sh`가 index rebuild,
+  lint, eval, graph, corpus tests와 예상 객체 회수를 한 번만 검증한다. workflow는
+  최상위 `completed`가 아니라 기대 개수와 각 item의 정확한 `extract_status=ok`,
+  `verify_status=ok`를 검사한다.
+- **스킬 구조**: ingest `SKILL.md`를 148줄 실행 router로 줄이고 상세 판단은 reference로
+  라우팅했다. kind별 갱신 규칙은 ingest의 `references/update-rules.md`가 단일 원본이고,
+  session-ingest는 그 파일을 참조한다. 프로젝트 코드 검증은 installer가 소유하지 않는
+  선택적 `project-code-verification.md` overlay로 분리했다.
+- **installer·batch 안전**: 퇴역 파일 정리와 rollback, 안전 경로 preflight, 실행 비트
+  채택, report와 manifest/verify/domain 입력의 동일 경로·심링크 별칭 거부를 회귀로
+  고정했다. 새 설치 뒤 2회차는 모든 변경 배열이 비는 멱등 상태다.
+- **행동·실코퍼스 검증**: 단건, 부분 실패 workflow, C++ callers 흐름, full-ID logical key
+  거부, raw 개정/대량 이름 분기를 재실행 가능한 중립 fixture와 보고서로 남겼다. BB2에서
+  문서 7,092·raw chunk 1,577·vector rowid 7,092, lint 0, eval 15/15, 기존 고립 15,
+  코퍼스 guard 5/5를 확인했다. 엔진은 pytest 611 + subtests 26, 템플릿 unittest 59를
+  통과했다.
+
+- 설계: [bulk-ingest-hardening design](docs/specs/2026-07-21-bulk-ingest-hardening-design.md)
+- 계획: [bulk-ingest-hardening plan](docs/plans/2026-07-21-bulk-ingest-hardening.md)
+- 행동 증거: [Task 9 report](docs/reports/2026-07-22-bulk-ingest-task9-behavior-evidence.md)
+- 최종 결과: [completion report](docs/reports/2026-07-23-bulk-ingest-hardening-completion.md)
 
 ---
 

@@ -1,9 +1,34 @@
 # 대량 적재 엔진·스킬 개선 설계
 
 - 날짜: 2026-07-21
-- 상태: 구현 전 설계
+- 상태: 구현 완료 (2026-07-23)
 - 범위: `project-brain` 엔진과 단일 원본 적재 스킬 템플릿, BB2 설치본 전파
 - 근거 세션: Claude Code `d56a5ab7-a945-4663-b50e-426bfd20902f`
+
+## 구현 완료 기록 (2026-07-23)
+
+이 문서의 문제 서술과 접근 비교는 구현 전 판단 근거로 보존한다. 최종 구현은 접근 C
+(`엔진 가드 + 단일 원본 템플릿 + installer 전파`)로 완료됐고, 검토 중 발견된 안전
+요건까지 포함했다.
+
+- `validate_notes()`가 완성 객체 ID를 logical key 자리에 넣는 입력을 build 전에 거부한다.
+- raw 토큰 근사를 ASCII 단어 1·한글 음절 1·기타 비공백 기호 2글자당 1로 보수화하고,
+  과대 단일 유닛을 문자 경계에서 다시 분할한다. 실모델은 `max_seq_length=2048`,
+  batch size 8을 함께 쓴다.
+- `run_ingest_batch.py`, `validate_workflow_result.py`, `finalize_ingest.sh`를 설치 runtime으로
+  추가했다. item 적재와 전체 semantic finalization을 분리하고, resume fingerprint,
+  isolation baseline, 항목별 exact `ok`, 구조화 finalizer 결과를 fail-closed로 검증한다.
+- ingest `SKILL.md`는 148줄 실행 router가 됐다. kind별 변경 규칙은 ingest
+  `references/update-rules.md`로 모으고 session-ingest가 이를 참조한다.
+- BB2 코드 흐름 규칙은 installer 비관리 `project-code-verification.md` overlay가 맡는다.
+- 계획 이후 추가 승인된 installer 퇴역 파일 정리도 이번 구현에 포함했다. 미수정 관리
+  파일만 제거하며, 안전 경로 preflight·manifest 사전 준비·동일 디렉토리 backup·실패 시
+  역순 rollback을 적용한다. batch report와 입력 파일의 동일 경로·심링크 별칭도 차단한다.
+
+최종 엔진 검증은 pytest 611개와 26개 subtest, 설치 runtime unittest 59개다. BB2 실코퍼스는
+문서 7,092개, raw chunk 1,577개, vector rowid 7,092개, lint 0, eval 15/15, 기존 고립 15,
+코퍼스 guard 5/5를 확인했다. 자세한 실행 증거와 커밋은
+[최종 완료 보고서](../reports/2026-07-23-bulk-ingest-hardening-completion.md)에 있다.
 
 ## 1. 목표
 

@@ -1,5 +1,25 @@
 # 대량 적재 엔진·스킬 개선 Implementation Plan
 
+> **완료 기록 — 2026-07-23:** Task 1~12 구현과 명세·품질 검토를 완료했다. 아래 체크박스,
+> RED/GREEN 명령, 당시 절대경로는 실행 전 계획을 보존하는 역사 기록이며 현재 작업 지시로
+> 다시 실행하지 않는다.
+>
+> 실제 엔진 작업은
+> `/Users/al03040455/Downloads/codes/project-brain/.worktrees/bulk-ingest-hardening`
+> (`feat/bulk-ingest-hardening`)에서 수행해 `182e650`까지 만들고
+> `/Users/al03040455/Downloads/codes/project-brain`의 `main`에 fast-forward merge했다.
+> merge 후 Python 3.9/3.14의 빈 unittest discovery 차이를 없앤 테스트 fixture 수정
+> `f3a7053`도 반영했다. BB2는 계획의 Orca worktree 대신 사용자가 승인한
+> `/Users/al03040455/Desktop/bb2_client`의 `docs/bb2-brain-object-model`에서 작업했고,
+> `1d1faa77`, `e3e4cd30`, `6022287c` 세 커밋으로 설치본·raw guard·최종 runtime sync를
+> 완료했다.
+>
+> 최종 검증은 엔진 pytest 611 + subtests 26, 템플릿 unittest 59, BB2 lint 0,
+> eval 15/15, corpus guard 5/5, 문서 7,092·raw chunk 1,577·vector rowid 7,092다.
+> installer 퇴역 파일 정리·rollback과 batch report 입력 충돌 차단은 계획 작성 뒤 승인된
+> 추가 범위로 같은 작업에서 완료했다. 전체 결과는
+> [완료 보고서](../reports/2026-07-23-bulk-ingest-hardening-completion.md)를 본다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 대량 Brain 적재에서 발생한 이중 접두 key, raw 색인 메모리 폭증, 부분 완료 오인, 반복 색인,

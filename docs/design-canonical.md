@@ -80,7 +80,7 @@ L0 Raw            기획서 md 원문(brain 보관)·위키/세션(링크만)·�
 L1 지식 객체       18 kind + Insight(신설·2026-06-15) · 검수 사다리 · 시간축 · 코드↔기획 매핑
 L2 검색 색인       BM25 + 벡터 + RRF(+재랭킹 검토) · 한국어 형태소 · 객체+raw 커버 · 재생성 가능
 L3 회상·답변       어시스턴트가 운영 · 의도 분류 + 검색 → 내용+검수상태+근거로 답 · 후보 표시→promote
-L4 적재 경로       (1)개발 중 (2)완성 스펙 소급 (3)세션 중 "저장하자" · 추출=LLM(스킬)/도구=범용 부품
+L4 적재 경로       (1)개발 중 (2)완성 스펙 소급 (3)세션 중 "저장하자" · single/batch 완료 게이트 · 추출=LLM(스킬)/도구=범용 부품
 공유 모델          [Q3→2026-06-11 분리 실행] 엔진/데이터 2-레포: 엔진=project-brain(글로벌 도구) · 데이터=프로젝트 레포 brain/ git 추적(raw 텍스트 포함) · 색인만 로컬
 ```
 
@@ -117,7 +117,8 @@ L4 적재 경로       (1)개발 중 (2)완성 스펙 소급 (3)세션 중 "저�
   `.project-brain.json` config(cwd 상향 탐색, 명시 인자 > config > 에러).
 - **적재 조립 자동화 `build`**: 기능 적재마다 손으로 짜던 "구조화 노트→객체 묶음" 조립을
   `project-brain build`로 대체. id 파생·객체 연결·끊긴 참조 검사는 엔진이, 판정
-  (supersede·이력)은 노트에 명시(에이전트 몫).
+  (supersede·이력)은 노트에 명시(에이전트 몫). 조립 전 key는 `mapping.<context>.<key>`
+  같은 완성 ID가 아니라 context 안의 logical key만 허용한다.
 - **`build_decisions` — decisions[] 결정 조립** (2026-06-26): 위 `build`의 연장.
   `extra_objects` 탈출구로 손조립하던 `DecisionRecord`를 노트 `decisions[]` 1급 섹션으로 받아
   `DecisionRecord` + `EvidenceRef`(commit/jira/pr)로 결정론 조립(`build_decisions(notes, now)`).
@@ -125,6 +126,28 @@ L4 적재 경로       (1)개발 중 (2)완성 스펙 소급 (3)세션 중 "저�
   단일 `now`로 churn 0. 같은 분업 유지(id 파생·연결·검증은 엔진, 무엇이·왜·어디에는 노트).
   왜: 손조립 DecisionRecord가 재적재마다 타임스탬프 churn + 양방향 수동 정합이라 엔진이 흡수.
   커밋 7c2f87c·91a9a6c·37d0da9.
+
+### 3.2 L4 완료 경계와 installer 소유권 (2026-07-23)
+
+적재의 의미 판단은 계속 LLM 스킬과 사람이 맡는다. 엔진과 설치 runtime은 판단을 대신하지
+않고, 조용한 부분 성공이나 파일 유실을 막는 경계만 강제한다.
+
+- **single/batch 분리**: 단건 runner는 assemble → build → ingest를 수행하고, batch item은
+  `--defer-finalize`로 색인·평가를 미룬다. batch runner가 전체 item의 성공을 확인한 뒤
+  index rebuild·lint·eval·graph·corpus tests·예상 객체 회수를 한 번만 실행한다.
+- **완료는 구조화 결과로 판정**: workflow 최상위 `completed`는 근거가 아니다. 기대 item
+  수와 각 item의 정확한 extract/verify `ok`, batch의 빈 실패 목록, semantic finalizer의
+  구조화된 `ok=true`, 최종 `finalized=true`가 함께 있어야 닫는다.
+- **설치 소유권**: manifest는 범용 템플릿이 만든 파일만 추적한다. 프로젝트 고유 코드 검증
+  overlay처럼 manifest 밖 파일은 프로젝트 소유이며 `--force`도 건드리지 않는다.
+- **퇴역도 보존 우선**: 템플릿에서 사라진 파일은 manifest 해시와 디스크가 일치할 때만
+  설치 경로와 manifest에서 제거한다. 원본은 먼저 같은 디렉토리 backup으로 옮기고,
+  manifest 확정이 실패하면 역순 복원한다. 사용자 수정 파일, 안전하지 않은 경로,
+  일반 파일이 아닌 대상은 쓰기 전에 중단한다.
+
+구체적인 실행 계약과 검증값은
+[대량 적재 강화 설계](specs/2026-07-21-bulk-ingest-hardening-design.md)와
+[완료 보고서](reports/2026-07-23-bulk-ingest-hardening-completion.md)에 있다.
 
 ## 4. 미결 사항 — 이름 박고 미룸
 

@@ -10,9 +10,22 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-07-23 — 대량 적재 최종 안전 보강
+
+kind별 기존 객체 갱신 규칙의 단일 원본을 ingest `references/update-rules.md`로 옮기고
+session-ingest는 그 파일을 참조하게 했다. single runner는 semantic finalization 결과의
+정확한 구조와 `ok`를 확인하고, batch runner는 baseline·입력 fingerprint·resume report를
+검증하며 manifest/verify/domain 입력과 같은 report 경로 또는 심링크 별칭을 실행 전에
+거부한다. 내용이 같은 manifest 밖 스크립트를 채택할 때 실행 비트를 템플릿과 맞춘다.
+
+installer는 템플릿에서 사라진 미수정 관리 파일을 설치본과 manifest에서 퇴역시킨다.
+manifest 임시 파일을 먼저 완성하고 퇴역 원본을 같은 디렉토리 backup으로 옮긴 뒤 확정하며,
+중간 이동이나 manifest 교체 실패 시 역순 복원한다. 사용자 수정 파일·프로젝트 overlay,
+심링크·상위 경로 탈출·비일반 파일은 기존 보존/거부 경계를 유지한다.
+
 ## 2026-07-22 — 대량 적재 완료 계약 강화
 
-완성 ID를 논리 key로 넣지 못하게 막고, raw 청크의 토큰 수는 보수적으로 추정해 과대 단위를 안전하게 나누며, 개정 기획서의 `spec-v<N>.md`와 대량·이전 자료 보관용 정리된 원본 basename 규칙(충돌 시 SHA-256 접미사)을 분리했다. 여러 항목은 `run_ingest_batch.py`가 처리하고 모두 성공한 뒤 `finalize_ingest.sh`는 한 번만 수행한다. 동적 workflow 결과는 `validate_workflow_result.py`를 통과해야 다음 단계로 간다. 코드 기반 작업은 선택적 `references/project-code-verification.md`를 읽어 그 계약을 동적 workflow와 하위 작업자에게 전달한다. SKILL.md는 실행 경로 중심 146줄로 줄였다.
+완성 ID를 논리 key로 넣지 못하게 막고, raw 청크의 토큰 수는 보수적으로 추정해 과대 단위를 안전하게 나누며, 개정 기획서의 `spec-v<N>.md`와 대량·이전 자료 보관용 정리된 원본 basename 규칙(충돌 시 SHA-256 접미사)을 분리했다. 여러 항목은 `run_ingest_batch.py`가 처리하고 모두 성공한 뒤 `finalize_ingest.sh`는 한 번만 수행한다. 동적 workflow 결과는 `validate_workflow_result.py`를 통과해야 다음 단계로 간다. 코드 기반 작업은 선택적 `references/project-code-verification.md`를 읽어 그 계약을 동적 workflow와 하위 작업자에게 전달한다. SKILL.md는 실행 경로 중심 148줄로 줄였다.
 
 ## 2026-07-01 — 적대검증 진정성 문구 보강 + 안전장치 B 폐기(엔진 변경 없음)
 

@@ -20,10 +20,14 @@ promote)하고, 한국어 하이브리드 검색(FTS5 BM25 + bge-m3 벡터 + RRF
 ## 개발 루프
 
 ```bash
-uv sync --extra mecab                  # 개발 venv (최초 1회)
-.venv/bin/python -m pytest tests/ -q   # 합성 테스트 (실코퍼스 불필요)
+uv sync --extra mecab
+.venv/bin/python -m pytest -q
+.venv/bin/python -m unittest discover \
+  -s src/project_brain/templates/ingest/scripts -p 'test_*.py'
 ```
 
+- 첫 테스트는 엔진 합성 회귀, 두 번째는 설치되는 ingest runtime의 unittest다. 둘 다
+  통과해야 엔진 변경이 완료다.
 - 글로벌 도구는 이 클론의 **편집 설치**다(`uv tool install -e . --with mecab-python3`)
   — 여기서 코드를 고치면 `project-brain` 명령에 즉시 반영된다. 재설치 불필요.
   단 pyproject 의존성이 바뀌면 `uv tool install -e . --with mecab-python3 --force`.
@@ -37,18 +41,28 @@ uv sync --extra mecab                  # 개발 venv (최초 1회)
 
 ```bash
 cd <소비 프로젝트 루트>
-python3 -m unittest discover -s brain/checks -p "test_*.py"   # 실측 가드 (CLI 호출 — 빠름)
-project-brain index rebuild      # 색인 영향 변경 시 (실모델, 수십 초)
-project-brain eval               # 골든셋 7종 (실모델)
+PYTHONPATH=<engine-root>/src <engine-root>/.venv/bin/python \
+  -m unittest discover -s brain/checks -p "test_*.py"
+PYTHONPATH=<engine-root>/src <engine-root>/.venv/bin/python \
+  -m project_brain.cli index rebuild   # 색인 영향 변경 시에만
+PYTHONPATH=<engine-root>/src <engine-root>/.venv/bin/python \
+  -m project_brain.cli eval            # 현재 BB2 기준 15/15
 ```
+
+여러 checkout이 있으면 bare `project-brain`이나 시스템 `python3`가 다른 엔진을 import할 수
+있다. 검증할 checkout의 `PYTHONPATH`와 `.venv/bin/python`을 함께 명시한다. 실모델 rebuild는
+비용이 크므로 색인 입력·임베딩 계약이 바뀐 경우에만 한 번 실행하고, 문서·installer-only
+변경에서는 기존 DB로 lint/eval/graph를 확인한다.
 
 ## 주의
 
 - `Date`·경로 하드코딩 금지 — 경로는 config(.project-brain.json) 해석
   (`src/project_brain/config.py`, 명시 인자 > config > ConfigError).
 - `context_projection.py`는 context_md 빌더와 `build_reuse_projection`(재사용 projection 빌더)를 모두 담는 정본이다. projection 재사용층(별도 검색 레인)이 소비하며, cli `projection` 서브커맨드·`rebuild`·`lint`도 이 파일을 참조한다. "동결·소비자 없음"이 아님.
-- 스킬 템플릿(`src/project_brain/templates/`)을 바꾸면 install의 manifest 보존
-  동작(사용자 수정 파일 skip)을 깨지 않는지 `tests/test_installer.py`로 확인.
+- 스킬 템플릿이나 installer를 바꾸면 `tests/test_installer.py`로 사용자 수정 파일 skip,
+  프로젝트 overlay 비관리, 실행 비트 채택, 퇴역 파일 제거·rollback을 확인한다. 임시
+  대상에 두 번 설치해 두 번째 report의 `created/updated/removed/adopted/skipped`가 전부
+  빈 배열인지도 확인한다.
 - `raw/manifests/`를 손으로 편집·추가한 뒤에는 `project-brain audit`를 돌린다 — redaction_status
   enum 검증이 write 시점(save_object)뿐 아니라 lint_store 전수 재검증에도 있으나, 수기 편집은
   write 층을 건너뛰므로 audit로 태워야 잡힌다. (라우터 `_restricted_for`는 "approved"가 아니면
