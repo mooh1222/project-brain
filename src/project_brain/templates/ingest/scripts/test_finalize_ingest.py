@@ -161,6 +161,13 @@ raise SystemExit(0 if payload["ok"] else 1)
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             checks = root / "{{BRAIN_ROOT}}" / "checks"
             checks.mkdir(parents=True)
+            (checks / "test_corpus.py").write_text("""import unittest
+
+
+class CorpusCheck(unittest.TestCase):
+    def test_fixture_passes(self):
+        self.assertTrue(True)
+""", encoding="utf-8")
             config = root / "config.json"
             config.write_text(json.dumps(self.contract), encoding="utf-8")
             env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
