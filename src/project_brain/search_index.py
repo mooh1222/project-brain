@@ -176,6 +176,20 @@ def _cleanup_rebuild_temp(temp_path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _cleanup_rebuild_temp_preserving_failure(
+    temp_path: Path, primary_error: Exception,
+) -> None:
+    """정리 오류를 보조 정보로 남기되 재구축의 원래 실패를 우선한다."""
+    try:
+        _cleanup_rebuild_temp(temp_path)
+    except Exception as cleanup_error:
+        note = f"임시 색인 정리도 실패했습니다: {cleanup_error}"
+        if hasattr(primary_error, "add_note"):
+            primary_error.add_note(note)
+        else:
+            primary_error.args = (*primary_error.args, note)
+
+
 def _validate_rebuilt_index(
     db_path: Path, *, expected_documents: int, expected_vectors: int,
 ) -> None:
@@ -337,8 +351,8 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                     "새 색인 DB는 이미 교체됐지만 디렉터리 동기화에 실패했습니다. "
                     "현재 DB는 조회할 수 있으나 전원 중단 전에 `index rebuild`를 다시 실행하세요."
                 ) from exc
-        except BaseException:
-            _cleanup_rebuild_temp(temp_path)
+        except Exception as exc:
+            _cleanup_rebuild_temp_preserving_failure(temp_path, exc)
             raise
 
     return {

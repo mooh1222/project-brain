@@ -234,6 +234,52 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(self._temporary_rebuild_files(), [])
         self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
 
+    def test_post_commit_failure_keeps_durability_error_when_cleanup_also_fails(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        BrainStore.save_object(self.brain, glossary_term("g.reward", term="보상"))
+
+        from project_brain import search_index
+        with mock.patch(
+            "project_brain.search_index._fsync_directory",
+            side_effect=OSError("primary directory fsync failure"),
+        ), mock.patch(
+            "project_brain.search_index._cleanup_rebuild_temp",
+            side_effect=OSError("secondary cleanup failure"),
+        ):
+            with self.assertRaises(search_index.IndexRebuildDurabilityError) as ctx:
+                rebuild(self.brain, self.db)
+
+        self.assertTrue(ctx.exception.committed)
+        self.assertIsInstance(ctx.exception.__cause__, OSError)
+        self.assertIn("primary directory fsync failure", str(ctx.exception.__cause__))
+        self.assertTrue(any(
+            "secondary cleanup failure" in note
+            for note in getattr(ctx.exception, "__notes__", [])
+        ))
+        self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
+
+    def test_pre_commit_failure_keeps_primary_error_when_cleanup_also_fails(self):
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+        before = self.db.read_bytes()
+
+        with mock.patch(
+            "project_brain.search_index._fsync_file",
+            side_effect=OSError("primary file fsync failure"),
+        ), mock.patch(
+            "project_brain.search_index._cleanup_rebuild_temp",
+            side_effect=OSError("secondary cleanup failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "primary file fsync failure") as ctx:
+                rebuild(self.brain, self.db)
+
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertTrue(any(
+            "secondary cleanup failure" in note
+            for note in getattr(ctx.exception, "__notes__", [])
+        ))
+
     def test_rebuild_replaces_only_after_valid_temp_and_fsyncs_directory(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
         rebuild(self.brain, self.db)
