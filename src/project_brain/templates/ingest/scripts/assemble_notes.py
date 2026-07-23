@@ -52,7 +52,8 @@ def build_notes(atoms, spec):
             ak = f"{mk}--{i}"  # 키 규약(2 표본 입증)
             akeys.append(ak)
             code_anchors.append({"key": ak, "path": ca["path"], "symbol": ca["symbol"],
-                                 "manifest": spec["MANIFESTS"]["code"], "quote": ca.get("quote", "")})
+                                 "manifest": spec["MANIFESTS"]["code"], "quote": ca.get("quote", ""),
+                                 "verified_at": spec.get("VERIFIED_AT", "")})
         tkeys = []
         for t in a.get("glossary_terms", []):
             tk = t["term_key"]
@@ -61,11 +62,17 @@ def build_notes(atoms, spec):
             tkeys.append(tk)
             if tk not in glossary:
                 glossary[tk] = {"term": t["term"], "definition": t["definition"]}
+                for field in ("status", "candidate"):
+                    if field in t:
+                        glossary[tk][field] = t[field]
                 term_first_anchor[tk] = akeys[0] if akeys else None
-        mappings.append({"key": mk, "canonical_summary": a["canonical_summary"],
-                         "meaning": a["meaning"], "boundary": a["boundary"],
-                         "caveats": [f"history_coverage={spec['HISTORY_COVERAGE']}"],
-                         "glossary_keys": tkeys, "code_evref_keys": akeys})
+        mapping = {"key": mk, "canonical_summary": a["canonical_summary"],
+                   "meaning": a["meaning"], "boundary": a["boundary"],
+                   "caveats": [f"history_coverage={spec['HISTORY_COVERAGE']}"],
+                   "glossary_keys": tkeys, "code_evref_keys": akeys}
+        if "status" in a:
+            mapping["status"] = a["status"]
+        mappings.append(mapping)
     glossary_section, gids = [], []
     for tk, info in glossary.items():
         ak = term_first_anchor[tk]
@@ -76,7 +83,8 @@ def build_notes(atoms, spec):
     context = {"key": ctx, "commit": spec["COMMIT"], "repo": spec.get("REPO", "{{REPO}}"),
                "display_name": spec["DISPLAY_NAME"], "boundary_summary": spec["BOUNDARY_SUMMARY"],
                "in_scope": spec["IN_SCOPE"], "out_of_scope": spec["OUT_OF_SCOPE"],
-               "glossary_term_ids": gids}
+               "glossary_term_ids": gids,
+               "claim_status": spec.get("CLAIM_STATUS", "reviewed")}
     if spec.get("NOW"):
         context["now"] = spec["NOW"]  # CLI(project-brain build)가 context.now를 읽어 build()의 now 인자로 넘김 → churn 0
     # 도메인 근거(code/commit/jira/pr)는 내부 공유 승인 성격이라 redaction_status="approved"를 명시한다.
@@ -85,6 +93,8 @@ def build_notes(atoms, spec):
     sources = [{"id": mid, "source_type": _SOURCE_TYPE.get(kind, "code_search"),
                 "title": f"{spec['DISPLAY_NAME']} {kind} 소스",
                 "locator": f"{spec.get('REPO','{{REPO}}')}@{spec['COMMIT']}",
+                "acl": spec.get("SOURCE_ACL", []),
+                "captured_at": spec.get("CAPTURED_AT", ""),
                 "redaction_status": "approved"}
                for kind, mid in spec["MANIFESTS"].items()]
     return {"context": context, "sources": sources, "code_anchors": code_anchors,

@@ -30,14 +30,15 @@ def derive_id(kind, ctx, key):
 
 
 def build_glossary_terms(notes, now):
-    """노트의 glossary[] 항목을 reviewed GlossaryTerm 객체로 변환한다."""
+    """노트의 glossary[] 항목을 GlossaryTerm 객체로 변환한다."""
     ctx = notes["context"]["key"]
+    claim_status = notes["context"].get("claim_status", "reviewed")
     out = []
     for g in notes.get("glossary", []):
         obj = {
             "id": derive_id("GlossaryTerm", ctx, g["key"]),
             "kind": "GlossaryTerm",
-            "status": "reviewed",
+            "status": g.get("status", claim_status),
             "truth_role": "domain",
             "title": g["key"],
             "context_id": f"context.{ctx}",
@@ -47,6 +48,8 @@ def build_glossary_terms(notes, now):
             "synonyms": g.get("synonyms", []),
             "aliases": g.get("aliases", []),
         }
+        if "candidate" in g:
+            obj["candidate"] = g["candidate"]
         out.append(base(obj, tags=[ctx], created_at=now, updated_at=now, poc_priority="P2"))
     return out
 
@@ -58,13 +61,13 @@ def build_code_evidence(notes, now):
     out = []
     for a in notes.get("code_anchors", []):
         key = a["key"]
-        quote = a.get("quote") or a["symbol"]
+        quote = a["quote"]
         loc = {
             "id": derive_id("CodeLocator", ctx, key),
             "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
             "title": quote[:120], "repo": repo, "path": a["path"], "symbol": a["symbol"],
             "locator_source": a.get("locator_source", "rg"),
-            "commit_sha": commit, "verified_at": now,
+            "commit_sha": commit, "verified_quote": quote, "verified_at": a["verified_at"],
         }
         ev = {
             "id": derive_id("EvidenceRef", ctx, key),
@@ -82,6 +85,7 @@ def build_mappings(notes, refs_map, now):
     """mappings[]를 DomainMapping으로. 신규 용어(glossary_keys) + 기존 용어(glossary_term_refs)
     를 합쳐 glossary_term_ids로, code_evref_keys를 locator/evref로 연결한다."""
     ctx = notes["context"]["key"]
+    claim_status = notes["context"].get("claim_status", "reviewed")
     out = []
     for m in notes.get("mappings", []):
         gids = [derive_id("GlossaryTerm", ctx, k) for k in m.get("glossary_keys", [])]
@@ -90,7 +94,7 @@ def build_mappings(notes, refs_map, now):
         evref_ids = [derive_id("EvidenceRef", ctx, k) for k in m.get("code_evref_keys", [])]
         obj = {
             "id": derive_id("DomainMapping", ctx, m["key"]),
-            "kind": "DomainMapping", "status": "reviewed", "truth_role": "domain",
+            "kind": "DomainMapping", "status": m.get("status", claim_status), "truth_role": "domain",
             "title": m["canonical_summary"][:120], "context_id": f"context.{ctx}",
             "mapping_key": m["key"], "canonical_summary": m["canonical_summary"],
             "meaning": m["meaning"], "boundary": m["boundary"],
@@ -121,6 +125,7 @@ def build_decisions(notes, now):
     """
     cx = notes["context"]
     ctx, repo = cx["key"], cx.get("repo", "demoapp")
+    claim_status = cx.get("claim_status", "reviewed")
     out, made = [], set()
 
     def ensure_evref(item):
@@ -143,7 +148,7 @@ def build_decisions(notes, now):
         ref_ids = [ensure_evref(it) for it in d.get("evidence", [])]
         dec = {
             "id": derive_id("DecisionRecord", ctx, d["key"]),
-            "kind": "DecisionRecord", "status": "reviewed", "truth_role": "event",
+            "kind": "DecisionRecord", "status": d.get("status", claim_status), "truth_role": "event",
             "title": d["title"], "decision_type": d["decision_type"],
             "summary": d["summary"], "decision": d["decision"],
             "spec_reflected": d.get("spec_reflected", "not_applicable"),
@@ -164,10 +169,10 @@ def build_manifests(notes, now):
         obj = {
             "id": s["id"], "kind": "EvidenceManifest", "status": "reviewed",
             "truth_role": "source", "title": s["title"], "source_type": s["source_type"],
-            "locator": s["locator"], "captured_at": s.get("captured_at", now),
+            "locator": s["locator"], "captured_at": s["captured_at"],
             "captured_by": s.get("captured_by", "agent"),
             "sensitivity": s.get("sensitivity", "internal"),
-            "acl": s.get("acl", ["demo-team"]),
+            "acl": s["acl"],
         }
         # redaction_status는 기본값을 채우지 않는다 — 미지정이면 키 생략 → ingest의
         # schema 필수필드 검사가 시끄럽게 거부한다. 옛 기본값 "none"은 라우터
@@ -308,13 +313,13 @@ _DICT_SECTIONS = {"context", "refs"}
 _UPDATE_KEYS = {"id", "expected_updated_at", "set", "union", "evidence_unchanged"}
 _LOGICAL_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _ANCHOR_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:--[0-9]+)?$")
-# 섹션 항목별 필수 필드(중첩 검증). 변환 함수가 default 채우는 필드는 여기 안 넣는다.
+# 섹션 항목별 필수 필드(중첩 검증). 출처·검증 시각은 semantic assembly에서 명시한다.
 _ITEM_REQUIRED = {
-    # glossary는 항상 reviewed로 만들어지므로 evidence_refs 필수(2층 schema가 막는 걸 1층에서 친절히).
+    # glossary는 claim_status가 reviewed일 때 evidence_refs가 필수(2층 schema가 막는 걸 1층에서 친절히).
     "glossary": ("key", "term", "definition", "evidence_refs"),
-    "code_anchors": ("key", "path", "symbol", "manifest"),
+    "code_anchors": ("key", "path", "symbol", "manifest", "quote", "verified_at"),
     "mappings": ("key", "canonical_summary", "meaning", "boundary"),
-    "sources": ("id", "source_type", "title", "locator"),
+    "sources": ("id", "source_type", "title", "locator", "captured_at", "acl"),
     "decisions": ("key", "decision_type", "title", "summary", "decision"),
 }
 
@@ -396,12 +401,44 @@ def validate_notes(notes):
                     continue
                 for j, key in enumerate(affects):
                     _validate_logical_key(errors, f"decisions[{i}].affects[{j}]", key)
-    # glossary는 reviewed로 생성되므로 evidence_refs가 비어 있어도 안 됨(2층 schema:186을 1층에서 친절히).
-    # _ITEM_REQUIRED는 키 존재만 보므로 빈 리스트는 여기서 별도로 잡는다.
+    # semantic assembly의 출처·앵커는 값까지 명시해야 한다. 기본 ACL·현재 시각·심볼 폴백은
+    # 출처를 흐리므로 쓰지 않는다. quote는 원문 보존 대상이라 strip 같은 정규화를 하지 않는다.
+    for i, source in enumerate(notes.get("sources") if isinstance(notes.get("sources"), list) else []):
+        if not isinstance(source, dict):
+            continue
+        captured_at = source.get("captured_at")
+        acl = source.get("acl")
+        if not isinstance(captured_at, str) or not captured_at.strip():
+            errors.append(f"노트: sources[{i}].captured_at은 비어 있지 않은 값 필수")
+        if (not isinstance(acl, list) or not acl
+                or any(not isinstance(entry, str) or not entry.strip() for entry in acl)):
+            errors.append(f"노트: sources[{i}].acl은 비어 있지 않은 문자열 목록 필수")
+    for i, anchor in enumerate(notes.get("code_anchors") if isinstance(notes.get("code_anchors"), list) else []):
+        if not isinstance(anchor, dict):
+            continue
+        if not isinstance(anchor.get("quote"), str) or anchor.get("quote") == "":
+            errors.append(f"노트: code_anchors[{i}].quote는 비어 있지 않은 원문 필수")
+        verified_at = anchor.get("verified_at")
+        if not isinstance(verified_at, str) or not verified_at.strip():
+            errors.append(f"노트: code_anchors[{i}].verified_at은 비어 있지 않은 값 필수")
+    # glossary는 reviewed일 때 evidence_refs가 비어 있어도 안 됨(2층 schema를 1층에서 친절히).
+    # candidate GlossaryTerm은 현재 schema의 candidate_state·candidate_source 계약을 그대로 쓴다.
+    # _ITEM_REQUIRED는 키 존재만 보므로 빈 리스트와 후보 메타데이터는 여기서 별도로 잡는다.
     glossary = notes.get("glossary")
     for i, g in enumerate(glossary if isinstance(glossary, list) else []):
-        if isinstance(g, dict) and "evidence_refs" in g and not g["evidence_refs"]:
+        if not isinstance(g, dict):
+            continue
+        status = g.get("status", cx.get("claim_status", "reviewed") if isinstance(cx, dict) else "reviewed")
+        if status == "reviewed" and "evidence_refs" in g and not g["evidence_refs"]:
             errors.append(f"노트: glossary[{i}] evidence_refs가 비어 있음 (reviewed 용어는 근거 필수)")
+        if status == "candidate":
+            candidate = g.get("candidate")
+            if not isinstance(candidate, dict):
+                errors.append(f"노트: glossary[{i}] candidate status에는 candidate metadata 필수")
+            else:
+                for field in ("candidate_state", "candidate_source"):
+                    if field not in candidate:
+                        errors.append(f"노트: glossary[{i}].candidate.{field} 필수")
     # updates: 연산 키 화이트리스트(remove·조건·계산 차단) + 타입
     updates = notes.get("updates")
     for up in updates if isinstance(updates, list) else []:

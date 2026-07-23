@@ -29,6 +29,7 @@ class BuildCodeEvidenceTest(unittest.TestCase):
             "code_anchors": [{"key": "hit-hook", "path": "TrapObject.h",
                               "symbol": "TrapObject::_doTrapOnPop", "line_start": 206,
                               "line_end": 206, "quote": "virtual void _doTrapOnPop(...){};",
+                              "verified_at": NOW,
                               "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
@@ -39,6 +40,8 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(loc["path"], "TrapObject.h")
         self.assertEqual(loc["commit_sha"], "abc123")
         self.assertEqual(loc["repo"], "demoapp")
+        self.assertEqual(loc["verified_quote"], "virtual void _doTrapOnPop(...){};")
+        self.assertEqual(loc["verified_at"], NOW)
         self.assertNotIn("line_start", loc)
         self.assertNotIn("line_end", loc)
         self.assertEqual(ev["id"], "evref.ctx.hit-hook")
@@ -50,7 +53,8 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         notes = {
             "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
             "code_anchors": [{"key": "no-line", "path": "Foo.cpp", "symbol": "Foo::bar",
-                              "quote": "void bar();", "manifest": "manifest.ctx.code-v2"}],
+                              "quote": "void bar();", "verified_at": NOW,
+                              "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
         kinds = {o["kind"]: o for o in objs}
@@ -115,7 +119,8 @@ class BuildManifestsContextTest(unittest.TestCase):
     def test_source_becomes_manifest(self):
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "sources": [{"id": "manifest.ctx.s", "source_type": "session",
-                              "title": "T", "locator": "...", "captured_by": "user-statement"}]}
+                              "title": "T", "locator": "...", "captured_by": "user-statement",
+                              "captured_at": NOW, "acl": ["team"]}]}
         objs = build_manifests(notes, NOW)
         self.assertEqual(len(objs), 1)
         m = objs[0]
@@ -123,12 +128,14 @@ class BuildManifestsContextTest(unittest.TestCase):
         self.assertEqual(m["kind"], "EvidenceManifest")
         self.assertEqual(m["truth_role"], "source")
         self.assertNotIn("redaction_status", m)  # 미지정은 키 생략 → ingest에서 schema가 거부
-        self.assertEqual(m["acl"], ["demo-team"])          # default
+        self.assertEqual(m["acl"], ["team"])
+        self.assertEqual(m["captured_at"], NOW)
 
     def test_source_redaction_status_passes_through(self):
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "sources": [{"id": "manifest.ctx.s", "source_type": "session",
                               "title": "T", "locator": "...", "captured_by": "user-statement",
+                              "captured_at": NOW, "acl": ["team"],
                               "redaction_status": "approved"}]}
         m = build_manifests(notes, NOW)[0]
         self.assertEqual(m["redaction_status"], "approved")
@@ -184,6 +191,101 @@ class BuildGlossaryTest(unittest.TestCase):
         objs = build_glossary_terms(notes, NOW)
         self.assertEqual(objs[0]["synonyms"], [])
         self.assertEqual(objs[0]["aliases"], [])
+
+
+class AssemblyClaimContractTest(unittest.TestCase):
+    def _notes(self, *, claim_status="reviewed"):
+        return {
+            "context": {"key": "ctx", "commit": "abc", "claim_status": claim_status,
+                        "display_name": "Context", "boundary_summary": "boundary"},
+            "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
+                         "title": "code", "locator": "repo@abc", "captured_at": NOW,
+                         "acl": ["team"], "redaction_status": "approved"}],
+            "code_anchors": [{"key": "anchor", "path": "a.cpp", "symbol": "run",
+                              "manifest": "manifest.ctx.code", "quote": "\tfirst();\n\tsecond();",
+                              "verified_at": NOW}],
+            "glossary": [{"key": "term", "term": "Term", "definition": "definition",
+                          "evidence_refs": ["evref.ctx.anchor"]}],
+            "mappings": [{"key": "mapping", "canonical_summary": "summary",
+                          "meaning": "meaning", "boundary": "boundary",
+                          "glossary_keys": ["term"], "code_evref_keys": ["anchor"]}],
+            "decisions": [{"key": "decision", "decision_type": "qa_issue", "title": "title",
+                           "summary": "summary", "decision": "decision", "evidence": [],
+                           "affects": ["mapping"]}],
+        }
+
+    def test_context_claim_status_defaults_to_reviewed(self):
+        notes = self._notes()
+        del notes["context"]["claim_status"]
+        result = build(notes, BrainStore({}), NOW)
+        self.assertEqual(result["errors"], [])
+        claims = [o for o in result["objects"]
+                  if o["kind"] in {"GlossaryTerm", "DomainMapping", "DecisionRecord"}]
+        self.assertEqual({o["status"] for o in claims}, {"reviewed"})
+
+    def test_context_candidate_marks_claims_but_not_supporting_evidence(self):
+        notes = self._notes(claim_status="candidate")
+        notes["glossary"][0]["candidate"] = {
+            "candidate_state": "ready_for_review", "candidate_source": "code",
+        }
+        result = build(notes, BrainStore({}), NOW)
+        self.assertEqual(result["errors"], [])
+        by_id = {o["id"]: o for o in result["objects"]}
+        self.assertEqual(by_id["g.ctx.term"]["status"], "candidate")
+        self.assertEqual(by_id["mapping.ctx.mapping"]["status"], "candidate")
+        self.assertEqual(by_id["decision.ctx.decision"]["status"], "candidate")
+        for oid in ("manifest.ctx.code", "code.ctx.anchor", "evref.ctx.anchor"):
+            self.assertEqual(by_id[oid]["status"], "reviewed")
+
+    def test_item_status_overrides_context_for_each_claim_kind(self):
+        notes = self._notes(claim_status="candidate")
+        notes["glossary"][0].update(status="reviewed")
+        notes["mappings"][0].update(status="reviewed")
+        notes["decisions"][0].update(status="reviewed")
+        result = build(notes, BrainStore({}), NOW)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(
+            {o["id"]: o["status"] for o in result["objects"]
+             if o["kind"] in {"GlossaryTerm", "DomainMapping", "DecisionRecord"}},
+            {"g.ctx.term": "reviewed", "mapping.ctx.mapping": "reviewed",
+             "decision.ctx.decision": "reviewed"},
+        )
+
+    def test_candidate_glossary_requires_complete_established_metadata(self):
+        notes = self._notes(claim_status="candidate")
+        notes["glossary"][0]["candidate"] = {"candidate_state": "ready_for_review"}
+        result = build(notes, BrainStore({}), NOW)
+        self.assertTrue(any("candidate_source" in error for error in result["errors"]))
+
+    def test_candidate_glossary_accepts_complete_established_metadata(self):
+        notes = self._notes(claim_status="candidate")
+        notes["glossary"][0]["candidate"] = {
+            "candidate_state": "ready_for_review", "candidate_source": "code",
+        }
+        result = build(notes, BrainStore({}), NOW)
+        self.assertEqual(result["errors"], [])
+
+    def test_source_acl_and_capture_time_are_required_before_build(self):
+        notes = self._notes()
+        notes["sources"][0]["acl"] = []
+        notes["sources"][0]["captured_at"] = ""
+        errors = validate_notes(notes)
+        self.assertTrue(any("acl" in error and "비어" in error for error in errors))
+        self.assertTrue(any("captured_at" in error and "비어" in error for error in errors))
+
+    def test_code_anchor_quote_and_verification_time_are_required_before_build(self):
+        notes = self._notes()
+        notes["code_anchors"][0]["quote"] = ""
+        notes["code_anchors"][0]["verified_at"] = ""
+        errors = validate_notes(notes)
+        self.assertTrue(any("quote" in error and "비어" in error for error in errors))
+        self.assertTrue(any("verified_at" in error and "비어" in error for error in errors))
+
+    def test_locator_preserves_exact_multiline_tab_verified_quote(self):
+        result = build(self._notes(), BrainStore({}), NOW)
+        self.assertEqual(result["errors"], [])
+        locator = next(o for o in result["objects"] if o["kind"] == "CodeLocator")
+        self.assertEqual(locator["verified_quote"], "\tfirst();\n\tsecond();")
 
 
 T0 = "2026-06-01T00:00:00Z"
@@ -539,7 +641,8 @@ class ValidateNotesTest(unittest.TestCase):
         errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
                                  "code_anchors": [{"key": "k", "path": "Foo.cpp",
                                                    "symbol": "Foo::bar",
-                                                   "manifest": "manifest.c.code"}]})
+                                                   "manifest": "manifest.c.code", "quote": "void bar();",
+                                                   "verified_at": NOW}]})
         self.assertEqual(errors, [])
 
 
@@ -549,10 +652,10 @@ class BuildIntegrationTest(unittest.TestCase):
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
                          "title": "코드", "locator": "...", "captured_by": "agent",
-                         "redaction_status": "approved"}],
+                         "captured_at": NOW, "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
-                              "manifest": "manifest.ctx.code-v2"}],
+                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
@@ -572,10 +675,10 @@ class BuildIntegrationTest(unittest.TestCase):
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
                          "title": "코드", "locator": "...", "captured_by": "agent",
-                         "redaction_status": "approved"}],
+                         "captured_at": NOW, "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
-                              "manifest": "manifest.ctx.code-v2"}],
+                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
@@ -740,9 +843,11 @@ class BuildWithDecisionsTest(unittest.TestCase):
                         "in_scope": ["x"], "out_of_scope": ["y"], "glossary_term_ids": []},
             "sources": [
                 {"id": "manifest.ctx.code", "source_type": "code_search",
-                 "title": "코드", "locator": "repo@dev", "redaction_status": "approved"},
+                 "title": "코드", "locator": "repo@dev", "captured_at": NOW, "acl": ["team"],
+                 "redaction_status": "approved"},
                 {"id": "manifest.ctx.commit", "source_type": "commit",
-                 "title": "커밋 이력", "locator": "bb2_client@develop",
+                 "title": "커밋 이력", "locator": "bb2_client@develop", "captured_at": NOW,
+                 "acl": ["team"],
                  "redaction_status": "approved"},
             ],
             # 매핑이 reviewed로 만들어지므로 evidence_refs가 비면 안 됨(schema.py:217).
@@ -750,7 +855,7 @@ class BuildWithDecisionsTest(unittest.TestCase):
             "code_anchors": [
                 {"key": "filter-fn", "path": "BallGenerator.cpp",
                  "symbol": "_getEnableGenerateType", "manifest": "manifest.ctx.code",
-                 "quote": "// 셀렉 후보 자격 판정"},
+                 "quote": "// 셀렉 후보 자격 판정", "verified_at": NOW},
             ],
             "mappings": [
                 {"key": "enable-filter", "canonical_summary": "셀렉 후보 필터",
