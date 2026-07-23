@@ -166,7 +166,8 @@ class TestStaleAdvisory(unittest.TestCase):
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
         self.assertTrue(gm["mappings"][0]["stale_advisory"]["unmerged_anchor"])
         self.assertIn(
-            "Verified code anchor is not yet reachable from the configured default branch.",
+            "Code anchor is not reachable from the configured default branch; "
+            "check whether it is unmerged or history was rewritten.",
             answer["warnings"],
         )
         self.assertFalse(any("코드 변경 감지" in w for w in answer["warnings"]))
@@ -179,13 +180,16 @@ class TestStaleAdvisory(unittest.TestCase):
                         "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
         }
         answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
-        verified = "Verified code anchor is not yet reachable from the configured default branch."
+        unreachable = (
+            "Code anchor is not reachable from the configured default branch; "
+            "check whether it is unmerged or history was rewritten."
+        )
         unverifiable = (
             "Code anchor reachability could not be verified against the configured default branch."
         )
-        branch_warnings = [w for w in answer["warnings"] if w in {verified, unverifiable}]
-        self.assertEqual(branch_warnings, [verified, unverifiable])
-        self.assertEqual(branch_warnings.count(verified), 1)
+        branch_warnings = [w for w in answer["warnings"] if w in {unreachable, unverifiable}]
+        self.assertEqual(branch_warnings, [unreachable, unverifiable])
+        self.assertEqual(branch_warnings.count(unreachable), 1)
         self.assertEqual(branch_warnings.count(unverifiable), 1)
         self.assertTrue(any("코드 변경 감지" in w for w in answer["warnings"]))
 

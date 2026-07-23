@@ -328,7 +328,8 @@ class QueryRouter:
                 }
                 if "not_ancestor" in unmerged_reasons:
                     warnings.append(
-                        "Verified code anchor is not yet reachable from the configured default branch."
+                        "Code anchor is not reachable from the configured default branch; "
+                        "check whether it is unmerged or history was rewritten."
                     )
                 if "anchor_unverifiable" in unmerged_reasons:
                     warnings.append(

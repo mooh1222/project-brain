@@ -126,7 +126,11 @@ class TestCli(unittest.TestCase):
         mapping = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")["mappings"][0]
         self.assertFalse(mapping["stale_advisory"]["code_changed"])
         self.assertTrue(mapping["stale_advisory"]["unmerged_anchor"])
-        self.assertTrue(any("not yet reachable" in w for w in answer["warnings"]))
+        self.assertIn(
+            "Code anchor is not reachable from the configured default branch; "
+            "check whether it is unmerged or history was rewritten.",
+            answer["warnings"],
+        )
         self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
 
     def test_cli_query_surfaces_unverifiable_anchor_without_changing_status(self):

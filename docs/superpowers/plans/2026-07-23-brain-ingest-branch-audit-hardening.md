@@ -266,7 +266,7 @@ This plan records the three-party agreement between the implementing agent, the 
   Keep the existing code-change warning. Add a separate branch-scope message such as:
 
   ```text
-  Verified code anchor is not yet reachable from the configured default branch.
+  Code anchor is not reachable from the configured default branch; check whether it is unmerged or history was rewritten.
   ```
 
   Query and show must attach both fields without changing the stored object's `status`.
