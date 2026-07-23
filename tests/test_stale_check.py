@@ -569,6 +569,26 @@ class StaleSetCacheTest(unittest.TestCase):
         self.assertEqual(adv["m.both"]["target_head"], "TARGET")
         self.assertEqual(adv["m.both"]["computed_at"], "2026-07-23T12:00:00+09:00")
 
+    def test_build_stale_set_keeps_nonblocking_unmerged_mapping_advisory(self):
+        from project_brain.stale_check import advisories_by_mapping, build_stale_set
+        report = {
+            "target_head": "TARGET",
+            "candidates": [],
+            "unmerged_anchors": [{
+                "locator_id": "code.candidate", "path": "a/Candidate.cpp",
+                "from_commit": "WORK", "reason": "not_ancestor",
+                "nonblocking_affected_mapping_ids": ["m.candidate"],
+            }],
+        }
+        stale_set = build_stale_set(report, now="t")
+        self.assertEqual(stale_set["stale_mapping_ids"], [])
+        self.assertEqual(advisories_by_mapping(stale_set)["m.candidate"], {
+            "code_changed": False, "unmerged_anchor": True,
+            "unmerged_reasons": ["not_ancestor"], "locator_ids": ["code.candidate"],
+            "from_commits": ["WORK"], "change_types": [], "paths": ["a/Candidate.cpp"],
+            "target_head": "TARGET", "computed_at": "t",
+        })
+
     def test_write_then_load_roundtrip(self):
         from project_brain.stale_check import write_stale_set, load_stale_set, stale_set_path
         self.assertIsNone(load_stale_set(self.root))  # 없으면 None

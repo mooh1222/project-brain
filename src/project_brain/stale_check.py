@@ -227,7 +227,9 @@ def build_stale_set(report, *, now):
             d["change_types"].add(sl["change_type"])
             d["paths"].add(sl["path"])
     for anchor in report.get("unmerged_anchors") or []:
-        for mapping_id in anchor.get("blocking_affected_mapping_ids") or []:
+        mapping_ids = set(anchor.get("blocking_affected_mapping_ids") or [])
+        mapping_ids.update(anchor.get("nonblocking_affected_mapping_ids") or [])
+        for mapping_id in sorted(mapping_ids):
             d = entry(mapping_id)
             d["unmerged_anchor"] = True
             d["unmerged_reasons"].add(anchor["reason"])
