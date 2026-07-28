@@ -76,7 +76,10 @@ def _resolve(explicit, key: str, what: str, start=None) -> Path:
 
 
 def resolve_brain_root(explicit=None, start=None) -> Path:
-    return _resolve(explicit, "brain_root", "brain 코퍼스", start=start)
+    brain_root = _resolve(explicit, "brain_root", "brain 코퍼스", start=start)
+    if not brain_root.is_absolute():
+        raise ConfigError("brain 코퍼스 경로는 absolute path여야 한다.")
+    return brain_root
 
 
 def resolve_db_path(explicit=None, start=None) -> Path:

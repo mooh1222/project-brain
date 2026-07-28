@@ -158,6 +158,10 @@ class ResolveTest(unittest.TestCase):
                     fn(None, start=Path(td))
                 self.assertIn(CONFIG_FILENAME, str(ctx.exception))
 
+    def test_explicit_brain_root_must_be_absolute(self):
+        with self.assertRaises(ConfigError):
+            resolve_brain_root("relative/brain")
+
 
 if __name__ == "__main__":
     unittest.main()
