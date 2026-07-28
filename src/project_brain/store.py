@@ -28,28 +28,44 @@ class BrainStore:
 
     @classmethod
     def load(cls, brain_root: Path) -> "BrainStore":
+        from project_brain.corpus_io import (
+            assert_corpus_readable,
+            corpus_lock,
+        )
+
+        with corpus_lock(brain_root, exclusive=False):
+            assert_corpus_readable(brain_root)
+            return cls.load_unlocked(brain_root)
+
+    @classmethod
+    def load_unlocked(cls, brain_root: Path) -> "BrainStore":
+        """Load while the caller already owns the appropriate corpus lock."""
+        from project_brain.corpus_io import (
+            CorpusIOError,
+            read_tracked_json_files,
+        )
+
         # 객체 디렉토리(_KIND_DIR)만 스캔한다 — brain root에는 비객체 JSON
         # (eval_scenarios.json, raw/sources/ 자료 등)이 같이 살 수 있고, 객체는
         # 항상 save_object가 _KIND_DIR 아래에 쓰므로 스캔도 같은 경계를 따른다.
-        paths: list[Path] = []
         try:
-            for rel in set(cls._KIND_DIR.values()):
-                d = Path(brain_root) / rel
-                if d.is_dir():
-                    paths.extend(d.rglob("*.json"))
-        except OSError as exc:
+            files = read_tracked_json_files(
+                brain_root,
+                set(cls._KIND_DIR.values()),
+            )
+        except (CorpusIOError, OSError) as exc:
             root = Path(brain_root)
             raise StoreLoadError(
                 "object_scan_failed",
                 f"could not scan tracked object directories: {exc}",
-                paths=(root,),
+                paths=getattr(exc, "paths", ()) or (root,),
             ) from exc
         objects: dict[str, dict[str, Any]] = {}
         object_paths: dict[str, Path] = {}
-        for path in sorted(paths):
+        for path, data in files:
             try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
+                text = data.decode("utf-8")
+            except UnicodeError as exc:
                 raise StoreLoadError(
                     "object_read_failed",
                     f"could not read tracked object JSON {path}: {exc}",

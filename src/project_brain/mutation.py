@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -13,6 +13,12 @@ from pathlib import Path, PurePosixPath
 from project_brain.code_verify import (
     CodeVerificationError,
     verify_locator_for_write,
+)
+from project_brain.corpus_io import (
+    CorpusIOError,
+    apply_transaction,
+    corpus_lock,
+    recover_unfinished_transaction_unlocked,
 )
 from project_brain.hash_utils import stable_json
 from project_brain.lint import LintProblem, lint_store_report
@@ -93,11 +99,75 @@ class MutationPlanResult:
 
 
 class MutationService:
+    def apply(
+        self,
+        objects: Sequence[dict],
+        *,
+        request: MutationRequest,
+        failure_injector: Callable[[str], None] | None = None,
+    ) -> MutationPlanResult:
+        inputs, request_error = _validate_request_shape(objects, request)
+        if request_error is not None:
+            return request_error
+        assert inputs is not None
+
+        with corpus_lock(request.brain_root, exclusive=True):
+            recover_unfinished_transaction_unlocked(request.brain_root)
+            try:
+                existing_store = BrainStore.load_unlocked(request.brain_root)
+            except StoreLoadError as exc:
+                if isinstance(exc.__cause__, CorpusIOError):
+                    raise exc.__cause__
+                return _store_load_failure(exc)
+            result = self.plan(
+                inputs,
+                request=request,
+                _existing_store=existing_store,
+            )
+            if not result.ok or result.manifest is None:
+                return result
+            writable_actions = (
+                result.manifest.creates + result.manifest.updates
+            )
+            actions = (
+                writable_actions
+                + result.manifest.deletes
+                + result.manifest.renames
+            )
+            if not actions:
+                return result
+            after_paths = {
+                str(action["path"])
+                for action in writable_actions
+            }
+            after_paths.update(
+                str(action["new_path"])
+                for action in result.manifest.renames
+            )
+            after_files = {
+                relative_path: BrainStore.object_bytes(obj)
+                for obj in result.after_objects
+                if (
+                    relative_path := BrainStore.object_path(
+                        request.brain_root,
+                        obj,
+                    ).relative_to(request.brain_root).as_posix()
+                ) in after_paths
+            }
+            apply_transaction(
+                request.brain_root,
+                manifest=asdict(result.manifest),
+                after_files=after_files,
+                failure_injector=failure_injector,
+            )
+            return result
+
     def plan(
         self,
         objects: Sequence[dict],
         *,
         request: MutationRequest,
+        _existing_store: BrainStore | None = None,
     ) -> MutationPlanResult:
         inputs, request_error = _validate_request_shape(objects, request)
         if request_error is not None:
@@ -147,15 +217,13 @@ class MutationService:
             for obj in inputs
             if isinstance(obj.get("id"), str)
         }
-        try:
-            existing_store = BrainStore.load(request.brain_root)
-        except StoreLoadError as exc:
-            error_code = (
-                exc.code
-                if exc.code == "duplicate_existing_object_id"
-                else "corpus_invalid"
-            )
-            return _failure(error_code, f"{exc.code}: {exc.detail}")
+        if _existing_store is None:
+            try:
+                existing_store = BrainStore.load(request.brain_root)
+            except StoreLoadError as exc:
+                return _store_load_failure(exc)
+        else:
+            existing_store = _existing_store
         existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
 
         # 3) schema와 enum.
@@ -386,6 +454,15 @@ class MutationService:
 
 def _failure(code: str, detail: str) -> MutationPlanResult:
     return MutationPlanResult(ok=False, error_code=code, detail=detail)
+
+
+def _store_load_failure(exc: StoreLoadError) -> MutationPlanResult:
+    error_code = (
+        exc.code
+        if exc.code == "duplicate_existing_object_id"
+        else "corpus_invalid"
+    )
+    return _failure(error_code, f"{exc.code}: {exc.detail}")
 
 
 def _validate_request_shape(

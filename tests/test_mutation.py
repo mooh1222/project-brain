@@ -788,3 +788,18 @@ def test_corrupt_tracked_object_json_returns_corpus_invalid(tmp_path):
     assert result.error_code == "corpus_invalid"
     assert result.manifest is None
     assert "broken.json" in result.detail
+
+
+def test_apply_corrupt_tracked_object_json_returns_corpus_invalid(tmp_path):
+    brain_root = tmp_path / "brain"
+    broken = brain_root / "objects" / "domain" / "broken.json"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("{", encoding="utf-8")
+    request = _request(brain_root, ())
+
+    result = MutationService().apply((), request=request)
+
+    assert result.error_code == "corpus_invalid"
+    assert not (brain_root / ".brain-local" / "transactions").exists()
+    assert result.manifest is None
+    assert "broken.json" in result.detail
