@@ -17,6 +17,7 @@ from unittest import mock
 
 from project_brain import cli
 from project_brain.cli import _run_build
+from project_brain.id_grammar import format_id
 from project_brain.store import BrainStore
 from tests.test_ingest import (
     candidate_term,
@@ -93,8 +94,13 @@ class TestCli(unittest.TestCase):
                                    glossary_term_ids=["g.boost"])):
             BrainStore.save_object(self.root, obj)
         write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.boost"],
-            "detail": {"m.boost": {"change_types": ["M"], "paths": ["a/X.cpp"]}}})
+            "target_head": "T", "computed_at": "t",
+            "stale_mapping_ids": ["mapping.neutral.boost"],
+            "detail": {
+                "mapping.neutral.boost": {
+                    "change_types": ["M"], "paths": ["a/X.cpp"]
+                }
+            }})
         argv = ["--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -102,7 +108,10 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         answer = json.loads(out.getvalue())
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        m = next(
+            x for x in gm["mappings"]
+            if x["id"] == "mapping.neutral.boost"
+        )
         self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
 
     def test_cli_query_surfaces_unmerged_advisory_without_changing_status(self):
@@ -114,9 +123,11 @@ class TestCli(unittest.TestCase):
             BrainStore.save_object(self.root, obj)
         write_stale_set(self.root, {
             "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
-            "detail": {"m.boost": {"code_changed": False, "unmerged_anchor": True,
+            "detail": {"mapping.neutral.boost": {
+                                   "code_changed": False, "unmerged_anchor": True,
                                    "unmerged_reasons": ["not_ancestor"],
-                                   "locator_ids": ["code.work"], "from_commits": ["WORK"],
+                                   "locator_ids": ["code.neutral.work"],
+                                   "from_commits": ["WORK"],
                                    "change_types": [], "paths": ["a/Work.cpp"]}}})
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
@@ -131,7 +142,10 @@ class TestCli(unittest.TestCase):
             "check whether it is unmerged or history was rewritten.",
             answer["warnings"],
         )
-        self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
+        self.assertEqual(
+            BrainStore.load(self.root).get("mapping.neutral.boost")["status"],
+            "reviewed",
+        )
 
     def test_cli_query_surfaces_unverifiable_anchor_without_changing_status(self):
         from project_brain.stale_check import write_stale_set
@@ -142,9 +156,11 @@ class TestCli(unittest.TestCase):
             BrainStore.save_object(self.root, obj)
         write_stale_set(self.root, {
             "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
-            "detail": {"m.boost": {"code_changed": False, "unmerged_anchor": True,
+            "detail": {"mapping.neutral.boost": {
+                                   "code_changed": False, "unmerged_anchor": True,
                                    "unmerged_reasons": ["anchor_unverifiable"],
-                                   "locator_ids": ["code.unknown"], "from_commits": ["UNKNOWN"],
+                                   "locator_ids": ["code.neutral.unknown"],
+                                   "from_commits": ["UNKNOWN"],
                                    "change_types": [], "paths": ["a/Work.cpp"]}}})
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
@@ -154,7 +170,10 @@ class TestCli(unittest.TestCase):
         warning = next(w for w in answer["warnings"] if "could not be verified" in w)
         self.assertNotIn("Verified", warning)
         self.assertNotIn("unmerged", warning.lower())
-        self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
+        self.assertEqual(
+            BrainStore.load(self.root).get("mapping.neutral.boost")["status"],
+            "reviewed",
+        )
 
     def test_audit_stale_check_and_mark_checked_use_configured_default_branch(self):
         project = self.root / "project"
@@ -196,7 +215,8 @@ class TestCli(unittest.TestCase):
              mock.patch("project_brain.stale_check.mark_checked",
                         return_value={"ok": True, "updated": [], "blocked": [], "warnings": []}), \
              mock.patch("sys.argv", ["cli", "mark-checked", "--brain-root", str(brain),
-                                      "--mappings", "m.any", "--checked-head", "HEAD", "--no-fetch"]), \
+                                      "--mappings", "mapping.neutral.any",
+                                      "--checked-head", "HEAD", "--no-fetch"]), \
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         self.assertEqual(head_calls[-1]["default_branch"], "trunk")
@@ -218,9 +238,9 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         # ingest()가 호출되어 store에 적재됨
         store = BrainStore.load(self.root)
-        self.assertTrue(store.has("ev.manifest"))
-        self.assertTrue(store.has("ev.ref"))
-        self.assertEqual(store.get("g.x")["status"], "candidate")
+        self.assertTrue(store.has("manifest.neutral.source"))
+        self.assertTrue(store.has("evref.neutral.ref"))
+        self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
 
     def test_cli_projection_label_split_by_status(self):
         # spec 2026-06-17 Task A5: projection_reuse 채널의 신뢰 라벨이 status로 갈린다 —
@@ -417,7 +437,12 @@ class TestCli(unittest.TestCase):
         # 근거 객체가 없는 Insight → dangling source_object_ids 보고 + rc=1
         from tests.test_ingest import insight
         BrainStore.save_object(
-            self.root, insight(source_object_ids=["m.gone", "m.gone2"]))
+            self.root,
+            insight(source_object_ids=[
+                "mapping.neutral.gone",
+                "mapping.neutral.gone2",
+            ]),
+        )
         argv = ["lint", "--brain-root", str(self.root)]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -429,9 +454,10 @@ class TestCli(unittest.TestCase):
             any("dangling source_object_ids" in p for p in report["problems"]))
 
 
-def candidate_term_with_evidence(tid="g.x", term="갈고리"):
+def candidate_term_with_evidence(tid="g.neutral.x", term="갈고리"):
     """근거(ev.ref) 보유 candidate GlossaryTerm. promote 후 §6.4(reviewed 근거 필수)를 통과한다."""
     from project_brain.objbase import base
+    tid = format_id("GlossaryTerm", ctx="neutral", key=tid.rsplit(".", 1)[-1])
     return base(
         {
             "id": tid,
@@ -442,7 +468,7 @@ def candidate_term_with_evidence(tid="g.x", term="갈고리"):
             "context_id": "context.neutral",
             "term": term,
             "definition": "후보 정의",
-            "evidence_refs": ["ev.ref"],
+            "evidence_refs": ["evref.neutral.ref"],
             "candidate": {"candidate_state": "ready_for_review", "candidate_source": "spec"},
         },
         tags=["neutral"], created_at="2026-06-04T00:00:00Z", updated_at="2026-06-04T00:00:00Z",
@@ -464,10 +490,13 @@ class TestCliPromote(unittest.TestCase):
     def test_promote_round_trip(self):
         self._ingest()
         # promote 전: 후보가 candidate로 노출
-        self.assertEqual(BrainStore.load(self.root).get("g.x")["status"], "candidate")
+        self.assertEqual(
+            BrainStore.load(self.root).get("g.neutral.x")["status"],
+            "candidate",
+        )
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.x", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
         ]
         out = io.StringIO()
@@ -478,9 +507,12 @@ class TestCliPromote(unittest.TestCase):
         self.assertTrue(result["ok"])
         store = BrainStore.load(self.root)
         # 승격 객체 + 검토 기록 둘 다 저장됨
-        self.assertEqual(store.get("g.x")["status"], "reviewed")
-        self.assertEqual(store.get("g.x")["review_record_id"], "review.g.x")
-        self.assertTrue(store.has("review.g.x"))
+        self.assertEqual(store.get("g.neutral.x")["status"], "reviewed")
+        self.assertEqual(
+            store.get("g.neutral.x")["review_record_id"],
+            "review.g.neutral.x",
+        )
+        self.assertTrue(store.has("review.g.neutral.x"))
         # 없는 기록 가리킴 0건(사후 lint clean)
         from project_brain.lint import lint_store
         self.assertEqual(lint_store(store), [])
@@ -490,20 +522,20 @@ class TestCliPromote(unittest.TestCase):
         self._ingest()
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.x", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
-        rr = BrainStore.load(self.root).get("review.g.x")
+        rr = BrainStore.load(self.root).get("review.g.neutral.x")
         self.assertTrue(rr["reviewed_at"].endswith("+09:00"), rr["reviewed_at"])
 
     def test_promote_missing_id_returns_error(self):
         self._ingest()
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.nope", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.nope", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
         ]
         out = io.StringIO()
@@ -516,29 +548,29 @@ class TestCliPromote(unittest.TestCase):
         from project_brain.router import QueryRouter
         self._ingest()  # candidate g.x (term=갈고리, evidence 보유) + manifest + ref
         before = QueryRouter(BrainStore.load(self.root)).answer("갈고리 용어 무슨 뜻?")
-        self.assertIn("g.x", before["promotable_candidate_ids"])
-        self.assertNotIn("g.x", before["source_object_ids"])
+        self.assertIn("g.neutral.x", before["promotable_candidate_ids"])
+        self.assertNotIn("g.neutral.x", before["source_object_ids"])
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.x", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
         ]
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         after = QueryRouter(BrainStore.load(self.root)).answer("갈고리 용어 무슨 뜻?")
         # 승격 후: 후보에서 빠지고 검수 source로(reviewed GlossaryTerm은 glossary_objects 덤프로 노출)
-        self.assertNotIn("g.x", after["promotable_candidate_ids"])
-        self.assertIn("g.x", after["source_object_ids"])
+        self.assertNotIn("g.neutral.x", after["promotable_candidate_ids"])
+        self.assertIn("g.neutral.x", after["source_object_ids"])
 
     def test_promote_zero_evidence_rejected(self):
         # §6.4 활성 후: 근거 없는 candidate(candidate엔 §6.4 미적용 → 적재는 됨)를 승격하면
         # 승격 결과물(reviewed, 근거 빔)이 쓰기 전 일괄 검증에 걸려 rc=1, 디스크 불변(원자성).
         from project_brain.ingest import ingest
         from tests.test_ingest import candidate_term  # evidence_refs=[] 기본
-        ingest(self.root, [candidate_term("g.noev")])
+        ingest(self.root, [candidate_term("g.neutral.noev")])
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.noev", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.noev", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
         ]
         out = io.StringIO()
@@ -550,8 +582,8 @@ class TestCliPromote(unittest.TestCase):
         self.assertIn("requires non-empty evidence_refs", result["error"])
         # 원자성: 거부됐으니 g.noev는 여전히 candidate(부분 쓰기·review 기록 생성 없음)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.noev")["status"], "candidate")
-        self.assertFalse(store.has("review.g.noev"))
+        self.assertEqual(store.get("g.neutral.noev")["status"], "candidate")
+        self.assertFalse(store.has("review.g.neutral.noev"))
 
     def test_promote_backfills_empty_evidence_from_mapping(self):
         # 빈 근거 candidate + 짝 reviewed 매핑 → 수동 promote가 backfill해 §6.4 통과.
@@ -562,21 +594,24 @@ class TestCliPromote(unittest.TestCase):
             _ar_mapping("m.empty", term_ids=["g.empty"], evidence_refs=["evref.a"], mapping_key="me"),
         ])
         argv = ["promote", "--brain-root", str(self.root),
-                "--ids", "g.empty", "--reviewer", "user-confirmed",
+                "--ids", "g.neutral.empty", "--reviewer", "user-confirmed",
                 "--reviewed-at", "2026-06-08T00:00:00Z"]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.empty")["status"], "reviewed")
-        self.assertEqual(store.get("g.empty")["evidence_refs"], ["evref.a"])
+        self.assertEqual(store.get("g.neutral.empty")["status"], "reviewed")
+        self.assertEqual(
+            store.get("g.neutral.empty")["evidence_refs"],
+            ["evref.neutral.a"],
+        )
 
     def test_promote_rejects_already_reviewed(self):
         # 멱등 가드: 같은 id 두 번 promote → 두 번째 rc=1.
         self._ingest()  # candidate g.x (term=갈고리, evidence 보유)
         base_argv = ["promote", "--brain-root", str(self.root),
-                     "--ids", "g.x", "--reviewer", "user-confirmed",
+                     "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
                      "--reviewed-at", "2026-06-06T00:00:00Z"]
         with mock.patch("sys.argv", ["cli"] + base_argv), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
@@ -593,7 +628,7 @@ class TestCliPromote(unittest.TestCase):
                                  evidence_refs=["evref.a"])
         ingest(self.root, [manifest(), _ar_evref("evref.a"), context(), conflict_term])
         argv = ["promote", "--brain-root", str(self.root),
-                "--ids", "g.c", "--reviewer", "user-confirmed",
+                "--ids", "g.neutral.c", "--reviewer", "user-confirmed",
                 "--reviewed-at", "2026-06-08T00:00:00Z",
                 "--conflict-resolution", "위키 정설 채택"]
         out = io.StringIO()
@@ -601,12 +636,20 @@ class TestCliPromote(unittest.TestCase):
             rc = cli.main()
         self.assertEqual(rc, 0)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.c")["status"], "reviewed")
-        self.assertEqual(store.get("review.g.c")["conflict_resolution"], "위키 정설 채택")
+        self.assertEqual(store.get("g.neutral.c")["status"], "reviewed")
+        self.assertEqual(
+            store.get("review.g.neutral.c")["conflict_resolution"],
+            "위키 정설 채택",
+        )
 
 
-def _ar_evref(rid, manifest_id="ev.manifest"):
+def _ar_evref(rid, manifest_id="manifest.neutral.source"):
     from project_brain.objbase import base
+    rid = format_id(
+        "EvidenceRef",
+        ctx="neutral",
+        anchor_key=rid.rsplit(".", 1)[-1],
+    )
     return base(
         {
             "id": rid, "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
@@ -619,12 +662,21 @@ def _ar_evref(rid, manifest_id="ev.manifest"):
 
 def _ar_term(tid, *, term, candidate_state="evidence_verified", evidence_refs=None):
     from project_brain.objbase import base
+    tid = format_id("GlossaryTerm", ctx="neutral", key=tid.rsplit(".", 1)[-1])
+    canonical_evidence_refs = [
+        format_id(
+            "EvidenceRef",
+            ctx="neutral",
+            anchor_key=evidence_ref_id.rsplit(".", 1)[-1],
+        )
+        for evidence_ref_id in (evidence_refs if evidence_refs is not None else [])
+    ]
     return base(
         {
             "id": tid, "kind": "GlossaryTerm", "status": "candidate", "truth_role": "domain",
             "title": f"Candidate term: {term}", "context_id": "context.neutral",
             "term": term, "definition": "후보 정의",
-            "evidence_refs": evidence_refs if evidence_refs is not None else [],
+            "evidence_refs": canonical_evidence_refs,
             "candidate": {"candidate_state": candidate_state, "candidate_source": "spec"},
         },
         tags=["neutral"], created_at="2026-06-04T00:00:00Z", updated_at="2026-06-04T00:00:00Z",
@@ -633,6 +685,19 @@ def _ar_term(tid, *, term, candidate_state="evidence_verified", evidence_refs=No
 
 def _ar_mapping(mid, *, term_ids, evidence_refs, mapping_key):
     from project_brain.objbase import base
+    mid = format_id("DomainMapping", ctx="neutral", key=mapping_key)
+    term_ids = [
+        format_id("GlossaryTerm", ctx="neutral", key=term_id.rsplit(".", 1)[-1])
+        for term_id in term_ids
+    ]
+    evidence_refs = [
+        format_id(
+            "EvidenceRef",
+            ctx="neutral",
+            anchor_key=evidence_ref_id.rsplit(".", 1)[-1],
+        )
+        for evidence_ref_id in evidence_refs
+    ]
     return base(
         {
             "id": mid, "kind": "DomainMapping", "status": "reviewed", "truth_role": "domain",
@@ -680,47 +745,75 @@ class TestCliPromoteAuto(unittest.TestCase):
 
     def test_batch_promotes_eligible_skips_conflict_and_unknown(self):
         self._ingest_corpus()
-        rc, result = self._run(["g.empty", "g.has", "g.conflict", "g.multi", "g.nope"])
+        rc, result = self._run([
+            "g.neutral.empty",
+            "g.neutral.has",
+            "g.neutral.conflict",
+            "g.neutral.multi",
+            "g.neutral.nope",
+        ])
         self.assertEqual(rc, 0)
         self.assertTrue(result["ok"])
-        self.assertEqual(set(result["promoted"]), {"g.empty", "g.has", "g.multi"})
-        self.assertEqual(result["skipped"]["conflict"], ["g.conflict"])
-        self.assertEqual(result["skipped"]["unknown_id"], ["g.nope"])
+        self.assertEqual(
+            set(result["promoted"]),
+            {"g.neutral.empty", "g.neutral.has", "g.neutral.multi"},
+        )
+        self.assertEqual(result["skipped"]["conflict"], ["g.neutral.conflict"])
+        self.assertEqual(result["skipped"]["unknown_id"], ["g.neutral.nope"])
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.empty")["status"], "reviewed")
+        self.assertEqual(store.get("g.neutral.empty")["status"], "reviewed")
         # backfill: 빈 근거 용어가 짝 매핑 evref로 채워짐
-        self.assertEqual(store.get("g.empty")["evidence_refs"], ["evref.a"])
+        self.assertEqual(
+            store.get("g.neutral.empty")["evidence_refs"],
+            ["evref.neutral.a"],
+        )
         from project_brain.lint import lint_store
         self.assertEqual(lint_store(store), [])
 
     def test_review_record_records_auto_reviewer_and_vouched_by(self):
         self._ingest_corpus()
-        self._run(["g.empty", "g.multi"])
+        self._run(["g.neutral.empty", "g.neutral.multi"])
         store = BrainStore.load(self.root)
-        rr_empty = store.get("review.g.empty")
+        rr_empty = store.get("review.g.neutral.empty")
         self.assertEqual(rr_empty["reviewer"], "auto:mapping-vouched")
-        self.assertEqual(rr_empty["vouched_by_mapping_ids"], ["m.empty"])
+        self.assertEqual(
+            rr_empty["vouched_by_mapping_ids"],
+            ["mapping.neutral.me"],
+        )
         # 다중 참조: 보증 매핑 전부, 정렬됨
-        rr_multi = store.get("review.g.multi")
-        self.assertEqual(rr_multi["vouched_by_mapping_ids"], ["m.a", "m.z"])
+        rr_multi = store.get("review.g.neutral.multi")
+        self.assertEqual(
+            rr_multi["vouched_by_mapping_ids"],
+            ["mapping.neutral.a", "mapping.neutral.z"],
+        )
 
     def test_dedup_multi_mapping_promotes_once(self):
         self._ingest_corpus()
-        rc, result = self._run(["g.multi", "g.multi"])
+        rc, result = self._run(["g.neutral.multi", "g.neutral.multi"])
         self.assertEqual(rc, 0)
-        self.assertEqual(result["promoted"], ["g.multi"])
+        self.assertEqual(result["promoted"], ["g.neutral.multi"])
 
     def test_rerun_is_idempotent(self):
         self._ingest_corpus()
-        self._run(["g.empty", "g.has", "g.multi"])
-        rc, result = self._run(["g.empty", "g.has", "g.multi"])
+        self._run(["g.neutral.empty", "g.neutral.has", "g.neutral.multi"])
+        rc, result = self._run(
+            ["g.neutral.empty", "g.neutral.has", "g.neutral.multi"]
+        )
         self.assertEqual(rc, 0)
         self.assertEqual(result["promoted"], [])
-        self.assertEqual(set(result["skipped"]["already_reviewed"]), {"g.empty", "g.has", "g.multi"})
+        self.assertEqual(
+            set(result["skipped"]["already_reviewed"]),
+            {"g.neutral.empty", "g.neutral.has", "g.neutral.multi"},
+        )
 
 
-def _ar_legacy_manifest(mid="ev.wiki", source_type="wiki"):
+def _ar_legacy_manifest(mid="manifest.neutral.wiki", source_type="wiki"):
     from project_brain.objbase import base
+    mid = format_id(
+        "EvidenceManifest",
+        ctx="neutral",
+        key=mid.rsplit(".", 1)[-1],
+    )
     return base(
         {
             "id": mid, "kind": "EvidenceManifest", "status": "reviewed", "truth_role": "source",
@@ -732,8 +825,21 @@ def _ar_legacy_manifest(mid="ev.wiki", source_type="wiki"):
     )
 
 
-def _ar_legacy_evref(rid="evref.wiki", manifest_id="ev.wiki"):
+def _ar_legacy_evref(
+    rid="evref.neutral.wiki",
+    manifest_id="manifest.neutral.wiki",
+):
     from project_brain.objbase import base
+    rid = format_id(
+        "EvidenceRef",
+        ctx="neutral",
+        anchor_key=rid.rsplit(".", 1)[-1],
+    )
+    manifest_id = format_id(
+        "EvidenceManifest",
+        ctx="neutral",
+        key=manifest_id.rsplit(".", 1)[-1],
+    )
     return base(
         {
             "id": rid, "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
@@ -760,7 +866,7 @@ class TestCliPromoteAtomicity(unittest.TestCase):
         term = _ar_term("g.legacy", term="레거시", evidence_refs=["evref.wiki"])
         ingest(self.root, [_ar_legacy_manifest(), _ar_legacy_evref(), context(), term])
         argv = ["promote", "--brain-root", str(self.root),
-                "--ids", "g.legacy", "--reviewer", "user-confirmed",
+                "--ids", "g.neutral.legacy", "--reviewer", "user-confirmed",
                 "--reviewed-at", "2026-06-08T00:00:00Z"]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -769,8 +875,8 @@ class TestCliPromoteAtomicity(unittest.TestCase):
         self.assertIn("legacy-only", json.dumps(json.loads(out.getvalue()), ensure_ascii=False))
         # 원자성: 디스크 불변(부분 쓰기·review 기록 생성 없음)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.legacy")["status"], "candidate")
-        self.assertFalse(store.has("review.g.legacy"))
+        self.assertEqual(store.get("g.neutral.legacy")["status"], "candidate")
+        self.assertFalse(store.has("review.g.neutral.legacy"))
 
     def test_promote_auto_skips_legacy_only_evidence(self):
         # 짝 매핑 evidence가 wiki(legacy)뿐인 용어는 자동 승격 부적격 → skip. 정상 용어만 승격.
@@ -786,17 +892,21 @@ class TestCliPromoteAtomicity(unittest.TestCase):
             _ar_mapping("m.legacy", term_ids=["g.legacy"], evidence_refs=["evref.wiki"], mapping_key="mleg"),
         ])
         argv = ["promote-auto", "--brain-root", str(self.root),
-                "--ids", "g.ok", "g.legacy", "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--ids", "g.neutral.ok", "g.neutral.legacy",
+                "--reviewed-at", "2026-06-08T00:00:00Z"]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         result = json.loads(out.getvalue())
-        self.assertEqual(result["promoted"], ["g.ok"])
-        self.assertEqual(result["skipped"]["legacy_only_evidence"], ["g.legacy"])
+        self.assertEqual(result["promoted"], ["g.neutral.ok"])
+        self.assertEqual(
+            result["skipped"]["legacy_only_evidence"],
+            ["g.neutral.legacy"],
+        )
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.ok")["status"], "reviewed")
-        self.assertEqual(store.get("g.legacy")["status"], "candidate")
+        self.assertEqual(store.get("g.neutral.ok")["status"], "reviewed")
+        self.assertEqual(store.get("g.neutral.legacy")["status"], "candidate")
         self.assertEqual(lint_store(store), [])
 
 
@@ -843,11 +953,14 @@ class TestCliSearch(unittest.TestCase):
         self.assertIn("needs_clarification", payload)
         # reviewed 적중에 검수상태·linked(코드 위치)가 동반된다.
         ids = {h["object_id"] for h in payload["results"]}
-        self.assertIn("m.lane", ids)
-        m = next(h for h in payload["results"] if h["object_id"] == "m.lane")
+        self.assertIn("mapping.neutral.lane", ids)
+        m = next(
+            h for h in payload["results"]
+            if h["object_id"] == "mapping.neutral.lane"
+        )
         self.assertEqual(m["status"], "reviewed")
         locs = {c["object_id"] for c in m["linked"]["code_locators"]}
-        self.assertIn("code.lane", locs)
+        self.assertIn("code.neutral.lane", locs)
 
     def test_search_candidate_channel(self):
         from tests.test_search import glossary_term
@@ -857,7 +970,7 @@ class TestCliSearch(unittest.TestCase):
         rc, payload = self._search("레인 영역 배치")
         self.assertEqual(rc, 0)
         cand_ids = {h["object_id"] for h in payload["candidates"]}
-        self.assertIn("g.cand", cand_ids)
+        self.assertIn("g.neutral.cand", cand_ids)
         # reviewed 게이트 통과 0건 → needs_clarification.
         self.assertEqual(payload["results"], [])
         self.assertTrue(payload["needs_clarification"])
@@ -894,7 +1007,10 @@ class TestCliSearch(unittest.TestCase):
         rc, payload = self._search("클리어 토큰 노출 게이트 이중구현")
         self.assertEqual(rc, 0)
         self.assertIn("advisories", payload)
-        self.assertIn("insight.gate", {h["object_id"] for h in payload["advisories"]})
+        self.assertIn(
+            "insight.neutral.gate",
+            {h["object_id"] for h in payload["advisories"]},
+        )
         for h in payload["advisories"]:
             self.assertEqual(h["trust_label"], "가로지르는 위험·교훈(검증됨)")
 
@@ -912,7 +1028,7 @@ class TestCliSearch(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(rc, 0)  # lint clean → rc 0
         self.assertTrue(payload["lint"]["ok"])
-        self.assertIn("g.orphan", payload["isolated"]["isolated"])
+        self.assertIn("g.neutral.orphan", payload["isolated"]["isolated"])
         self.assertIsNone(payload["stale"])        # 기존 --no-stale 계약 보존
         self.assertTrue(payload["stale_status"]["ok"])
         self.assertTrue(payload["stale_status"]["skipped"])
@@ -972,7 +1088,8 @@ class TestCliSearch(unittest.TestCase):
 
     def test_audit_fails_closed_on_unverifiable_anchor(self):
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
-                 "unmerged_anchors": [{"locator_id": "code.unknown", "path": "a/X.cpp",
+                 "unmerged_anchors": [{"locator_id": "code.neutral.unknown",
+                                        "path": "a/X.cpp",
                                         "from_commit": "MISSING", "reason": "anchor_unverifiable",
                                         "blocking_affected_mapping_ids": [],
                                         "nonblocking_affected_mapping_ids": []}],
@@ -990,7 +1107,8 @@ class TestCliSearch(unittest.TestCase):
 
     def test_audit_keeps_not_ancestor_as_successful_advisory(self):
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
-                 "unmerged_anchors": [{"locator_id": "code.work", "path": "a/X.cpp",
+                 "unmerged_anchors": [{"locator_id": "code.neutral.work",
+                                        "path": "a/X.cpp",
                                         "from_commit": "WORK", "reason": "not_ancestor",
                                         "blocking_affected_mapping_ids": [],
                                         "nonblocking_affected_mapping_ids": []}],
@@ -1026,7 +1144,7 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["code_quotes"]["failures"], [
-            {"locator_id": "code.quoted", "reason": "quote_not_found"},
+            {"locator_id": "code.x.quoted", "reason": "quote_not_found"},
         ])
 
     def test_audit_no_stale_skips_both_git_dependent_checks(self):
@@ -1401,7 +1519,8 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--brain-root", str(self.root),
             "--context-id", "context.neutral",
             "--requirement-key", "result-popup-rank",
-            "--source-object-ids", "mapping.neutral.race-end", "mapping.does-not-exist",
+            "--source-object-ids", "mapping.neutral.race-end",
+            "mapping.neutral.does-not-exist",
             "--title", "결과 팝업 순위 표시 착수 브리핑",
             "--payload-file", str(self.payload_file),
             "--generated-by", "demo-brain-query",
@@ -1412,7 +1531,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
-        self.assertIn("mapping.does-not-exist", payload["error"])
+        self.assertIn("mapping.neutral.does-not-exist", payload["error"])
         store = BrainStore.load(self.root)
         self.assertFalse(store.has("projection.neutral.result-popup-rank.reuse"))
 
@@ -1561,7 +1680,7 @@ class TestCliProjectionRefresh(unittest.TestCase):
             "truth_role": "index", "title": "끊긴 브리핑", "context_id": "context.neutral",
             "format": "prompt_payload", "reuse_payload": "x",
             "output_locator": "indexes/context_projections/dangling.txt",
-            "source_object_ids": ["mapping.does-not-exist"],
+            "source_object_ids": ["mapping.neutral.does-not-exist"],
             "source_content_hash": "whatever", "projection_hash": "y",
             "generated_at": self.GEN_AT, "generated_by": "t",
             "stale_policy": "fail_on_manual_edit",
@@ -1638,18 +1757,18 @@ class TestCliShow(unittest.TestCase):
             domain_mapping("m.x", meaning="레이스 시작",
                            glossary_term_ids=["g.race"], code_locator_ids=["code.x"]),
         ])
-        rc, payload = self._show("m.x")
+        rc, payload = self._show("mapping.neutral.x")
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["object"]["id"], "m.x")
+        self.assertEqual(payload["object"]["id"], "mapping.neutral.x")
         by_nb = {n["object_id"]: n for n in payload["neighbors"]}
         # 이웃은 저장소에 실존하는 참조만 — 종류·제목 동반.
-        self.assertEqual(by_nb["g.race"]["kind"], "GlossaryTerm")
-        self.assertEqual(by_nb["g.race"]["title"], "Term: 레이스")
-        self.assertEqual(by_nb["code.x"]["kind"], "CodeLocator")
-        # 끊긴 참조(evidence_refs=["ev.map"])·자기참조(id)는 이웃에 안 뜬다.
-        self.assertNotIn("ev.map", by_nb)
-        self.assertNotIn("m.x", by_nb)
+        self.assertEqual(by_nb["g.neutral.race"]["kind"], "GlossaryTerm")
+        self.assertEqual(by_nb["g.neutral.race"]["title"], "Term: 레이스")
+        self.assertEqual(by_nb["code.neutral.x"]["kind"], "CodeLocator")
+        # 끊긴 참조(evidence_refs=["evref.neutral.mapping"])·자기참조(id)는 이웃에 안 뜬다.
+        self.assertNotIn("evref.neutral.map", by_nb)
+        self.assertNotIn("mapping.neutral.x", by_nb)
 
     def test_show_attaches_stale_advisory_for_stale_mapping(self):
         # Step 2: show 대상이 stale-set에 들면 payload 최상위에 stale_advisory(객체 본문 불변).
@@ -1660,9 +1779,14 @@ class TestCliShow(unittest.TestCase):
             domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
         ])
         write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.x"],
-            "detail": {"m.x": {"change_types": ["M"], "paths": ["a/X.cpp"]}}})
-        rc, payload = self._show("m.x")
+            "target_head": "T", "computed_at": "t",
+            "stale_mapping_ids": ["mapping.neutral.x"],
+            "detail": {
+                "mapping.neutral.x": {
+                    "change_types": ["M"], "paths": ["a/X.cpp"]
+                }
+            }})
+        rc, payload = self._show("mapping.neutral.x")
         self.assertEqual(rc, 0)
         self.assertEqual(payload["stale_advisory"]["change_types"], ["M"])
         self.assertNotIn("stale_advisory", payload["object"])  # 객체 본문은 불변
@@ -1675,13 +1799,18 @@ class TestCliShow(unittest.TestCase):
             domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
         ])
         write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.x"],
-            "detail": {"m.x": {"code_changed": True, "unmerged_anchor": True,
+            "target_head": "T", "computed_at": "t",
+            "stale_mapping_ids": ["mapping.neutral.x"],
+            "detail": {"mapping.neutral.x": {
+                               "code_changed": True, "unmerged_anchor": True,
                                "unmerged_reasons": ["not_ancestor"],
-                               "locator_ids": ["code.changed", "code.work"],
+                               "locator_ids": [
+                                   "code.neutral.changed",
+                                   "code.neutral.work",
+                               ],
                                "from_commits": ["SHA1", "WORK"], "change_types": ["M"],
                                "paths": ["a/Race.cpp"]}}})
-        rc, payload = self._show("m.x")
+        rc, payload = self._show("mapping.neutral.x")
         self.assertEqual(rc, 0)
         self.assertTrue(payload["stale_advisory"]["code_changed"])
         self.assertTrue(payload["stale_advisory"]["unmerged_anchor"])
@@ -1693,15 +1822,15 @@ class TestCliShow(unittest.TestCase):
             glossary_term("g.race", term="레이스"),
             domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
         ])
-        rc, payload = self._show("m.x")  # 캐시 안 떨굼
+        rc, payload = self._show("mapping.neutral.x")  # 캐시 안 떨굼
         self.assertEqual(rc, 0)
         self.assertNotIn("stale_advisory", payload)
 
     def test_show_missing_id_errors(self):
-        rc, payload = self._show("nope.404")
+        rc, payload = self._show("mapping.neutral.missing")
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
-        self.assertIn("nope.404", payload["error"])
+        self.assertIn("mapping.neutral.missing", payload["error"])
 
 
 if __name__ == "__main__":

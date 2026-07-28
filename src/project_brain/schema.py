@@ -2,6 +2,9 @@
 spec: docs/superpowers/specs/2026-05-27-project-brain-object-model-design.md
 router가 실제로 읽는 필드는 일부지만, 적재 무결성을 위해 spec 필수 필드 전체를 강제한다."""
 
+from project_brain.id_grammar import ID_GRAMMARS, validate_id_fields
+
+
 BASE_REQUIRED = (
     "id", "kind", "schema_version", "status", "poc_priority",
     "truth_role", "title", "created_at", "updated_at", "tags", "evidence_refs",
@@ -72,6 +75,10 @@ PROJECTION_FORMAT_VALUES = frozenset({"context_md", "prompt_payload"})
 INDEX_NAME_VALUES = frozenset({"fts", "timeline", "entity", "code_locator", "trigram", "vector"})
 
 VALID_KINDS = frozenset(KIND_REQUIRED)
+if VALID_KINDS != frozenset(ID_GRAMMARS):
+    missing = sorted(VALID_KINDS - frozenset(ID_GRAMMARS))
+    extra = sorted(frozenset(ID_GRAMMARS) - VALID_KINDS)
+    raise RuntimeError(f"ID grammar/schema kind mismatch: missing={missing!r}, extra={extra!r}")
 
 # enum 값 집합 (spec §6.1 EvidenceManifest.source_type / §6.2 EvidenceRef.ref_type).
 # 필드 존재만 보던 검증이 잘못된 값(예: spec_ppt, slide)을 통과시켰던 회귀를 막는다.
@@ -287,4 +294,5 @@ def validate_object(obj: dict) -> list[str]:
                 errors.append(f"{obj['id']}: mapping_bundle ReviewRecord requires confirmation_key")
         elif "target_object_id" not in obj:
             errors.append(f"{obj['id']}: ReviewRecord missing field 'target_object_id'")
+    errors.extend(validate_id_fields(obj))
     return errors

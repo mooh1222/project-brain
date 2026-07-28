@@ -144,12 +144,21 @@ class TestStaleAdvisory(unittest.TestCase):
         )
 
     def test_stale_advisory_attached_to_mapping_when_in_stale_set(self):
-        adv = {"m.boost": {"code_changed": True, "change_types": ["M"],
-                           "paths": ["a/X.cpp"], "target_head": "T",
-                           "computed_at": "2026-06-25T15:00:00+09:00"}}
+        adv = {
+            "mapping.neutral.boost": {
+                "code_changed": True,
+                "change_types": ["M"],
+                "paths": ["a/X.cpp"],
+                "target_head": "T",
+                "computed_at": "2026-06-25T15:00:00+09:00",
+            }
+        }
         answer = QueryRouter(self._store(), stale_advisories=adv).answer("강화폭탄 무슨 뜻?")
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        m = next(
+            x for x in gm["mappings"]
+            if x["id"] == "mapping.neutral.boost"
+        )
         self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
         # warning에 기준 시점(computed_at)이 들어가 펼치기 전에도 "언제 기준"인지 보인다(route 후속①).
         self.assertTrue(any("코드 변경" in w and "2026-06-25T15:00:00+09:00" in w
@@ -157,8 +166,10 @@ class TestStaleAdvisory(unittest.TestCase):
 
     def test_branch_scope_warning_is_separate_from_code_change_warning(self):
         advisories = {
-            "m.boost": {"code_changed": False, "unmerged_anchor": True,
-                        "unmerged_reasons": ["not_ancestor"], "locator_ids": ["code.work"],
+            "mapping.neutral.boost": {
+                        "code_changed": False, "unmerged_anchor": True,
+                        "unmerged_reasons": ["not_ancestor"],
+                        "locator_ids": ["code.neutral.work"],
                         "from_commits": ["WORK"], "paths": ["a/X.cpp"],
                         "target_head": "T", "computed_at": "t"},
         }
@@ -174,9 +185,11 @@ class TestStaleAdvisory(unittest.TestCase):
 
     def test_anchor_unverifiable_warning_is_distinct_and_reason_order_is_stable(self):
         advisories = {
-            "m.boost": {"code_changed": True, "unmerged_anchor": True,
+            "mapping.neutral.boost": {
+                        "code_changed": True, "unmerged_anchor": True,
                         "unmerged_reasons": ["not_ancestor", "anchor_unverifiable"],
-                        "locator_ids": ["code.work"], "from_commits": ["WORK"],
+                        "locator_ids": ["code.neutral.work"],
+                        "from_commits": ["WORK"],
                         "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
         }
         answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
@@ -195,9 +208,11 @@ class TestStaleAdvisory(unittest.TestCase):
 
     def test_anchor_unverifiable_warning_does_not_claim_verified_or_unmerged(self):
         advisories = {
-            "m.boost": {"code_changed": False, "unmerged_anchor": True,
+            "mapping.neutral.boost": {
+                        "code_changed": False, "unmerged_anchor": True,
                         "unmerged_reasons": ["anchor_unverifiable"],
-                        "locator_ids": ["code.unknown"], "from_commits": ["UNKNOWN"],
+                        "locator_ids": ["code.neutral.unknown"],
+                        "from_commits": ["UNKNOWN"],
                         "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
         }
         answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
@@ -208,7 +223,10 @@ class TestStaleAdvisory(unittest.TestCase):
     def test_no_stale_advisory_without_cache(self):
         answer = QueryRouter(self._store()).answer("강화폭탄 무슨 뜻?")
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        m = next(
+            x for x in gm["mappings"]
+            if x["id"] == "mapping.neutral.boost"
+        )
         self.assertNotIn("stale_advisory", m)
 
 
@@ -347,7 +365,7 @@ class TestRouterRecallTopK(unittest.TestCase):
         loc_section = next(s for s in answer["sections"]
                            if s["intent"] == "implementation_location")
         # 매핑이 동반한 code.stage가 핀포인트로 들어온다(전량 적재 아님).
-        self.assertIn("code.stage", loc_section["object_ids"])
+        self.assertIn("code.neutral.stage", loc_section["object_ids"])
         self.assertLessEqual(len(loc_section["object_ids"]), 5 + 1)
 
     def test_candidate_linked_locator_not_in_source(self):
@@ -368,8 +386,8 @@ class TestRouterRecallTopK(unittest.TestCase):
         answer = self._router().answer("스테이지 클리어 개수 최대값 모델 어디 구현?")
         loc_section = next(s for s in answer["sections"]
                            if s["intent"] == "implementation_location")
-        self.assertIn("code.ok", loc_section["object_ids"])
-        self.assertNotIn("code.cand", loc_section["object_ids"])
+        self.assertIn("code.neutral.ok", loc_section["object_ids"])
+        self.assertNotIn("code.neutral.cand", loc_section["object_ids"])
 
     def test_candidate_linked_locator_exposed_with_label(self):
         # 후보 채널 노출(2026-06-11 사용자 결정): reviewed 매핑이 동반한 candidate
@@ -391,12 +409,12 @@ class TestRouterRecallTopK(unittest.TestCase):
         answer = self._router().answer("스테이지 클리어 개수 최대값 모델 어디 구현?")
         loc_section = next(s for s in answer["sections"]
                            if s["intent"] == "implementation_location")
-        self.assertNotIn("code.cand", loc_section["object_ids"])
+        self.assertNotIn("code.neutral.cand", loc_section["object_ids"])
         cand = next(c for c in loc_section["candidate_locators"]
-                    if c["id"] == "code.cand")
+                    if c["id"] == "code.neutral.cand")
         self.assertEqual(cand["trust_label"], "확인 필요")
         self.assertEqual(cand["path"], "a/Model.hpp")
-        self.assertIn("code.cand", answer["promotable_candidate_ids"])
+        self.assertIn("code.neutral.cand", answer["promotable_candidate_ids"])
 
     def test_candidate_direct_locator_hit_exposed(self):
         # 후보 채널 직접 적중(candidate CodeLocator가 recall candidates에 뜸)도
@@ -412,7 +430,7 @@ class TestRouterRecallTopK(unittest.TestCase):
                            if s["intent"] == "implementation_location")
         self.assertEqual(loc_section["object_ids"], [])
         ids = [c["id"] for c in loc_section["candidate_locators"]]
-        self.assertIn("code.0", ids)
+        self.assertIn("code.neutral.0", ids)
 
     def test_glossary_meaning_uses_topk_not_all_reviewed(self):
         # reviewed GlossaryTerm 12개 적재. 정확 매칭 매핑이 없는 질의에서도 glossary
@@ -481,7 +499,7 @@ class TestRouterRecallTopK(unittest.TestCase):
         answer = self._router().answer("레인 무슨 뜻?")
         gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
         # m.lane은 정확 매칭(mappings)으로 한 번만 — object_ids에 중복 없음.
-        self.assertEqual(gloss["object_ids"].count("m.lane"), 1)
+        self.assertEqual(gloss["object_ids"].count("mapping.neutral.lane"), 1)
 
 
 class TestRouterRecallFallback(unittest.TestCase):
@@ -534,7 +552,7 @@ class TestRouterUnknownRecall(unittest.TestCase):
         ])
         answer = self._router().answer("레인 영역 배치 좌표")
         self.assertIn("unknown", answer["intents"])
-        self.assertIn("g.lane", answer["source_object_ids"])
+        self.assertIn("g.neutral.lane", answer["source_object_ids"])
         self.assertFalse(answer["needs_clarification"])
 
     def test_unknown_candidate_only_needs_clarification(self):
@@ -544,8 +562,8 @@ class TestRouterUnknownRecall(unittest.TestCase):
                              status="candidate"),
         ])
         answer = self._router().answer("레인 영역 배치 좌표")
-        self.assertIn("g.cand", answer["promotable_candidate_ids"])
-        self.assertNotIn("g.cand", answer["source_object_ids"])
+        self.assertIn("g.neutral.cand", answer["promotable_candidate_ids"])
+        self.assertNotIn("g.neutral.cand", answer["source_object_ids"])
         self.assertTrue(answer["needs_clarification"])
 
     def test_unknown_no_index_falls_back_to_no_match(self):
@@ -587,22 +605,22 @@ class TestRouterAdvisories(unittest.TestCase):
         self.embedder = StubEmbedder()
         T = "2026-06-04T00:00:00Z"
         objs = [
-            base({"id": "g.token", "kind": "GlossaryTerm", "status": "reviewed",
+            base({"id": "g.neutral.token", "kind": "GlossaryTerm", "status": "reviewed",
                   "truth_role": "domain", "title": "Term", "context_id": "context.neutral",
                   "term": "클리어 토큰", "definition": "스테이지 클리어 토큰 노출",
-                  "evidence_refs": ["ev.x"]},
+                  "evidence_refs": ["evref.neutral.x"]},
                  tags=["n"], created_at=T, updated_at=T),
-            base({"id": "code.gate", "kind": "CodeLocator", "status": "reviewed",
+            base({"id": "code.neutral.gate", "kind": "CodeLocator", "status": "reviewed",
                   "truth_role": "reference", "title": "Code", "context_id": "context.neutral",
                   "repo": "demoapp", "path": "a/Enter.cpp", "symbol": "Enter::gate",
                   "locator_source": "rg", "verified_at": T, "evidence_refs": []},
                  tags=["n"], created_at=T, updated_at=T),
-            base({"id": "insight.gate", "kind": "Insight", "status": "reviewed",
+            base({"id": "insight.neutral.gate", "kind": "Insight", "status": "reviewed",
                   "truth_role": "synthesis", "title": "인사이트",
                   "body": "클리어 토큰 노출 게이트가 두 팝업에 이중구현",
                   "scope": "클리어 토큰", "insight_type": "cross-cutting-risk",
-                  "source_object_ids": ["g.token", "code.gate"],
-                  "code_locator_ids": ["code.gate"], "evidence_refs": []},
+                  "source_object_ids": ["g.neutral.token", "code.neutral.gate"],
+                  "code_locator_ids": ["code.neutral.gate"], "evidence_refs": []},
                  tags=["n"], created_at=T, updated_at=T),
         ]
         for o in objs:
@@ -618,13 +636,22 @@ class TestRouterAdvisories(unittest.TestCase):
         resp = self._router().answer("클리어 토큰 노출 게이트 이중구현")
         self.assertIn("advisories", resp)
         ids = {a["id"] for a in resp["advisories"]}
-        self.assertIn("insight.gate", ids)
-        adv = next(a for a in resp["advisories"] if a["id"] == "insight.gate")
+        self.assertIn("insight.neutral.gate", ids)
+        adv = next(
+            a for a in resp["advisories"]
+            if a["id"] == "insight.neutral.gate"
+        )
         self.assertEqual(adv["insight_type"], "cross-cutting-risk")
         self.assertIn("이중구현", adv["surface"])
-        self.assertIn("code.gate", {c["object_id"] for c in adv["code_locators"]})
+        self.assertIn(
+            "code.neutral.gate",
+            {c["object_id"] for c in adv["code_locators"]},
+        )
         # 가로지름(critic 검토 4): source_object_ids가 advisory에 직접 담긴다.
-        self.assertEqual(set(adv["source_object_ids"]), {"g.token", "code.gate"})
+        self.assertEqual(
+            set(adv["source_object_ids"]),
+            {"g.neutral.token", "code.neutral.gate"},
+        )
 
     def test_advisories_empty_without_index(self):
         # 색인 없는 라우터(db_path 미전달)는 recall 비활성 → advisories 빈 리스트.

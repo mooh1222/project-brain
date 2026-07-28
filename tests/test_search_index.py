@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from project_brain.embedder import EMBED_DIM, StubEmbedder
+from project_brain.id_grammar import format_id, parse_id
 from project_brain.objbase import base
 from project_brain.search_index import (
     IndexRebuildInProgressError,
@@ -38,13 +39,29 @@ def _b(obj):
     return base(obj, tags=["neutral"], created_at=T, updated_at=T)
 
 
+def _contextual_id(kind, object_id, context_id="context.neutral"):
+    ctx = parse_id(context_id, "DomainContext").ctx
+    key = object_id.rsplit(".", 1)[-1]
+    if kind == "GlossaryTerm":
+        return format_id(kind, ctx=ctx, key=key)
+    if kind == "CodeLocator":
+        return format_id(kind, ctx=ctx, anchor_key=key)
+    raise AssertionError(f"unsupported fixture kind {kind}")
+
+
 def glossary_term(tid, *, term, definition="정의", status="reviewed", synonyms=None,
                   context_id="context.neutral"):
+    tid = _contextual_id("GlossaryTerm", tid, context_id)
+    ctx = parse_id(context_id, "DomainContext").ctx
     obj = {
         "id": tid, "kind": "GlossaryTerm", "status": status, "truth_role": "domain",
         "title": f"Term: {term}", "context_id": context_id,
         "term": term, "definition": definition,
-        "evidence_refs": ["ev.x"] if status == "reviewed" else [],
+        "evidence_refs": (
+            [format_id("EvidenceRef", ctx=ctx, anchor_key="term")]
+            if status == "reviewed"
+            else []
+        ),
     }
     if synonyms is not None:
         obj["synonyms"] = synonyms
@@ -54,6 +71,7 @@ def glossary_term(tid, *, term, definition="정의", status="reviewed", synonyms
 
 
 def code_locator(cid, *, path, symbol):
+    cid = _contextual_id("CodeLocator", cid)
     return _b({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
         "title": "코드", "repo": "demoapp", "path": path, "symbol": symbol,
@@ -61,18 +79,32 @@ def code_locator(cid, *, path, symbol):
     })
 
 
-def review_record(rid):
+def review_record():
     # 색인 제외 kind(§2.1) — 색인에 들어가면 안 됨.
+    target_object_id = format_id("GlossaryTerm", ctx="neutral", key="x")
     return _b({
-        "id": rid, "kind": "ReviewRecord", "status": "reviewed", "truth_role": "review",
+        "id": format_id("ReviewRecord", target_object_id=target_object_id),
+        "kind": "ReviewRecord", "status": "reviewed", "truth_role": "review",
         "title": "검수", "reviewer": "auto", "reviewed_at": T, "verdict": "approved",
-        "target_object_id": "g.x",
+        "target_object_id": target_object_id,
     })
 
 
 def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
                status="candidate", source_objects=None):
-    sids = source_object_ids or ["g.d1"]
+    ctx = parse_id(context_id, "DomainContext").ctx
+    pid_parts = pid.split(".")
+    requirement_key = pid_parts[-2] if pid_parts[-1] == "reuse" else pid_parts[-1]
+    pid = format_id(
+        "ContextProjection",
+        ctx=ctx,
+        requirement_key=requirement_key,
+        format="prompt_payload",
+    )
+    sids = [
+        _contextual_id("GlossaryTerm", sid, context_id)
+        for sid in (source_object_ids or ["g.d1"])
+    ]
     # source_objects(구성 객체 dict들)를 주면 fresh source_content_hash를 lint와
     # 같은 공식으로 계산한다 — A6 신선도 가드가 색인에서 빼지 않도록. 안 주면 옛
     # placeholder("x")라 stale 취급된다(낡음 검사 자체를 보는 테스트용).
@@ -249,7 +281,10 @@ class RebuildTest(unittest.TestCase):
         self.assertTrue(ctx.exception.committed)
         self.assertIn("이미 교체", str(ctx.exception))
         self.assertEqual(self._temporary_rebuild_files(), [])
-        self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
+        self.assertIn(
+            "g.neutral.reward",
+            {r["object_id"] for r in search_bm25(self.db, "보상")["results"]},
+        )
 
     def test_post_commit_failure_keeps_durability_error_when_cleanup_also_fails(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
@@ -274,7 +309,10 @@ class RebuildTest(unittest.TestCase):
             "secondary cleanup failure" in note
             for note in getattr(ctx.exception, "__notes__", [])
         ))
-        self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
+        self.assertIn(
+            "g.neutral.reward",
+            {r["object_id"] for r in search_bm25(self.db, "보상")["results"]},
+        )
 
     def test_pre_commit_failure_keeps_primary_error_when_cleanup_also_fails(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
@@ -329,7 +367,10 @@ class RebuildTest(unittest.TestCase):
         fsync_directory.assert_called_once_with(self.db.parent)
         self.assertEqual(boundary_events, ["replace", "directory_fsync"])
         self.assertEqual(self._temporary_rebuild_files(), [])
-        self.assertIn("g.reward", {r["object_id"] for r in search_bm25(self.db, "보상")["results"]})
+        self.assertIn(
+            "g.neutral.reward",
+            {r["object_id"] for r in search_bm25(self.db, "보상")["results"]},
+        )
 
     def test_held_rebuild_lock_fails_without_waiting_and_releases_cleanly(self):
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
@@ -346,7 +387,7 @@ class RebuildTest(unittest.TestCase):
         build_store_dir(self.brain, [
             glossary_term("g.race", term="레이스", definition="카약 경주"),
             code_locator("code.foo", path="a/b/C.cpp", symbol="onClickNewRace"),
-            review_record("review.x"),  # 색인 제외
+            review_record(),  # 색인 제외
         ])
         stats = rebuild(self.brain, self.db)
         self.assertEqual(stats["indexed"], 2)  # 용어 1 + 코드 1, ReviewRecord 제외
@@ -361,7 +402,7 @@ class RebuildTest(unittest.TestCase):
         conn = sqlite3.connect(str(self.db))
         try:
             row = conn.execute(
-                "SELECT context_id FROM documents WHERE object_id = 'g.race'"
+                "SELECT context_id FROM documents WHERE object_id = 'g.neutral.race'"
             ).fetchone()
         finally:
             conn.close()
@@ -396,7 +437,12 @@ class RebuildTest(unittest.TestCase):
         ])
         rebuild(self.brain, self.db)
         # g.reward 파일 삭제 후 재빌드
-        (self.brain / "objects" / "domain" / "g.reward.json").unlink()
+        (
+            self.brain
+            / "objects"
+            / "domain"
+            / "g.neutral.reward.json"
+        ).unlink()
         stats = rebuild(self.brain, self.db)
         self.assertEqual(stats["indexed"], 1)
         conn = sqlite3.connect(str(self.db))
@@ -404,7 +450,7 @@ class RebuildTest(unittest.TestCase):
             ids = [r[0] for r in conn.execute("SELECT object_id FROM documents").fetchall()]
         finally:
             conn.close()
-        self.assertEqual(ids, ["g.race"])
+        self.assertEqual(ids, ["g.neutral.race"])
 
     def test_rebuild_idempotent(self):
         # 두 번 rebuild → 같은 documents 행 집합(멱등)
@@ -439,7 +485,7 @@ class SearchBM25Test(unittest.TestCase):
             glossary_term("g.reward", term="보상", definition="레이스 종료 보상 지급"),
             code_locator("code.new", path="main/map/MinaKayak.cpp",
                          symbol="onClickNewRace"),
-            review_record("review.x"),
+            review_record(),
         ])
         rebuild(self.brain, self.db)
 
@@ -449,19 +495,19 @@ class SearchBM25Test(unittest.TestCase):
     def test_korean_query_hits(self):
         out = search_bm25(self.db, "카약 경주 보상")
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("g.race", ids)
-        self.assertIn("g.reward", ids)
+        self.assertIn("g.neutral.race", ids)
+        self.assertIn("g.neutral.reward", ids)
 
     def test_symbol_query_hits(self):
         # camelCase 심볼 질의가 on/click/new/race 토큰으로 코드 위치에 적중
         out = search_bm25(self.db, "onClickNewRace")
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("code.new", ids)
+        self.assertIn("code.neutral.new", ids)
 
     def test_excluded_kind_not_in_results(self):
         out = search_bm25(self.db, "검수")  # ReviewRecord 표면이었던 텍스트
         ids = {r["object_id"] for r in out["results"]}
-        self.assertNotIn("review.x", ids)
+        self.assertNotIn("review.g.neutral.x", ids)
 
     def test_result_shape(self):
         out = search_bm25(self.db, "레이스")
@@ -606,13 +652,13 @@ class RegexFallbackTest(unittest.TestCase):
         # regex 폴백은 한글 연속 통째 토큰 — "레이스"(통째)는 매칭됨
         out = search_bm25(self.db, "레이스")
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("g.race", ids)
+        self.assertIn("g.neutral.race", ids)
 
     def test_symbol_query_hits_under_regex(self):
         # 심볼 분리는 백엔드 무관 결정론이라 regex 폴백에서도 동일하게 적중
         out = search_bm25(self.db, "onClickNewRace")
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("code.new", ids)
+        self.assertIn("code.neutral.new", ids)
 
 
 class TokenizerMismatchWarningTest(unittest.TestCase):
@@ -723,7 +769,7 @@ class VectorIndexTest(unittest.TestCase):
             glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
             glossary_term("g.reward", term="보상", definition="레이스 종료 보상 지급"),
             code_locator("code.new", path="main/map/MinaKayak.cpp", symbol="onClickNewRace"),
-            review_record("review.x"),  # 색인 제외
+            review_record(),  # 색인 제외
         ])
         rebuild(self.brain, self.db, embedder=self.embedder)
 
@@ -757,9 +803,9 @@ class VectorIndexTest(unittest.TestCase):
         # stub은 의미를 못 담지만, 같은 텍스트 임베딩은 자기 자신을 거리 0 근처로 찾는다.
         out = search_vector(self.db, "카약 경주 진행", embedder=self.embedder)
         ids = [r["object_id"] for r in out["results"]]
-        self.assertIn("g.race", ids)
+        self.assertIn("g.neutral.race", ids)
         # g.race가 자기 표면과 동일 임베딩이라 거리 최소(맨 앞).
-        self.assertEqual(ids[0], "g.race")
+        self.assertEqual(ids[0], "g.neutral.race")
 
     def test_result_shape_mirrors_bm25(self):
         out = search_vector(self.db, "레이스", embedder=self.embedder)
@@ -824,16 +870,16 @@ class VectorScopeTest(unittest.TestCase):
     def test_scope_filters_to_matching_context(self):
         out = search_vector(self.db, "레이스", scope="context.kayak", embedder=self.embedder)
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("g.a", ids)
-        self.assertNotIn("g.b", ids)
+        self.assertIn("g.kayak.a", ids)
+        self.assertNotIn("g.other.b", ids)
         for r in out["results"]:
             self.assertEqual(r["context_id"], "context.kayak")
 
     def test_no_scope_returns_both(self):
         out = search_vector(self.db, "레이스", embedder=self.embedder)
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("g.a", ids)
-        self.assertIn("g.b", ids)
+        self.assertIn("g.kayak.a", ids)
+        self.assertIn("g.other.b", ids)
 
 
 class FtsRegressionWithVecTableTest(unittest.TestCase):
@@ -855,12 +901,12 @@ class FtsRegressionWithVecTableTest(unittest.TestCase):
     def test_bm25_still_works_with_vec_table(self):
         out = search_bm25(self.db, "레이스")
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("g.race", ids)
+        self.assertIn("g.neutral.race", ids)
 
     def test_bm25_symbol_with_vec_table(self):
         out = search_bm25(self.db, "onClickNewRace")
         ids = {r["object_id"] for r in out["results"]}
-        self.assertIn("code.new", ids)
+        self.assertIn("code.neutral.new", ids)
 
 
 if __name__ == "__main__":
@@ -943,7 +989,12 @@ class CorpusFingerprintTest(unittest.TestCase):
             self.assertEqual(fp_with, compute_corpus_fingerprint(store2, brain_root))
 
             # 더 강하게: 그 객체가 아예 없는 코퍼스와도 지문이 같다(색인 집합 동치).
-            (brain_root / "objects" / "domain" / "g.t.cjk.json").unlink()
+            (
+                brain_root
+                / "objects"
+                / "domain"
+                / "g.t.cjk.json"
+            ).unlink()
             store3 = BrainStore.load(brain_root)
             self.assertEqual(fp_with, compute_corpus_fingerprint(store3, brain_root))
 
@@ -969,7 +1020,11 @@ class StaleProjectionTest(unittest.TestCase):
         # 저장된 store 내용으로 source_content_hash를 재계산(lint 헬퍼 재사용).
         from project_brain.lint import _compute_source_content_hash
         store = BrainStore.load(self.brain)
-        return _compute_source_content_hash(store, source_object_ids)
+        canonical_ids = [
+            _contextual_id("GlossaryTerm", sid)
+            for sid in source_object_ids
+        ]
+        return _compute_source_content_hash(store, canonical_ids)
 
     def _index_object_ids_of_kind(self, kind):
         conn = sqlite3.connect(str(self.db))
@@ -1000,7 +1055,9 @@ class StaleProjectionTest(unittest.TestCase):
             "g.src", term="알림클리어", definition="완전히 다른 정의로 변경"))
         rebuild(self.brain, self.db)
         self.assertNotIn(
-            "projection.stale", self._index_object_ids_of_kind("ContextProjection"))
+            "projection.neutral.stale.reuse",
+            self._index_object_ids_of_kind("ContextProjection"),
+        )
 
     def test_fresh_projection_included_in_rebuild(self):
         # 구성 용어를 적재 → fresh 해시로 projection 저장 → 변형 없이 rebuild →
@@ -1017,7 +1074,9 @@ class StaleProjectionTest(unittest.TestCase):
         BrainStore.save_object(self.brain, proj)
         rebuild(self.brain, self.db)
         self.assertIn(
-            "projection.fresh", self._index_object_ids_of_kind("ContextProjection"))
+            "projection.neutral.fresh.reuse",
+            self._index_object_ids_of_kind("ContextProjection"),
+        )
 
     def test_stale_projection_excluded_from_fingerprint(self):
         # rebuild와 지문이 같은 입력을 봐야 한다 — stale projection은 지문에서도 빠진다.
@@ -1043,7 +1102,12 @@ class StaleProjectionTest(unittest.TestCase):
         fp_with_stale = compute_corpus_fingerprint(store_stale, self.brain)
 
         # projection 자체를 아예 지운 코퍼스의 지문과 stale 코퍼스의 지문이 같아야 한다.
-        (self.brain / "indexes" / "context_projections" / "projection.fp.json").unlink()
+        (
+            self.brain
+            / "indexes"
+            / "context_projections"
+            / "projection.neutral.fp.reuse.json"
+        ).unlink()
         store_gone = BrainStore.load(self.brain)
         fp_gone = compute_corpus_fingerprint(store_gone, self.brain)
         self.assertEqual(fp_with_stale, fp_gone)
@@ -1156,14 +1220,14 @@ class ScopedBm25SearchTest(unittest.TestCase):
         #  d1 우위). 이 현상이 s1 회귀의 원인이고 scoped 레인의 존재 이유다.
         def a_rank(results):
             return [r["object_id"] for r in results
-                    if r["object_id"] in ("g.d1", "g.d2")]
+                    if r["object_id"] in ("g.a.d1", "g.a.d2")]
 
         self._rebuild(self.base_objs)
         before = a_rank(search_bm25(self.db, "알림 클리어")["results"])
         self._rebuild(self.noise_objs)
         after = a_rank(search_bm25(self.db, "알림 클리어")["results"])
-        self.assertEqual(before, ["g.d2", "g.d1"])
-        self.assertEqual(after, ["g.d1", "g.d2"])
+        self.assertEqual(before, ["g.a.d2", "g.a.d1"])
+        self.assertEqual(after, ["g.a.d1", "g.a.d2"])
 
     def test_scope_excludes_other_context_and_raw(self):
         # scope 행만 후보 — 다른 컨텍스트·raw 청크는 결과에도 df에도 안 들어간다.
@@ -1176,8 +1240,8 @@ class ScopedBm25SearchTest(unittest.TestCase):
         rebuild(self.brain, self.db)
         results = search_bm25_scoped(self.db, "알림 팝업", scope="context.a")["results"]
         ids = {r["object_id"] for r in results}
-        self.assertIn("g.d1", ids)
-        self.assertNotIn("g.out", ids)
+        self.assertIn("g.a.d1", ids)
+        self.assertNotIn("g.b.out", ids)
         self.assertTrue(all(r["kind"] != "raw_chunk" for r in results))
 
     def test_deterministic(self):
@@ -1208,7 +1272,7 @@ class ScopedBm25SearchTest(unittest.TestCase):
         try:
             indexed = conn.execute(
                 "SELECT COUNT(*) FROM documents WHERE object_id = ? AND kind = ?",
-                ("projection.a.reuse", "ContextProjection"),
+                ("projection.a.a.reuse", "ContextProjection"),
             ).fetchone()[0]
         finally:
             conn.close()

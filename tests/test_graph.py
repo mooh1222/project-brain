@@ -160,8 +160,8 @@ class TestGraphIsolatedCli(unittest.TestCase):
             payload = json.loads(out.getvalue())
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
-        self.assertIn("code.lonely", payload["isolated"])
-        self.assertNotIn("code.linked", payload["isolated"])
+        self.assertIn("code.neutral.lonely", payload["isolated"])
+        self.assertNotIn("code.neutral.linked", payload["isolated"])
         self.assertEqual(payload["by_kind"], {"CodeLocator": 1})
 
     def test_cli_graph_isolated_kind_filter(self):
@@ -200,9 +200,9 @@ class TestGraphExportCli(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["out"], str(out_path))
         self.assertEqual(payload["nodes"], 2)
-        self.assertEqual(payload["edges"], 1)        # m.x → code.x
+        self.assertEqual(payload["edges"], 1)  # mapping.neutral.x → code.neutral.x
         self.assertIn("vis-network", html)
-        self.assertIn("code.x", html)
+        self.assertIn("code.neutral.x", html)
 
     def test_cli_graph_export_creates_missing_parent_dirs(self):
         # 없는 부모 디렉터리로 내보내면 폴더를 만들어 쓴다(흔한 케이스 — 트레이스백 금지).

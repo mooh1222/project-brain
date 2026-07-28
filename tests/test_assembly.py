@@ -21,6 +21,10 @@ class DeriveIdTest(unittest.TestCase):
         self.assertEqual(derive_id("CodeLocator", "ctx", "a"), "code.ctx.a")
         self.assertEqual(derive_id("EvidenceRef", "ctx", "a"), "evref.ctx.a")
 
+    def test_noncanonical_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            derive_id("DomainMapping", "ctx", "bad_key")
+
 
 class BuildCodeEvidenceTest(unittest.TestCase):
     def test_anchor_expands_to_locator_and_evref(self):
@@ -108,6 +112,7 @@ class BuildMappingsTest(unittest.TestCase):
         self.assertEqual(m["id"], "mapping.ctx.hit-trigger")
         self.assertEqual(m["kind"], "DomainMapping")
         self.assertEqual(m["status"], "reviewed")
+        self.assertEqual(m["context_id"], "context.ctx")
         self.assertEqual(sorted(m["glossary_term_ids"]),
                          ["g.ctx.do-trap-on-near-bubble-pop", "g.ctx.hit"])
         self.assertEqual(m["code_locator_ids"], ["code.ctx.hit-hook"])
@@ -820,11 +825,11 @@ class BuildDecisionsTest(unittest.TestCase):
         self.assertEqual(validate_notes(notes), [])  # 1층 통과(하드코딩 튜플 아닌 dict 참조)
         objs = build_decisions(notes, NOW)
         evs = {o["id"]: o for o in objs if o["kind"] == "EvidenceRef"}
-        self.assertEqual(evs["evref.ctx.slack-C123-p456"]["ref_type"], "slack_thread")
+        self.assertEqual(evs["evref.ctx.slack-c123-p456"]["ref_type"], "slack_thread")
         self.assertEqual(evs["evref.ctx.spec-luckybox-v2"]["ref_type"], "spec_section")
         self.assertEqual(evs["evref.ctx.wiki-luckybox-page"]["ref_type"], "wiki_section")
         # 커밋 외 타입은 노트가 준 locator를 그대로 쓴다(인스턴스 URL은 엔진이 안 만듦)
-        self.assertEqual(evs["evref.ctx.slack-C123-p456"]["locator"],
+        self.assertEqual(evs["evref.ctx.slack-c123-p456"]["locator"],
                          "https://slack/archives/C123/p456")
 
     def test_decision_evidence_unsupported_type_still_rejected(self):

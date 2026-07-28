@@ -17,7 +17,7 @@ from project_brain.store import BrainStore
 T = "2026-06-04T00:00:00Z"
 
 
-def manifest(mid="ev.manifest"):
+def manifest(mid="manifest.neutral.source"):
     """중립 EvidenceManifest 한 개."""
     return base(
         {
@@ -38,7 +38,10 @@ def manifest(mid="ev.manifest"):
     )
 
 
-def evidence_ref(rid="ev.ref", manifest_id="ev.manifest"):
+def evidence_ref(
+    rid="evref.neutral.ref",
+    manifest_id="manifest.neutral.source",
+):
     """중립 EvidenceRef 한 개. bundle 내 manifest를 가리킴."""
     return base(
         {
@@ -56,7 +59,7 @@ def evidence_ref(rid="ev.ref", manifest_id="ev.manifest"):
     )
 
 
-def candidate_term(tid="g.x", *, term="용어"):
+def candidate_term(tid="g.neutral.x", *, term="용어"):
     """중립 candidate GlossaryTerm 한 개."""
     return base(
         {
@@ -78,7 +81,13 @@ def candidate_term(tid="g.x", *, term="용어"):
     )
 
 
-def reviewed_term(tid="g.x", *, term="용어", review_record_id=None, evidence_refs=None):
+def reviewed_term(
+    tid="g.neutral.x",
+    *,
+    term="용어",
+    review_record_id=None,
+    evidence_refs=None,
+):
     """중립 reviewed GlossaryTerm 한 개(candidate 메타 없음). §6.4: reviewed는 근거 필수."""
     obj = {
         "id": tid,
@@ -89,7 +98,9 @@ def reviewed_term(tid="g.x", *, term="용어", review_record_id=None, evidence_r
         "context_id": "context.neutral",
         "term": term,
         "definition": "중립 정의",
-        "evidence_refs": evidence_refs if evidence_refs is not None else ["ev.ref"],
+        "evidence_refs": (
+            evidence_refs if evidence_refs is not None else ["evref.neutral.ref"]
+        ),
     }
     if review_record_id is not None:
         obj["review_record_id"] = review_record_id
@@ -136,7 +147,12 @@ def context(cid="context.neutral", *, glossary_term_ids=None):
     )
 
 
-def candidate_mapping(mid="m.x", *, glossary_term_ids, mapping_key="key"):
+def candidate_mapping(
+    mid="mapping.neutral.key",
+    *,
+    glossary_term_ids,
+    mapping_key="key",
+):
     """중립 candidate DomainMapping 한 개. decision_record_ids는 빈 리스트."""
     return base(
         {
@@ -157,7 +173,7 @@ def candidate_mapping(mid="m.x", *, glossary_term_ids, mapping_key="key"):
     )
 
 
-def insight(iid="insight.x", *, insight_type="cross-cutting-risk",
+def insight(iid="insight.neutral.risk", *, insight_type="cross-cutting-risk",
             source_object_ids=None, body="노출 게이트가 두 팝업에 이중구현돼 어긋난다",
             status="reviewed", scope="스테이지 클리어 토큰 노출", code_locator_ids=None):
     """중립 Insight 한 개(2026-06-15 신설 kind). A형(cross-cutting-risk) 기본 — source≥2."""
@@ -169,7 +185,7 @@ def insight(iid="insight.x", *, insight_type="cross-cutting-risk",
         "title": "인사이트: 노출 게이트 이중구현",
         "body": body,
         "source_object_ids": source_object_ids if source_object_ids is not None
-                             else ["m.a", "m.b"],
+                             else ["mapping.neutral.a", "mapping.neutral.b"],
         "scope": scope,
     }
     if insight_type is not None:
@@ -191,9 +207,9 @@ class TestIngest(unittest.TestCase):
         bundle = [manifest(), evidence_ref(), candidate_term()]
         ingest(self.root, bundle)
         store = BrainStore.load(self.root)
-        self.assertTrue(store.has("ev.manifest"))
-        self.assertTrue(store.has("ev.ref"))
-        self.assertEqual(store.get("g.x")["status"], "candidate")
+        self.assertTrue(store.has("manifest.neutral.source"))
+        self.assertTrue(store.has("evref.neutral.ref"))
+        self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
 
     def test_ingest_rejects_schema_violation_writes_nothing(self):
         bad = {"id": "bad", "kind": "GlossaryTerm"}  # base 필드 다수 누락
@@ -206,7 +222,13 @@ class TestIngest(unittest.TestCase):
     def test_ingest_rejects_dangling_link_writes_nothing(self):
         # context는 동봉해 resolve되지만 mapping이 store에도 bundle에도 없는
         # glossary_term_id를 가리킴 → dangling link 거부(lint.py 8a)
-        bundle = [context(), candidate_mapping("m.x", glossary_term_ids=["g.missing"])]
+        bundle = [
+            context(),
+            candidate_mapping(
+                "mapping.neutral.key",
+                glossary_term_ids=["g.neutral.missing"],
+            ),
+        ]
         with self.assertRaises(IngestError):
             ingest(self.root, bundle)
         self.assertEqual(BrainStore.load(self.root).all(), [])
@@ -217,50 +239,94 @@ class TestIngest(unittest.TestCase):
         # 같은 객체 두 번째 ingest 도 성공(write_text 덮어쓰기)
         ingest(self.root, [manifest(), evidence_ref(), candidate_term()])
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.x")["status"], "candidate")
+        self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
 
     def test_ingest_allows_candidate_to_reviewed(self):
         ingest(self.root, [manifest(), evidence_ref(), candidate_term()])
-        # 같은 id를 reviewed로 ingest(승격). reviewed_term은 ev.ref(이미 store에) 참조 → §6.4·lint 통과
-        rr = review_record_for("review.g.x", "g.x")
-        ingest(self.root, [reviewed_term(review_record_id="review.g.x"), rr])
+        # 같은 id를 reviewed로 ingest(승격). reviewed_term은 기존 evref를 참조 → §6.4·lint 통과
+        rr = review_record_for("review.g.neutral.x", "g.neutral.x")
+        ingest(self.root, [reviewed_term(review_record_id="review.g.neutral.x"), rr])
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.x")["status"], "reviewed")
-        self.assertTrue(store.has("review.g.x"))
+        self.assertEqual(store.get("g.neutral.x")["status"], "reviewed")
+        self.assertTrue(store.has("review.g.neutral.x"))
 
     def test_ingest_rejects_reviewed_to_candidate_demotion(self):
-        rr = review_record_for("review.g.x", "g.x")
-        ingest(self.root, [manifest(), evidence_ref(), reviewed_term(review_record_id="review.g.x"), rr])
+        rr = review_record_for("review.g.neutral.x", "g.neutral.x")
+        ingest(
+            self.root,
+            [
+                manifest(),
+                evidence_ref(),
+                reviewed_term(review_record_id="review.g.neutral.x"),
+                rr,
+            ],
+        )
         # 같은 id를 candidate로 덮으려 하면 거부(후퇴 가드)
         with self.assertRaises(IngestError):
             ingest(self.root, [candidate_term()])
         # 기존 reviewed 보존
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.x")["status"], "reviewed")
+        self.assertEqual(store.get("g.neutral.x")["status"], "reviewed")
 
     def test_ingest_reviewed_to_reviewed_ok(self):
-        rr = review_record_for("review.g.x", "g.x")
-        ingest(self.root, [manifest(), evidence_ref(), reviewed_term(review_record_id="review.g.x"), rr])
+        rr = review_record_for("review.g.neutral.x", "g.neutral.x")
+        ingest(
+            self.root,
+            [
+                manifest(),
+                evidence_ref(),
+                reviewed_term(review_record_id="review.g.neutral.x"),
+                rr,
+            ],
+        )
         # 다시 reviewed로 ingest(멱등) — 성공
-        ingest(self.root, [reviewed_term(review_record_id="review.g.x"), rr])
-        self.assertEqual(BrainStore.load(self.root).get("g.x")["status"], "reviewed")
+        ingest(
+            self.root,
+            [reviewed_term(review_record_id="review.g.neutral.x"), rr],
+        )
+        self.assertEqual(
+            BrainStore.load(self.root).get("g.neutral.x")["status"],
+            "reviewed",
+        )
 
     def test_ingest_merges_existing_store_for_lint(self):
         # 기존 store에 context + candidate term 적재
-        ingest(self.root, [context(glossary_term_ids=["g.x"]), candidate_term("g.x")])
+        ingest(
+            self.root,
+            [
+                context(glossary_term_ids=["g.neutral.x"]),
+                candidate_term("g.neutral.x"),
+            ],
+        )
         # 새 bundle의 mapping이 기존 store의 term/context를 가리킴 → merge 후 lint 통과
-        ingest(self.root, [candidate_mapping("m.x", glossary_term_ids=["g.x"])])
+        ingest(
+            self.root,
+            [
+                candidate_mapping(
+                    "mapping.neutral.key",
+                    glossary_term_ids=["g.neutral.x"],
+                )
+            ],
+        )
         store = BrainStore.load(self.root)
-        self.assertTrue(store.has("m.x"))
-        self.assertTrue(store.has("g.x"))
+        self.assertTrue(store.has("mapping.neutral.key"))
+        self.assertTrue(store.has("g.neutral.x"))
 
     def _insight_bundle(self):
         # Insight source 객체(m.a·m.b)를 store에 동봉해 dangling을 피한다.
         return [
-            context(glossary_term_ids=["g.x"]),
-            candidate_term("g.x"),
-            candidate_mapping("m.a", glossary_term_ids=["g.x"]),
-            candidate_mapping("m.b", glossary_term_ids=["g.x"]),
+            context(glossary_term_ids=["g.neutral.x"]),
+            candidate_term("g.neutral.x"),
+            candidate_mapping(
+                "mapping.neutral.a",
+                glossary_term_ids=["g.neutral.x"],
+                mapping_key="a",
+            ),
+            candidate_mapping(
+                "mapping.neutral.b",
+                glossary_term_ids=["g.neutral.x"],
+                mapping_key="b",
+            ),
         ]
 
     def test_ingest_insight_reviewed_idempotent(self):
@@ -268,7 +334,10 @@ class TestIngest(unittest.TestCase):
         ingest(self.root, self._insight_bundle() + [insight()])
         # 같은 reviewed Insight 재적재(멱등) — 기존 ingest 로직 그대로 성공.
         ingest(self.root, [insight()])
-        self.assertEqual(BrainStore.load(self.root).get("insight.x")["status"], "reviewed")
+        self.assertEqual(
+            BrainStore.load(self.root).get("insight.neutral.risk")["status"],
+            "reviewed",
+        )
 
 
 T0 = "2026-06-10T00:00:00Z"

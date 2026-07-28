@@ -8,6 +8,7 @@ review_extra_by_id(single_object 전용)는 {object_id: {추가필드}}로, 각 
 merge한다 — 자동 승격의 vouched_by_mapping_ids(§4.5), 수동 conflict 해소 기록(§4.4)에 쓴다.
 """
 
+from project_brain.id_grammar import format_id
 from project_brain.objbase import review_record
 
 
@@ -90,7 +91,7 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
             reviewed["status"] = "reviewed"
             reviewed["updated_at"] = reviewed_at
             reviewed.pop("candidate", None)
-            review_id = "review." + reviewed["id"]
+            review_id = format_id("ReviewRecord", target_object_id=reviewed["id"])
             reviewed["review_record_id"] = review_id
             rr = review_record(
                 review_id,
@@ -110,7 +111,7 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
     if scope == "mapping_bundle":
         if not bundle_key:
             raise ValueError("mapping_bundle promote requires bundle_key")
-        review_id = "review." + bundle_key
+        review_id = format_id("ReviewRecord", bundle_key=bundle_key)
         promoted_objects = []
         for mid in ids:
             obj = index[mid]  # 없는 id면 KeyError

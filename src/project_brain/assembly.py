@@ -7,26 +7,19 @@
 import copy
 import re
 
+from project_brain.id_grammar import format_id
 from project_brain.objbase import base
 from project_brain.schema import validate_object
 from project_brain.lint import lint_store
 from project_brain.graph import ISOLATION_LEAF_KINDS, referenced_ids
 from project_brain.store import BrainStore
 
-# id 파생 규칙 (kind → prefix). 컨벤션: g.<ctx>.<key> / mapping.<ctx>.<key> 등.
-_ID_PREFIX = {
-    "GlossaryTerm": "g",
-    "DomainMapping": "mapping",
-    "CodeLocator": "code",
-    "EvidenceRef": "evref",
-    "DecisionRecord": "decision",
-    "DomainContext": "context",
-}
-
-
 def derive_id(kind, ctx, key):
-    """kind+컨텍스트+key로 객체 id를 만든다. 규칙은 _ID_PREFIX 고정."""
-    return f"{_ID_PREFIX[kind]}.{ctx}.{key}"
+    """kind+컨텍스트+key로 객체 id를 만든다. 문법은 id_grammar 정본을 따른다."""
+    if kind == "DomainContext":
+        return format_id(kind, ctx=ctx)
+    key_field = "anchor_key" if kind in {"CodeLocator", "EvidenceRef"} else "key"
+    return format_id(kind, ctx=ctx, **{key_field: key})
 
 
 def build_glossary_terms(notes, now):
@@ -41,7 +34,7 @@ def build_glossary_terms(notes, now):
             "status": g.get("status", claim_status),
             "truth_role": "domain",
             "title": g["key"],
-            "context_id": f"context.{ctx}",
+            "context_id": format_id("DomainContext", ctx=ctx),
             "term": g["term"],
             "definition": g["definition"],
             "evidence_refs": g.get("evidence_refs", []),
@@ -95,7 +88,8 @@ def build_mappings(notes, refs_map, now):
         obj = {
             "id": derive_id("DomainMapping", ctx, m["key"]),
             "kind": "DomainMapping", "status": m.get("status", claim_status), "truth_role": "domain",
-            "title": m["canonical_summary"][:120], "context_id": f"context.{ctx}",
+            "title": m["canonical_summary"][:120],
+            "context_id": format_id("DomainContext", ctx=ctx),
             "mapping_key": m["key"], "canonical_summary": m["canonical_summary"],
             "meaning": m["meaning"], "boundary": m["boundary"],
             "caveats": m.get("caveats", ["history_coverage=unsearched"]),
@@ -130,14 +124,18 @@ def build_decisions(notes, now):
 
     def ensure_evref(item):
         etype, ref = item["type"], item["ref"]
-        eid = f"evref.{ctx}.{etype}-{ref}"
+        eid = derive_id("EvidenceRef", ctx, f"{etype}-{ref}".lower())
         if eid not in made:
             made.add(eid)
             locator = {"repo": repo, "sha": ref} if etype == "commit" else item["locator"]
             ev = {
                 "id": eid, "kind": "EvidenceRef", "status": "reviewed",
                 "truth_role": "reference", "title": (item.get("summary") or ref)[:120],
-                "evidence_manifest_id": f"manifest.{ctx}.{etype}",
+                "evidence_manifest_id": format_id(
+                    "EvidenceManifest",
+                    ctx=ctx,
+                    key=etype,
+                ),
                 "ref_type": _DECISION_REF_TYPE[etype], "locator": locator,
                 "summary": item.get("summary") or ref,
             }
@@ -153,7 +151,7 @@ def build_decisions(notes, now):
             "summary": d["summary"], "decision": d["decision"],
             "spec_reflected": d.get("spec_reflected", "not_applicable"),
             "source_object_ids": ref_ids, "evidence_refs": ref_ids,
-            "affected_context_ids": [f"context.{ctx}"],
+            "affected_context_ids": [format_id("DomainContext", ctx=ctx)],
             "affected_mapping_ids": [derive_id("DomainMapping", ctx, mk)
                                      for mk in d.get("affects", [])],
         }
@@ -191,7 +189,8 @@ def build_context(notes, now):
         return []
     ctx = cx["key"]
     obj = {
-        "id": f"context.{ctx}", "kind": "DomainContext", "status": "reviewed",
+        "id": format_id("DomainContext", ctx=ctx),
+        "kind": "DomainContext", "status": "reviewed",
         "truth_role": "domain", "title": cx["display_name"][:80], "context_key": ctx,
         "project_id": cx.get("repo", "demoapp"), "display_name": cx["display_name"],
         "boundary_summary": cx["boundary_summary"], "in_scope": cx.get("in_scope", []),
