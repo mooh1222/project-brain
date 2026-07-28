@@ -1,10 +1,12 @@
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
 from project_brain.config import (
     ConfigError,
+    load_config,
     resolve_brain_root,
     resolve_default_branch,
     resolve_scenarios_path,
@@ -27,6 +29,96 @@ from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
 from project_brain.search_index import rebuild as index_rebuild
 from project_brain.store import BrainStore
+from project_brain.mutation import MutationOperation
+from project_brain.repo_context import (
+    RepoContext,
+    RepoVerificationError,
+    resolve_repo_context,
+)
+
+
+def _add_mutation_context_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    engine_required: bool,
+) -> None:
+    parser.add_argument("--repo-root", help="검증할 Git worktree의 absolute root")
+    parser.add_argument("--expected-repo-id", help="canonical repository identity")
+    parser.add_argument("--expected-revision-ref", help="검증 대상 Git ref")
+    parser.add_argument(
+        "--engine-sha",
+        required=engine_required,
+        help="이 mutation을 수행하는 Project Brain exact commit SHA",
+    )
+
+
+def _resolve_mutation_context(
+    args,
+    brain_root: Path,
+    *,
+    required: bool,
+) -> RepoContext | None:
+    """명시 인자 또는 project config에서 mutation용 repo context를 해석한다."""
+    cfg = load_config(start=brain_root)
+    repo_root = (
+        Path(args.repo_root).resolve()
+        if args.repo_root
+        else cfg["root"].resolve() if cfg is not None else None
+    )
+    configured_repo_id = cfg.get("repo") if cfg is not None else None
+    expected_repo_id = args.expected_repo_id or configured_repo_id
+    expected_revision_ref = args.expected_revision_ref
+    if expected_revision_ref is None and cfg is not None:
+        expected_revision_ref = (
+            f"origin/{resolve_default_branch(start=brain_root)}"
+        )
+    if (
+        not required
+        and repo_root is None
+        and expected_repo_id is None
+        and expected_revision_ref is None
+    ):
+        return None
+    missing = [
+        name
+        for name, value in (
+            ("repo_root", repo_root),
+            ("expected_repo_id", expected_repo_id),
+            ("expected_revision_ref", expected_revision_ref),
+        )
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        raise ConfigError(
+            "mutation repository context를 알 수 없다: "
+            + ", ".join(missing)
+            + " — 명시 플래그나 .project-brain.json 설정을 제공하라."
+        )
+    return resolve_repo_context(
+        repo_root,
+        expected_repo_id=expected_repo_id,
+        configured_repo_id=configured_repo_id or expected_repo_id,
+        expected_revision_ref=expected_revision_ref,
+    )
+
+
+def _apply_mutation(
+    *,
+    operation: MutationOperation,
+    brain_root: Path,
+    repo_context: RepoContext | None,
+    engine_sha: str,
+    objects,
+    preconditions=None,
+):
+    return ingest(
+        brain_root,
+        objects,
+        preconditions=preconditions,
+        engine_sha=engine_sha,
+        repo_context=repo_context,
+        operation=operation,
+    )
 
 
 def _run_query(argv) -> int:
@@ -92,16 +184,29 @@ def _run_ingest(argv) -> int:
     parser.add_argument("--objects-file", required=True)
     parser.add_argument("--preconditions-file",
                         help="build 리포트 JSON (preconditions 키 — 저장 직전 낙관적 잠금 재검사)")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=any(obj.get("kind") == "CodeLocator" for obj in objects),
+    )
     preconditions = None
     if args.preconditions_file:
         report = json.loads(Path(args.preconditions_file).read_text(encoding="utf-8"))
         preconditions = report.get("preconditions", report)
     try:
-        ingest(brain_root, objects, preconditions=preconditions)
+        _apply_mutation(
+            operation=MutationOperation.INGEST,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=objects,
+            preconditions=preconditions,
+        )
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
@@ -120,6 +225,7 @@ def _run_promote(argv) -> int:
     parser.add_argument("--bundle-key")
     parser.add_argument("--conflict-resolution",
                         help="수동 conflict 용어 승격 시 정설 선택 근거(검수 기록에 기록, §4.4)")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
@@ -158,26 +264,27 @@ def _run_promote(argv) -> int:
     except (ValueError, KeyError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
-    # ★원자성(2026-06-08 사고 반영): 디스크에 쓰기 전 schema 검증 + 적용 후 store lint를 둘 다
-    #   save 전에 한다. schema는 필드/enum만 보고, legacy-only·dangling 같은 store 관계 위반은
-    #   lint가 잡으므로 lint를 save 뒤에 두면 부분 쓰기가 남는다. ingest.py처럼 merged store를
-    #   메모리에서 lint해 통과해야만 save한다.
     to_write = promoted + records
-    schema_errors = []
-    for obj in to_write:
-        schema_errors.extend(validate_object(obj))
-    if schema_errors:
-        print(json.dumps({"ok": False, "error": "; ".join(schema_errors)}, ensure_ascii=False, indent=2))
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=any(obj.get("kind") == "CodeLocator" for obj in to_write),
+    )
+    try:
+        _apply_mutation(
+            operation=MutationOperation.PROMOTE,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=to_write,
+        )
+    except IngestError as exc:
+        print(json.dumps(
+            {"ok": False, "error": str(exc)},
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 1
-    merged = {o["id"]: o for o in store.all()}
-    for obj in to_write:
-        merged[obj["id"]] = obj
-    problems = lint_store(BrainStore(merged))
-    if problems:
-        print(json.dumps({"ok": False, "lint": problems}, ensure_ascii=False, indent=2))
-        return 1
-    for obj in to_write:
-        BrainStore.save_object(brain_root, obj)
     print(json.dumps(
         {"ok": True, "promoted": [o["id"] for o in promoted], "reviews": [r["id"] for r in records]},
         ensure_ascii=False, indent=2))
@@ -190,6 +297,7 @@ def _run_promote_auto(argv) -> int:
     parser.add_argument("--ids", required=True, nargs="+",
                         help="배치 커버리지 검증 워크플로우가 산출한 pass 용어 id 목록(§4.2b)")
     parser.add_argument("--reviewed-at", help="생략 시 현재 KST를 엔진이 자동으로 박는다")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
@@ -242,24 +350,27 @@ def _run_promote_auto(argv) -> int:
         except (ValueError, KeyError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
             return 1
-        # 원자성(2026-06-08 사고 반영): 쓰기 전 schema + merged store lint를 둘 다 한다. lint를
-        # save 뒤에 두면 legacy-only 같은 위반이 부분 쓰기를 남긴다. 통과해야만 save한다.
         to_write = promoted + records
-        schema_errors = []
-        for obj in to_write:
-            schema_errors.extend(validate_object(obj))
-        if schema_errors:
-            print(json.dumps({"ok": False, "error": "; ".join(schema_errors)}, ensure_ascii=False, indent=2))
+        repo_context = _resolve_mutation_context(
+            args,
+            brain_root,
+            required=any(obj.get("kind") == "CodeLocator" for obj in to_write),
+        )
+        try:
+            _apply_mutation(
+                operation=MutationOperation.PROMOTE_AUTO,
+                brain_root=brain_root,
+                repo_context=repo_context,
+                engine_sha=args.engine_sha,
+                objects=to_write,
+            )
+        except IngestError as exc:
+            print(json.dumps(
+                {"ok": False, "error": str(exc)},
+                ensure_ascii=False,
+                indent=2,
+            ))
             return 1
-        merged = {o["id"]: o for o in store.all()}
-        for obj in to_write:
-            merged[obj["id"]] = obj
-        problems = lint_store(BrainStore(merged))
-        if problems:
-            print(json.dumps({"ok": False, "lint": problems}, ensure_ascii=False, indent=2))
-            return 1
-        for obj in to_write:
-            BrainStore.save_object(brain_root, obj)
 
     # 승격 후 남은 보증 용어(보류된 커버리지 불통과분 등) 비차단 드리프트 신호(§4.6).
     from project_brain.lint import unpromoted_vouched_terms
@@ -752,8 +863,29 @@ def _run_projection_refresh(args) -> int:
         return 1
 
     if to_ingest:
+        repo_context = _resolve_mutation_context(
+            args,
+            brain_root,
+            required=any(
+                obj.get("kind") == "CodeLocator"
+                for obj in to_ingest
+            ),
+        )
         try:
-            ingest(brain_root, to_ingest)
+            preconditions = {
+                obj["id"]: hashlib.sha256(
+                    BrainStore.object_bytes(store.get(obj["id"]))
+                ).hexdigest()
+                for obj in to_ingest
+            }
+            _apply_mutation(
+                operation=MutationOperation.PROJECTION_REPAIR,
+                brain_root=brain_root,
+                repo_context=repo_context,
+                engine_sha=args.engine_sha,
+                objects=to_ingest,
+                preconditions=preconditions,
+            )
         except IngestError as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
             return 1
@@ -790,6 +922,7 @@ def _run_projection(argv) -> int:
                          help="없으면 생성될 projection JSON 미리보기만(저장 안 함)")
     p_reuse.add_argument("--replace", action="store_true",
                          help="같은 projection id가 store에 이미 있을 때만 교체 허용")
+    _add_mutation_context_arguments(p_reuse, engine_required=False)
 
     p_refresh = sub.add_parser(
         "refresh",
@@ -797,10 +930,13 @@ def _run_projection(argv) -> int:
     p_refresh.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     p_refresh.add_argument("--ids", nargs="+",
                            help="대상 projection id (생략 시 전체 ContextProjection)")
+    _add_mutation_context_arguments(p_refresh, engine_required=True)
     args = parser.parse_args(argv)
 
     if args.action == "refresh":
         return _run_projection_refresh(args)
+    if args.write and not args.engine_sha:
+        parser.error("--engine-sha is required with --write")
 
     from project_brain.context_projection import build_reuse_projection
 
@@ -836,6 +972,11 @@ def _run_projection(argv) -> int:
         print(json.dumps({"ok": True, "preview": True, "projection": projection},
                          ensure_ascii=False, indent=2))
         return 0
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=projection.get("kind") == "CodeLocator",
+    )
 
     # 같은 id가 이미 있으면 기본 거부 — --replace 줄 때만 교체(codex 합의).
     if store.has(projection["id"]) and not args.replace:
@@ -858,7 +999,13 @@ def _run_projection(argv) -> int:
         return 1
     # ingest() 경유 저장: schema + merged lint + reviewed→candidate 후퇴 가드를 탄다.
     try:
-        ingest(brain_root, [projection])
+        _apply_mutation(
+            operation=MutationOperation.PROJECTION,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=[projection],
+        )
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
@@ -962,7 +1109,6 @@ def _run_mark_checked(argv) -> int:
     """검토 완료 매핑으로 locator closure를 mark (spec §4). 갱신 locator만 저장."""
     parser = argparse.ArgumentParser(prog="cli mark-checked")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config)")
-    parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모 — brain이 레포 루트 직하라 가정)")
     parser.add_argument("--mappings", required=True, nargs="+",
                         help="'의미 그대로'로 검토 완료한 매핑 id 목록")
     parser.add_argument("--checked-head", required=True,
@@ -970,6 +1116,7 @@ def _run_mark_checked(argv) -> int:
     parser.add_argument("--no-fetch", action="store_true",
                         help="git fetch 생략(오프라인·테스트). 주의: write 명령이라 "
                              "checked_head 경합 가드가 로컬 기본 브랜치 기준으로 약해진다")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     from project_brain.stale_check import (
@@ -980,10 +1127,10 @@ def _run_mark_checked(argv) -> int:
     )
 
     brain_root = resolve_brain_root(args.brain_root)
+    repo_context = _resolve_mutation_context(args, brain_root, required=True)
     default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
-    repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
-    git_runner = make_git_runner(repo_root)
+    git_runner = make_git_runner(repo_context.repo_root)
     if args.no_fetch:
         print(f"warning: --no-fetch는 checked_head 경합 가드를 로컬 origin/{default_branch} 기준으로 "
               f"약화시킨다(쓰기 명령 — 최신 {default_branch} 미반영 위험).", file=sys.stderr)
@@ -1002,18 +1149,21 @@ def _run_mark_checked(argv) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
 
-    # 쓰기 전 schema 검증 후에만 save(promote의 '쓰기 전 검증' 원칙). CodeLocator의
-    # commit_sha/verified_at/updated_at만 갱신해 관계가 안 바뀌므로 store lint는 불필요
-    # (promote는 관계를 바꿔 merged lint까지 하지만 여긴 해당 없음).
-    schema_errors = []
-    for loc in result["updated"]:
-        schema_errors.extend(validate_object(loc))
-    if schema_errors:
-        print(json.dumps({"ok": False, "error": "; ".join(schema_errors)},
-                         ensure_ascii=False, indent=2))
+    try:
+        _apply_mutation(
+            operation=MutationOperation.MARK_CHECKED,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=result["updated"],
+        )
+    except IngestError as exc:
+        print(json.dumps(
+            {"ok": False, "error": str(exc)},
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 1
-    for loc in result["updated"]:
-        BrainStore.save_object(brain_root, loc)
     print(json.dumps(
         {"ok": True, "updated": [loc["id"] for loc in result["updated"]],
          "blocked": result["blocked"], "warnings": result["warnings"]},
@@ -1064,7 +1214,7 @@ def main() -> int:
         if argv and argv[0] == "mark-checked":
             return _run_mark_checked(argv[1:])
         return _run_query(argv)
-    except ConfigError as exc:
+    except (ConfigError, RepoVerificationError) as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
               file=sys.stderr)

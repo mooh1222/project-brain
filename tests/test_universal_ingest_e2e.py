@@ -22,12 +22,15 @@ single_object 승격 → 단계3 mapping_bundle 승격을 generic 부품으로 �
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from project_brain.code_verify import VerifiedLocator
 from project_brain.id_grammar import format_id
-from project_brain.ingest import ingest
+from tests.test_ingest import ingest
 from project_brain.lint import lint_store
 from project_brain.objbase import base
 from project_brain.promote import promote
+from project_brain.repo_context import RepoContext
 from project_brain.router import QueryRouter
 from project_brain.store import BrainStore
 
@@ -107,7 +110,7 @@ def _code_locator(lid, *, path, symbol, line_start, line_end, title):
             "line_start": line_start,
             "line_end": line_end,
             "locator_source": "rg",
-            "verified_at": T,
+            "verified_quote": f"synthetic quote for {symbol}",
         },
         tags=["mina-kayak"], created_at=T, updated_at=T,
     )
@@ -519,15 +522,50 @@ class MinaKayakEndToEndTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        self.repo_context = RepoContext(
+            repo_root=self.root,
+            expected_repo_id=REPO,
+            expected_revision_ref="origin/develop",
+            target_revision_sha="a" * 40,
+        )
+
+        def verify_fixture_locator(
+            locator,
+            *,
+            repo,
+            manual_symbol_verification=None,
+        ):
+            verified = dict(locator)
+            verified["verified_at"] = T
+            return VerifiedLocator(
+                locator=verified,
+                quote_sha256="f" * 64,
+                verified_at=T,
+                symbol_status="verified",
+            )
+
+        self._verify_patcher = mock.patch(
+            "project_brain.mutation.verify_locator_for_write",
+            side_effect=verify_fixture_locator,
+        )
+        self._verify_patcher.start()
 
     def tearDown(self):
+        self._verify_patcher.stop()
         self._tmp.cleanup()
+
+    def _ingest(self, objects):
+        return ingest(
+            self.root,
+            objects,
+            repo_context=self.repo_context,
+        )
 
     # ── Task 6 단계별 ─────────────────────────────────────────────────────────
 
     def test_e2e_candidate_ingest(self):
         """AC2 단계1: candidate bundle 1회 ingest. mapping/glossary가 candidate."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         store = BrainStore.load(self.root)
         for mid in MAPPING_IDS:
             self.assertEqual(store.get(mid)["status"], "candidate", mid)
@@ -536,26 +574,26 @@ class MinaKayakEndToEndTest(unittest.TestCase):
 
     def test_e2e_promote_glossary(self):
         """AC2 단계2: single_object 승격 후 ingest. 대상 term reviewed + review.<id> 존재."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         bundle = build_candidate_bundle()
         promoted, reviews = promote(
             bundle, [PROMOTE_TERM_ID], "single_object",
             reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, promoted + reviews)
+        self._ingest(promoted + reviews)
         store = BrainStore.load(self.root)
         self.assertEqual(store.get(PROMOTE_TERM_ID)["status"], "reviewed")
         self.assertTrue(store.has("review." + PROMOTE_TERM_ID))
 
     def test_e2e_promote_mapping_bundle(self):
         """AC2 단계3: mapping_bundle 승격 후 ingest. mapping reviewed + 공유 review_record."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         bundle = build_candidate_bundle()
         promoted, reviews = promote(
             bundle, MAPPING_IDS, "mapping_bundle",
             bundle_key=BUNDLE_KEY, reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, promoted + reviews)
+        self._ingest(promoted + reviews)
         store = BrainStore.load(self.root)
         for mid in MAPPING_IDS:
             self.assertEqual(store.get(mid)["status"], "reviewed", mid)
@@ -599,18 +637,18 @@ class MinaKayakEndToEndTest(unittest.TestCase):
 
     def _reingest_full(self):
         """단계1~3을 모두 태운 store를 만든다(reviewed mapping까지)."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         bundle = build_candidate_bundle()
         g_promoted, g_reviews = promote(
             bundle, [PROMOTE_TERM_ID], "single_object",
             reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, g_promoted + g_reviews)
+        self._ingest(g_promoted + g_reviews)
         m_promoted, m_reviews = promote(
             bundle, MAPPING_IDS, "mapping_bundle",
             bundle_key=BUNDLE_KEY, reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, m_promoted + m_reviews)
+        self._ingest(m_promoted + m_reviews)
 
     def test_e2e_lint_clean_after_full_reingest(self):
         """AC5: 전체 재적재 완료 store가 lint clean."""

@@ -5,6 +5,7 @@ import unittest
 
 from project_brain.lint import (
     LintProblem,
+    lint_mutation_input_store_report,
     lint_store,
     lint_store_report,
     unpromoted_vouched_terms,
@@ -72,6 +73,32 @@ def _temporal_fact(fid, *, value, supersedes=None, closed=False):
 
 
 class TestLintStore(unittest.TestCase):
+    def test_mutation_input_lint_opt_in_does_not_weaken_default_lint(self):
+        locator = base(
+            {
+                "id": "code.neutral.foo",
+                "kind": "CodeLocator",
+                "status": "reviewed",
+                "truth_role": "reference",
+                "title": "Foo::bar",
+                "repo": "demo",
+                "path": "Foo.cpp",
+                "symbol": "Foo::bar",
+                "commit_sha": "a" * 40,
+                "locator_source": "rg",
+                "verified_quote": "void Foo::bar() {}",
+            },
+            tags=["neutral"],
+            created_at=T,
+            updated_at=T,
+        )
+        store = store_of(locator)
+
+        self.assertTrue(
+            any("verified_at" in problem.message for problem in lint_store_report(store))
+        )
+        self.assertEqual(lint_mutation_input_store_report(store), ())
+
     def test_structured_report_keeps_wrapper_messages_compatible(self):
         term = candidate_term()
         term["evidence_refs"] = ["evref.neutral.missing"]

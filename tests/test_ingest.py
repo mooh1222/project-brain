@@ -6,15 +6,29 @@ ingest는 bundle 전체에 per-object validate → merged store lint → save �
 묶고(spec §3.1, §4.2), 멱등 갱신과 reviewed→candidate 후퇴 가드(유일 신규 로직,
 spec §4.1)를 진입점에 둔다."""
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from project_brain.ingest import IngestError, ingest
+from project_brain.ingest import IngestError, ingest as _product_ingest
 from project_brain.objbase import base
 from project_brain.store import BrainStore
 
 T = "2026-06-04T00:00:00Z"
+ENGINE_SHA = "e" * 40
+
+
+def ingest(brain_root, objects, preconditions=None, **kwargs):
+    """합성 테스트 writer도 exact engine SHA를 명시한다."""
+    return _product_ingest(
+        brain_root,
+        objects,
+        preconditions=preconditions,
+        engine_sha=kwargs.pop("engine_sha", ENGINE_SHA),
+        **kwargs,
+    )
 
 
 def manifest(mid="manifest.neutral.source"):
@@ -245,11 +259,41 @@ class TestIngest(unittest.TestCase):
 
     def test_ingest_writes_valid_bundle(self):
         bundle = [manifest(), evidence_ref(), context(), candidate_term()]
-        ingest(self.root, bundle)
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch(
+            "project_brain.ingest.MutationService.apply",
+            autospec=True,
+            side_effect=__import__(
+                "project_brain.mutation",
+                fromlist=["MutationService"],
+            ).MutationService.apply,
+        ) as apply:
+            ingest(self.root, bundle, engine_sha=ENGINE_SHA)
+        self.assertEqual(apply.call_count, 1)
         store = BrainStore.load(self.root)
         self.assertTrue(store.has("manifest.neutral.source"))
         self.assertTrue(store.has("evref.neutral.ref"))
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
+
+    def test_product_code_has_no_direct_brain_store_save_calls(self):
+        package = Path(__file__).parents[1] / "src" / "project_brain"
+        offenders = []
+        for path in sorted(package.rglob("*.py")):
+            relative_path = path.relative_to(package).as_posix()
+            if relative_path in {"store.py", "mutation.py"}:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "save_object"
+                ):
+                    offenders.append(f"{relative_path}:{node.lineno}")
+        self.assertEqual(offenders, [])
 
     def test_ingest_rejects_schema_violation_writes_nothing(self):
         bad = {"id": "bad", "kind": "GlossaryTerm"}  # base 필드 다수 누락
@@ -438,15 +482,19 @@ class PreconditionsTest(unittest.TestCase):
             # 노트는 옛 시점(06-10)을 기대 → 그 사이 누가 06-15로 고침 → 거부
             new = _mapping_obj("2026-06-16T00:00:00Z", meaning="새 의미")
             with self.assertRaises(IngestError):
-                ingest(brain, [new], preconditions={"mapping.ctx.x": "2026-06-10T00:00:00Z"})
+                ingest(brain, [new], preconditions={"mapping.ctx.x": "0" * 64})
 
     def test_precondition_match_allows_save(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
-            ingest(brain, _refs() + [_mapping_obj("2026-06-15T00:00:00Z")])
+            current = _mapping_obj("2026-06-15T00:00:00Z")
+            ingest(brain, _refs() + [current])
             new = _mapping_obj("2026-06-16T00:00:00Z", boundary="새 경계")
-            ingest(brain, [new], preconditions={"mapping.ctx.x": "2026-06-15T00:00:00Z"})  # 일치 → OK
+            import hashlib
+
+            expected = hashlib.sha256(BrainStore.object_bytes(current)).hexdigest()
+            ingest(brain, [new], preconditions={"mapping.ctx.x": expected})
 
 
 if __name__ == "__main__":

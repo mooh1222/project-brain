@@ -3,7 +3,11 @@ Task 4가 §6.4(reviewed DomainMapping·GlossaryTerm evidence_refs 강제)를 �
 
 import unittest
 
+from project_brain.lint import lint_store
+from project_brain.objbase import base
+from project_brain import schema
 from project_brain.schema import validate_object
+from project_brain.store import BrainStore
 from tests.test_ingest import (
     candidate_mapping,
     candidate_term,
@@ -69,6 +73,40 @@ class TestValidateObject(unittest.TestCase):
         self.assertTrue(any("mapping_bundle review_scope" in error for error in errors))
         self.assertTrue(any("bundle_key" in error for error in errors))
         self.assertTrue(any("target_object_ids" in error for error in errors))
+
+    def test_preverification_schema_alone_allows_locator_without_verified_at(self):
+        locator = base(
+            {
+                "id": "code.neutral.foo",
+                "kind": "CodeLocator",
+                "status": "reviewed",
+                "truth_role": "reference",
+                "title": "Foo::bar",
+                "repo": "demo",
+                "path": "Foo.cpp",
+                "symbol": "Foo::bar",
+                "commit_sha": "a" * 40,
+                "locator_source": "rg",
+                "verified_quote": "void Foo::bar() {}",
+            },
+            tags=["neutral"],
+            created_at="2026-07-28T00:00:00+09:00",
+            updated_at="2026-07-28T00:00:00+09:00",
+        )
+
+        self.assertTrue(
+            hasattr(schema, "validate_mutation_input_schema"),
+            "pre-verification mutation input schema API is missing",
+        )
+        self.assertEqual(schema.validate_mutation_input_schema(locator), [])
+        self.assertTrue(
+            any("verified_at" in error for error in validate_object(locator))
+        )
+        self.assertTrue(
+            any("verified_at" in error for error in lint_store(
+                BrainStore({locator["id"]: locator})
+            ))
+        )
 
 
 class TestReferenceFieldTypes(unittest.TestCase):

@@ -9,6 +9,7 @@ ingest 서브커맨드가 ingest()를 호출해 store에 적재하는지(test_cl
 import io
 import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -18,6 +19,8 @@ from unittest import mock
 from project_brain import cli
 from project_brain.cli import _run_build
 from project_brain.id_grammar import format_id
+from project_brain.mutation import MutationOperation, MutationService
+from project_brain.repo_context import RepoContext
 from project_brain.store import BrainStore
 from tests.test_ingest import (
     candidate_term,
@@ -25,6 +28,8 @@ from tests.test_ingest import (
     evidence_ref,
     manifest,
 )
+
+ENGINE_ARGS = ("--engine-sha", "e" * 40)
 
 
 def _context_object(ctx):
@@ -229,9 +234,20 @@ class TestCli(unittest.TestCase):
              mock.patch("project_brain.stale_check.resolve_target_head", side_effect=fake_target_head), \
              mock.patch("project_brain.stale_check.mark_checked",
                         return_value={"ok": True, "updated": [], "blocked": [], "warnings": []}), \
+             mock.patch.object(
+                 cli,
+                 "_resolve_mutation_context",
+                 return_value=RepoContext(
+                     repo_root=project,
+                     expected_repo_id="demo",
+                     expected_revision_ref="HEAD",
+                     target_revision_sha="a" * 40,
+                 ),
+             ), \
              mock.patch("sys.argv", ["cli", "mark-checked", "--brain-root", str(brain),
                                       "--mappings", "mapping.neutral.any",
-                                      "--checked-head", "HEAD", "--no-fetch"]), \
+                                      "--checked-head", "HEAD", "--no-fetch",
+                                      *ENGINE_ARGS]), \
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         self.assertEqual(head_calls[-1]["default_branch"], "trunk")
@@ -246,16 +262,126 @@ class TestCli(unittest.TestCase):
             str(self.root),
             "--objects-file",
             str(objects_file),
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.INGEST,
+        )
         # ingest()가 호출되어 store에 적재됨
         store = BrainStore.load(self.root)
         self.assertTrue(store.has("manifest.neutral.source"))
         self.assertTrue(store.has("evref.neutral.ref"))
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
+
+    def test_cli_ingest_resolves_config_repo_context_and_exact_revision(self):
+        from tests.test_mutation import _code_locator
+
+        project = self.input_dir / "project"
+        brain = project / "brain"
+        project.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=project,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=project,
+            check=True,
+        )
+        (project / "Foo.cpp").write_text(
+            "void Foo::bar() {}\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "Foo.cpp"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "fixture"],
+            cwd=project,
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/develop", sha],
+            cwd=project,
+            check=True,
+        )
+        (project / ".project-brain.json").write_text(
+            json.dumps({
+                "brain_root": "brain",
+                "repo": "demo",
+                "default_branch": "develop",
+            }),
+            encoding="utf-8",
+        )
+        locator = _code_locator(commit_sha=sha, verified_at=None)
+        objects_file = self.input_dir / "locator-bundle.json"
+        objects_file.write_text(
+            json.dumps([locator], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        argv = [
+            "ingest",
+            "--brain-root",
+            str(brain.resolve()),
+            "--objects-file",
+            str(objects_file),
+            *ENGINE_ARGS,
+        ]
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(), 0)
+
+        request = apply.call_args.kwargs["request"]
+        self.assertEqual(request.brain_root, brain.resolve())
+        self.assertEqual(request.repo_context.repo_root, project.resolve())
+        self.assertEqual(request.repo_context.expected_repo_id, "demo")
+        self.assertEqual(
+            request.repo_context.expected_revision_ref,
+            "origin/develop",
+        )
+        self.assertEqual(request.repo_context.target_revision_sha, sha)
+        self.assertEqual(request.engine_sha, "e" * 40)
+        stored = BrainStore.load(brain).get(locator["id"])
+        self.assertEqual(stored["title"], "Foo::bar")
+        self.assertIn("verified_at", stored)
 
     def test_cli_projection_label_split_by_status(self):
         # spec 2026-06-17 Task A5: projection_reuse 채널의 신뢰 라벨이 status로 갈린다 —
@@ -499,7 +625,7 @@ class TestCliPromote(unittest.TestCase):
         self._tmp.cleanup()
 
     def _ingest(self):
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         ingest(
             self.root,
             [manifest(), evidence_ref(), context(), candidate_term_with_evidence()],
@@ -516,11 +642,30 @@ class TestCliPromote(unittest.TestCase):
             "promote", "--brain-root", str(self.root),
             "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.PROMOTE,
+        )
         result = json.loads(out.getvalue())
         self.assertTrue(result["ok"])
         store = BrainStore.load(self.root)
@@ -541,6 +686,7 @@ class TestCliPromote(unittest.TestCase):
         argv = [
             "promote", "--brain-root", str(self.root),
             "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -555,6 +701,7 @@ class TestCliPromote(unittest.TestCase):
             "promote", "--brain-root", str(self.root),
             "--ids", "g.neutral.nope", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -572,6 +719,7 @@ class TestCliPromote(unittest.TestCase):
             "promote", "--brain-root", str(self.root),
             "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
@@ -583,13 +731,14 @@ class TestCliPromote(unittest.TestCase):
     def test_promote_zero_evidence_rejected(self):
         # §6.4 활성 후: 근거 없는 candidate(candidate엔 §6.4 미적용 → 적재는 됨)를 승격하면
         # 승격 결과물(reviewed, 근거 빔)이 쓰기 전 일괄 검증에 걸려 rc=1, 디스크 불변(원자성).
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         from tests.test_ingest import candidate_term  # evidence_refs=[] 기본
         ingest(self.root, [context(), candidate_term("g.neutral.noev")])
         argv = [
             "promote", "--brain-root", str(self.root),
             "--ids", "g.neutral.noev", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -605,7 +754,7 @@ class TestCliPromote(unittest.TestCase):
 
     def test_promote_backfills_empty_evidence_from_mapping(self):
         # 빈 근거 candidate + 짝 reviewed 매핑 → 수동 promote가 backfill해 §6.4 통과.
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         ingest(self.root, [
             manifest(), _ar_evref("evref.a"), context(),
             _ar_term("g.empty", term="빈근거"),
@@ -613,7 +762,7 @@ class TestCliPromote(unittest.TestCase):
         ])
         argv = ["promote", "--brain-root", str(self.root),
                 "--ids", "g.neutral.empty", "--reviewer", "user-confirmed",
-                "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--reviewed-at", "2026-06-08T00:00:00Z", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -630,7 +779,7 @@ class TestCliPromote(unittest.TestCase):
         self._ingest()  # candidate g.x (term=갈고리, evidence 보유)
         base_argv = ["promote", "--brain-root", str(self.root),
                      "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
-                     "--reviewed-at", "2026-06-06T00:00:00Z"]
+                     "--reviewed-at", "2026-06-06T00:00:00Z", *ENGINE_ARGS]
         with mock.patch("sys.argv", ["cli"] + base_argv), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         out = io.StringIO()
@@ -641,14 +790,14 @@ class TestCliPromote(unittest.TestCase):
 
     def test_promote_conflict_records_resolution(self):
         # 수동 conflict 승격(spec §5.2 사람 판정 허용) → 해소 근거가 검수 기록에 남음.
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         conflict_term = _ar_term("g.c", term="충돌", candidate_state="conflict",
                                  evidence_refs=["evref.a"])
         ingest(self.root, [manifest(), _ar_evref("evref.a"), context(), conflict_term])
         argv = ["promote", "--brain-root", str(self.root),
                 "--ids", "g.neutral.c", "--reviewer", "user-confirmed",
                 "--reviewed-at", "2026-06-08T00:00:00Z",
-                "--conflict-resolution", "위키 정설 채택"]
+                "--conflict-resolution", "위키 정설 채택", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -736,7 +885,7 @@ class TestCliPromoteAuto(unittest.TestCase):
         self._tmp.cleanup()
 
     def _ingest_corpus(self):
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         bundle = [
             manifest(),
             _ar_evref("evref.a"), _ar_evref("evref.b"),
@@ -755,7 +904,8 @@ class TestCliPromoteAuto(unittest.TestCase):
 
     def _run(self, ids):
         argv = ["promote-auto", "--brain-root", str(self.root),
-                "--ids", *ids, "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--ids", *ids, "--reviewed-at", "2026-06-08T00:00:00Z",
+                *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -763,14 +913,30 @@ class TestCliPromoteAuto(unittest.TestCase):
 
     def test_batch_promotes_eligible_skips_conflict_and_unknown(self):
         self._ingest_corpus()
-        rc, result = self._run([
-            "g.neutral.empty",
-            "g.neutral.has",
-            "g.neutral.conflict",
-            "g.neutral.multi",
-            "g.neutral.nope",
-        ])
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply:
+            rc, result = self._run([
+                "g.neutral.empty",
+                "g.neutral.has",
+                "g.neutral.conflict",
+                "g.neutral.multi",
+                "g.neutral.nope",
+            ])
         self.assertEqual(rc, 0)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.PROMOTE_AUTO,
+        )
         self.assertTrue(result["ok"])
         self.assertEqual(
             set(result["promoted"]),
@@ -880,12 +1046,12 @@ class TestCliPromoteAtomicity(unittest.TestCase):
     def test_manual_promote_legacy_only_rejected_disk_unchanged(self):
         # legacy(wiki) 근거만 가진 용어를 수동 승격하면 reviewed가 legacy-only(lint 6 위반).
         # 사전 lint가 막아 rc=1, 디스크는 candidate 그대로(원자성 — save 전 lint).
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         term = _ar_term("g.legacy", term="레거시", evidence_refs=["evref.wiki"])
         ingest(self.root, [_ar_legacy_manifest(), _ar_legacy_evref(), context(), term])
         argv = ["promote", "--brain-root", str(self.root),
                 "--ids", "g.neutral.legacy", "--reviewer", "user-confirmed",
-                "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--reviewed-at", "2026-06-08T00:00:00Z", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -898,7 +1064,7 @@ class TestCliPromoteAtomicity(unittest.TestCase):
 
     def test_promote_auto_skips_legacy_only_evidence(self):
         # 짝 매핑 evidence가 wiki(legacy)뿐인 용어는 자동 승격 부적격 → skip. 정상 용어만 승격.
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         from project_brain.lint import lint_store
         ingest(self.root, [
             manifest(), _ar_evref("evref.spec"),
@@ -911,7 +1077,7 @@ class TestCliPromoteAtomicity(unittest.TestCase):
         ])
         argv = ["promote-auto", "--brain-root", str(self.root),
                 "--ids", "g.neutral.ok", "g.neutral.legacy",
-                "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--reviewed-at", "2026-06-08T00:00:00Z", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -1413,7 +1579,6 @@ class RunBuildTest(unittest.TestCase):
                              "redaction_status": "approved"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                                   "line_start": 1, "line_end": 1, "quote": "q",
-                                  "verified_at": "2026-06-16T00:00:00Z",
                                   "manifest": "manifest.ctx.code"}],
                 "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                               "evidence_refs": ["evref.ctx.hit-hook"]}],
@@ -1454,7 +1619,6 @@ class RunBuildTest(unittest.TestCase):
                              "redaction_status": "approved"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                                   "line_start": 1, "line_end": 1, "quote": "q",
-                                  "verified_at": "2026-06-16T00:00:00Z",
                                   "manifest": "manifest.ctx.code"}],
                 "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                               "evidence_refs": ["evref.ctx.hit-hook"]}],
@@ -1506,6 +1670,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--title", "결과 팝업 순위 표시 착수 브리핑",
             "--payload-file", str(self.payload_file),
             "--generated-by", "demo-brain-query",
+            *ENGINE_ARGS,
             *extra,
         ]
 
@@ -1517,8 +1682,24 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
 
     def test_write_ingests_projection_readable_from_store(self):
         # (a) source 다 존재 시 --write로 ingest 경유 저장 → store에서 읽힘.
-        rc, payload = self._run("--write")
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply:
+            rc, payload = self._run("--write")
         self.assertEqual(rc, 0, payload)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.PROJECTION,
+        )
         self.assertTrue(payload["ok"])
         pid = "projection.neutral.result-popup-rank.reuse"
         self.assertEqual(payload["id"], pid)
@@ -1546,6 +1727,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--payload-file", str(self.payload_file),
             "--generated-by", "demo-brain-query",
             "--write",
+            *ENGINE_ARGS,
         ]
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -1652,6 +1834,7 @@ class TestCliProjectionRefresh(unittest.TestCase):
     def _run_refresh(self, *extra):
         out = io.StringIO()
         argv = ["projection", "refresh", "--brain-root", str(self.root), *extra]
+        argv.extend(ENGINE_ARGS)
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         return rc, json.loads(out.getvalue())
@@ -1672,6 +1855,31 @@ class TestCliProjectionRefresh(unittest.TestCase):
             store2.get(self.pid)["source_content_hash"],
             _compute_source_content_hash(store2, ["mapping.neutral.race-end"]))
         self.assertEqual([p for p in lint_store(store2) if self.pid in p], [])
+
+    def test_refresh_routes_once_as_projection_repair_without_direct_save(self):
+        from project_brain.mutation import MutationOperation, MutationService
+
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply:
+            rc, payload = self._run_refresh()
+
+        self.assertEqual(rc, 0, payload)
+        self.assertEqual(apply.call_count, 1)
+        request = apply.call_args.kwargs["request"]
+        self.assertIs(request.operation, MutationOperation.PROJECTION_REPAIR)
+        self.assertEqual(
+            set(request.preconditions),
+            {self.pid},
+        )
 
     def test_refresh_updates_reviewed_projection(self):
         # reviewed projection도 갱신된다(plan C3 Step1 명시) — ingest 후퇴 가드는

@@ -33,7 +33,6 @@ class BuildCodeEvidenceTest(unittest.TestCase):
             "code_anchors": [{"key": "hit-hook", "path": "TrapObject.h",
                               "symbol": "TrapObject::_doTrapOnPop", "line_start": 206,
                               "line_end": 206, "quote": "virtual void _doTrapOnPop(...){};",
-                              "verified_at": NOW,
                               "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
@@ -45,7 +44,9 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(loc["commit_sha"], "abc123")
         self.assertEqual(loc["repo"], "demoapp")
         self.assertEqual(loc["verified_quote"], "virtual void _doTrapOnPop(...){};")
-        self.assertEqual(loc["verified_at"], NOW)
+        self.assertNotIn("verified_at", loc)
+        self.assertEqual(loc["title"], "TrapObject::_doTrapOnPop")
+        self.assertEqual(ev["title"], "TrapObject::_doTrapOnPop")
         self.assertNotIn("line_start", loc)
         self.assertNotIn("line_end", loc)
         self.assertEqual(ev["id"], "evref.ctx.hit-hook")
@@ -57,7 +58,7 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         notes = {
             "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
             "code_anchors": [{"key": "no-line", "path": "Foo.cpp", "symbol": "Foo::bar",
-                              "quote": "void bar();", "verified_at": NOW,
+                              "quote": "void bar();",
                               "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
@@ -222,7 +223,7 @@ class AssemblyClaimContractTest(unittest.TestCase):
                          "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "anchor", "path": "a.cpp", "symbol": "run",
                               "manifest": "manifest.ctx.code", "quote": "\tfirst();\n\tsecond();",
-                              "verified_at": NOW}],
+                              }],
             "glossary": [{"key": "term", "term": "Term", "definition": "definition",
                           "evidence_refs": ["evref.ctx.anchor"]}],
             "mappings": [{"key": "mapping", "canonical_summary": "summary",
@@ -292,13 +293,11 @@ class AssemblyClaimContractTest(unittest.TestCase):
         self.assertTrue(any("acl" in error and "비어" in error for error in errors))
         self.assertTrue(any("captured_at" in error and "비어" in error for error in errors))
 
-    def test_code_anchor_quote_and_verification_time_are_required_before_build(self):
+    def test_code_anchor_quote_is_required_before_build(self):
         notes = self._notes()
         notes["code_anchors"][0]["quote"] = ""
-        notes["code_anchors"][0]["verified_at"] = ""
         errors = validate_notes(notes)
         self.assertTrue(any("quote" in error and "비어" in error for error in errors))
-        self.assertTrue(any("verified_at" in error and "비어" in error for error in errors))
 
     def test_locator_preserves_exact_multiline_tab_verified_quote(self):
         result = build(self._notes(), BrainStore({}), NOW)
@@ -660,8 +659,8 @@ class ValidateNotesTest(unittest.TestCase):
         errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
                                  "code_anchors": [{"key": "k", "path": "Foo.cpp",
                                                    "symbol": "Foo::bar",
-                                                   "manifest": "manifest.c.code", "quote": "void bar();",
-                                                   "verified_at": NOW}]})
+                                                   "manifest": "manifest.c.code",
+                                                   "quote": "void bar();"}]})
         self.assertEqual(errors, [])
 
 
@@ -674,7 +673,7 @@ class BuildIntegrationTest(unittest.TestCase):
                          "captured_at": NOW, "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
-                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
+                              "manifest": "manifest.ctx.code-v2"}],
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
@@ -698,7 +697,7 @@ class BuildIntegrationTest(unittest.TestCase):
                          "captured_at": NOW, "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
-                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
+                              "manifest": "manifest.ctx.code-v2"}],
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
@@ -759,7 +758,56 @@ class BuildIntegrationTest(unittest.TestCase):
                               "set": {"title": "새 제목"}}]}
         result = build(notes, store, NOW)
         self.assertEqual(result["errors"], [])
-        self.assertEqual(result["preconditions"], {"mapping.ctx.hook": T0})
+        import hashlib
+
+        expected = hashlib.sha256(
+            BrainStore.object_bytes(store.get("mapping.ctx.hook"))
+        ).hexdigest()
+        self.assertEqual(
+            result["preconditions"],
+            {"mapping.ctx.hook": expected},
+        )
+
+
+class CodeAnchorMutationInputTest(unittest.TestCase):
+    def _notes(self):
+        return {
+            "context": {
+                "key": "ctx",
+                "commit": "a" * 40,
+                "repo": "demoapp",
+            },
+            "code_anchors": [
+                {
+                    "key": "foo",
+                    "path": "Foo.cpp",
+                    "symbol": "Foo::bar",
+                    "manifest": "manifest.ctx.code",
+                    "quote": "void Foo::bar() {}",
+                }
+            ],
+        }
+
+    def test_code_anchor_build_uses_symbol_titles_and_omits_verified_at(self):
+        loc, evref = build_code_evidence(self._notes(), NOW)
+
+        self.assertEqual(loc["title"], "Foo::bar")
+        self.assertNotIn("verified_at", loc)
+        self.assertEqual(evref["title"], "Foo::bar")
+
+    def test_code_anchor_rejects_external_title_and_verified_at(self):
+        for field, value in (
+            ("title", "외부 제목"),
+            ("verified_at", "1900-01-01T00:00:00Z"),
+        ):
+            notes = self._notes()
+            notes["code_anchors"][0][field] = value
+            with self.subTest(field=field):
+                errors = validate_notes(notes)
+                self.assertTrue(
+                    any(field in error and "허용" in error for error in errors),
+                    errors,
+                )
 
 
 class BuildDecisionsTest(unittest.TestCase):
@@ -886,7 +934,7 @@ class BuildWithDecisionsTest(unittest.TestCase):
             "code_anchors": [
                 {"key": "filter-fn", "path": "BallGenerator.cpp",
                  "symbol": "_getEnableGenerateType", "manifest": "manifest.ctx.code",
-                 "quote": "// 셀렉 후보 자격 판정", "verified_at": NOW},
+                 "quote": "// 셀렉 후보 자격 판정"},
             ],
             "mappings": [
                 {"key": "enable-filter", "canonical_summary": "셀렉 후보 필터",

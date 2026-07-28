@@ -6,11 +6,11 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from project_brain.ingest import IngestError, ingest
+from project_brain.ingest import IngestError
 from project_brain.objbase import base
 from project_brain.router import QueryRouter
 from project_brain.store import BrainStore
-from tests.test_ingest import context, evidence_ref, manifest
+from tests.test_ingest import context, evidence_ref, ingest, manifest
 
 T1 = "2026-07-01T00:00:00+09:00"
 T2 = "2026-07-02T00:00:00+09:00"

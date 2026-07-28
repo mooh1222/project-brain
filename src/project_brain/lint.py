@@ -13,6 +13,7 @@ from project_brain.router import _conflicting_fact_groups
 from project_brain.schema import (
     VALID_KINDS,
     id_problem_code,
+    validate_mutation_input_schema,
     validate_object_id,
     validate_object_schema,
 )
@@ -148,9 +149,11 @@ def unpromoted_vouched_terms(store: BrainStore) -> list[str]:
     return warnings
 
 
-def lint_store_report(
+def _lint_store_report(
     store: BrainStore,
-    workspace_root: Path | None = None,
+    workspace_root: Path | None,
+    *,
+    mutation_input: bool,
 ) -> tuple[LintProblem, ...]:
     problems: list[LintProblem] = []
     objs = store.all()
@@ -168,7 +171,11 @@ def lint_store_report(
     schema_valid_objs: list[dict] = []
     for obj in objs:
         object_id = _object_id(obj)
-        schema_problems = validate_object_schema(obj)
+        schema_problems = (
+            validate_mutation_input_schema(obj)
+            if mutation_input
+            else validate_object_schema(obj)
+        )
         for message in schema_problems:
             add("schema", (object_id,), message)
         id_problems = (
@@ -329,6 +336,34 @@ def lint_store_report(
             add("generated_file_without_projection", (), message)
 
     return tuple(problems)
+
+
+def lint_store_report(
+    store: BrainStore,
+    workspace_root: Path | None = None,
+) -> tuple[LintProblem, ...]:
+    """최종 저장 객체에 대한 엄격한 구조화 lint."""
+    return _lint_store_report(
+        store,
+        workspace_root,
+        mutation_input=False,
+    )
+
+
+def lint_mutation_input_store_report(
+    store: BrainStore,
+    workspace_root: Path | None = None,
+) -> tuple[LintProblem, ...]:
+    """MutationService에 넘길 draft bundle 전용 lint.
+
+    CodeLocator의 ``verified_at`` 누락만 verifier 실행 전까지 허용한다.
+    일반/public lint와 최종 merged lint는 이 함수를 사용하지 않는다.
+    """
+    return _lint_store_report(
+        store,
+        workspace_root,
+        mutation_input=True,
+    )
 
 
 def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[str]:

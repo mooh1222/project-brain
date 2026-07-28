@@ -17,6 +17,7 @@ from project_brain.mutation import (
 )
 from project_brain.objbase import base
 from project_brain.hash_utils import stable_json
+from project_brain.hash_utils import source_content_hash
 from project_brain.repo_context import resolve_repo_context
 from project_brain.store import BrainStore
 from tests.test_ingest import (
@@ -97,6 +98,36 @@ def _legacy_invalid_context(*, title: str = "legacy") -> dict:
     return obj
 
 
+def _projection(
+    *,
+    object_id: str = "projection.neutral.req.reuse",
+    source_ids: list[str] | None = None,
+    source_hash: str = "stale",
+) -> dict:
+    return base(
+        {
+            "id": object_id,
+            "kind": "ContextProjection",
+            "status": "candidate",
+            "truth_role": "index",
+            "title": "reuse",
+            "context_id": "context.neutral",
+            "format": "prompt_payload",
+            "reuse_payload": "payload",
+            "output_locator": "indexes/context_projections/neutral.req.reuse.txt",
+            "source_object_ids": source_ids or ["context.neutral"],
+            "source_content_hash": source_hash,
+            "projection_hash": "projection-hash",
+            "generated_at": T,
+            "generated_by": "test",
+            "stale_policy": "fail_on_manual_edit",
+        },
+        tags=["neutral"],
+        created_at=T,
+        updated_at=T,
+    )
+
+
 def _code_locator(
     *,
     object_id: str = "code.neutral.foo",
@@ -106,7 +137,7 @@ def _code_locator(
     symbol: str = "Foo::bar",
     commit_sha: str = "0" * 40,
     quote: str | None = "void Foo::bar() {}",
-    verified_at: str = "1900-01-01T00:00:00Z",
+    verified_at: str | None = "1900-01-01T00:00:00Z",
 ) -> dict:
     payload = {
         "id": object_id,
@@ -119,8 +150,9 @@ def _code_locator(
         "symbol": symbol,
         "commit_sha": commit_sha,
         "locator_source": "rg",
-        "verified_at": verified_at,
     }
+    if verified_at is not None:
+        payload["verified_at"] = verified_at
     if quote is not None:
         payload["verified_quote"] = quote
     return base(payload, tags=["neutral"], created_at=T, updated_at=T)
@@ -190,9 +222,190 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "promote_auto",
         "mark_checked",
         "projection",
+        "projection_repair",
         "context_replace",
         "id_only_migration",
         "display_migration",
+    }
+
+
+def _projection_repair_plan(
+    brain_root: Path,
+    replacements: list[dict],
+    *,
+    preconditions: dict[str, str] | None = None,
+    delete_ids: tuple[str, ...] = (),
+):
+    return _plan(
+        brain_root,
+        replacements,
+        operation=MutationOperation.PROJECTION_REPAIR,
+        preconditions=preconditions,
+        delete_ids=delete_ids,
+    )
+
+
+def test_projection_repair_removes_existing_hash_mismatch(tmp_path):
+    brain_root = tmp_path / "brain"
+    source = context()
+    stale = _projection()
+    _write_raw(brain_root, source)
+    _write_raw(brain_root, stale)
+    repaired = dict(stale)
+    repaired["source_content_hash"] = source_content_hash([source])
+
+    result = _projection_repair_plan(
+        brain_root,
+        [repaired],
+        preconditions={stale["id"]: _object_hash(stale)},
+    )
+
+    assert result.ok is True
+    assert result.manifest.updates[0]["object_id"] == stale["id"]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [MutationOperation.PROJECTION, MutationOperation.INGEST],
+)
+def test_general_mutation_still_rejects_existing_projection_mismatch(
+    tmp_path,
+    operation,
+):
+    brain_root = tmp_path / operation.value
+    source = context()
+    stale = _projection()
+    _write_raw(brain_root, source)
+    _write_raw(brain_root, stale)
+    repaired = dict(stale)
+    repaired["source_content_hash"] = source_content_hash([source])
+
+    result = _plan(
+        brain_root,
+        [repaired],
+        operation=operation,
+        preconditions={stale["id"]: _object_hash(stale)},
+    )
+
+    assert result.error_code == "existing_lint_problem"
+
+
+@pytest.mark.parametrize("case", ["missing", "extra", "mismatch"])
+def test_projection_repair_requires_exact_before_hash_preconditions(tmp_path, case):
+    brain_root = tmp_path / "brain"
+    source = context()
+    stale = _projection()
+    _write_raw(brain_root, source)
+    _write_raw(brain_root, stale)
+    repaired = dict(stale)
+    repaired["source_content_hash"] = source_content_hash([source])
+    preconditions = {stale["id"]: _object_hash(stale)}
+    if case == "missing":
+        preconditions = {}
+    elif case == "extra":
+        preconditions["context.neutral"] = _object_hash(source)
+    else:
+        preconditions[stale["id"]] = "0" * 64
+
+    result = _projection_repair_plan(
+        brain_root,
+        [repaired],
+        preconditions=preconditions,
+    )
+
+    expected = (
+        "precondition_hash_mismatch"
+        if case == "mismatch"
+        else "projection_repair_precondition_set_mismatch"
+    )
+    assert result.error_code == expected
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("create", "projection_repair_create_forbidden"),
+        ("delete", "projection_repair_delete_forbidden"),
+        ("rename", "projection_repair_delete_forbidden"),
+        ("non_projection", "projection_repair_kind_invalid"),
+        ("other_field", "projection_repair_field_invalid"),
+    ],
+)
+def test_projection_repair_rejects_non_repair_shapes(
+    tmp_path,
+    case,
+    expected_code,
+):
+    brain_root = tmp_path / "brain"
+    source = context()
+    stale = _projection()
+    _write_raw(brain_root, source)
+    _write_raw(brain_root, stale)
+    repaired = dict(stale)
+    repaired["source_content_hash"] = source_content_hash([source])
+    delete_ids = ()
+    if case == "create":
+        repaired["id"] = "projection.neutral.new.reuse"
+    elif case == "delete":
+        delete_ids = (stale["id"],)
+    elif case == "rename":
+        repaired["id"] = "projection.neutral.renamed.reuse"
+        delete_ids = (stale["id"],)
+    elif case == "non_projection":
+        repaired = dict(source)
+        repaired["title"] = "changed"
+    else:
+        repaired["title"] = "changed"
+    preconditions = {
+        repaired["id"]: _object_hash(
+            source if case == "non_projection" else stale
+        )
+    }
+
+    result = _projection_repair_plan(
+        brain_root,
+        [repaired],
+        preconditions=preconditions,
+        delete_ids=delete_ids,
+    )
+
+    assert result.error_code == expected_code
+
+
+@pytest.mark.parametrize("case", ["wrong_hash", "partial", "dangling"])
+def test_projection_repair_rejects_incomplete_or_other_lint(tmp_path, case):
+    brain_root = tmp_path / "brain"
+    source = context()
+    stale = _projection()
+    _write_raw(brain_root, source)
+    _write_raw(brain_root, stale)
+    repaired = dict(stale)
+    repaired["source_content_hash"] = (
+        "still-wrong"
+        if case == "wrong_hash"
+        else source_content_hash([source])
+    )
+    if case == "partial":
+        second = _projection(
+            object_id="projection.neutral.other.reuse",
+            source_hash="also-stale",
+        )
+        _write_raw(brain_root, second)
+    elif case == "dangling":
+        broken = context("context.broken", glossary_term_ids=["g.neutral.missing"])
+        broken["context_key"] = "broken"
+        _write_raw(brain_root, broken)
+
+    result = _projection_repair_plan(
+        brain_root,
+        [repaired],
+        preconditions={stale["id"]: _object_hash(stale)},
+    )
+
+    assert result.ok is False
+    assert result.error_code in {
+        "projection_repair_incomplete",
+        "dangling_reference",
     }
 
 
@@ -412,6 +625,32 @@ def test_new_locator_is_verified_and_external_time_and_title_are_ignored(tmp_pat
     assert result.after["verified_at"] != locator["verified_at"]
     assert result.after["title"] == "Foo::bar"
     assert result.after["verified_quote"] == "void Foo::bar() {}"
+
+
+def test_new_locator_without_verified_at_reaches_verifier_and_gets_engine_time(
+    tmp_path,
+):
+    repo_context, sha = _git_repo(tmp_path)
+    locator = _code_locator(commit_sha=sha, verified_at=None)
+
+    result = _plan(
+        tmp_path / "brain",
+        [locator],
+        repo_context=repo_context,
+    )
+
+    assert result.ok is True
+    assert "verified_at" not in locator
+    assert isinstance(result.after["verified_at"], str)
+    assert result.after["verified_at"]
+
+
+def test_unverified_locator_missing_quote_fails_at_quote_gate_not_schema(tmp_path):
+    locator = _code_locator(quote=None, verified_at=None)
+
+    result = _plan(tmp_path / "brain", [locator])
+
+    assert result.error_code == "quote_required"
 
 
 def test_coordinate_changed_locator_is_reverified(tmp_path):

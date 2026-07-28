@@ -220,8 +220,11 @@ def _validate_reference_field_types(obj: dict) -> list[str]:
     return errors
 
 
-def validate_object_schema(obj: dict) -> list[str]:
-    """ID 문법을 제외한 schema·enum 위반 메시지를 반환한다."""
+def _validate_object_schema(
+    obj: dict,
+    *,
+    omitted_required_fields: frozenset[str] = frozenset(),
+) -> list[str]:
     kind = obj.get("kind")
     if not isinstance(kind, str) or kind not in VALID_KINDS:
         return [f"{obj.get('id', '?')}: unknown kind {kind!r}"]
@@ -232,7 +235,7 @@ def validate_object_schema(obj: dict) -> list[str]:
         if field not in obj:
             errors.append(f"{obj['id']}: missing base field {field!r}")
     for field in KIND_REQUIRED[kind]:
-        if field not in obj:
+        if field not in obj and field not in omitted_required_fields:
             errors.append(f"{obj['id']}: {kind} missing field {field!r}")
     errors.extend(_validate_reference_field_types(obj))
     status = obj.get("status")
@@ -386,6 +389,28 @@ def validate_object_schema(obj: dict) -> list[str]:
         elif "target_object_id" not in obj:
             errors.append(f"{obj['id']}: ReviewRecord missing field 'target_object_id'")
     return errors
+
+
+def validate_object_schema(obj: dict) -> list[str]:
+    """ID 문법을 제외한 최종 저장 schema·enum 위반 메시지를 반환한다."""
+    return _validate_object_schema(obj)
+
+
+def validate_mutation_input_schema(obj: dict) -> list[str]:
+    """저장 전 검증 대상 CodeLocator만 ``verified_at`` 누락을 허용한다.
+
+    일반 schema와 최종 merged lint는 계속 엄격하다. 이 API는
+    MutationService가 quote/symbol을 검증해 엔진 시각을 넣기 전 입력 단계에서만 쓴다.
+    """
+    omitted = (
+        frozenset({"verified_at"})
+        if obj.get("kind") == "CodeLocator"
+        else frozenset()
+    )
+    return _validate_object_schema(
+        obj,
+        omitted_required_fields=omitted,
+    )
 
 
 def validate_object_id(obj: dict) -> list[str]:

@@ -13,8 +13,12 @@ from pathlib import Path
 from unittest import mock
 
 from project_brain import cli
+from project_brain.code_verify import VerifiedLocator
 from project_brain.id_grammar import format_id, parse_id
+from project_brain.repo_context import RepoContext
 from project_brain.store import BrainStore
+
+ENGINE_SHA = "e" * 40
 
 
 def fake_git_runner(target_head, changed, *, merge_base=None):
@@ -58,6 +62,7 @@ def code_locator(cid, *, path, commit_sha, symbol="sym"):
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
         "title": f"Code: {symbol}", "repo": "demoapp", "path": path, "symbol": symbol,
         "locator_source": "rg", "verified_at": "2026-06-12T00:00:00Z",
+        "verified_quote": f"synthetic quote for {symbol}",
         "commit_sha": commit_sha, "evidence_refs": [],
     }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
 
@@ -90,6 +95,54 @@ def domain_mapping(mid, *, code_locator_ids, status="reviewed"):
     if status == "candidate":
         obj["candidate"] = {"candidate_state": "ready_for_review", "candidate_source": "spec"}
     return base(obj, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
+
+
+def lint_support_objects():
+    """MutationService의 merged-store lint를 만족하는 공통 근거·컨텍스트."""
+    from project_brain.objbase import base
+
+    timestamp = "2026-06-12T00:00:00Z"
+    manifest = base({
+        "id": "manifest.x.source",
+        "kind": "EvidenceManifest",
+        "status": "reviewed",
+        "truth_role": "source",
+        "title": "stale-check synthetic source",
+        "source_type": "spec",
+        "locator": "spec://stale-check",
+        "captured_at": timestamp,
+        "captured_by": "test",
+        "sensitivity": "internal",
+        "acl": ["team"],
+        "redaction_status": "approved",
+    }, tags=["x"], created_at=timestamp, updated_at=timestamp)
+    evidence_ref = base({
+        "id": "evref.x.source",
+        "kind": "EvidenceRef",
+        "status": "reviewed",
+        "truth_role": "reference",
+        "title": "stale-check synthetic evidence",
+        "evidence_manifest_id": manifest["id"],
+        "ref_type": "spec_section",
+        "locator": {"section": "synthetic"},
+        "summary": "stale-check synthetic evidence",
+    }, tags=["x"], created_at=timestamp, updated_at=timestamp)
+    context = base({
+        "id": "context.x",
+        "kind": "DomainContext",
+        "status": "reviewed",
+        "truth_role": "domain",
+        "title": "Stale-check context",
+        "context_key": "x",
+        "project_id": "demoapp",
+        "display_name": "Stale-check",
+        "boundary_summary": "stale-check synthetic boundary",
+        "in_scope": ["stale-check"],
+        "out_of_scope": ["other"],
+        "injection_profile": {"default_audience": "coding-agent"},
+        "glossary_term_ids": [],
+    }, tags=["x"], created_at=timestamp, updated_at=timestamp)
+    return manifest, evidence_ref, context
 
 
 def _store(*objs):
@@ -799,6 +852,7 @@ class CliMarkCheckedTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         for obj in (
+            *lint_support_objects(),
             code_locator("code.shared", path="a/X.cpp", commit_sha="OLD"),
             domain_mapping("m.r1", code_locator_ids=["code.shared"]),
             domain_mapping("m.r2", code_locator_ids=["code.shared"]),
@@ -810,9 +864,43 @@ class CliMarkCheckedTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, argv, runner):
+        def verify_fixture_locator(
+            locator,
+            *,
+            repo,
+            manual_symbol_verification=None,
+        ):
+            verified_at = "2026-07-29T00:00:00+09:00"
+            verified = dict(locator)
+            verified["verified_at"] = verified_at
+            return VerifiedLocator(
+                locator=verified,
+                quote_sha256="f" * 64,
+                verified_at=verified_at,
+                symbol_status="verified",
+            )
+
         out = io.StringIO()
         with mock.patch("project_brain.stale_check.make_git_runner", return_value=runner), \
-             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+             mock.patch.object(
+                 cli,
+                 "_resolve_mutation_context",
+                 return_value=RepoContext(
+                     repo_root=self.root,
+                     expected_repo_id="demoapp",
+                     expected_revision_ref="origin/develop",
+                     target_revision_sha="a" * 40,
+                 ),
+             ), \
+             mock.patch(
+                 "project_brain.mutation.verify_locator_for_write",
+                 side_effect=verify_fixture_locator,
+             ), \
+             mock.patch(
+                 "sys.argv",
+                 ["cli"] + argv + ["--engine-sha", ENGINE_SHA],
+             ), \
+             redirect_stdout(out):
             rc = cli.main()
         return rc, json.loads(out.getvalue())
 

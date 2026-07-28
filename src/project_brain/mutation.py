@@ -26,8 +26,8 @@ from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
 from project_brain.repo_context import RepoContext
 from project_brain.schema import (
     id_problem_code,
+    validate_mutation_input_schema,
     validate_object_id,
-    validate_object_schema,
 )
 from project_brain.store import BrainStore, StoreLoadError
 
@@ -53,6 +53,7 @@ class MutationOperation(StrEnum):
     PROMOTE_AUTO = "promote_auto"
     MARK_CHECKED = "mark_checked"
     PROJECTION = "projection"
+    PROJECTION_REPAIR = "projection_repair"
     CONTEXT_REPLACE = "context_replace"
     ID_ONLY_MIGRATION = "id_only_migration"
     DISPLAY_MIGRATION = "display_migration"
@@ -228,7 +229,7 @@ class MutationService:
 
         # 3) schema와 enum.
         for obj in inputs:
-            errors = validate_object_schema(obj)
+            errors = validate_mutation_input_schema(obj)
             if errors:
                 return _failure("schema_invalid", "; ".join(errors))
 
@@ -254,6 +255,15 @@ class MutationService:
                         "new_or_modified_lint_problem",
                         "; ".join(id_errors),
                     )
+
+        if request.operation is MutationOperation.PROJECTION_REPAIR:
+            repair_error = _validate_projection_repair_request(
+                request,
+                input_by_id=input_by_id,
+                existing_by_id=existing_by_id,
+            )
+            if repair_error is not None:
+                return repair_error
 
         # 5) 허용된 상태 전이.
         for object_id, obj in input_by_id.items():
@@ -384,14 +394,44 @@ class MutationService:
         # 10) merged lint. grandfather는 기존 invalid_id의 문제·객체 hash가
         # 모두 같은 경우만 허용한다.
         before_report = lint_store_report(existing_store)
-        for problem in before_report:
-            if problem.code != "invalid_id":
+        if request.operation is MutationOperation.PROJECTION_REPAIR:
+            before_non_id = tuple(
+                problem
+                for problem in before_report
+                if problem.code != "invalid_id"
+            )
+            disallowed_before = tuple(
+                problem
+                for problem in before_non_id
+                if problem.code != "projection_source_hash_mismatch"
+            )
+            if disallowed_before:
                 return _failure(
-                    problem.code
-                    if problem.code == "unknown_grammar"
-                    else "existing_lint_problem",
-                    problem.message,
+                    "existing_lint_problem",
+                    disallowed_before[0].message,
                 )
+            mismatch_ids = {
+                object_id
+                for problem in before_non_id
+                for object_id in problem.object_ids
+            }
+            if mismatch_ids != set(input_by_id):
+                return _failure(
+                    "projection_repair_incomplete",
+                    (
+                        "projection repair targets must exactly match all "
+                        "existing projection_source_hash_mismatch objects"
+                    ),
+                )
+        else:
+            for problem in before_report:
+                if problem.code != "invalid_id":
+                    return _failure(
+                        problem.code
+                        if problem.code == "unknown_grammar"
+                        else "existing_lint_problem",
+                        problem.message,
+                    )
 
         before_grandfathered = _grandfathered_problems(
             before_report,
@@ -406,6 +446,14 @@ class MutationService:
             for problem in after_report
             if problem.code != "invalid_id"
         ]
+        if (
+            request.operation is MutationOperation.PROJECTION_REPAIR
+            and non_id_after
+        ):
+            return _failure(
+                "projection_repair_incomplete",
+                non_id_after[0].message,
+            )
         if non_id_after or not after_keys.issubset(before_keys):
             problem = non_id_after[0] if non_id_after else next(
                 problem
@@ -454,6 +502,58 @@ class MutationService:
 
 def _failure(code: str, detail: str) -> MutationPlanResult:
     return MutationPlanResult(ok=False, error_code=code, detail=detail)
+
+
+def _validate_projection_repair_request(
+    request: MutationRequest,
+    *,
+    input_by_id: Mapping[str, dict],
+    existing_by_id: Mapping[str, dict],
+) -> MutationPlanResult | None:
+    if request.delete_ids:
+        return _failure(
+            "projection_repair_delete_forbidden",
+            "projection repair does not allow deletes",
+        )
+    input_ids = set(input_by_id)
+    if set(request.preconditions) != input_ids:
+        return _failure(
+            "projection_repair_precondition_set_mismatch",
+            "projection repair target IDs and precondition IDs must exactly match",
+        )
+    for object_id, replacement in input_by_id.items():
+        previous = existing_by_id.get(object_id)
+        if previous is None:
+            return _failure(
+                "projection_repair_create_forbidden",
+                f"projection repair target does not exist: {object_id}",
+            )
+        if (
+            previous.get("kind") != "ContextProjection"
+            or replacement.get("kind") != "ContextProjection"
+        ):
+            return _failure(
+                "projection_repair_kind_invalid",
+                f"projection repair target must be ContextProjection: {object_id}",
+            )
+        changed_fields = {
+            field_name
+            for field_name in set(previous) | set(replacement)
+            if (
+                field_name not in previous
+                or field_name not in replacement
+                or previous.get(field_name) != replacement.get(field_name)
+            )
+        }
+        if not changed_fields.issubset({"source_content_hash"}):
+            return _failure(
+                "projection_repair_field_invalid",
+                (
+                    f"{object_id}: projection repair may only change "
+                    f"source_content_hash, got {sorted(changed_fields)!r}"
+                ),
+            )
+    return None
 
 
 def _store_load_failure(exc: StoreLoadError) -> MutationPlanResult:

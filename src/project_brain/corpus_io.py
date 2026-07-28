@@ -77,6 +77,7 @@ _MUTATION_OPERATIONS = {
     "promote_auto",
     "mark_checked",
     "projection",
+    "projection_repair",
     "context_replace",
     "id_only_migration",
     "display_migration",

@@ -10,7 +10,6 @@ SPEC = {
     "HISTORY_COVERAGE": "partial", "NOW": "2026-06-26T00:00:00+09:00",
     "CLAIM_STATUS": "reviewed", "SOURCE_ACL": ["team"],
     "CAPTURED_AT": "2026-06-26T00:00:00+09:00",
-    "VERIFIED_AT": "2026-06-26T00:00:00+09:00",
     "EXPECT_UNMERGED_ANCHORS": False,
     "CORRECTIONS": {}, "DECISIONS": [],
 }
@@ -62,15 +61,23 @@ class BuildNotesTest(unittest.TestCase):
         # ingest schema(필수 필드 + enum)를 통과한다. 누락 시 "missing field"로 적재 거부.
         self.assertEqual(notes["sources"][0]["redaction_status"], "approved")
 
-    def test_explicit_provenance_and_claim_status_pass_through(self):
+    def test_explicit_source_provenance_and_claim_status_pass_through(self):
         spec = dict(SPEC, CLAIM_STATUS="candidate", SOURCE_ACL=["brain-team"],
-                    CAPTURED_AT="2026-07-23T00:00:00+09:00",
-                    VERIFIED_AT="2026-07-23T00:01:00+09:00")
+                    CAPTURED_AT="2026-07-23T00:00:00+09:00")
         notes = build_notes([_atom("m1")], spec)
         self.assertEqual(notes["context"]["claim_status"], "candidate")
         self.assertEqual(notes["sources"][0]["acl"], ["brain-team"])
         self.assertEqual(notes["sources"][0]["captured_at"], "2026-07-23T00:00:00+09:00")
-        self.assertEqual(notes["code_anchors"][0]["verified_at"], "2026-07-23T00:01:00+09:00")
+
+    def test_code_anchor_omits_external_verification_fields(self):
+        notes = build_notes(
+            [_atom("m1")],
+            dict(SPEC, VERIFIED_AT="2026-07-23T00:01:00+09:00"),
+        )
+        self.assertEqual(
+            set(notes["code_anchors"][0]),
+            {"key", "path", "symbol", "manifest", "quote"},
+        )
 
     def test_glossary_candidate_metadata_passes_through_from_first_definition(self):
         candidate = {
@@ -108,12 +115,11 @@ class BuildNotesTest(unittest.TestCase):
 
     def test_empty_provenance_reaches_actionable_assembly_rejection(self):
         from project_brain.assembly import validate_notes
-        spec = dict(SPEC, SOURCE_ACL=[], CAPTURED_AT="", VERIFIED_AT="")
+        spec = dict(SPEC, SOURCE_ACL=[], CAPTURED_AT="")
         notes = build_notes([_atom("m1")], spec)
         errors = validate_notes(notes)
         self.assertTrue(any("acl" in error and "비어" in error for error in errors))
         self.assertTrue(any("captured_at" in error and "비어" in error for error in errors))
-        self.assertTrue(any("verified_at" in error and "비어" in error for error in errors))
 
 
 class NormalizeTest(unittest.TestCase):
