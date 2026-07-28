@@ -14,6 +14,7 @@ from project_brain.mutation import (
     MutationOperation,
     MutationRequest,
     MutationService,
+    corpus_fingerprint,
 )
 from project_brain.objbase import base
 from project_brain.hash_utils import stable_json
@@ -24,6 +25,8 @@ from tests.test_ingest import (
     candidate_mapping,
     candidate_term,
     context,
+    evidence_ref,
+    manifest,
     review_record_for,
 )
 
@@ -126,6 +129,18 @@ def _projection(
         created_at=T,
         updated_at=T,
     )
+
+
+def _promotion_bundle(term: dict, *, reviewer: str = "second") -> list[dict]:
+    reviewed = dict(term)
+    reviewed["status"] = "reviewed"
+    reviewed["updated_at"] = T
+    reviewed.pop("candidate", None)
+    review_id = f"review.{term['id']}"
+    reviewed["review_record_id"] = review_id
+    record = review_record_for(review_id, term["id"])
+    record["reviewer"] = reviewer
+    return [reviewed, record]
 
 
 def _code_locator(
@@ -410,6 +425,78 @@ def test_projection_repair_rejects_incomplete_or_other_lint(tmp_path, case):
 
 
 @pytest.mark.parametrize(
+    "operation",
+    [MutationOperation.PROMOTE, MutationOperation.PROMOTE_AUTO],
+)
+def test_promotion_requires_exact_preconditions_for_target_ids(tmp_path, operation):
+    brain_root = tmp_path / operation.value
+    term = candidate_term()
+    term["evidence_refs"] = ["evref.neutral.ref"]
+    for obj in (manifest(), evidence_ref(), context(), term):
+        _write_raw(brain_root, obj)
+    promotion = _promotion_bundle(term)
+
+    result = _plan(
+        brain_root,
+        promotion,
+        operation=operation,
+    )
+
+    assert result.error_code == "promotion_precondition_set_mismatch"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [MutationOperation.PROMOTE, MutationOperation.PROMOTE_AUTO],
+)
+def test_promotion_requires_exact_selection_snapshot(tmp_path, operation):
+    brain_root = tmp_path / operation.value
+    term = candidate_term()
+    term["evidence_refs"] = ["evref.neutral.ref"]
+    for obj in (manifest(), evidence_ref(), context(), term):
+        _write_raw(brain_root, obj)
+    promotion = _promotion_bundle(term)
+
+    result = _plan(
+        brain_root,
+        promotion,
+        operation=operation,
+        preconditions={term["id"]: _object_hash(term)},
+    )
+
+    assert result.error_code == "promotion_corpus_fingerprint_required"
+
+
+def test_second_promotion_apply_cannot_overwrite_reviewed_target_or_record(tmp_path):
+    brain_root = tmp_path / "brain"
+    stale_term = candidate_term()
+    stale_term["evidence_refs"] = ["evref.neutral.ref"]
+    first_promotion = _promotion_bundle(stale_term, reviewer="first")
+    for obj in (manifest(), evidence_ref(), context(), *first_promotion):
+        _write_raw(brain_root, obj)
+    stale_second_promotion = _promotion_bundle(stale_term, reviewer="second")
+
+    inputs = tuple(stale_second_promotion)
+    request = _request(
+        brain_root,
+        inputs,
+        operation=MutationOperation.PROMOTE,
+        preconditions={
+            stale_term["id"]: _object_hash(first_promotion[0]),
+        },
+        expected_corpus_fingerprint=corpus_fingerprint(
+            BrainStore.load(brain_root)
+        ),
+    )
+    result = MutationService().apply(inputs, request=request)
+
+    assert result.error_code == "promotion_target_not_candidate"
+    stored = BrainStore.load(brain_root)
+    assert stored.get(stale_term["id"]) == first_promotion[0]
+    assert stored.get(f"review.{stale_term['id']}")["reviewer"] == "first"
+
+
+@pytest.mark.parametrize(
     "case",
     [
         "request_type",
@@ -674,7 +761,11 @@ def test_coordinate_changed_locator_is_reverified(tmp_path):
     assert result.error_code == "quote_not_found"
 
 
-def test_unchanged_locator_ignores_external_verified_at(tmp_path):
+@pytest.mark.parametrize(
+    "operation",
+    [MutationOperation.INGEST, MutationOperation.MARK_CHECKED],
+)
+def test_unchanged_locator_preserves_engine_fields(tmp_path, operation):
     brain_root = tmp_path / "brain"
     existing = _code_locator(
         quote=None,
@@ -684,11 +775,17 @@ def test_unchanged_locator_ignores_external_verified_at(tmp_path):
     _write_raw(brain_root, existing)
     replacement = dict(existing)
     replacement["verified_at"] = "2099-01-01T00:00:00Z"
+    replacement["title"] = "external rewrite"
 
-    result = _plan(brain_root, [replacement])
+    result = _plan(
+        brain_root,
+        [replacement],
+        operation=operation,
+    )
 
     assert result.ok is True
     assert result.after["verified_at"] == T
+    assert result.after["title"] == "legacy display"
 
 
 def test_legacy_id_only_is_the_only_no_quote_exception(tmp_path):

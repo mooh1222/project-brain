@@ -788,6 +788,59 @@ class TestCliPromote(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("already reviewed", json.loads(out.getvalue())["error"])
 
+    def test_promote_fails_closed_if_target_changes_before_apply(self):
+        from project_brain.promote import promote
+
+        self._ingest()
+        original_apply = cli._apply_mutation
+
+        def apply_after_competing_promotion(**kwargs):
+            stale_target = BrainStore.load(self.root).get("g.neutral.x")
+            first_promoted, first_records = promote(
+                [stale_target],
+                [stale_target["id"]],
+                "single_object",
+                reviewer="first-reviewer",
+                reviewed_at="2026-06-05T00:00:00Z",
+            )
+            for obj in first_promoted + first_records:
+                BrainStore.save_object(self.root, obj)
+            return original_apply(**kwargs)
+
+        argv = [
+            "promote",
+            "--brain-root",
+            str(self.root),
+            "--ids",
+            "g.neutral.x",
+            "--reviewer",
+            "second-reviewer",
+            "--reviewed-at",
+            "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
+        ]
+        out = io.StringIO()
+        with mock.patch.object(
+            cli,
+            "_apply_mutation",
+            side_effect=apply_after_competing_promotion,
+        ), mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        stored = BrainStore.load(self.root)
+        self.assertEqual(
+            stored.get("review.g.neutral.x")["reviewer"],
+            "first-reviewer",
+        )
+        self.assertEqual(
+            stored.get("g.neutral.x")["updated_at"],
+            "2026-06-05T00:00:00Z",
+        )
+
     def test_promote_conflict_records_resolution(self):
         # 수동 conflict 승격(spec §5.2 사람 판정 허용) → 해소 근거가 검수 기록에 남음.
         from tests.test_ingest import ingest
@@ -989,6 +1042,43 @@ class TestCliPromoteAuto(unittest.TestCase):
             set(result["skipped"]["already_reviewed"]),
             {"g.neutral.empty", "g.neutral.has", "g.neutral.multi"},
         )
+
+    def test_auto_fails_closed_if_vouching_snapshot_changes_before_apply(self):
+        self._ingest_corpus()
+        original_apply = cli._apply_mutation
+
+        def apply_after_voucher_change(**kwargs):
+            store = BrainStore.load(self.root)
+            mapping = dict(store.get("mapping.neutral.me"))
+            mapping["glossary_term_ids"] = []
+            BrainStore.save_object(self.root, mapping)
+            return original_apply(**kwargs)
+
+        out = io.StringIO()
+        argv = [
+            "promote-auto",
+            "--brain-root",
+            str(self.root),
+            "--ids",
+            "g.neutral.empty",
+            "--reviewed-at",
+            "2026-06-08T00:00:00Z",
+            *ENGINE_ARGS,
+        ]
+        with mock.patch.object(
+            cli,
+            "_apply_mutation",
+            side_effect=apply_after_voucher_change,
+        ), mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        stored = BrainStore.load(self.root)
+        self.assertEqual(stored.get("g.neutral.empty")["status"], "candidate")
+        self.assertFalse(stored.has("review.g.neutral.empty"))
 
 
 def _ar_legacy_manifest(mid="manifest.neutral.wiki", source_type="wiki"):

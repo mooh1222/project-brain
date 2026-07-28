@@ -28,6 +28,7 @@ def ingest(
     engine_sha: str,
     repo_context: RepoContext | None = None,
     operation: MutationOperation = MutationOperation.INGEST,
+    expected_corpus_fingerprint: str | None = None,
 ):
     """한 bundle을 공통 mutation service로 원자 적용한다."""
     inputs = tuple(objects)
@@ -38,6 +39,7 @@ def ingest(
         engine_sha=engine_sha,
         objects=inputs,
         preconditions=preconditions or {},
+        expected_corpus_fingerprint=expected_corpus_fingerprint,
     )
     result = MutationService().apply(inputs, request=request)
     if not result.ok:

@@ -264,6 +264,17 @@ class MutationService:
             )
             if repair_error is not None:
                 return repair_error
+        if request.operation in {
+            MutationOperation.PROMOTE,
+            MutationOperation.PROMOTE_AUTO,
+        }:
+            promotion_error = _validate_promotion_request(
+                request,
+                input_by_id=input_by_id,
+                existing_by_id=existing_by_id,
+            )
+            if promotion_error is not None:
+                return promotion_error
 
         # 5) 허용된 상태 전이.
         for object_id, obj in input_by_id.items():
@@ -318,9 +329,17 @@ class MutationService:
                                 exc.failure.detail,
                             )
                         planned = verified.locator
+                        planned["title"] = _canonical_locator_title(planned)
                     elif previous is not None:
                         planned["verified_at"] = previous.get("verified_at")
-                    planned["title"] = _canonical_locator_title(planned)
+                        planned["title"] = (
+                            _canonical_locator_title(planned)
+                            if (
+                                request.operation
+                                is MutationOperation.DISPLAY_MIGRATION
+                            )
+                            else previous.get("title")
+                        )
                 planned_inputs.append(planned)
 
         # 8) 기존 객체 precondition과 before hash.
@@ -556,6 +575,78 @@ def _validate_projection_repair_request(
     return None
 
 
+def _validate_promotion_request(
+    request: MutationRequest,
+    *,
+    input_by_id: Mapping[str, dict],
+    existing_by_id: Mapping[str, dict],
+) -> MutationPlanResult | None:
+    review_records = tuple(
+        obj
+        for obj in input_by_id.values()
+        if obj.get("kind") == "ReviewRecord"
+    )
+    target_ids: set[str] = set()
+    for record in review_records:
+        target_id = record.get("target_object_id")
+        if isinstance(target_id, str):
+            target_ids.add(target_id)
+        target_object_ids = record.get("target_object_ids")
+        if isinstance(target_object_ids, list):
+            target_ids.update(
+                object_id
+                for object_id in target_object_ids
+                if isinstance(object_id, str)
+            )
+    replacement_target_ids = {
+        object_id
+        for object_id, obj in input_by_id.items()
+        if obj.get("kind") != "ReviewRecord"
+    }
+    if not target_ids or target_ids != replacement_target_ids:
+        return _failure(
+            "promotion_target_set_mismatch",
+            "promotion ReviewRecord targets must exactly match replacement targets",
+        )
+    if set(request.preconditions) != target_ids:
+        return _failure(
+            "promotion_precondition_set_mismatch",
+            "promotion target IDs and precondition IDs must exactly match",
+        )
+    if request.expected_corpus_fingerprint is None:
+        return _failure(
+            "promotion_corpus_fingerprint_required",
+            "promotion requires the exact selection corpus fingerprint",
+        )
+    for target_id in sorted(target_ids):
+        previous = existing_by_id.get(target_id)
+        if previous is None:
+            return _failure(
+                "promotion_target_missing",
+                f"promotion target is missing: {target_id}",
+            )
+        if previous.get("status") != "candidate":
+            return _failure(
+                "promotion_target_not_candidate",
+                (
+                    f"{target_id}: promotion requires current candidate status, "
+                    f"got {previous.get('status')!r}"
+                ),
+            )
+        if input_by_id[target_id].get("status") != "reviewed":
+            return _failure(
+                "promotion_result_not_reviewed",
+                f"{target_id}: promotion replacement must be reviewed",
+            )
+    for record in review_records:
+        if record["id"] in existing_by_id:
+            return _failure(
+                "promotion_review_record_exists",
+                f"promotion ReviewRecord already exists: {record['id']}",
+            )
+    return None
+
+
 def _store_load_failure(exc: StoreLoadError) -> MutationPlanResult:
     error_code = (
         exc.code
@@ -708,6 +799,14 @@ def _corpus_fingerprint(objects: Mapping[str, Mapping[str, object]]) -> str:
         digest.update(BrainStore.object_bytes(objects[object_id]))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def corpus_fingerprint(store: BrainStore) -> str:
+    """현재 in-memory store snapshot의 exact corpus fingerprint."""
+    return _corpus_fingerprint({
+        obj["id"]: obj
+        for obj in store.all()
+    })
 
 
 def _infer_id_only_renames(

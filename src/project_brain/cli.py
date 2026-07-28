@@ -29,7 +29,7 @@ from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
 from project_brain.search_index import rebuild as index_rebuild
 from project_brain.store import BrainStore
-from project_brain.mutation import MutationOperation
+from project_brain.mutation import MutationOperation, corpus_fingerprint
 from project_brain.repo_context import (
     RepoContext,
     RepoVerificationError,
@@ -110,6 +110,7 @@ def _apply_mutation(
     engine_sha: str,
     objects,
     preconditions=None,
+    expected_corpus_fingerprint=None,
 ):
     return ingest(
         brain_root,
@@ -118,7 +119,20 @@ def _apply_mutation(
         engine_sha=engine_sha,
         repo_context=repo_context,
         operation=operation,
+        expected_corpus_fingerprint=expected_corpus_fingerprint,
     )
+
+
+def _object_preconditions(
+    store: BrainStore,
+    object_ids,
+) -> dict[str, str]:
+    return {
+        object_id: hashlib.sha256(
+            BrainStore.object_bytes(store.get(object_id))
+        ).hexdigest()
+        for object_id in object_ids
+    }
 
 
 def _run_query(argv) -> int:
@@ -230,6 +244,7 @@ def _run_promote(argv) -> int:
 
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
+    selection_fingerprint = corpus_fingerprint(store)
     missing = [i for i in args.ids if not store.has(i)]
     if missing:
         print(json.dumps({"ok": False, "error": f"unknown ids: {missing}"},
@@ -277,6 +292,8 @@ def _run_promote(argv) -> int:
             repo_context=repo_context,
             engine_sha=args.engine_sha,
             objects=to_write,
+            preconditions=_object_preconditions(store, args.ids),
+            expected_corpus_fingerprint=selection_fingerprint,
         )
     except IngestError as exc:
         print(json.dumps(
@@ -302,6 +319,7 @@ def _run_promote_auto(argv) -> int:
 
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
+    selection_fingerprint = corpus_fingerprint(store)
     selection = select_vouched_candidates(store)  # {term_id: [보증 매핑 id]}
 
     # --ids를 1단계 기준으로 다시 가드 → 건너뛴 사유별 분류(조용한 누락 금지, §4.3).
@@ -363,6 +381,8 @@ def _run_promote_auto(argv) -> int:
                 repo_context=repo_context,
                 engine_sha=args.engine_sha,
                 objects=to_write,
+                preconditions=_object_preconditions(store, eligible),
+                expected_corpus_fingerprint=selection_fingerprint,
             )
         except IngestError as exc:
             print(json.dumps(
@@ -784,8 +804,8 @@ def _run_build(argv) -> int:
 
     brain_root = resolve_brain_root(args.brain_root)
     notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
-    # 객체 created_at/updated_at/verified_at 시점. 노트에 context.now를 적으면 그 값을
-    # 쓰고(소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
+    # 객체 created_at/updated_at 시점. 노트에 context.now를 적으면 그 값을 쓰고
+    # (소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
     now = notes.get("context", {}).get("now") or now_kst()
     store = BrainStore.load(brain_root)
     result = build(notes, store, now)
