@@ -875,7 +875,7 @@ def _run_graph(argv) -> int:
     발견 전용이라 차단하지 않는다 — 어디에 무엇을 연결할지는 사람·스킬 몫(C7).
 
     `graph export <out.html> [--brain-root <path>]` — 코퍼스를 vis-network 단일 HTML로
-    써서 브라우저로 탐색한다. 엣지는 isolated와 같은 정본 정의(INBOUND_REF_FIELDS)라
+    써서 브라우저로 탐색한다. 엣지는 isolated와 같은 정본 reference_fields registry라
     어떤 잎이 왜 고립인지 화면에서 그대로 보인다. vis-network는 CDN에서 받으므로 볼 때
     인터넷이 필요하다. 읽기 전용 — store는 불변, 출력 파일만 쓴다."""
     parser = argparse.ArgumentParser(prog="cli graph")
@@ -885,7 +885,7 @@ def _run_graph(argv) -> int:
     p_iso.add_argument("--kind", nargs="+",
                        help="점검 대상 kind 한정 (기본: CodeLocator·GlossaryTerm·EvidenceRef 잎 kind). "
                             "주의: 기본 잎 밖 kind(예: SlideRef)는 인바운드 엣지(slide_refs 등)가 "
-                            "INBOUND_REF_FIELDS에 없어 거짓 고립이 날 수 있다")
+                            "reference_fields registry에 없어 거짓 고립이 날 수 있다")
     p_exp = sub.add_parser("export")
     p_exp.add_argument("out", help="출력 HTML 경로")
     p_exp.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")

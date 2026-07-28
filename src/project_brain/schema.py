@@ -3,6 +3,15 @@ spec: docs/superpowers/specs/2026-05-27-project-brain-object-model-design.md
 router가 실제로 읽는 필드는 일부지만, 적재 무결성을 위해 spec 필수 필드 전체를 강제한다."""
 
 from project_brain.id_grammar import ID_GRAMMARS, validate_id_fields
+from project_brain.reference_fields import (
+    LIST_REFERENCE_FIELDS,
+    NESTED_REFERENCE_POINTERS,
+    SCALAR_REFERENCE_FIELDS,
+    _NonCanonicalArrayIndexError,
+    _escape_pointer_token,
+    _pointer_tokens,
+    _resolve_pointer,
+)
 
 
 BASE_REQUIRED = (
@@ -132,6 +141,55 @@ class SchemaError(ValueError):
     pass
 
 
+def _validate_reference_field_types(obj: dict) -> list[str]:
+    object_id = obj.get("id", "?")
+    errors: list[str] = []
+
+    for field in sorted(SCALAR_REFERENCE_FIELDS):
+        if field not in obj:
+            continue
+        value = obj[field]
+        if not isinstance(value, str):
+            pointer = f"/{_escape_pointer_token(field)}"
+            errors.append(
+                f"{object_id}: reference field {field!r} at {pointer} "
+                f"must be a string, got {type(value).__name__}"
+            )
+
+    for field in sorted(LIST_REFERENCE_FIELDS):
+        if field not in obj:
+            continue
+        value = obj[field]
+        pointer = f"/{_escape_pointer_token(field)}"
+        if not isinstance(value, list):
+            errors.append(
+                f"{object_id}: reference field {field!r} at {pointer} "
+                f"must be a list of strings, got {type(value).__name__}"
+            )
+            continue
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                errors.append(
+                    f"{object_id}: reference field {field!r} at {pointer}/{index} "
+                    f"must be a string, got {type(item).__name__}"
+                )
+
+    for pointer in NESTED_REFERENCE_POINTERS:
+        try:
+            found, value = _resolve_pointer(obj, pointer)
+        except _NonCanonicalArrayIndexError:
+            continue
+        if not found or isinstance(value, str):
+            continue
+        field = _pointer_tokens(pointer)[-1]
+        errors.append(
+            f"{object_id}: reference field {field!r} at {pointer} "
+            f"must be a string, got {type(value).__name__}"
+        )
+
+    return errors
+
+
 def validate_object(obj: dict) -> list[str]:
     """위반 메시지 목록을 반환한다(빈 목록 = 통과). Lint가 모아 보고하도록 예외 대신 목록."""
     kind = obj.get("kind")
@@ -144,6 +202,7 @@ def validate_object(obj: dict) -> list[str]:
     for field in KIND_REQUIRED[kind]:
         if field not in obj:
             errors.append(f"{obj['id']}: {kind} missing field {field!r}")
+    errors.extend(_validate_reference_field_types(obj))
     status = obj.get("status")
     if status is not None and status not in OBJECT_STATUS_VALUES:
         errors.append(f"{obj['id']}: invalid status {status!r}")

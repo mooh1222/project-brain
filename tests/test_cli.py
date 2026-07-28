@@ -27,6 +27,21 @@ from tests.test_ingest import (
 )
 
 
+def _context_object(ctx):
+    from project_brain.assembly import build_context
+    return build_context(
+        {
+            "context": {
+                "key": ctx,
+                "repo": "demoapp",
+                "display_name": "합성 컨텍스트",
+                "boundary_summary": "합성 테스트 경계",
+            },
+        },
+        "2026-06-16T00:00:00Z",
+    )[0]
+
+
 class TestCli(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -222,7 +237,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(head_calls[-1]["default_branch"], "trunk")
 
     def test_cli_ingest_subcommand_writes(self):
-        bundle = [manifest(), evidence_ref(), candidate_term()]
+        bundle = [manifest(), evidence_ref(), context(), candidate_term()]
         objects_file = self.input_dir / "bundle.json"
         objects_file.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
         argv = [
@@ -422,7 +437,7 @@ class TestCli(unittest.TestCase):
 
     def test_cli_lint_clean_store_ok(self):
         # 깨끗한 store(서로 참조 정상) → lint ok=true, problems 0 (test_lint.py와 동일 조합)
-        for obj in (manifest(), evidence_ref(), candidate_term()):
+        for obj in (manifest(), evidence_ref(), context(), candidate_term()):
             BrainStore.save_object(self.root, obj)
         argv = ["lint", "--brain-root", str(self.root)]
         out = io.StringIO()
@@ -485,7 +500,10 @@ class TestCliPromote(unittest.TestCase):
 
     def _ingest(self):
         from project_brain.ingest import ingest
-        ingest(self.root, [manifest(), evidence_ref(), candidate_term_with_evidence()])
+        ingest(
+            self.root,
+            [manifest(), evidence_ref(), context(), candidate_term_with_evidence()],
+        )
 
     def test_promote_round_trip(self):
         self._ingest()
@@ -567,7 +585,7 @@ class TestCliPromote(unittest.TestCase):
         # 승격 결과물(reviewed, 근거 빔)이 쓰기 전 일괄 검증에 걸려 rc=1, 디스크 불변(원자성).
         from project_brain.ingest import ingest
         from tests.test_ingest import candidate_term  # evidence_refs=[] 기본
-        ingest(self.root, [candidate_term("g.neutral.noev")])
+        ingest(self.root, [context(), candidate_term("g.neutral.noev")])
         argv = [
             "promote", "--brain-root", str(self.root),
             "--ids", "g.neutral.noev", "--reviewer", "user-confirmed",
@@ -1019,6 +1037,7 @@ class TestCliSearch(unittest.TestCase):
         # stale는 git 의존이라 --no-stale로 건너뛴다(결정론). 고아 candidate 용어는
         # evidence_refs=[]라 dangling 없이 isolated만 잡힌다.
         from tests.test_search import glossary_term
+        BrainStore.save_object(self.brain, context())
         BrainStore.save_object(
             self.brain, glossary_term("g.orphan", term="고아", definition="d", status="candidate"))
         argv = ["audit", "--no-stale", "--brain-root", str(self.brain)]
@@ -1383,6 +1402,7 @@ class RunBuildTest(unittest.TestCase):
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
+            BrainStore.save_object(brain, _context_object("ctx"))
             # reviewed GlossaryTerm은 evidence_refs가 필수(schema) → source+code_anchor로 닫는다
             notes_path.write_text(json.dumps({
                 "context": {"key": "ctx", "commit": "abc",
@@ -1425,6 +1445,7 @@ class RunBuildTest(unittest.TestCase):
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
+            BrainStore.save_object(brain, _context_object("ctx"))
             notes_path.write_text(json.dumps({
                 "context": {"key": "ctx", "commit": "abc", "repo": "demoapp"},  # now 생략
                 "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",

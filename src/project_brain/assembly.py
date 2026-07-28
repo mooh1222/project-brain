@@ -522,16 +522,8 @@ def build(notes, store, now):
     for o in all_objs:
         merged[o["id"]] = o
 
-    # EvidenceRef → EvidenceManifest dangling (lint.py 사각지대 — lint는 EvidenceRef가
-    # 가리키는 manifest 실존을 안 본다. _source_type_for_evidence_ref는 None만 반환).
-    for o in all_objs:
-        if o.get("kind") == "EvidenceRef":
-            mid = o.get("evidence_manifest_id")
-            if mid and mid not in merged:
-                errors.append(f"{o['id']}: dangling evidence_manifest_id {mid}")
-
-    # updates union 대상 id 실존 (lint.py 사각지대 — lint는 DomainMapping 링크만 보므로
-    # DomainContext.glossary_term_ids 등은 직접 검사. id 리스트 필드만, 자유텍스트 list 제외).
+    # updates union 대상 id 실존을 update별 오류로 명시한다.
+    # id 리스트 필드만 검사하고 자유텍스트 list는 제외한다.
     for up in notes.get("updates", []):
         for f, vs in (up.get("union") or {}).items():
             if f.endswith("_ids") or f == "evidence_refs":

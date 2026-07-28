@@ -8,6 +8,7 @@ from tests.test_ingest import (
     candidate_mapping,
     candidate_term,
     context,
+    malformed_reference_cases,
     manifest,
 )
 
@@ -68,6 +69,13 @@ class TestValidateObject(unittest.TestCase):
         self.assertTrue(any("mapping_bundle review_scope" in error for error in errors))
         self.assertTrue(any("bundle_key" in error for error in errors))
         self.assertTrue(any("target_object_ids" in error for error in errors))
+
+
+class TestReferenceFieldTypes(unittest.TestCase):
+    def test_malformed_reference_types_are_rejected(self):
+        for label, obj, expected in malformed_reference_cases():
+            with self.subTest(label=label):
+                self.assertIn(expected, validate_object(obj))
 
 
 class TestEvidenceGate(unittest.TestCase):

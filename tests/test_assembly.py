@@ -72,6 +72,20 @@ def _store(*objs):
     return BrainStore({o["id"]: o for o in objs})
 
 
+def _context(ctx="ctx"):
+    return build_context(
+        {
+            "context": {
+                "key": ctx,
+                "repo": "demoapp",
+                "display_name": "합성 컨텍스트",
+                "boundary_summary": "합성 테스트 경계",
+            },
+        },
+        NOW,
+    )[0]
+
+
 class ResolveRefsTest(unittest.TestCase):
     def test_id_direct_passthrough(self):
         store = _store({"id": "g.ctx.x", "kind": "GlossaryTerm"})
@@ -664,7 +678,7 @@ class BuildIntegrationTest(unittest.TestCase):
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
-        result = build(notes, _store(), NOW)
+        result = build(notes, _store(_context()), NOW)
         self.assertEqual(result["errors"], [])
         ids = {o["id"] for o in result["objects"]}
         self.assertIn("g.ctx.hit", ids)
@@ -673,9 +687,10 @@ class BuildIntegrationTest(unittest.TestCase):
 
     def test_build_warns_isolated_new_leaf_non_blocking(self):
         # C8: 이번 묶음 신규 잎 중 인바운드 0(아무도 안 가리킴)을 비차단 warnings로 보고한다.
-        # 매핑 없이 적재된 GlossaryTerm·CodeLocator는 고립 잎 → 경고. evref는 term의
-        # evidence_refs가 가리키므로 경고 아님(묶음 내 참조). 차단 아님(errors 비어야 함 —
-        # candidate 일시 고립은 정상). 점검 잎 kind·역인덱스는 C1(graph.py)과 공유.
+        # 매핑 없이 적재된 GlossaryTerm은 고립 잎 → 경고. evref는 term의 evidence_refs가,
+        # locator는 evref.locator.code_locator_id가 가리키므로 둘 다 경고 아님(묶음 내 참조).
+        # 차단 아님(errors 비어야 함 — candidate 일시 고립은 정상). 점검 잎 kind·역인덱스는
+        # C1(graph.py)과 공유.
         notes = {
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
@@ -687,24 +702,27 @@ class BuildIntegrationTest(unittest.TestCase):
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
-        result = build(notes, _store(), NOW)
+        result = build(notes, _store(_context()), NOW)
         self.assertEqual(result["errors"], [])  # 비차단
         warned = " ".join(result["warnings"])
         self.assertIn("g.ctx.hit", warned)             # 고립 GlossaryTerm → 경고
-        self.assertIn("code.ctx.hit-hook", warned)     # 고립 CodeLocator → 경고
         self.assertNotIn("evref.ctx.hit-hook", warned)  # term이 가리킴 → 고립 아님
+        self.assertNotIn("code.ctx.hit-hook", warned)   # evref locator가 가리킴 → 고립 아님
 
     def test_build_dangling_ref_caught(self):
         # glossary가 없는 evref를 가리키면 2층(dangling)이 잡는다
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "glossary": [{"key": "x", "term": "x", "definition": "d",
                                "evidence_refs": ["evref.ctx.nonexistent"]}]}
-        result = build(notes, _store(), NOW)
-        self.assertTrue(result["errors"])
+        result = build(notes, _store(_context()), NOW)
+        self.assertTrue(
+            any("dangling evidence_ref evref.ctx.nonexistent" in error
+                for error in result["errors"]),
+            result["errors"],
+        )
 
     def test_build_evref_dangling_manifest_caught(self):
-        # extra_objects로 들어온 EvidenceRef가 없는 manifest를 가리키면 build 2층이 잡는다
-        # (lint는 EvidenceRef→manifest를 안 보므로 build가 직접 검사)
+        # extra_objects로 들어온 EvidenceRef가 없는 manifest를 가리키면 build 2층이 잡는다.
         evref = {"id": "evref.ctx.x", "kind": "EvidenceRef", "status": "reviewed",
                  "truth_role": "reference", "title": "e",
                  "evidence_manifest_id": "manifest.ctx.missing", "ref_type": "session_turn",
@@ -713,17 +731,25 @@ class BuildIntegrationTest(unittest.TestCase):
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "extra_objects": [evref]}
         result = build(notes, _store(), NOW)
-        self.assertTrue(any("evidence_manifest_id" in e for e in result["errors"]))
+        self.assertEqual(
+            [error for error in result["errors"]
+             if "dangling evidence_manifest_id manifest.ctx.missing" in error],
+            ["evref.ctx.x: dangling evidence_manifest_id manifest.ctx.missing"],
+        )
 
     def test_build_union_target_missing_caught(self):
-        # DomainContext.glossary_term_ids union 대상이 store·묶음 어디에도 없으면 build가 잡는다
-        # (lint는 DomainMapping 링크만 봐서 DomainContext union은 사각지대)
+        # DomainContext.glossary_term_ids union 대상이 store·묶음 어디에도 없으면
+        # generic lint와 별도로 update 위치를 밝힌 진단을 보존한다.
         store = _store(*_ref_objs())  # context.ctx 포함
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "updates": [{"id": "context.ctx", "expected_updated_at": T0,
                               "union": {"glossary_term_ids": ["g.ctx.nonexistent"]}}]}
         result = build(notes, store, NOW)
-        self.assertTrue(any("g.ctx.nonexistent" in e for e in result["errors"]))
+        self.assertIn(
+            "updates context.ctx: union glossary_term_ids 대상 g.ctx.nonexistent 없음 "
+            "(store·이번 묶음 어디에도)",
+            result["errors"],
+        )
 
     def test_build_emits_preconditions_for_updates(self):
         # title(비-claim) set + 참조 닫힌 픽스처 → errors 없이 preconditions 방출

@@ -147,6 +147,46 @@ def context(cid="context.neutral", *, glossary_term_ids=None):
     )
 
 
+def malformed_reference_cases():
+    """참조 registry 필드의 대표적인 타입 위반 객체와 기대 오류."""
+    scalar = evidence_ref()
+    scalar["evidence_manifest_id"] = ["manifest.neutral.source"]
+
+    list_container = context(glossary_term_ids="g.neutral.x")
+
+    list_item = context(glossary_term_ids=[7])
+
+    nested = evidence_ref()
+    nested["locator"] = {"code_locator_id": 7}
+
+    return (
+        (
+            "scalar",
+            scalar,
+            "evref.neutral.ref: reference field 'evidence_manifest_id' at "
+            "/evidence_manifest_id must be a string, got list",
+        ),
+        (
+            "list-container",
+            list_container,
+            "context.neutral: reference field 'glossary_term_ids' at "
+            "/glossary_term_ids must be a list of strings, got str",
+        ),
+        (
+            "list-item",
+            list_item,
+            "context.neutral: reference field 'glossary_term_ids' at "
+            "/glossary_term_ids/0 must be a string, got int",
+        ),
+        (
+            "nested",
+            nested,
+            "evref.neutral.ref: reference field 'code_locator_id' at "
+            "/locator/code_locator_id must be a string, got int",
+        ),
+    )
+
+
 def candidate_mapping(
     mid="mapping.neutral.key",
     *,
@@ -204,7 +244,7 @@ class TestIngest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_ingest_writes_valid_bundle(self):
-        bundle = [manifest(), evidence_ref(), candidate_term()]
+        bundle = [manifest(), evidence_ref(), context(), candidate_term()]
         ingest(self.root, bundle)
         store = BrainStore.load(self.root)
         self.assertTrue(store.has("manifest.neutral.source"))
@@ -218,6 +258,14 @@ class TestIngest(unittest.TestCase):
             ingest(self.root, bundle)
         # 원자성: 아무 파일도 안 쓰임
         self.assertEqual(BrainStore.load(self.root).all(), [])
+
+    def test_ingest_rejects_malformed_reference_types_writes_nothing(self):
+        for label, obj, expected in malformed_reference_cases():
+            with self.subTest(label=label):
+                with self.assertRaises(IngestError) as caught:
+                    ingest(self.root, [obj])
+                self.assertIn(expected, str(caught.exception))
+                self.assertEqual(BrainStore.load(self.root).all(), [])
 
     def test_ingest_rejects_dangling_link_writes_nothing(self):
         # context는 동봉해 resolve되지만 mapping이 store에도 bundle에도 없는
@@ -234,15 +282,15 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(BrainStore.load(self.root).all(), [])
 
     def test_ingest_idempotent_overwrite(self):
-        bundle = [manifest(), evidence_ref(), candidate_term()]
+        bundle = [manifest(), evidence_ref(), context(), candidate_term()]
         ingest(self.root, bundle)
         # 같은 객체 두 번째 ingest 도 성공(write_text 덮어쓰기)
-        ingest(self.root, [manifest(), evidence_ref(), candidate_term()])
+        ingest(self.root, [manifest(), evidence_ref(), context(), candidate_term()])
         store = BrainStore.load(self.root)
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
 
     def test_ingest_allows_candidate_to_reviewed(self):
-        ingest(self.root, [manifest(), evidence_ref(), candidate_term()])
+        ingest(self.root, [manifest(), evidence_ref(), context(), candidate_term()])
         # 같은 id를 reviewed로 ingest(승격). reviewed_term은 기존 evref를 참조 → §6.4·lint 통과
         rr = review_record_for("review.g.neutral.x", "g.neutral.x")
         ingest(self.root, [reviewed_term(review_record_id="review.g.neutral.x"), rr])
@@ -257,6 +305,7 @@ class TestIngest(unittest.TestCase):
             [
                 manifest(),
                 evidence_ref(),
+                context(),
                 reviewed_term(review_record_id="review.g.neutral.x"),
                 rr,
             ],
@@ -275,6 +324,7 @@ class TestIngest(unittest.TestCase):
             [
                 manifest(),
                 evidence_ref(),
+                context(),
                 reviewed_term(review_record_id="review.g.neutral.x"),
                 rr,
             ],

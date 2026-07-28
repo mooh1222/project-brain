@@ -133,7 +133,8 @@ bb2_client 고립 노드 정비 4세션(2026-06-23)을 회고해 도출·검증�
 코퍼스를 vis-network 단일 HTML로 내보내는 `project-brain graph export <out.html>`.
 데이터 레포의 `.brain-local/graph_export.py` 로컬 프로토타입(git 미추적이라 다른 머신·
 새 클론에 없어 재현 불가)을 정식 명령으로 승격. 엣지는 `graph isolated`와 같은 정본
-정의(`graph.edges` = INBOUND_REF_FIELDS, 외부 키 제외)를 써서 "어떤 잎이 왜 고립인지"가
+정의(`graph.edges`가 `reference_fields` registry의 `iter_object_refs()`를 사용하고 외부 키는
+제외)를 써서 "어떤 잎이 왜 고립인지"가
 화면에서 그대로 보인다(둘이 어긋나지 않게 단일 출처). 노드 클릭 시 객체 전체·kind 필터·
 검색·이웃만 보기 지원. vis-network는 CDN(unpkg)에서 받아 파이썬 의존성 0, 볼 때 인터넷
 필요. 읽기 전용(store 불변, 출력 파일만). 다관점 적대 리뷰 8건 중 4건 확정·반영
