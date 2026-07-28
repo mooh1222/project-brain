@@ -60,10 +60,11 @@ def build_payload(store: BrainStore) -> dict:
             "label": label,
             "group": kind,
             "title": "\n".join(tip),
+            "display_only": True,
             "borderWidth": 3 if status == "reviewed" else 1,
             "shapeProperties": {"borderDashes": [5, 5] if status == "candidate" else False},
         })
-        details[oid] = o
+        details[oid] = {**o, "display_only": True}
 
     edge_list = [{"from": f, "to": t} for f, t in graph_edges(store)]
 

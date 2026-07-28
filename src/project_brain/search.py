@@ -8,7 +8,7 @@ BM25 채널(search_bm25)과 벡터 채널(search_vector)을 각각 top 50 받아
 §3 결과 계약 dict로 만든다.
 
 슬라이스 4(§3.5 그래프 1-hop): 융합 top-30 적중에서 참조 필드를 1-hop 따라 linked를
-채우고(code_locators는 {object_id, title, path, symbol} 객체형), top-30 적중집합 안의 상호
+채우고(code_locators는 {object_id, path, symbol, quote_access} 객체형), top-30 적중집합 안의 상호
 연결 도달 횟수를 graph_reached(bool)·graph_hits(횟수)로 분리 기록한다. evidence_refs는
 표시 전용(linked.evidence_ref_ids)이라 랭킹·그래프 도달 계산에서 제외한다.
 
@@ -36,6 +36,7 @@ import sqlite3
 from pathlib import Path
 
 from project_brain.config import resolve_brain_root, resolve_db_path
+from project_brain.quote_access import AccessState, evaluate_quote_access
 from project_brain.raw_chunks import RAW_KIND, RAW_STATUS
 from project_brain.search_index import (
     search_bm25,
@@ -158,8 +159,10 @@ def rrf_fuse(rankings, k: int = RRF_K):
 def _build_linked(object_id: str, store: BrainStore) -> dict:
     """적중 객체의 참조 필드를 1-hop 따라 linked를 채운다(§3.5).
 
-    - code_locators: code_locator_ids가 가리키는 CodeLocator를 ★{object_id, title, path, symbol}
-      객체로★ 동반(jira→코드 핀포인트 — id만으론 핀포인트가 아니다, 과업 1번).
+    - code_locators: code_locator_ids가 가리키는 CodeLocator를
+      ★{object_id, path, symbol, quote_access} 객체로★ 동반한다. title은 표시용이라
+      검색 결과에서 빼고, 현재 principal/ACL evaluator가 없는 제품 경로에서는
+      quote_access가 indeterminate이므로 verified_quote도 내보내지 않는다.
     - related_object_ids: 용어/결정/매핑 등 나머지 4종 엣지가 가리키는 연결 객체를
       {object_id, title}로 동반(이웃이 무엇인지 id만으론 가늠 어려워 제목 동반).
     - evidence_ref_ids: 해당 객체의 evidence_refs(★표시 전용 — 랭킹·그래프 입력 금지★).
@@ -172,12 +175,26 @@ def _build_linked(object_id: str, store: BrainStore) -> dict:
         if not store.has(cid):
             continue
         c = store.get(cid)
-        code_locators.append({
+        quote_access = evaluate_quote_access(
+            cid,
+            store,
+            principal=None,
+            acl_evaluator=None,
+        ).final
+        linked_locator = {
             "object_id": cid,
-            "title": c.get("title"),
             "path": c.get("path"),
             "symbol": c.get("symbol"),
-        })
+            "quote_access": quote_access.value,
+        }
+        quote = c.get("verified_quote")
+        if (
+            quote_access is AccessState.ALLOW
+            and isinstance(quote, str)
+            and quote
+        ):
+            linked_locator["quote"] = quote
+        code_locators.append(linked_locator)
 
     related: list[dict] = []
     seen_related: set[str] = set()

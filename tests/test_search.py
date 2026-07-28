@@ -614,7 +614,8 @@ class GraphOneHopTest(unittest.TestCase):
         return {h["object_id"]: h for h in hits}
 
     def test_linked_code_locators_are_objects_with_path_symbol(self):
-        # ★code_locators는 {object_id, path, symbol} 객체 — id만 주면 핀포인트가 아니다★.
+        # linked CodeLocator는 정본 4필드만 노출한다. title은 표시용이고,
+        # principal/ACL evaluator가 없는 제품 기본 경로에서는 quote를 절대 내보내지 않는다.
         by_id = self._by_id("시작 팝업 스테이지 개수 안내")
         self.assertIn("mapping.neutral.popup", by_id)
         locators = by_id["mapping.neutral.popup"]["linked"]["code_locators"]
@@ -629,6 +630,31 @@ class GraphOneHopTest(unittest.TestCase):
             by_loc["code.neutral.init"]["symbol"],
             "StartAlert::init",
         )
+        self.assertEqual(
+            by_loc["code.neutral.init"],
+            {
+                "object_id": "code.neutral.init",
+                "path": "a/Popup.cpp",
+                "symbol": "StartAlert::init",
+                "quote_access": "indeterminate",
+            },
+        )
+
+    def test_linked_locator_never_leaks_title_or_verified_quote_without_principal(self):
+        locator = self.brain / "objects" / "code" / "code.neutral.init.json"
+        payload = BrainStore.load(self.brain).get("code.neutral.init")
+        payload["verified_quote"] = "void StartAlert::init()"
+        locator.write_bytes(BrainStore.object_bytes(payload))
+        rebuild(self.brain, self.db, embedder=self.embedder)
+
+        linked = self._by_id("시작 팝업 스테이지 개수 안내")[
+            "mapping.neutral.popup"
+        ]["linked"]["code_locators"]
+        entry = next(c for c in linked if c["object_id"] == "code.neutral.init")
+        self.assertNotIn("title", entry)
+        self.assertNotIn("verified_quote", entry)
+        self.assertNotIn("quote", entry)
+        self.assertEqual(entry["quote_access"], "indeterminate")
 
     def test_linked_related_object_ids_from_glossary_edges(self):
         # glossary_term_ids → related_object_ids. dangling(g.dangling) 건너뜀.

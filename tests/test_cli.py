@@ -95,8 +95,12 @@ class TestCli(unittest.TestCase):
         rebuild(self.root, db, embedder=StubEmbedder())
         argv = ["--brain-root", str(self.root), "--db", str(db),
                 "--stub-embedder", "makeLanes0 어디 구현?"]
+        unrelated = self.input_dir / "unrelated-project"
+        unrelated.mkdir()
+        (unrelated / ".project-brain.json").write_text("{invalid", encoding="utf-8")
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        with mock.patch("project_brain.config.Path.cwd", return_value=unrelated), \
+             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         answer = json.loads(out.getvalue())
@@ -104,6 +108,47 @@ class TestCli(unittest.TestCase):
                    if s["intent"] == "implementation_location")
         self.assertGreaterEqual(len(loc["object_ids"]), 1)
         self.assertLessEqual(len(loc["object_ids"]), 5)
+
+    def test_cli_query_uses_existing_config_db_by_default(self):
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from tests.test_search import code_locator
+
+        project = self.input_dir / "project"
+        # config가 프로젝트 바깥의 corpus/DB 절대경로를 가리켜도 같은 config를 써야 한다.
+        brain = self.root / "configured-brain"
+        db = self.root / "configured.db"
+        project.mkdir()
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": str(brain), "db": str(db)}),
+            encoding="utf-8",
+        )
+        for i in range(12):
+            BrainStore.save_object(
+                brain,
+                code_locator(
+                    f"code.{i:02d}",
+                    path=f"a/Lane{i}.cpp",
+                    symbol=f"makeLanes{i}",
+                ),
+            )
+        rebuild(brain, db, embedder=StubEmbedder())
+
+        out = io.StringIO()
+        with mock.patch("project_brain.config.Path.cwd", return_value=project), \
+             mock.patch("sys.argv", [
+                 "cli", "--stub-embedder", "makeLanes0 어디 구현?",
+             ]), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        answer = json.loads(out.getvalue())
+        section = next(
+            s for s in answer["sections"]
+            if s["intent"] == "implementation_location"
+        )
+        self.assertGreaterEqual(len(section["object_ids"]), 1)
+        self.assertLessEqual(len(section["object_ids"]), 5)
+        self.assertNotIn("details_omitted_reason", section)
 
     def test_cli_query_surfaces_stale_advisory_from_cache(self):
         # Step 2: .brain-local/stale-set.json이 있으면 query가 읽어 매핑에 stale_advisory 부착.
@@ -1248,6 +1293,19 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(m["status"], "reviewed")
         locs = {c["object_id"] for c in m["linked"]["code_locators"]}
         self.assertIn("code.neutral.lane", locs)
+        linked = next(
+            c for c in m["linked"]["code_locators"]
+            if c["object_id"] == "code.neutral.lane"
+        )
+        self.assertEqual(
+            linked,
+            {
+                "object_id": "code.neutral.lane",
+                "path": "a/Lane.cpp",
+                "symbol": "makeLanes",
+                "quote_access": "indeterminate",
+            },
+        )
 
     def test_search_candidate_channel(self):
         from tests.test_search import glossary_term
@@ -2126,10 +2184,13 @@ class TestCliShow(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["object"]["id"], "mapping.neutral.x")
+        self.assertTrue(payload["display_only"])
+        self.assertTrue(payload["object"]["display_only"])
         by_nb = {n["object_id"]: n for n in payload["neighbors"]}
         # 이웃은 저장소에 실존하는 참조만 — 종류·제목 동반.
         self.assertEqual(by_nb["g.neutral.race"]["kind"], "GlossaryTerm")
         self.assertEqual(by_nb["g.neutral.race"]["title"], "Term: 레이스")
+        self.assertTrue(by_nb["g.neutral.race"]["display_only"])
         self.assertEqual(by_nb["code.neutral.x"]["kind"], "CodeLocator")
         # 끊긴 참조(evidence_refs=["evref.neutral.mapping"])·자기참조(id)는 이웃에 안 뜬다.
         self.assertNotIn("evref.neutral.map", by_nb)

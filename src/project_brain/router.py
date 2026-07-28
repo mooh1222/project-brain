@@ -54,6 +54,7 @@ class QueryRouter:
         self.embedder = embedder
         self.brain_root = Path(brain_root) if brain_root is not None else None
         self._recall_cache: dict[str, dict | None] = {}
+        self._recall_omitted_reason: str | None = None
 
     def _recall(self, query: str) -> dict | None:
         """질의를 의미 회상층에 태워 게이트 적용 결과를 돌려준다(§7).
@@ -66,14 +67,25 @@ class QueryRouter:
         준 store와 brain_root가 같은 코퍼스라는 전제(다르면 호출자 구성 오류).
         """
         if self.db_path is None or not self.db_path.exists():
+            self._recall_omitted_reason = "no_db"
             return None
         if query in self._recall_cache:
             return self._recall_cache[query]
         from project_brain.search import eval_recall
-        result = eval_recall(
-            query, db_path=self.db_path, embedder=self.embedder, brain_root=self.brain_root,
-            store=self.store,
-        )
+        from project_brain.search_index import StaleIndexError
+        try:
+            result = eval_recall(
+                query,
+                db_path=self.db_path,
+                embedder=self.embedder,
+                brain_root=self.brain_root,
+                store=self.store,
+            )
+        except StaleIndexError:
+            self._recall_omitted_reason = "stale_db"
+            self._recall_cache[query] = None
+            return None
+        self._recall_omitted_reason = None
         self._recall_cache[query] = result
         return result
 
@@ -226,9 +238,13 @@ class QueryRouter:
                     claim_statuses.append(claim_status(fact, raw_available=self._raw_available_for(fact), restricted=False))
                 sections.append({"intent": intent, "object_ids": [fact["id"] for fact in facts], "summary": "As-of historical facts"})
             elif intent == "implementation_location":
-                # §7 전량 적재 → top-K 전이: 색인이 있으면 recall 점수 top-K로 좁히고
-                # (06-05 "110개 무더기" 원인 제거), 없으면 기존 전량 적재로 폴백한다.
-                locators = self._implementation_locators(canonical)
+                # 색인이 있으면 recall 점수 top-K로 좁히고, 없거나 stale하면 객체
+                # details 대신 kind 집계와 생략 사유만 표시한다.
+                locator_result = self._implementation_locators(canonical)
+                locator_aggregate = (
+                    locator_result if isinstance(locator_result, dict) else None
+                )
+                locators = [] if locator_aggregate is not None else locator_result
                 for locator in locators:
                     source_ids.append(locator["id"])
                     # CodeLocator도 다른 intent와 동일하게 claim_status 경유 → restricted/raw-unavailable 산출.
@@ -262,7 +278,15 @@ class QueryRouter:
                     })
                 if candidate_locator_details:
                     warnings.append("확인 필요한 후보 항목 포함 — 사용 시점에 확정(promote) 가능")
-                sections.append({"intent": intent, "object_ids": [locator["id"] for locator in locators], "candidate_locators": candidate_locator_details, "summary": "Code locators"})
+                section = {
+                    "intent": intent,
+                    "object_ids": [locator["id"] for locator in locators],
+                    "candidate_locators": candidate_locator_details,
+                    "summary": "Code locators",
+                }
+                if locator_aggregate is not None:
+                    section.update(locator_aggregate)
+                sections.append(section)
             elif intent == "glossary_meaning":
                 # spec §7: "내가 이 용어 말하면 무슨 뜻?" → reviewed DomainMapping 우선, GlossaryTerm은 alias.
                 matched_mappings = self._matched_mappings(canonical)
@@ -354,9 +378,11 @@ class QueryRouter:
                     # EventLedgerRecord는 색인 제외 kind라 recall로 못 좁힌다 — 전량 유지.
                     sources.extend(self._reviewed_by_kind("EventLedgerRecord"))
                 if "implementation_location" in intents_present:
-                    # §7 전량 → top-K: 동반 의도 section과 같은 공급원을 재사용한다
-                    # (색인 없으면 헬퍼 내부에서 전량 폴백).
-                    sources.extend(self._implementation_locators(canonical))
+                    # 동반 의도 section과 같은 공급원을 재사용한다. 색인이 없거나
+                    # stale하면 locator details는 출처 사슬에도 넣지 않는다.
+                    locator_result = self._implementation_locators(canonical)
+                    if not isinstance(locator_result, dict):
+                        sources.extend(locator_result)
                 if "glossary_meaning" in intents_present:
                     sources.extend(self._glossary_meaning_objects(canonical, exclude=set()))
                 if "current_status" in intents_present:
@@ -489,11 +515,11 @@ class QueryRouter:
                 objs.append(obj)
         return objs
 
-    def _implementation_locators(self, query: str) -> list[dict]:
+    def _implementation_locators(self, query: str) -> list[dict] | dict:
         """implementation_location source가 적재할 CodeLocator(§7 전량→top-K).
 
-        ★색인이 없으면★ 기존 reviewed CodeLocator 전량으로 폴백한다(색인 없는 tmp store
-        테스트 보존). 색인이 있으면 06-05 "110개 무더기"를 제거하고 recall top-K로 좁히되,
+        ★색인이 없거나 stale하면★ CodeLocator 객체를 반환하지 않고 kind 집계와 생략
+        사유만 돌려준다. 색인이 있으면 recall top-K로 좁히되,
         ★핀포인트는 두 경로로 모은다★(§3.5·§8 "매핑 적중 → code_locator 동반"):
           (1) recall 적중이 CodeLocator 자체인 경우(심볼 직접 적중),
           (2) recall 적중 매핑 등이 linked.code_locators로 동반한 CodeLocator(그래프 1-hop).
@@ -501,7 +527,13 @@ class QueryRouter:
         상위라 (1) 단독이면 0건이 흔하다, 실코퍼스 실측)."""
         recalled = self._recall(query)
         if recalled is None:
-            return self._reviewed_by_kind("CodeLocator")
+            return {
+                "kind_counts": {
+                    "CodeLocator": len(self.store.by_kind("CodeLocator")),
+                },
+                "object_ids": [],
+                "details_omitted_reason": self._recall_omitted_reason or "no_db",
+            }
         locators: list[dict] = []
         seen: set[str] = set()
         for hit in recalled["results"]:
@@ -517,8 +549,8 @@ class QueryRouter:
                 if not cid or cid in seen or not self.store.has(cid):
                     continue
                 locator = self.store.get(cid)
-                # 확신 채널(source) 규약(§7): 폴백 경로(_reviewed_by_kind)와 같게
-                # reviewed만 적재 — reviewed 매핑이 candidate locator를 참조하는 잠재
+                # 확신 채널(source) 규약(§7): reviewed만 적재 — reviewed 매핑이
+                # candidate locator를 참조하는 잠재
                 # 케이스에서 미검수가 source로 새는 비대칭을 막는다(2026-06-10 리뷰,
                 # 현 실코퍼스는 CodeLocator 110/110 reviewed라 잠재 가드).
                 if locator.get("status") != "reviewed":
@@ -534,7 +566,7 @@ class QueryRouter:
         CodeLocator를 "확인 필요" 라벨 노출용으로 모은다 — (1) 후보 채널 직접 적중,
         (2) 적중(확신·후보)이 linked.code_locators로 동반한 candidate. 확신 채널과
         겹칠 일은 없다(같은 객체가 reviewed이면서 candidate일 수 없음). 색인이
-        없으면 빈 리스트 — 폴백 경로는 기존 확신 채널 전량 그대로 둔다."""
+        없거나 stale하면 빈 리스트다."""
         recalled = self._recall(query)
         if recalled is None:
             return []

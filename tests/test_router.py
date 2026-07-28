@@ -521,6 +521,79 @@ class TestRouterRecallFallback(unittest.TestCase):
         answer = router.answer("갈고리 용어 무슨 뜻?")
         self.assertIn("g.r", answer["source_object_ids"])
 
+    def test_no_db_implementation_fallback_returns_only_aggregate(self):
+        store = store_of(*[
+            code_locator(
+                f"code.{i}",
+                path=f"private/Secret{i}.cpp",
+                symbol=f"Secret{i}::run",
+            )
+            for i in range(3)
+        ])
+        answer = QueryRouter(store).answer("Secret0 어디 구현?")
+        section = next(
+            s for s in answer["sections"]
+            if s["intent"] == "implementation_location"
+        )
+        self.assertEqual(
+            {
+                key: section[key]
+                for key in ("kind_counts", "object_ids", "details_omitted_reason")
+            },
+            {
+                "kind_counts": {"CodeLocator": 3},
+                "object_ids": [],
+                "details_omitted_reason": "no_db",
+            },
+        )
+        rendered = str(section)
+        self.assertNotIn("code.neutral.", rendered)
+        self.assertNotIn("private/Secret", rendered)
+        self.assertNotIn("Secret0::run", rendered)
+
+    def test_stale_db_implementation_fallback_returns_only_aggregate(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            db = Path(td) / "index.db"
+            for i in range(3):
+                BrainStore.save_object(
+                    brain,
+                    code_locator(
+                        f"code.{i}",
+                        path=f"private/Secret{i}.cpp",
+                        symbol=f"Secret{i}::run",
+                    ),
+                )
+            index_rebuild(brain, db, embedder=StubEmbedder())
+            changed = BrainStore.load(brain).get("code.neutral.0")
+            changed["path"] = "private/Changed.cpp"
+            BrainStore.save_object(brain, changed)
+
+            answer = QueryRouter(
+                BrainStore.load(brain),
+                db_path=db,
+                embedder=StubEmbedder(),
+                brain_root=brain,
+            ).answer("Secret0 어디 구현?")
+            section = next(
+                s for s in answer["sections"]
+                if s["intent"] == "implementation_location"
+            )
+            self.assertEqual(
+                {
+                    key: section[key]
+                    for key in ("kind_counts", "object_ids", "details_omitted_reason")
+                },
+                {
+                    "kind_counts": {"CodeLocator": 3},
+                    "object_ids": [],
+                    "details_omitted_reason": "stale_db",
+                },
+            )
+            rendered = str(section)
+            self.assertNotIn("code.neutral.", rendered)
+            self.assertNotIn("private/", rendered)
+
 
 class TestRouterUnknownRecall(unittest.TestCase):
     """§7 unknown 일반 회상: 맥락만 던진 질의를 의미 회상으로 답한다.

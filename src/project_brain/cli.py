@@ -152,16 +152,17 @@ def _run_query(argv) -> int:
     )
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--current-head")
-    # 후속 c(2026-06-11): --db를 주면 라우터 recall(top-K·후보 채널)이 켜진다.
-    # 기본은 미지정=기존 폴백 동작 — cli search와 달리 자동 기본 경로를 쓰지 않는
-    # 이유는 색인이 있는 머신에서 기존 query 사용·테스트가 전부 실모델 로드를
-    # 타게 되는 동작 변경이라서(보존 우선). 표준 색인은 <brain_root>/.brain-local/index.db.
-    parser.add_argument("--db", help="색인 DB 경로 — 주면 recall이 켜진다 (예: brain/.brain-local/index.db)")
+    parser.add_argument("--db", help="색인 DB 경로 (기본: config에 있고 실제 존재하는 DB)")
     parser.add_argument("--stub-embedder", action="store_true",
                         help="실모델 대신 stub 임베더 사용(테스트·CI 결정론, §5)")
     parser.add_argument("query", nargs="?")
     args = parser.parse_args(argv)
 
+    cwd_config = (
+        None
+        if args.brain_root is not None and args.db is not None
+        else load_config()
+    )
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
     if not args.query:
@@ -172,9 +173,25 @@ def _run_query(argv) -> int:
     # 파일 IO는 CLI 책임 — router는 dict만 소비(git·파일 모름). 없으면 {}(동작 불변).
     from project_brain.stale_check import advisories_by_mapping, load_stale_set
     stale_advisories = advisories_by_mapping(load_stale_set(brain_root))
+    configured = None
+    if args.db is None:
+        configured = (
+            cwd_config
+            if cwd_config is not None and cwd_config["brain_root"] == brain_root
+            else load_config(start=brain_root)
+        )
+        if configured is not None and configured["brain_root"] != brain_root:
+            configured = None
+    db_path = (
+        Path(args.db)
+        if args.db
+        else configured["db"]
+        if configured is not None and configured["db"].exists()
+        else None
+    )
     router = QueryRouter(
         store, current_head=args.current_head,
-        db_path=Path(args.db) if args.db else None,
+        db_path=db_path,
         embedder=embedder, brain_root=brain_root,
         stale_advisories=stale_advisories,
     )
@@ -570,11 +587,21 @@ def _run_show(argv) -> int:
                 continue
             seen.add(ref)
             n = store.get(ref)
-            neighbors.append({"edge": field, "object_id": ref,
-                              "kind": n.get("kind"), "title": n.get("title")})
+            neighbors.append({
+                "edge": field,
+                "object_id": ref,
+                "kind": n.get("kind"),
+                "title": n.get("title"),
+                "display_only": True,
+            })
     # stale-set 캐시에 이 객체가 들면 코드 변경·브랜치 범위 advisory를 최상위에 곁들인다(객체 본문 불변).
     from project_brain.stale_check import advisories_by_mapping, load_stale_set
-    payload = {"ok": True, "object": obj, "neighbors": neighbors}
+    payload = {
+        "ok": True,
+        "object": {**obj, "display_only": True},
+        "neighbors": neighbors,
+        "display_only": True,
+    }
     advisory = advisories_by_mapping(load_stale_set(brain_root)).get(args.id)
     if advisory:
         payload["stale_advisory"] = advisory
