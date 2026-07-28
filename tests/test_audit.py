@@ -115,7 +115,7 @@ def test_no_stale_marks_git_dependent_axes_unverifiable(tmp_path: Path):
     entry = report["locators"][0]
     assert entry["stale"] == "unverifiable"
     assert entry["code_quote"] == "unverifiable"
-    assert entry["symbol_relation"] == "unsupported"
+    assert entry["symbol_relation"] == "unverifiable"
     assert report["code_quotes"]["ok"] is False
     assert report["code_quotes"]["check_skipped"] is True
 

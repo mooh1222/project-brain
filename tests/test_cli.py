@@ -1456,6 +1456,10 @@ class TestCliSearch(unittest.TestCase):
         self.assertFalse(payload["code_quotes"]["ok"])
         self.assertEqual(payload["locators"][0]["stale"], "unverifiable")
         self.assertEqual(payload["locators"][0]["code_quote"], "unverifiable")
+        self.assertEqual(
+            payload["locators"][0]["symbol_relation"],
+            "unverifiable",
+        )
         blob_reader.assert_not_called()
 
     def test_audit_unknown_id_grammar_returns_rc1(self):

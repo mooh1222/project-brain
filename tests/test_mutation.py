@@ -761,11 +761,7 @@ def test_coordinate_changed_locator_is_reverified(tmp_path):
     assert result.error_code == "quote_not_found"
 
 
-@pytest.mark.parametrize(
-    "operation",
-    [MutationOperation.INGEST, MutationOperation.MARK_CHECKED],
-)
-def test_unchanged_locator_preserves_engine_fields(tmp_path, operation):
+def test_unchanged_ingest_locator_preserves_engine_fields(tmp_path):
     brain_root = tmp_path / "brain"
     existing = _code_locator(
         quote=None,
@@ -780,7 +776,7 @@ def test_unchanged_locator_preserves_engine_fields(tmp_path, operation):
     result = _plan(
         brain_root,
         [replacement],
-        operation=operation,
+        operation=MutationOperation.INGEST,
     )
 
     assert result.ok is True

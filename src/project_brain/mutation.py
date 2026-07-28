@@ -301,9 +301,13 @@ class MutationService:
                 if planned.get("kind") == "CodeLocator":
                     object_id = str(planned["id"])
                     previous = existing_by_id.get(object_id)
-                    needs_verification = previous is None or any(
-                        previous.get(field_name) != planned.get(field_name)
-                        for field_name in _COORDINATE_FIELDS
+                    needs_verification = (
+                        request.operation is MutationOperation.MARK_CHECKED
+                        or previous is None
+                        or any(
+                            previous.get(field_name) != planned.get(field_name)
+                            for field_name in _COORDINATE_FIELDS
+                        )
                     )
                     if needs_verification:
                         quote = planned.get("verified_quote")
@@ -332,7 +336,15 @@ class MutationService:
                             )
                         planned = verified.locator
                         verified_locator_ids.add(object_id)
-                        planned["title"] = _canonical_locator_title(planned)
+                        planned["title"] = (
+                            previous.get("title")
+                            if (
+                                previous is not None
+                                and request.operation
+                                is MutationOperation.MARK_CHECKED
+                            )
+                            else _canonical_locator_title(planned)
+                        )
                     elif previous is not None:
                         planned["verified_at"] = previous.get("verified_at")
                         planned["title"] = (

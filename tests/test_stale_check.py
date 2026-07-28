@@ -4,6 +4,7 @@
 spec: docs/superpowers/specs/2026-06-14-project-brain-stale-check-design.md
 """
 import io
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -15,6 +16,12 @@ from unittest import mock
 from project_brain import cli
 from project_brain.code_verify import VerifiedLocator
 from project_brain.id_grammar import format_id, parse_id
+from project_brain.mutation import (
+    MutationOperation,
+    MutationRequest,
+    MutationService,
+    corpus_fingerprint,
+)
 from project_brain.repo_context import RepoContext, resolve_repo_context
 from project_brain.store import BrainStore
 
@@ -933,6 +940,99 @@ class MarkCheckedTest(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "head_moved")
+
+    def test_same_sha_apply_reverifies_and_stamps_one_new_event_time(self):
+        repo_context, _old, checked = self._repo()
+        brain_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(brain_tmp.cleanup)
+        brain_root = Path(brain_tmp.name).resolve()
+        locator = code_locator(
+            "code.same-sha",
+            path="Foo.cpp",
+            commit_sha=checked,
+            symbol="Foo::bar",
+        )
+        locator["verified_quote"] = "void Foo::bar() {}"
+        BrainStore.save_object(brain_root, locator)
+        store = BrainStore.load(brain_root)
+        objects = (dict(locator),)
+        request = MutationRequest(
+            operation=MutationOperation.MARK_CHECKED,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+            objects=objects,
+            preconditions={
+                locator["id"]: hashlib.sha256(
+                    BrainStore.object_bytes(locator)
+                ).hexdigest(),
+            },
+            expected_corpus_fingerprint=corpus_fingerprint(store),
+        )
+
+        result = MutationService().apply(objects, request=request)
+
+        self.assertTrue(result.ok)
+        persisted = BrainStore.load(brain_root).get(locator["id"])
+        self.assertEqual(persisted["commit_sha"], checked)
+        self.assertEqual(persisted["title"], locator["title"])
+        self.assertEqual(persisted["verified_at"], persisted["updated_at"])
+        self.assertNotEqual(
+            persisted["verified_at"],
+            locator["verified_at"],
+        )
+
+    def test_same_sha_symbol_failure_refuses_entire_apply_bundle(self):
+        repo_context, _old, checked = self._repo()
+        brain_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(brain_tmp.cleanup)
+        brain_root = Path(brain_tmp.name).resolve()
+        valid = code_locator(
+            "code.valid-same",
+            path="Foo.cpp",
+            commit_sha=checked,
+            symbol="Foo::bar",
+        )
+        valid["verified_quote"] = "void Foo::bar() {}"
+        invalid = code_locator(
+            "code.invalid-same",
+            path="Foo.cpp",
+            commit_sha=checked,
+            symbol="Other::bar",
+        )
+        invalid["verified_quote"] = "void Foo::bar() {}"
+        for locator in (valid, invalid):
+            BrainStore.save_object(brain_root, locator)
+        store = BrainStore.load(brain_root)
+        objects = (dict(valid), dict(invalid))
+        request = MutationRequest(
+            operation=MutationOperation.MARK_CHECKED,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+            objects=objects,
+            preconditions={
+                locator["id"]: hashlib.sha256(
+                    BrainStore.object_bytes(locator)
+                ).hexdigest()
+                for locator in (valid, invalid)
+            },
+            expected_corpus_fingerprint=corpus_fingerprint(store),
+        )
+
+        result = MutationService().apply(objects, request=request)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "symbol_mismatch")
+        persisted = BrainStore.load(brain_root)
+        self.assertEqual(
+            persisted.get(valid["id"])["verified_at"],
+            valid["verified_at"],
+        )
+        self.assertEqual(
+            persisted.get(invalid["id"])["verified_at"],
+            invalid["verified_at"],
+        )
 
 
 class CliMarkCheckedTest(unittest.TestCase):

@@ -179,7 +179,15 @@ def run_audit(
                 or not locator.get("verified_quote")
                 else "unverifiable" if no_stale else "missing"
             ),
-            "symbol_relation": "unsupported",
+            "symbol_relation": (
+                "unverifiable"
+                if (
+                    no_stale
+                    and isinstance(locator.get("verified_quote"), str)
+                    and bool(locator.get("verified_quote"))
+                )
+                else "unsupported"
+            ),
             "quote_access": evaluate_quote_access(
                 str(locator["id"]),
                 store,
