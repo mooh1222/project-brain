@@ -3,7 +3,12 @@ dangling evidence_ref는 1 problem. promote 사후 lint가 의존하는 동작�
 
 import unittest
 
-from project_brain.lint import lint_store, unpromoted_vouched_terms
+from project_brain.lint import (
+    LintProblem,
+    lint_store,
+    lint_store_report,
+    unpromoted_vouched_terms,
+)
 from project_brain.objbase import base
 from project_brain.store import BrainStore
 from tests.test_ingest import (
@@ -13,6 +18,7 @@ from tests.test_ingest import (
     malformed_reference_cases,
     manifest,
     reviewed_term,
+    review_record_for,
 )
 
 T = "2026-06-04T00:00:00Z"
@@ -66,6 +72,56 @@ def _temporal_fact(fid, *, value, supersedes=None, closed=False):
 
 
 class TestLintStore(unittest.TestCase):
+    def test_structured_report_keeps_wrapper_messages_compatible(self):
+        term = candidate_term()
+        term["evidence_refs"] = ["evref.neutral.missing"]
+        store = store_of(context(), term)
+        report = lint_store_report(store)
+
+        self.assertEqual(
+            report,
+            (
+                LintProblem(
+                    code="dangling_reference",
+                    object_ids=("g.neutral.x",),
+                    message=(
+                        "g.neutral.x: dangling evidence_ref "
+                        "evref.neutral.missing"
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(lint_store(store), [problem.message for problem in report])
+
+    def test_invalid_id_and_unknown_grammar_have_distinct_codes(self):
+        invalid = context("context.Bad")
+        invalid["context_key"] = "Bad"
+        unknown = context("mystery.neutral")
+        unknown["context_key"] = "neutral"
+
+        invalid_report = lint_store_report(store_of(invalid))
+        unknown_report = lint_store_report(store_of(unknown))
+
+        self.assertTrue(invalid_report)
+        self.assertEqual({problem.code for problem in invalid_report}, {"invalid_id"})
+        self.assertTrue(unknown_report)
+        self.assertEqual({problem.code for problem in unknown_report}, {"unknown_grammar"})
+
+    def test_nested_review_target_with_unknown_prefix_is_unknown_grammar(self):
+        review = review_record_for(
+            "review.legacy.target",
+            "legacy.target",
+        )
+
+        report = lint_store_report(store_of(review))
+
+        id_codes = {
+            problem.code
+            for problem in report
+            if "invalid id" in problem.message
+        }
+        self.assertEqual(id_codes, {"unknown_grammar"})
+
     def test_clean_store_no_problems(self):
         store = store_of(manifest(), evidence_ref(), context(), candidate_term())
         self.assertEqual(lint_store(store), [])

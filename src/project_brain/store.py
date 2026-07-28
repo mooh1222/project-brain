@@ -1,7 +1,22 @@
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+
+class StoreLoadError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        paths: tuple[Path, ...] = (),
+    ):
+        self.code = code
+        self.detail = detail
+        self.paths = paths
+        super().__init__(f"{code}: {detail}")
 
 
 class BrainStore:
@@ -17,15 +32,69 @@ class BrainStore:
         # (eval_scenarios.json, raw/sources/ 자료 등)이 같이 살 수 있고, 객체는
         # 항상 save_object가 _KIND_DIR 아래에 쓰므로 스캔도 같은 경계를 따른다.
         paths: list[Path] = []
-        for rel in set(cls._KIND_DIR.values()):
-            d = Path(brain_root) / rel
-            if d.is_dir():
-                paths.extend(d.rglob("*.json"))
+        try:
+            for rel in set(cls._KIND_DIR.values()):
+                d = Path(brain_root) / rel
+                if d.is_dir():
+                    paths.extend(d.rglob("*.json"))
+        except OSError as exc:
+            root = Path(brain_root)
+            raise StoreLoadError(
+                "object_scan_failed",
+                f"could not scan tracked object directories: {exc}",
+                paths=(root,),
+            ) from exc
         objects: dict[str, dict[str, Any]] = {}
+        object_paths: dict[str, Path] = {}
         for path in sorted(paths):
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            object_id = payload["id"]
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise StoreLoadError(
+                    "object_read_failed",
+                    f"could not read tracked object JSON {path}: {exc}",
+                    paths=(path,),
+                ) from exc
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise StoreLoadError(
+                    "object_json_invalid",
+                    f"tracked object JSON is invalid at {path}: {exc}",
+                    paths=(path,),
+                ) from exc
+            if not isinstance(payload, dict):
+                raise StoreLoadError(
+                    "object_payload_invalid",
+                    f"tracked object JSON must contain an object: {path}",
+                    paths=(path,),
+                )
+            object_id = payload.get("id")
+            if not isinstance(object_id, str) or not object_id:
+                raise StoreLoadError(
+                    "object_id_invalid",
+                    f"tracked object requires a non-empty string id: {path}",
+                    paths=(path,),
+                )
+            kind = payload.get("kind")
+            if not isinstance(kind, str) or not kind:
+                raise StoreLoadError(
+                    "object_kind_invalid",
+                    f"tracked object requires a non-empty string kind: {path}",
+                    paths=(path,),
+                )
+            previous_path = object_paths.get(object_id)
+            if previous_path is not None:
+                raise StoreLoadError(
+                    "duplicate_existing_object_id",
+                    (
+                        f"duplicate payload id {object_id!r} in "
+                        f"{previous_path} and {path}"
+                    ),
+                    paths=(previous_path, path),
+                )
             objects[object_id] = payload
+            object_paths[object_id] = path
         return cls(objects)
 
     def get(self, object_id: str) -> dict[str, Any]:
@@ -64,14 +133,27 @@ class BrainStore:
     }
 
     @classmethod
+    def object_path(cls, brain_root: Path, obj: Mapping[str, object]) -> Path:
+        return (
+            Path(brain_root)
+            / cls._KIND_DIR[str(obj["kind"])]
+            / f"{obj['id']}.json"
+        )
+
+    @staticmethod
+    def object_bytes(obj: Mapping[str, object]) -> bytes:
+        return (
+            json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+
+    @classmethod
     def save_object(cls, brain_root: Path, obj: dict) -> Path:
         """schema 검증 통과 후 kind별 디렉토리에 <id>.json으로 쓴다. id는 호출자 책임."""
         from project_brain.schema import validate_object, SchemaError
         errors = validate_object(obj)
         if errors:
             raise SchemaError("; ".join(errors))
-        rel = cls._KIND_DIR[obj["kind"]]
-        path = Path(brain_root) / rel / f"{obj['id']}.json"
+        path = cls.object_path(brain_root, obj)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_bytes(cls.object_bytes(obj))
         return path

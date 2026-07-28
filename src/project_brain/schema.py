@@ -11,6 +11,7 @@ from project_brain.reference_fields import (
     _escape_pointer_token,
     _pointer_tokens,
     _resolve_pointer,
+    iter_object_refs,
 )
 
 
@@ -141,6 +142,35 @@ class SchemaError(ValueError):
     pass
 
 
+_KNOWN_ID_PREFIXES = frozenset(
+    prefix
+    for grammar in ID_GRAMMARS.values()
+    for prefix in grammar.prefixes
+)
+
+
+def id_problem_code(obj: dict) -> str:
+    """ID 위반이 미등록 grammar인지, 등록 grammar의 형식 위반인지 구분한다."""
+    object_id = obj.get("id")
+    if isinstance(object_id, str):
+        prefix = object_id.split(".", 1)[0]
+        if prefix not in _KNOWN_ID_PREFIXES:
+            return "unknown_grammar"
+        if (
+            obj.get("kind") == "ReviewRecord"
+            and object_id.startswith("review.")
+            and not object_id.startswith("review.bundle.")
+        ):
+            target_id = object_id.removeprefix("review.")
+            if target_id.split(".", 1)[0] not in _KNOWN_ID_PREFIXES:
+                return "unknown_grammar"
+
+    for ref in iter_object_refs(obj):
+        if ref.object_id.split(".", 1)[0] not in _KNOWN_ID_PREFIXES:
+            return "unknown_grammar"
+    return "invalid_id"
+
+
 def _validate_reference_field_types(obj: dict) -> list[str]:
     object_id = obj.get("id", "?")
     errors: list[str] = []
@@ -190,11 +220,13 @@ def _validate_reference_field_types(obj: dict) -> list[str]:
     return errors
 
 
-def validate_object(obj: dict) -> list[str]:
-    """위반 메시지 목록을 반환한다(빈 목록 = 통과). Lint가 모아 보고하도록 예외 대신 목록."""
+def validate_object_schema(obj: dict) -> list[str]:
+    """ID 문법을 제외한 schema·enum 위반 메시지를 반환한다."""
     kind = obj.get("kind")
-    if kind not in VALID_KINDS:
+    if not isinstance(kind, str) or kind not in VALID_KINDS:
         return [f"{obj.get('id', '?')}: unknown kind {kind!r}"]
+    if "id" not in obj:
+        return ["?: missing base field 'id'"]
     errors = []
     for field in BASE_REQUIRED:
         if field not in obj:
@@ -353,5 +385,17 @@ def validate_object(obj: dict) -> list[str]:
                 errors.append(f"{obj['id']}: mapping_bundle ReviewRecord requires confirmation_key")
         elif "target_object_id" not in obj:
             errors.append(f"{obj['id']}: ReviewRecord missing field 'target_object_id'")
-    errors.extend(validate_id_fields(obj))
     return errors
+
+
+def validate_object_id(obj: dict) -> list[str]:
+    """ID 문법과 객체 필드 합치 위반만 반환한다."""
+    return validate_id_fields(obj)
+
+
+def validate_object(obj: dict) -> list[str]:
+    """전체 위반 메시지 목록을 반환한다(빈 목록 = 통과)."""
+    schema_errors = validate_object_schema(obj)
+    if obj.get("kind") not in VALID_KINDS:
+        return schema_errors
+    return schema_errors + validate_object_id(obj)

@@ -1,0 +1,848 @@
+"""Brain 객체 mutation의 순수 preflight와 고정 manifest."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
+
+from project_brain.code_verify import (
+    CodeVerificationError,
+    verify_locator_for_write,
+)
+from project_brain.hash_utils import stable_json
+from project_brain.lint import LintProblem, lint_store_report
+from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
+from project_brain.repo_context import RepoContext
+from project_brain.schema import (
+    id_problem_code,
+    validate_object_id,
+    validate_object_schema,
+)
+from project_brain.store import BrainStore, StoreLoadError
+
+
+_COORDINATE_FIELDS = (
+    "repo",
+    "path",
+    "commit_sha",
+    "symbol",
+    "verified_quote",
+)
+_EXACT_GIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_LOGICAL_KEY_FIELDS = (
+    "logical_key",
+    "mapping_key",
+    "context_key",
+)
+
+
+class MutationOperation(StrEnum):
+    INGEST = "ingest"
+    PROMOTE = "promote"
+    PROMOTE_AUTO = "promote_auto"
+    MARK_CHECKED = "mark_checked"
+    PROJECTION = "projection"
+    CONTEXT_REPLACE = "context_replace"
+    ID_ONLY_MIGRATION = "id_only_migration"
+    DISPLAY_MIGRATION = "display_migration"
+
+
+@dataclass(frozen=True)
+class MutationRequest:
+    operation: MutationOperation
+    brain_root: Path
+    repo_context: RepoContext | None
+    engine_sha: str
+    objects: tuple[dict, ...]
+    delete_ids: tuple[str, ...] = ()
+    preconditions: Mapping[str, str] = field(default_factory=dict)
+    expected_corpus_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
+class MutationManifest:
+    transaction_id: str
+    operation: str
+    engine_sha: str
+    creates: tuple[dict, ...]
+    updates: tuple[dict, ...]
+    deletes: tuple[dict, ...]
+    renames: tuple[dict, ...]
+    reference_rewrites: tuple[dict, ...]
+    before_fingerprint: str
+    expected_after_fingerprint: str
+    grandfathered_problems_before: tuple[dict, ...]
+    grandfathered_problems_after: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class MutationPlanResult:
+    ok: bool
+    error_code: str | None = None
+    detail: str | None = None
+    after: dict | None = None
+    after_objects: tuple[dict, ...] = ()
+    manifest: MutationManifest | None = None
+    manifest_bytes: bytes = b""
+    manifest_sha256: str = ""
+
+
+class MutationService:
+    def plan(
+        self,
+        objects: Sequence[dict],
+        *,
+        request: MutationRequest,
+    ) -> MutationPlanResult:
+        inputs, request_error = _validate_request_shape(objects, request)
+        if request_error is not None:
+            return request_error
+        assert inputs is not None
+
+        # 1) sequence에서 완성 object ID 중복 검사. dict로 접기 전에 수행한다.
+        seen_ids: set[object] = set()
+        for obj in inputs:
+            object_id = obj.get("id")
+            if not isinstance(object_id, str):
+                continue
+            if object_id in seen_ids:
+                return _failure(
+                    "duplicate_object_id",
+                    f"duplicate object id in input sequence: {object_id!r}",
+                )
+            seen_ids.add(object_id)
+
+        # 2) 입력 logical key와 source ID 중복 검사.
+        duplicate = _find_duplicate_identity(inputs, _LOGICAL_KEY_FIELDS)
+        if duplicate is not None:
+            field_name, value = duplicate
+            return _failure(
+                "duplicate_logical_key",
+                f"duplicate {field_name} in input sequence: {value!r}",
+            )
+        duplicate = _find_duplicate_source_id(inputs)
+        if duplicate is not None:
+            _, value = duplicate
+            return _failure(
+                "duplicate_source_id",
+                f"duplicate source_id in input sequence: {value!r}",
+            )
+        # delete_ids 중복은 store 상태가 아니라 request sequence 자체의 모순이므로
+        # schema·lifecycle보다 앞선 입력 shape 단계에서 닫는다.
+        delete_ids = tuple(request.delete_ids)
+        if len(set(delete_ids)) != len(delete_ids):
+            return _failure(
+                "duplicate_delete_id",
+                "delete_ids contains a duplicate object id",
+            )
+
+        # 이 시점 이후에만 ID map을 만든다.
+        input_by_id = {
+            obj["id"]: obj
+            for obj in inputs
+            if isinstance(obj.get("id"), str)
+        }
+        try:
+            existing_store = BrainStore.load(request.brain_root)
+        except StoreLoadError as exc:
+            error_code = (
+                exc.code
+                if exc.code == "duplicate_existing_object_id"
+                else "corpus_invalid"
+            )
+            return _failure(error_code, f"{exc.code}: {exc.detail}")
+        existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
+
+        # 3) schema와 enum.
+        for obj in inputs:
+            errors = validate_object_schema(obj)
+            if errors:
+                return _failure("schema_invalid", "; ".join(errors))
+
+        # 4) ID parse와 필드 합치. 기존 invalid_id grandfather 판단은 merged lint에서
+        # object hash까지 묶어 하므로 여기서는 unknown grammar만 즉시 닫는다.
+        for obj in inputs:
+            id_errors = validate_object_id(obj)
+            if id_errors and id_problem_code(obj) == "unknown_grammar":
+                return _failure("unknown_grammar", "; ".join(id_errors))
+            if id_errors:
+                object_id = obj.get("id")
+                previous = (
+                    existing_by_id.get(object_id)
+                    if isinstance(object_id, str)
+                    else None
+                )
+                if (
+                    previous is None
+                    or _stable_object_hash(previous) != _stable_object_hash(obj)
+                    or validate_object_id(previous) != id_errors
+                ):
+                    return _failure(
+                        "new_or_modified_lint_problem",
+                        "; ".join(id_errors),
+                    )
+
+        # 5) 허용된 상태 전이.
+        for object_id, obj in input_by_id.items():
+            previous = existing_by_id.get(object_id)
+            if (
+                previous is not None
+                and previous.get("status") == "reviewed"
+                and obj.get("status") == "candidate"
+            ):
+                return _failure(
+                    "status_transition_invalid",
+                    f"{object_id}: refuse reviewed→candidate demotion",
+                )
+
+        # 6-7) repo/commit/blob 뒤 quote와 symbol 관계. 신규 또는 좌표가 바뀐
+        # CodeLocator만 검사한다. ID-only legacy rename은 stage 8의 before-state
+        # 증거로 예외 여부를 결정하므로 여기서 외부 verified_at을 소비하지 않는다.
+        planned_inputs: list[dict] = []
+        if request.operation is not MutationOperation.ID_ONLY_MIGRATION:
+            for obj in inputs:
+                planned = dict(obj)
+                if planned.get("kind") == "CodeLocator":
+                    object_id = str(planned["id"])
+                    previous = existing_by_id.get(object_id)
+                    needs_verification = previous is None or any(
+                        previous.get(field_name) != planned.get(field_name)
+                        for field_name in _COORDINATE_FIELDS
+                    )
+                    if needs_verification:
+                        quote = planned.get("verified_quote")
+                        if not isinstance(quote, str) or not quote:
+                            return _failure(
+                                "quote_required",
+                                f"{object_id}: verified_quote is required",
+                            )
+                        if request.repo_context is None:
+                            return _failure(
+                                "repo_context_required",
+                                f"{object_id}: explicit repo context is required",
+                            )
+                        try:
+                            verified = verify_locator_for_write(
+                                planned,
+                                repo=request.repo_context,
+                                manual_symbol_verification=planned.get(
+                                    "manual_symbol_verification"
+                                ),
+                            )
+                        except CodeVerificationError as exc:
+                            return _failure(
+                                exc.failure.code,
+                                exc.failure.detail,
+                            )
+                        planned = verified.locator
+                    elif previous is not None:
+                        planned["verified_at"] = previous.get("verified_at")
+                    planned["title"] = _canonical_locator_title(planned)
+                planned_inputs.append(planned)
+
+        # 8) 기존 객체 precondition과 before hash.
+        for object_id in delete_ids:
+            if object_id not in existing_by_id:
+                return _failure(
+                    "delete_target_missing",
+                    f"delete target is missing: {object_id}",
+                )
+            if object_id in input_by_id:
+                return _failure(
+                    "delete_update_conflict",
+                    f"object cannot be updated and deleted together: {object_id}",
+                )
+        rename_pairs, rename_error = _infer_id_only_renames(
+            request.operation,
+            existing_by_id,
+            input_by_id,
+            delete_ids,
+        )
+        if rename_error is not None:
+            return rename_error
+        if request.operation is MutationOperation.ID_ONLY_MIGRATION:
+            planned_inputs = [dict(obj) for obj in inputs]
+        planned_by_id = {obj["id"]: obj for obj in planned_inputs}
+
+        before_fingerprint = _corpus_fingerprint(existing_by_id)
+        if (
+            request.expected_corpus_fingerprint is not None
+            and request.expected_corpus_fingerprint != before_fingerprint
+        ):
+            return _failure(
+                "corpus_fingerprint_mismatch",
+                "expected corpus fingerprint does not match the current store",
+            )
+        for object_id, expected_hash in sorted(request.preconditions.items()):
+            previous = existing_by_id.get(object_id)
+            if previous is None:
+                return _failure(
+                    "precondition_target_missing",
+                    f"{object_id}: precondition target is missing",
+                )
+            actual_hash = _object_hash(previous)
+            if actual_hash != expected_hash:
+                return _failure(
+                    "precondition_hash_mismatch",
+                    (
+                        f"{object_id}: precondition hash {expected_hash!r} "
+                        f"does not match {actual_hash!r}"
+                    ),
+                )
+
+        merged = dict(existing_by_id)
+        for object_id in delete_ids:
+            merged.pop(object_id)
+        merged.update(planned_by_id)
+        merged_store = BrainStore(merged)
+
+        # 9) 입력과 기존 store를 합친 상태의 모든 참조.
+        for obj in merged_store.all():
+            for ref in iter_object_refs(obj):
+                if not merged_store.has(ref.object_id):
+                    return _failure(
+                        "dangling_reference",
+                        (
+                            f"{obj.get('id', '?')}: dangling reference "
+                            f"{ref.object_id} at {ref.pointer}"
+                        ),
+                    )
+
+        # 10) merged lint. grandfather는 기존 invalid_id의 문제·객체 hash가
+        # 모두 같은 경우만 허용한다.
+        before_report = lint_store_report(existing_store)
+        for problem in before_report:
+            if problem.code != "invalid_id":
+                return _failure(
+                    problem.code
+                    if problem.code == "unknown_grammar"
+                    else "existing_lint_problem",
+                    problem.message,
+                )
+
+        before_grandfathered = _grandfathered_problems(
+            before_report,
+            existing_by_id,
+        )
+        before_keys = {_grandfather_key(item) for item in before_grandfathered}
+        after_report = lint_store_report(merged_store)
+        after_grandfathered = _grandfathered_problems(after_report, merged)
+        after_keys = {_grandfather_key(item) for item in after_grandfathered}
+        non_id_after = [
+            problem
+            for problem in after_report
+            if problem.code != "invalid_id"
+        ]
+        if non_id_after or not after_keys.issubset(before_keys):
+            problem = non_id_after[0] if non_id_after else next(
+                problem
+                for problem in after_report
+                if _grandfather_key(
+                    _grandfathered_problem(problem, merged)
+                ) not in before_keys
+            )
+            return _failure(
+                "new_or_modified_lint_problem",
+                problem.message,
+            )
+        if (
+            request.operation is MutationOperation.ID_ONLY_MIGRATION
+            and after_grandfathered
+        ):
+            return _failure(
+                "grandfathered_problems_remaining",
+                "ID-only migration must finish with zero grandfathered problems",
+            )
+
+        expected_after_fingerprint = _corpus_fingerprint(merged)
+        manifest = _build_manifest(
+            request=request,
+            existing_by_id=existing_by_id,
+            planned_by_id=planned_by_id,
+            merged=merged,
+            delete_ids=delete_ids,
+            rename_pairs=rename_pairs,
+            before_fingerprint=before_fingerprint,
+            expected_after_fingerprint=expected_after_fingerprint,
+            before_grandfathered=before_grandfathered,
+            after_grandfathered=after_grandfathered,
+        )
+        manifest_bytes = _manifest_bytes(manifest)
+        after = planned_inputs[0] if len(planned_inputs) == 1 else None
+        return MutationPlanResult(
+            ok=True,
+            after=after,
+            after_objects=tuple(planned_inputs),
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        )
+
+
+def _failure(code: str, detail: str) -> MutationPlanResult:
+    return MutationPlanResult(ok=False, error_code=code, detail=detail)
+
+
+def _validate_request_shape(
+    objects: object,
+    request: object,
+) -> tuple[tuple[dict, ...] | None, MutationPlanResult | None]:
+    """Filesystem 접근 전에 public request/input runtime shape를 전수 검증한다."""
+    try:
+        if not isinstance(request, MutationRequest):
+            raise ValueError("request must be MutationRequest")
+        if not isinstance(request.operation, MutationOperation):
+            raise ValueError("operation must be MutationOperation")
+        if not isinstance(request.brain_root, Path):
+            raise ValueError("brain_root must be Path")
+        if not request.brain_root.is_absolute():
+            raise ValueError("brain_root must be absolute")
+        if request.repo_context is not None and not isinstance(
+            request.repo_context,
+            RepoContext,
+        ):
+            raise ValueError("repo_context must be RepoContext or None")
+        if (
+            not isinstance(request.engine_sha, str)
+            or _EXACT_GIT_SHA.fullmatch(request.engine_sha) is None
+        ):
+            raise ValueError("engine_sha must be an exact lowercase Git SHA")
+        if not isinstance(request.objects, tuple) or not all(
+            isinstance(obj, dict)
+            for obj in request.objects
+        ):
+            raise ValueError("request.objects must be tuple[dict, ...]")
+        if (
+            not isinstance(objects, Sequence)
+            or isinstance(objects, (str, bytes, bytearray))
+        ):
+            raise ValueError("objects must be a non-string Sequence")
+        raw_inputs = tuple(objects)
+        if not all(isinstance(obj, dict) for obj in raw_inputs):
+            raise ValueError("objects entries must be dict")
+        if raw_inputs != request.objects:
+            raise ValueError(
+                "objects must exactly match request.objects in sequence order"
+            )
+        if not isinstance(request.delete_ids, tuple) or not all(
+            isinstance(object_id, str)
+            for object_id in request.delete_ids
+        ):
+            raise ValueError("delete_ids must be tuple[str, ...]")
+        if not isinstance(request.preconditions, Mapping) or not all(
+            isinstance(object_id, str) and isinstance(expected_hash, str)
+            for object_id, expected_hash in request.preconditions.items()
+        ):
+            raise ValueError("preconditions must be Mapping[str, str]")
+        if (
+            request.expected_corpus_fingerprint is not None
+            and (
+                not isinstance(request.expected_corpus_fingerprint, str)
+                or not request.expected_corpus_fingerprint.strip()
+            )
+        ):
+            raise ValueError(
+                "expected_corpus_fingerprint must be None or a non-empty string"
+            )
+        return tuple(dict(obj) for obj in raw_inputs), None
+    except Exception as exc:
+        return None, _failure("request_invalid", str(exc))
+
+
+def _find_duplicate_identity(
+    objects: Sequence[Mapping[str, object]],
+    field_names: Sequence[str],
+) -> tuple[str, object] | None:
+    seen: set[tuple[object, ...]] = set()
+    for obj in objects:
+        for field_name in field_names:
+            if field_name not in obj:
+                continue
+            value = obj[field_name]
+            identity = (
+                field_name,
+                obj.get("kind"),
+                obj.get("context_id"),
+                value,
+            )
+            try:
+                if identity in seen:
+                    return field_name, value
+                seen.add(identity)
+            except TypeError:
+                continue
+    return None
+
+
+def _find_duplicate_source_id(
+    objects: Sequence[Mapping[str, object]],
+) -> tuple[str, object] | None:
+    seen: set[object] = set()
+    for obj in objects:
+        if "source_id" not in obj:
+            continue
+        value = obj["source_id"]
+        try:
+            if value in seen:
+                return "source_id", value
+            seen.add(value)
+        except TypeError:
+            continue
+    return None
+
+
+def _object_hash(obj: Mapping[str, object]) -> str:
+    return hashlib.sha256(BrainStore.object_bytes(obj)).hexdigest()
+
+
+def _stable_object_hash(obj: Mapping[str, object]) -> str:
+    return hashlib.sha256(stable_json(dict(obj)).encode("utf-8")).hexdigest()
+
+
+def _canonical_locator_title(locator: Mapping[str, object]) -> str:
+    symbol = locator.get("symbol")
+    if isinstance(symbol, str) and symbol:
+        return symbol
+    path = locator.get("path")
+    basename = (
+        PurePosixPath(path).name
+        if isinstance(path, str) and path
+        else "unknown"
+    )
+    object_id = locator.get("id")
+    anchor_key = (
+        object_id.rsplit(".", 1)[-1]
+        if isinstance(object_id, str) and object_id
+        else "unknown"
+    )
+    return f"{basename}:{anchor_key}"
+
+
+def _corpus_fingerprint(objects: Mapping[str, Mapping[str, object]]) -> str:
+    digest = hashlib.sha256()
+    for object_id in sorted(objects):
+        digest.update(object_id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(BrainStore.object_bytes(objects[object_id]))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _infer_id_only_renames(
+    operation: MutationOperation,
+    existing_by_id: Mapping[str, dict],
+    input_by_id: Mapping[str, dict],
+    delete_ids: tuple[str, ...],
+) -> tuple[tuple[tuple[str, str], ...], MutationPlanResult | None]:
+    if operation is not MutationOperation.ID_ONLY_MIGRATION:
+        return (), None
+
+    created_ids = [
+        object_id
+        for object_id in input_by_id
+        if object_id not in existing_by_id
+    ]
+    unused_new = set(created_ids)
+    pairs: list[tuple[str, str]] = []
+    for old_id in sorted(delete_ids):
+        old = existing_by_id[old_id]
+        comparable_old = _id_only_shape(old)
+        matches = [
+            new_id
+            for new_id in sorted(unused_new)
+            if input_by_id[new_id].get("kind") == old.get("kind")
+            and _id_only_shape(input_by_id[new_id]) == comparable_old
+        ]
+        if len(matches) != 1:
+            return (), _failure(
+                "id_only_payload_changed",
+                (
+                    f"{old_id}: ID-only migration requires exactly one "
+                    "payload-identical replacement"
+                ),
+            )
+        new_id = matches[0]
+        unused_new.remove(new_id)
+        pairs.append((old_id, new_id))
+
+    if unused_new:
+        return (), _failure(
+            "id_only_payload_changed",
+            "ID-only migration contains a new object without a legacy source",
+        )
+
+    invalid_existing_ids = {
+        object_id
+        for problem in lint_store_report(BrainStore(dict(existing_by_id)))
+        if problem.code == "invalid_id"
+        for object_id in problem.object_ids
+    }
+    for old_id, new_id in pairs:
+        if old_id not in invalid_existing_ids:
+            return (), _failure(
+                "id_only_legacy_source_not_invalid",
+                (
+                    f"{old_id}: ID-only rename source has no structured "
+                    "invalid_id problem"
+                ),
+            )
+        new_id_errors = validate_object_id(input_by_id[new_id])
+        if new_id_errors:
+            return (), _failure(
+                "id_only_replacement_invalid",
+                f"{new_id}: replacement ID is not canonical",
+            )
+
+    replacements = dict(pairs)
+    for old_id, new_id in pairs:
+        expected, _ = rewrite_object_refs(
+            existing_by_id[old_id],
+            replacements,
+        )
+        expected["id"] = new_id
+        if expected != input_by_id[new_id]:
+            return (), _failure(
+                "id_only_payload_changed",
+                (
+                    f"{old_id}: replacement changes fields other than "
+                    "the object ID or registered references"
+                ),
+            )
+    for object_id in sorted(set(existing_by_id) & set(input_by_id)):
+        expected, _ = rewrite_object_refs(
+            existing_by_id[object_id],
+            replacements,
+        )
+        if expected != input_by_id[object_id]:
+            return (), _failure(
+                "id_only_payload_changed",
+                (
+                    f"{object_id}: update changes fields other than "
+                    "registered references"
+                ),
+            )
+    return tuple(pairs), None
+
+
+def _id_only_shape(obj: Mapping[str, object]) -> dict:
+    replacements = {
+        ref.object_id: "$REFERENCE"
+        for ref in iter_object_refs(obj)
+    }
+    shaped, _ = rewrite_object_refs(obj, replacements)
+    shaped.pop("id", None)
+    return shaped
+
+
+def _problem_object_hash(
+    problem: LintProblem,
+    objects: Mapping[str, Mapping[str, object]],
+) -> str:
+    serialized = [
+        stable_json(dict(objects[object_id]))
+        for object_id in sorted(problem.object_ids)
+        if object_id in objects
+    ]
+    return hashlib.sha256("\n".join(serialized).encode("utf-8")).hexdigest()
+
+
+def _grandfathered_problem(
+    problem: LintProblem,
+    objects: Mapping[str, Mapping[str, object]],
+) -> dict:
+    return {
+        "object_id": problem.object_ids[0] if len(problem.object_ids) == 1 else None,
+        "problem": problem.message,
+        "object_hash": _problem_object_hash(problem, objects),
+    }
+
+
+def _grandfathered_problems(
+    report: Sequence[LintProblem],
+    objects: Mapping[str, Mapping[str, object]],
+) -> tuple[dict, ...]:
+    return tuple(
+        _grandfathered_problem(problem, objects)
+        for problem in report
+        if problem.code == "invalid_id"
+    )
+
+
+def _grandfather_key(problem: Mapping[str, object]) -> tuple[object, ...]:
+    return (
+        problem.get("object_id"),
+        problem.get("problem"),
+        problem.get("object_hash"),
+    )
+
+
+def _relative_object_path(
+    brain_root: Path,
+    obj: Mapping[str, object],
+) -> str:
+    return BrainStore.object_path(brain_root, obj).relative_to(brain_root).as_posix()
+
+
+def _reference_rewrites(
+    existing_by_id: Mapping[str, dict],
+    planned_by_id: Mapping[str, dict],
+    rename_pairs: tuple[tuple[str, str], ...],
+) -> tuple[dict, ...]:
+    rewrites: list[dict] = []
+    comparisons = [
+        (object_id, object_id, object_id)
+        for object_id in sorted(set(existing_by_id) & set(planned_by_id))
+    ]
+    comparisons.extend(
+        (old_id, new_id, new_id)
+        for old_id, new_id in sorted(rename_pairs)
+    )
+    for before_id, after_id, manifest_object_id in comparisons:
+        before = {
+            ref.pointer: ref.object_id
+            for ref in iter_object_refs(existing_by_id[before_id])
+        }
+        after = {
+            ref.pointer: ref.object_id
+            for ref in iter_object_refs(planned_by_id[after_id])
+        }
+        for pointer in sorted(set(before) & set(after)):
+            if before[pointer] == after[pointer]:
+                continue
+            rewrites.append(
+                {
+                    "object_id": manifest_object_id,
+                    "pointer": pointer,
+                    "before_id": before[pointer],
+                    "after_id": after[pointer],
+                }
+            )
+    return tuple(rewrites)
+
+
+def _build_manifest(
+    *,
+    request: MutationRequest,
+    existing_by_id: Mapping[str, dict],
+    planned_by_id: Mapping[str, dict],
+    merged: Mapping[str, dict],
+    delete_ids: tuple[str, ...],
+    rename_pairs: tuple[tuple[str, str], ...],
+    before_fingerprint: str,
+    expected_after_fingerprint: str,
+    before_grandfathered: tuple[dict, ...],
+    after_grandfathered: tuple[dict, ...],
+) -> MutationManifest:
+    renamed_old_ids = {old_id for old_id, _ in rename_pairs}
+    renamed_new_ids = {new_id for _, new_id in rename_pairs}
+
+    creates = tuple(
+        {
+            "object_id": object_id,
+            "path": _relative_object_path(request.brain_root, obj),
+            "before_sha256": None,
+            "after_sha256": _object_hash(obj),
+        }
+        for object_id, obj in sorted(planned_by_id.items())
+        if object_id not in existing_by_id and object_id not in renamed_new_ids
+    )
+    updates = tuple(
+        {
+            "object_id": object_id,
+            "path": _relative_object_path(request.brain_root, obj),
+            "before_sha256": _object_hash(existing_by_id[object_id]),
+            "after_sha256": _object_hash(obj),
+        }
+        for object_id, obj in sorted(planned_by_id.items())
+        if (
+            object_id in existing_by_id
+            and _object_hash(existing_by_id[object_id]) != _object_hash(obj)
+        )
+    )
+    deletes = tuple(
+        {
+            "object_id": object_id,
+            "path": _relative_object_path(
+                request.brain_root,
+                existing_by_id[object_id],
+            ),
+            "before_sha256": _object_hash(existing_by_id[object_id]),
+            "after_sha256": None,
+        }
+        for object_id in sorted(delete_ids)
+        if object_id not in renamed_old_ids
+    )
+    renames = tuple(
+        {
+            "old_id": old_id,
+            "new_id": new_id,
+            "old_path": _relative_object_path(
+                request.brain_root,
+                existing_by_id[old_id],
+            ),
+            "new_path": _relative_object_path(
+                request.brain_root,
+                merged[new_id],
+            ),
+            "before_sha256": _object_hash(existing_by_id[old_id]),
+            "after_sha256": _object_hash(merged[new_id]),
+        }
+        for old_id, new_id in sorted(rename_pairs)
+    )
+    reference_rewrites = _reference_rewrites(
+        existing_by_id,
+        planned_by_id,
+        rename_pairs,
+    )
+    seed = {
+        "operation": request.operation.value,
+        "engine_sha": request.engine_sha,
+        "creates": creates,
+        "updates": updates,
+        "deletes": deletes,
+        "renames": renames,
+        "reference_rewrites": reference_rewrites,
+        "before_fingerprint": before_fingerprint,
+        "expected_after_fingerprint": expected_after_fingerprint,
+        "grandfathered_problems_before": before_grandfathered,
+        "grandfathered_problems_after": after_grandfathered,
+    }
+    transaction_id = hashlib.sha256(
+        json.dumps(
+            seed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return MutationManifest(
+        transaction_id=transaction_id,
+        operation=request.operation.value,
+        engine_sha=request.engine_sha,
+        creates=creates,
+        updates=updates,
+        deletes=deletes,
+        renames=renames,
+        reference_rewrites=reference_rewrites,
+        before_fingerprint=before_fingerprint,
+        expected_after_fingerprint=expected_after_fingerprint,
+        grandfathered_problems_before=before_grandfathered,
+        grandfathered_problems_after=after_grandfathered,
+    )
+
+
+def _manifest_bytes(manifest: MutationManifest) -> bytes:
+    return (
+        json.dumps(
+            asdict(manifest),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
