@@ -629,11 +629,7 @@ def _run_lint(argv) -> int:
 
 
 def _run_audit(argv) -> int:
-    """lint·고립 객체·코드 드리프트·opt-in 원문 인용구를 함께 감사한다.
-
-    ``--no-stale``만 Git 없이 실행하는 명시적 모드다. 그 외에는 도달성 검증 불가와
-    원문 인용구 검증 실패를 모두 차단 결과로 낸다. ``not_ancestor``는 안내만 한다.
-    """
+    """인자를 해석하고 독립 audit 서비스의 결과를 직렬화한다."""
     parser = argparse.ArgumentParser(prog="cli audit")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모)")
@@ -645,70 +641,21 @@ def _run_audit(argv) -> int:
     brain_root = resolve_brain_root(args.brain_root)
     default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
+    from project_brain.audit import run_audit
 
-    problems = lint_store(store)
-
-    from project_brain.graph import find_isolated
-    isolated = find_isolated(store)
-    by_kind: dict = {}
-    for oid in isolated:
-        k = store.get(oid).get("kind")
-        by_kind[k] = by_kind.get(k, 0) + 1
-
-    stale = None
-    stale_status = None
-    cache_written = None
-    code_quotes = None
-    if args.no_stale:
-        stale_status = {"ok": True, "skipped": True, "reason": "no_stale"}
-        code_quotes = {"ok": True, "checked": 0, "skipped": 0,
-                       "check_skipped": True, "failures": []}
-    else:
-        from project_brain.stale_check import (
-            GitError,
-            build_stale_set,
-            make_git_runner,
-            stale_check,
-            write_stale_set,
-        )
-        from project_brain.code_verify import make_git_blob_reader, verify_code_quotes
-        repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
-        git_runner = make_git_runner(repo_root)
-        try:
-            stale = stale_check(
-                store, git_runner=git_runner, default_branch=default_branch,
-                fetch=not args.no_fetch)
-            cache_written = str(write_stale_set(brain_root, build_stale_set(stale, now=now_kst())))
-        except GitError as exc:
-            stale = {"error": str(exc)}
-            stale_status = {"ok": False, "skipped": False}
-        else:
-            stale_status = {
-                "ok": not any(
-                    anchor.get("reason") == "anchor_unverifiable"
-                    for anchor in stale.get("unmerged_anchors") or []
-                ),
-                "skipped": False,
-            }
-        code_quotes = verify_code_quotes(
-            store.by_kind("CodeLocator"),
-            blob_reader=make_git_blob_reader(repo_root),
-        )
-
-    ok = not problems and stale_status["ok"] and code_quotes["ok"]
-
-    print(json.dumps(
-        {"ok": ok,
-         "lint": {"ok": not problems, "problems": problems},
-         "isolated": {"isolated_count": len(isolated),
-                      "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
-                      "isolated": isolated},
-         "stale": stale,
-         "stale_status": stale_status,
-         "code_quotes": code_quotes,
-         "cache_written": cache_written},
-        ensure_ascii=False, indent=2))
-    return 0 if ok else 1
+    report = run_audit(
+        store,
+        brain_root=brain_root,
+        repo_root=Path(args.repo_root) if args.repo_root else brain_root.parent,
+        default_branch=default_branch,
+        fetch=not args.no_fetch,
+        no_stale=args.no_stale,
+        principal=None,
+        acl_evaluator=None,
+        now=now_kst(),
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 1
 
 
 def _run_install(argv) -> int:
@@ -1141,8 +1088,9 @@ def _run_mark_checked(argv) -> int:
 
     from project_brain.stale_check import (
         GitError,
+        MarkCheckedError,
         make_git_runner,
-        mark_checked,
+        plan_mark_checked,
         resolve_target_head,
     )
 
@@ -1161,22 +1109,48 @@ def _run_mark_checked(argv) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
 
-    # 코퍼스 datetime 표준(KST +09:00, microsecond 없음)에 맞춘다.
-    now = now_kst()
-    result = mark_checked(store, mapping_ids=args.mappings,
-                          checked_head=args.checked_head, current_head=current_head, now=now)
-    if not result["ok"]:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+    checked_context = RepoContext(
+        repo_root=repo_context.repo_root,
+        expected_repo_id=repo_context.expected_repo_id,
+        expected_revision_ref=repo_context.expected_revision_ref,
+        target_revision_sha=current_head,
+    )
+    try:
+        plan = plan_mark_checked(
+            store,
+            mapping_ids=args.mappings,
+            checked_head=args.checked_head,
+            repo_context=checked_context,
+            engine_sha=args.engine_sha,
+        )
+    except MarkCheckedError as exc:
+        payload = {
+            "ok": False,
+            "error_code": exc.code,
+            "error": exc.detail,
+            "locator_ids": list(exc.locator_ids),
+            "updated": [],
+            "blocked": [],
+            "warnings": [],
+        }
+        if exc.invalid_inputs:
+            payload["invalid_inputs"] = list(exc.invalid_inputs)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 1
 
     try:
-        _apply_mutation(
-            operation=MutationOperation.MARK_CHECKED,
-            brain_root=brain_root,
-            repo_context=repo_context,
-            engine_sha=args.engine_sha,
-            objects=result["updated"],
-        )
+        if plan.updated:
+            _apply_mutation(
+                operation=MutationOperation.MARK_CHECKED,
+                brain_root=brain_root,
+                repo_context=plan.repo_context,
+                engine_sha=plan.engine_sha,
+                objects=plan.updated,
+                preconditions=plan.preconditions,
+                expected_corpus_fingerprint=(
+                    plan.expected_corpus_fingerprint
+                ),
+            )
     except IngestError as exc:
         print(json.dumps(
             {"ok": False, "error": str(exc)},
@@ -1185,8 +1159,8 @@ def _run_mark_checked(argv) -> int:
         ))
         return 1
     print(json.dumps(
-        {"ok": True, "updated": [loc["id"] for loc in result["updated"]],
-         "blocked": result["blocked"], "warnings": result["warnings"]},
+        {"ok": True, "updated": [loc["id"] for loc in plan.updated],
+         "blocked": list(plan.blocked), "warnings": list(plan.warnings)},
         ensure_ascii=False, indent=2))
     return 0
 

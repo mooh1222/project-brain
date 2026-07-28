@@ -22,6 +22,7 @@ from project_brain.corpus_io import (
 )
 from project_brain.hash_utils import stable_json
 from project_brain.lint import LintProblem, lint_store_report
+from project_brain.objbase import now_kst
 from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
 from project_brain.repo_context import RepoContext
 from project_brain.schema import (
@@ -293,6 +294,7 @@ class MutationService:
         # CodeLocator만 검사한다. ID-only legacy rename은 stage 8의 before-state
         # 증거로 예외 여부를 결정하므로 여기서 외부 verified_at을 소비하지 않는다.
         planned_inputs: list[dict] = []
+        verified_locator_ids: set[str] = set()
         if request.operation is not MutationOperation.ID_ONLY_MIGRATION:
             for obj in inputs:
                 planned = dict(obj)
@@ -329,6 +331,7 @@ class MutationService:
                                 exc.failure.detail,
                             )
                         planned = verified.locator
+                        verified_locator_ids.add(object_id)
                         planned["title"] = _canonical_locator_title(planned)
                     elif previous is not None:
                         planned["verified_at"] = previous.get("verified_at")
@@ -341,6 +344,14 @@ class MutationService:
                             else previous.get("title")
                         )
                 planned_inputs.append(planned)
+
+        if request.operation is MutationOperation.MARK_CHECKED:
+            verification_event_at = now_kst()
+            for planned in planned_inputs:
+                if planned.get("id") not in verified_locator_ids:
+                    continue
+                planned["verified_at"] = verification_event_at
+                planned["updated_at"] = verification_event_at
 
         # 8) 기존 객체 precondition과 before hash.
         for object_id in delete_ids:

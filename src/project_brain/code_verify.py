@@ -269,7 +269,7 @@ def verify_locator_for_write(
     elif any(result.status is SymbolStatus.MISMATCH for result in symbol_results):
         evidence = "; ".join(result.evidence for result in symbol_results)
         raise _verification_error(locator_id, "symbol_mismatch", evidence)
-    elif _manual_evidence_matches(
+    elif manual_symbol_evidence_matches(
         manual_symbol_verification,
         repo_id=repo.expected_repo_id,
         commit=commit,
@@ -308,7 +308,7 @@ def _find_all(blob: bytes, quote: bytes) -> tuple[int, ...]:
         start = found + 1
 
 
-def _manual_evidence_matches(
+def manual_symbol_evidence_matches(
     evidence: Mapping[str, object] | None,
     *,
     repo_id: str,

@@ -15,7 +15,7 @@ from unittest import mock
 from project_brain import cli
 from project_brain.code_verify import VerifiedLocator
 from project_brain.id_grammar import format_id, parse_id
-from project_brain.repo_context import RepoContext
+from project_brain.repo_context import RepoContext, resolve_repo_context
 from project_brain.store import BrainStore
 
 ENGINE_SHA = "e" * 40
@@ -751,100 +751,188 @@ class StaleSetCacheTest(unittest.TestCase):
 
 
 class MarkCheckedTest(unittest.TestCase):
-    def _shared(self):
-        # code.shared를 reviewed 매핑 둘이 공유 + candidate 1 + superseded 1이 가리킴.
+    def _repo(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        repo = Path(td.name).resolve()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=repo,
+            check=True,
+        )
+        source = repo / "Foo.cpp"
+        source.write_text("void Foo::bar() {}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "Foo.cpp"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "old"], cwd=repo, check=True)
+        old = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        source.write_text(
+            "void Foo::bar() {}\n// reviewed target\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "Foo.cpp"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "target"], cwd=repo, check=True)
+        checked = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        context = resolve_repo_context(
+            repo,
+            expected_repo_id="demoapp",
+            configured_repo_id="demoapp",
+            expected_revision_ref=checked,
+        )
+        return context, old, checked
+
+    def _shared(self, old):
+        locator = code_locator(
+            "code.shared",
+            path="Foo.cpp",
+            commit_sha=old,
+            symbol="Foo::bar",
+        )
+        locator["verified_quote"] = "void Foo::bar() {}"
         return _store(
-            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD"),
+            locator,
             domain_mapping("m.r1", code_locator_ids=["code.shared"]),
             domain_mapping("m.r2", code_locator_ids=["code.shared"]),
-            domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
-            domain_mapping("m.sup", code_locator_ids=["code.shared"], status="superseded"),
+            domain_mapping(
+                "m.cand",
+                code_locator_ids=["code.shared"],
+                status="candidate",
+            ),
+            domain_mapping(
+                "m.sup",
+                code_locator_ids=["code.shared"],
+                status="superseded",
+            ),
         )
 
-    def test_full_closure_updates_keeps_lines_warns_candidate_only(self):
-        from project_brain.stale_check import mark_checked
-        store = self._shared()
-        result = mark_checked(
-            store, mapping_ids=["mapping.x.r1", "mapping.x.r2"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertTrue(result["ok"])
-        self.assertEqual([l["id"] for l in result["updated"]], ["code.x.shared"])
-        loc = result["updated"][0]
-        self.assertEqual(loc["commit_sha"], "NEW")
-        self.assertEqual(loc["verified_at"], "2026-06-14T12:00:00Z")
-        self.assertEqual(loc["updated_at"], "2026-06-14T12:00:00Z")
-        # warning은 candidate만 — superseded(m.sup)는 현재 사실 아니라 제외(spec §4).
-        self.assertEqual(result["warnings"],
-                         [{"locator_id": "code.x.shared",
-                           "candidate_mapping_ids": ["mapping.x.cand"]}])
-        # store 불변(저장은 CLI 책임) — 핵심 갱신 경로에서 원본 commit_sha가 안 바뀜.
-        self.assertEqual(store.get("code.x.shared")["commit_sha"], "OLD")
+    def test_full_closure_reverifies_quote_and_symbol_with_one_event_time(self):
+        from project_brain.stale_check import plan_mark_checked
 
-    def test_partial_closure_blocks_and_does_not_update(self):
-        from project_brain.stale_check import mark_checked
-        result = mark_checked(self._shared(), mapping_ids=["mapping.x.r1"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["updated"], [])  # m.r2가 빠져 갱신 안 함
-        self.assertEqual(result["blocked"],
-                         [{"locator_id": "code.x.shared",
-                           "missing_mapping_ids": ["mapping.x.r2"]}])
+        repo_context, old, checked = self._repo()
+        store = self._shared(old)
+        plan = plan_mark_checked(
+            store,
+            mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+            checked_head=checked,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+        )
 
-    def test_head_moved_guard(self):
-        from project_brain.stale_check import mark_checked
-        result = mark_checked(
-            self._shared(), mapping_ids=["mapping.x.r1", "mapping.x.r2"],
-                              checked_head="A", current_head="B",
-                              now="2026-06-14T12:00:00Z")
-        self.assertFalse(result["ok"])
-        self.assertIn("head moved", result["error"])
-        self.assertEqual(result["updated"], [])
+        self.assertEqual([loc["id"] for loc in plan.updated], ["code.x.shared"])
+        locator = plan.updated[0]
+        self.assertEqual(locator["commit_sha"], checked)
+        self.assertEqual(locator["verified_at"], locator["updated_at"])
+        self.assertNotEqual(
+            locator["verified_at"],
+            store.get("code.x.shared")["verified_at"],
+        )
+        self.assertEqual(plan.warnings, ({
+            "locator_id": "code.x.shared",
+            "candidate_mapping_ids": ["mapping.x.cand"],
+        },))
+        self.assertIn("code.x.shared", plan.preconditions)
+        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
 
-    def test_rejects_non_reviewed_inputs(self):
-        # blocker 방지(spec §4): 입력은 존재하는 reviewed DomainMapping만. candidate/
-        # superseded/unknown이 섞이면 ok:False로 거부 — candidate가 빈 reviewed closure를
-        # vacuous하게 통과시켜 commit_sha를 갱신하는 사각을 입력 단에서 막는다.
-        from project_brain.stale_check import mark_checked
-        result = mark_checked(self._shared(),
-                              mapping_ids=[
-                                  "mapping.x.r1",
-                                  "mapping.x.cand",
-                                  "mapping.x.sup",
-                                  "mapping.x.nope",
-                              ],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertFalse(result["ok"])
-        reasons = {x["id"]: x["reason"] for x in result["invalid_inputs"]}
-        self.assertEqual(reasons["mapping.x.cand"], "status_candidate")
-        self.assertEqual(reasons["mapping.x.sup"], "status_superseded")
-        self.assertEqual(reasons["mapping.x.nope"], "unknown_id")
-        self.assertEqual(result["updated"], [])  # 거부 시 아무것도 안 건드림
+    def test_quote_missing_refuses_entire_bundle_before_any_plan_is_returned(self):
+        from project_brain.stale_check import (
+            MarkCheckedError,
+            plan_mark_checked,
+        )
 
-    def test_non_code_locator_id_in_code_locator_ids_skipped(self):
-        # future bad data 방어(재리뷰 major): code_locator_ids에 비-CodeLocator id가 섞여도
-        # commit_sha를 엉뚱한 kind 객체에 쓰지 않는다. reviewed 매핑이 GlossaryTerm을 잘못 가리킨 상황.
-        from project_brain.objbase import base
-        from project_brain.stale_check import mark_checked
-        not_a_loc = base({
-            "id": "g.x.notaloc", "kind": "GlossaryTerm", "status": "reviewed",
-            "truth_role": "domain", "title": "용어", "context_id": "context.x",
-            "term": "용어", "definition": "정의",
-            "evidence_refs": ["evref.x.source"],
-        }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
-        store = _store(
-            domain_mapping("m.bad", code_locator_ids=["g.notaloc"]), not_a_loc)
-        result = mark_checked(store, mapping_ids=["mapping.x.bad"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["updated"], [])  # 비-CodeLocator는 건너뜀
+        repo_context, old, checked = self._repo()
+        store = self._shared(old)
+        store.get("code.x.shared").pop("verified_quote")
+
+        with self.assertRaises(MarkCheckedError) as raised:
+            plan_mark_checked(
+                store,
+                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+                checked_head=checked,
+                repo_context=repo_context,
+                engine_sha=ENGINE_SHA,
+            )
+
+        self.assertEqual(raised.exception.code, "refused_unverifiable")
         self.assertEqual(
-            store.get("g.x.notaloc")["updated_at"],
-            "2026-06-12T00:00:00Z",
+            raised.exception.locator_ids,
+            ("code.x.shared",),
         )
+        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
+
+    def test_symbol_mismatch_refuses_entire_bundle(self):
+        from project_brain.stale_check import (
+            MarkCheckedError,
+            plan_mark_checked,
+        )
+
+        repo_context, old, checked = self._repo()
+        store = self._shared(old)
+        store.get("code.x.shared")["symbol"] = "Other::bar"
+
+        with self.assertRaises(MarkCheckedError) as raised:
+            plan_mark_checked(
+                store,
+                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+                checked_head=checked,
+                repo_context=repo_context,
+                engine_sha=ENGINE_SHA,
+            )
+
+        self.assertEqual(raised.exception.code, "symbol_mismatch")
+        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
+
+    def test_partial_closure_is_blocked_without_verification(self):
+        from project_brain.stale_check import plan_mark_checked
+
+        repo_context, old, checked = self._repo()
+        plan = plan_mark_checked(
+            self._shared(old),
+            mapping_ids=["mapping.x.r1"],
+            checked_head=checked,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+        )
+
+        self.assertEqual(plan.updated, ())
+        self.assertEqual(plan.blocked, ({
+            "locator_id": "code.x.shared",
+            "missing_mapping_ids": ["mapping.x.r2"],
+        },))
+
+    def test_checked_head_must_equal_resolved_repository_target(self):
+        from project_brain.stale_check import (
+            MarkCheckedError,
+            plan_mark_checked,
+        )
+
+        repo_context, old, _checked = self._repo()
+        with self.assertRaises(MarkCheckedError) as raised:
+            plan_mark_checked(
+                self._shared(old),
+                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+                checked_head=old,
+                repo_context=repo_context,
+                engine_sha=ENGINE_SHA,
+            )
+
+        self.assertEqual(raised.exception.code, "head_moved")
 
 
 class CliMarkCheckedTest(unittest.TestCase):
@@ -864,6 +952,8 @@ class CliMarkCheckedTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, argv, runner):
+        checked_head = argv[argv.index("--checked-head") + 1]
+
         def verify_fixture_locator(
             locator,
             *,
@@ -889,8 +979,12 @@ class CliMarkCheckedTest(unittest.TestCase):
                      repo_root=self.root,
                      expected_repo_id="demoapp",
                      expected_revision_ref="origin/develop",
-                     target_revision_sha="a" * 40,
+                     target_revision_sha=checked_head,
                  ),
+             ), \
+             mock.patch(
+                 "project_brain.code_verify.verify_locator_for_write",
+                 side_effect=verify_fixture_locator,
              ), \
              mock.patch(
                  "project_brain.mutation.verify_locator_for_write",
@@ -916,6 +1010,7 @@ class CliMarkCheckedTest(unittest.TestCase):
         # 디스크에 갱신 반영 — commit_sha=NEW.
         loc = BrainStore.load(self.root).get("code.x.shared")
         self.assertEqual(loc["commit_sha"], "NEW")
+        self.assertEqual(loc["verified_at"], loc["updated_at"])
         # candidate가 같은 locator를 가리키므로 CLI 출력 warnings에 전달된다.
         self.assertEqual(payload["warnings"],
                          [{"locator_id": "code.x.shared",
@@ -937,6 +1032,45 @@ class CliMarkCheckedTest(unittest.TestCase):
             BrainStore.load(self.root).get("code.x.shared")["commit_sha"],
             "OLD",
         )
+
+    def test_quote_missing_refuses_whole_bundle_without_disk_changes(self):
+        missing = dict(BrainStore.load(self.root).get("code.x.shared"))
+        missing.pop("verified_quote")
+        BrainStore.save_object(self.root, missing)
+        for obj in (
+            code_locator(
+                "code.valid",
+                path="a/Valid.cpp",
+                commit_sha="OLD",
+            ),
+            domain_mapping(
+                "m.valid",
+                code_locator_ids=["code.valid"],
+            ),
+        ):
+            BrainStore.save_object(self.root, obj)
+
+        rc, payload = self._run(
+            [
+                "mark-checked",
+                "--brain-root",
+                str(self.root),
+                "--mappings",
+                "mapping.x.r1",
+                "mapping.x.r2",
+                "mapping.x.valid",
+                "--checked-head",
+                "NEW",
+                "--no-fetch",
+            ],
+            fake_git_runner("NEW", {}),
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["error_code"], "refused_unverifiable")
+        loaded = BrainStore.load(self.root)
+        self.assertEqual(loaded.get("code.x.shared")["commit_sha"], "OLD")
+        self.assertEqual(loaded.get("code.x.valid")["commit_sha"], "OLD")
 
     def test_head_moved_returns_rc1_disk_unchanged(self):
         runner = fake_git_runner("NEW", {})  # 현재 develop은 NEW인데
