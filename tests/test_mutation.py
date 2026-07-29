@@ -22,6 +22,7 @@ from project_brain.hash_utils import stable_json
 from project_brain.hash_utils import source_content_hash
 from project_brain.repo_context import resolve_repo_context
 from project_brain.store import BrainStore
+from project_brain.transaction_receipt import BatchBinding
 from tests.test_ingest import (
     candidate_mapping,
     candidate_term,
@@ -54,6 +55,7 @@ def _request(
     preconditions: dict[str, str] | None = None,
     expected_corpus_fingerprint: str | None = None,
     auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = (),
+    batch_binding: BatchBinding | None = None,
 ) -> MutationRequest:
     return MutationRequest(
         operation=operation,
@@ -66,6 +68,7 @@ def _request(
         preconditions=preconditions or {},
         expected_corpus_fingerprint=expected_corpus_fingerprint,
         auxiliary_updates=auxiliary_updates,
+        batch_binding=batch_binding,
     )
 
 
@@ -232,6 +235,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "preconditions",
         "expected_corpus_fingerprint",
         "auxiliary_updates",
+        "batch_binding",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
@@ -247,6 +251,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "expected_after_fingerprint",
         "grandfathered_problems_before",
         "grandfathered_problems_after",
+        "batch_binding",
     ]
     assert {operation.value for operation in MutationOperation} == {
         "ingest",

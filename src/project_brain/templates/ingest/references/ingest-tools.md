@@ -270,20 +270,36 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    scripts/run_ingest_batch.py batch.json --report batch-report.json --resume batch-report.json
    ```
 
-   `repo_root`는 symbolic link가 없는 absolute canonical path여야 한다. 각 item 입력은 manifest
-   아래 상대경로만 허용하며 absolute path, `..` 탈출, symbolic link는 거부한다.
+   `repo_root`는 symbolic link가 없는 absolute canonical path이자 실제 Git toplevel이어야 한다.
+   각 item 입력은 manifest 아래 상대경로만 허용하며 absolute path, `..` 탈출, symbolic link는
+   거부한다. runner는 시작 때 no-follow FD로 읽은 verify/spec 바이트를 run 전용 read-only
+   `immutable staged` 파일로 고정한다. child에는 이 staged 경로만 넘기며 원본과 staged 파일의
+   type/device/inode/size/hash를 item 전후와 finalization 직전에 다시 확인한다.
 
    첫 실행은 어떤 item보다 먼저 `isolation_baseline`을 report에 저장한다. report에는
-   absolute `repo_root`, `expected_repo_id`, `expected_revision_ref`, `engine_sha`, batch 파일 자체의
-   `manifest_sha256`, resolved 입력의 `manifest_fingerprint`, repo root의 device/inode, 성공 item의
-   exact `transactions`가 기록된다. 재개는 같은 report의 최초 baseline을 재사용하되 이 값과 입력
-   hash가 하나라도 다르거나 root가 교체됐으면 `resume_contract_mismatch`로 종료한다. malformed prior
-   report도 같은 방식으로 fail-closed 처리한다. 완료 검사는 post head == baseline head와 post unmerged == baseline union expected를 함께
+   absolute `repo_root`, `expected_repo_id`, `expected_revision_ref`, resolved
+   `target_revision_sha`, actual `engine_root`와 `engine_sha`, 양쪽 root의 device/inode, batch 파일
+   자체의 `manifest_sha256`, resolved 입력의 `manifest_fingerprint`, authoritative
+   `item_records`가 기록된다. 각 record는 full binding, `pending|failed|committed` status, failure,
+   exact transaction을 한 객체에 묶는다. `transactions`는 `item_records`에서 파생되는 호환
+   출력이며 독립 resume/finalization 근거가 아니다.
+
+   재개는 같은 report의 최초 baseline을 재사용하되 실제 Git toplevel/repo identity, ref가 가리키는
+   exact `target_revision_sha`, 실제 engine Git root/HEAD, root inode, manifest와 입력 hash 가운데
+   하나라도 다르면 `resume_contract_mismatch`로 종료한다. 각 item 전과 finalization 직전에도 같은
+   resolved state를 재검증한다. malformed prior report도 fail-closed 처리한다.
+
+   item ingest는 binding을 mutation manifest와 durable batch intent/journal에 함께 기록한다.
+   process가 COMMITTED 뒤 report 갱신 전에 끊겨도 재개는 root-anchored journal에서 exact
+   `durable receipt`를 복구한다. 이때 canonical manifest SHA, operation, engine SHA, action object
+   IDs, before/after fingerprint, 현재 corpus fingerprint, item/input identity를 모두 확인한다.
+   receipt가 없는 suffix만 재실행하며 첫 failed/pending record에서 tail 실행을 멈춘다.
+   `needs_user`, 누락·불일치 transaction, `committed=false`, durable receipt 불일치는 성공이나
+   `finalized`로 승격하지 않는다. 완료 증거는 `finalized=true` 하나가 아니라 모든 `item_records`의
+   exact durable 계약과 `finalization.ok=true`, `finalization.isolation.unexpected_new_ids=[]`,
+   각 recall check의 누락 목록이 빈 상태까지 포함한다.
+   완료 검사는 post head == baseline head와 post unmerged == baseline union expected를 함께
    확인한다. legacy baseline은 당시 허용한 제한만 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
-   `needs_user`, 누락되거나 필드가 다른 transaction 결과, `committed=false`, transaction
-   `manifest_sha256` 형식 오류는 성공이나 `finalized`로 승격하지 않는다. 완료 증거는
-   `finalized=true` 하나가 아니라 `transactions` 전부의 exact 계약과 `finalization.ok=true`,
-   `finalization.isolation.unexpected_new_ids=[]`, 각 recall check의 누락 목록이 빈 상태까지 포함한다.
 
    finalizer JSON의 `unmerged` 블록은 이 Git 범위 검사의 실제 결과다. `ok`가 false면 완료가 아니다.
    `baseline_ids`는 baseline에 있던 미머지 locator, `expected_ids`는 이번 계약이 허용한 locator,
@@ -306,8 +322,10 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 
 ## 적재 후 확인 — semantic finalization
 
-`scripts/finalize_ingest.py`는 먼저 각 item의 exact transaction 결과와 `manifest_sha256`을 검사한다.
-그 증거가 모두 `committed=true`일 때만 아래 게이트를 실행하고 `transactions`, `commands`,
+`scripts/finalize_ingest.py`는 authoritative `item_records`의 binding과 exact transaction을
+root-anchored durable intent/journal의 `COMMITTED` receipt chain으로 다시 검증한다. record가 모두
+`committed=true`이고 canonical manifest SHA, before/after fingerprint, operation, engine SHA,
+action object IDs, 현재 corpus fingerprint가 일치할 때만 아래 게이트를 실행하고 `transactions`, `commands`,
 `isolation`, `unmerged`, `recall_checks`, `errors`를
 가진 JSON 한 개를 낸다. runner는 종료 코드만 보지 않고 이 schema와 `ok`를 함께 확인한다.
 

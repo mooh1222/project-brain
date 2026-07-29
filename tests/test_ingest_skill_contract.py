@@ -450,13 +450,19 @@ class IngestSkillContractTest(unittest.TestCase):
             "absolute `repo_root`",
             "`expected_repo_id`",
             "`expected_revision_ref`",
+            "`target_revision_sha`",
+            "`engine_root`",
             "`engine_sha`",
             "`manifest_sha256`",
             "`resume_contract_mismatch`",
-            "`transactions`",
+            "`item_records`",
+            "durable receipt",
+            "immutable staged",
             "`committed=true`",
         ):
             self.assertIn(token, ingest_tools)
+        self.assertNotIn("성공 item의\n   exact `transactions`", ingest_tools)
+        self.assertIn("`transactions`는 `item_records`에서 파생", ingest_tools)
         self.assertIn("needs_user", playbook)
         self.assertIn("성공이나 finalized로", playbook)
         self.assertIn("anchor-key", object_model)
@@ -471,7 +477,13 @@ class IngestSkillContractTest(unittest.TestCase):
             self.assertIn(token, query)
         for token in ("stale", "code_quote=missing", "인용 부채", "독립"):
             self.assertIn(token, audit)
-        for token in ("transaction", "manifest_sha256", "finalized=false"):
+        for token in (
+            "item_records",
+            "durable receipt",
+            "target_revision_sha",
+            "manifest_sha256",
+            "finalized=false",
+        ):
             self.assertIn(token, checklist)
 
 

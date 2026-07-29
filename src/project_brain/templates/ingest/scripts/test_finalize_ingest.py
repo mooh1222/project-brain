@@ -23,6 +23,25 @@ TRANSACTION = {
     "ingested_ids": ["mapping.a"],
     "ingested_count": 1,
 }
+BINDING = {
+    "batch_manifest_sha256": "5" * 64,
+    "item_key": "one",
+    "item_input_fingerprint": "6" * 64,
+    "verify_json_sha256": "7" * 64,
+    "domain_spec_py_sha256": "8" * 64,
+    "repo_root": "/tmp/project-brain-consumer",
+    "expected_repo_id": "demo",
+    "expected_revision_ref": "HEAD",
+    "target_revision_sha": "9" * 40,
+    "engine_root": "/tmp/project-brain-engine",
+    "engine_sha": "a" * 40,
+}
+ITEM_RECORD = {
+    "binding": BINDING,
+    "status": "committed",
+    "failure": None,
+    "transaction": TRANSACTION,
+}
 
 
 def load_module():
@@ -139,6 +158,58 @@ class SemanticFinalizerTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "transaction"):
                     module.validate_transaction_results(value)
+
+    def test_item_records_are_recovered_from_the_common_durable_receipt_chain(self):
+        module = load_module()
+        observed = []
+
+        def recoverer(brain_root, bindings, expected_receipts):
+            observed.append((brain_root, bindings, expected_receipts))
+            return expected_receipts
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[ITEM_RECORD],
+            repo_root=Path(BINDING["repo_root"]),
+            receipt_recoverer=recoverer,
+            config_loader=lambda start: {
+                "root": Path(BINDING["repo_root"]),
+                "brain_root": Path(BINDING["repo_root"]) / "brain",
+            },
+            runner=self._runner(),
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["transactions"], [TRANSACTION])
+        self.assertEqual(observed, [(
+            Path(BINDING["repo_root"]) / "brain",
+            (BINDING,),
+            (TRANSACTION,),
+        )])
+
+    def test_item_record_forgery_or_noncommitted_state_blocks_before_commands(self):
+        module = load_module()
+        cases = (
+            [{**ITEM_RECORD, "status": "pending", "transaction": None}],
+            [{**ITEM_RECORD, "transaction": {**TRANSACTION, "manifest_sha256": "f" * 64}}],
+        )
+        for records in cases:
+            calls = []
+            with self.subTest(records=records), self.assertRaises(ValueError):
+                module.run_finalization(
+                    self.contract,
+                    ["code.before"],
+                    item_records=records,
+                    repo_root=Path(BINDING["repo_root"]),
+                    receipt_recoverer=lambda _root, _bindings, _expected: (TRANSACTION,),
+                    config_loader=lambda start: {
+                        "root": Path(BINDING["repo_root"]),
+                        "brain_root": Path(BINDING["repo_root"]) / "brain",
+                    },
+                    runner=lambda command: calls.append(command),
+                )
+            self.assertEqual(calls, [])
 
     def test_unmerged_expected_ids_are_compared_as_exact_union(self):
         module = load_module()

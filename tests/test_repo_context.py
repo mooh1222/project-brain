@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from project_brain.repo_context import RepoVerificationError, resolve_repo_context
+from project_brain.repo_context import (
+    RepoVerificationError,
+    resolve_git_checkout,
+    resolve_repo_context,
+)
 
 
 class RepoContextTest(unittest.TestCase):
@@ -47,6 +51,27 @@ class RepoContextTest(unittest.TestCase):
         self.assertEqual(context.expected_repo_id, "demo")
         self.assertEqual(context.expected_revision_ref, "HEAD")
         self.assertEqual(context.target_revision_sha, sha)
+
+    def test_resolves_actual_git_checkout_root_head_and_inode(self):
+        td, repo, sha = self._repo()
+        self.addCleanup(td.cleanup)
+
+        state = resolve_git_checkout(repo / "src" / "example.cpp")
+
+        root_stat = repo.stat()
+        self.assertEqual(state.root, repo)
+        self.assertEqual(state.head_sha, sha)
+        self.assertEqual(state.device, root_stat.st_dev)
+        self.assertEqual(state.inode, root_stat.st_ino)
+
+    def test_resolve_git_checkout_rejects_non_git_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td).resolve() / "plain.txt"
+            path.write_text("plain\n", encoding="utf-8")
+            with self.assertRaises(RepoVerificationError) as ctx:
+                resolve_git_checkout(path)
+
+        self.assertEqual(ctx.exception.failure.code, "not_git_repo")
 
     def test_not_git_repo_has_distinct_error_code(self):
         with tempfile.TemporaryDirectory() as td:

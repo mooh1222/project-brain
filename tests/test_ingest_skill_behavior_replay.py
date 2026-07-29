@@ -59,6 +59,10 @@ class RawReplayDriverTest(unittest.TestCase):
             "manifest_sha256",
             "resume_contract_mismatch",
             "--validate-transaction",
+            "item_records",
+            "recover_committed_receipts",
+            "target_revision_sha",
+            "batch-binding.json",
         ):
             self.assertIn(token, combined)
         self.assertNotIn("allow_missing_quote", combined)

@@ -113,6 +113,7 @@ def _apply_mutation(
     objects,
     preconditions=None,
     expected_corpus_fingerprint=None,
+    batch_binding=None,
 ):
     return ingest(
         brain_root,
@@ -122,6 +123,7 @@ def _apply_mutation(
         repo_context=repo_context,
         operation=operation,
         expected_corpus_fingerprint=expected_corpus_fingerprint,
+        batch_binding=batch_binding,
     )
 
 
@@ -238,16 +240,81 @@ def _run_ingest(argv) -> int:
     parser.add_argument("--objects-file", required=True)
     parser.add_argument("--preconditions-file",
                         help="build 리포트 JSON (preconditions 키 — 저장 직전 낙관적 잠금 재검사)")
+    parser.add_argument("--batch-binding-file")
+    parser.add_argument("--verify-json")
+    parser.add_argument("--domain-spec-py")
     _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
+    batch_binding = None
+    batch_paths = (
+        args.batch_binding_file,
+        args.verify_json,
+        args.domain_spec_py,
+    )
+    if any(value is not None for value in batch_paths):
+        if not all(value is not None for value in batch_paths):
+            parser.error(
+                "--batch-binding-file, --verify-json, --domain-spec-py는 "
+                "함께 필요합니다"
+            )
+        from project_brain.transaction_receipt import (
+            read_batch_binding,
+            verify_batch_input_files,
+        )
+        try:
+            batch_binding = read_batch_binding(
+                Path(args.batch_binding_file)
+            )
+            verify_batch_input_files(
+                batch_binding,
+                verify_json=Path(args.verify_json),
+                domain_spec_py=Path(args.domain_spec_py),
+            )
+        except (OSError, ValueError) as exc:
+            print(json.dumps(
+                {"ok": False, "error": f"batch binding invalid: {exc}"},
+                ensure_ascii=False,
+            ))
+            return 1
     repo_context = _resolve_mutation_context(
         args,
         brain_root,
-        required=any(obj.get("kind") == "CodeLocator" for obj in objects),
+        required=(
+            batch_binding is not None
+            or any(obj.get("kind") == "CodeLocator" for obj in objects)
+        ),
     )
+    if batch_binding is not None:
+        from project_brain.repo_context import resolve_git_checkout
+
+        try:
+            engine_state = resolve_git_checkout(Path(__file__))
+            if repo_context is None:
+                raise ValueError("batch ingest requires repo context")
+            expected_state = {
+                "repo_root": str(repo_context.repo_root),
+                "expected_repo_id": repo_context.expected_repo_id,
+                "expected_revision_ref": repo_context.expected_revision_ref,
+                "target_revision_sha": repo_context.target_revision_sha,
+                "engine_root": str(engine_state.root),
+                "engine_sha": engine_state.head_sha,
+            }
+            for field_name, expected_value in expected_state.items():
+                if getattr(batch_binding, field_name) != expected_value:
+                    raise ValueError(
+                        f"batch binding {field_name} mismatch"
+                    )
+            if args.engine_sha != batch_binding.engine_sha:
+                raise ValueError("batch binding engine_sha mismatch")
+        except (RepoVerificationError, ValueError) as exc:
+            print(json.dumps(
+                {"ok": False, "error": str(exc)},
+                ensure_ascii=False,
+            ))
+            return 1
     preconditions = None
     if args.preconditions_file:
         report = json.loads(Path(args.preconditions_file).read_text(encoding="utf-8"))
@@ -260,10 +327,39 @@ def _run_ingest(argv) -> int:
             engine_sha=args.engine_sha,
             objects=objects,
             preconditions=preconditions,
+            batch_binding=batch_binding,
         )
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
+    if batch_binding is not None:
+        from project_brain.corpus_io import (
+            CorpusIOError,
+            recover_committed_receipt,
+        )
+        from project_brain.transaction_receipt import (
+            verify_batch_input_files,
+        )
+
+        try:
+            verify_batch_input_files(
+                batch_binding,
+                verify_json=Path(args.verify_json),
+                domain_spec_py=Path(args.domain_spec_py),
+            )
+            payload = recover_committed_receipt(
+                brain_root,
+                batch_binding,
+            )
+        except (CorpusIOError, OSError, ValueError) as exc:
+            print(json.dumps(
+                {"ok": False, "error": str(exc), "committed": False},
+                ensure_ascii=False,
+            ))
+            return 1
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
     manifest = result.manifest
     if manifest is None:
         print(json.dumps(

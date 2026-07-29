@@ -99,12 +99,16 @@ description: |
 각 항목은 build·검증·ingest까지만 수행하고, 중간에 색인 재생성이나 전체 검수를 반복하지 않는다.
 실패 항목이 하나라도 있으면 finalization을 호출하지 않는다.
 
-항목 key와 report의 성공 목록이 서로 맞는지 확인한다.
-각 성공 item의 exact transaction 결과가 report의 `transactions`에 있고 `committed=true`인지,
-batch `manifest_sha256`과 repo/engine resume 계약이 그대로인지 확인한다.
+report의 `item_records`가 manifest 항목과 같은 순서·key인지 확인한다. 각 record는 item/input
+바인딩, 상태, 실패 정보, exact transaction을 한 객체에 묶으며 성공 record는 `status=committed`다.
+`transactions`·`succeeded`·`failed`는 이 정본에서 파생된 호환 필드일 뿐 독립 근거가 아니다.
+batch `manifest_sha256`, immutable staged 입력 hash, resolved target commit과 실제 engine HEAD를
+포함한 resume 계약이 그대로인지 확인한다. finalization은 durable intent/journal에서 복구한 receipt와
+record가 정확히 일치한 뒤에만 실행한다.
 새 wave용 임시 스크립트로 운영 규약을 우회하지 않는다.
 
-중단된 묶음은 같은 입력과 보고서로 재개하며, 이미 성공한 항목만 건너뛴다.
+중단된 묶음은 같은 입력과 보고서로 재개한다. durable receipt가 확인된 committed prefix만 건너뛰고,
+첫 failed/pending record부터 순서대로 재개하며 첫 실패에서 tail 실행을 멈춘다.
 대규모 분할, 기존 컨텍스트 확장, 동적 workflow 운영은 `references/system-domain-playbook.md`를 따른다.
 
 workflow 최상위 상태만으로 완료를 선언하지 않는다.

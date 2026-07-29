@@ -7,6 +7,7 @@ REPO_ROOT=""
 EXPECTED_REPO_ID=""
 EXPECTED_REVISION_REF=""
 ENGINE_SHA=""
+BATCH_BINDING_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry) DRY=1; shift ;;
@@ -15,6 +16,7 @@ while [ "$#" -gt 0 ]; do
     --expected-repo-id) EXPECTED_REPO_ID="${2:?--expected-repo-id requires a value}"; shift 2 ;;
     --expected-revision-ref) EXPECTED_REVISION_REF="${2:?--expected-revision-ref requires a value}"; shift 2 ;;
     --engine-sha) ENGINE_SHA="${2:?--engine-sha requires a value}"; shift 2 ;;
+    --batch-binding-file) BATCH_BINDING_FILE="${2:?--batch-binding-file requires a value}"; shift 2 ;;
     --) shift; break ;;
     -*) echo "usage: run_ingest.sh [--dry] [--defer-finalize] [mutation context] <verify.json> <domain_spec.py>" >&2; exit 2 ;;
     *) break ;;
@@ -65,14 +67,21 @@ if [ "$DEFER_FINALIZE" = "0" ]; then
 fi
 
 step "ingest"
-project-brain ingest \
+INGEST=(project-brain ingest \
   --objects-file "$OBJS" \
   --preconditions-file "$BUILD_REPORT" \
   --repo-root "$REPO_ROOT" \
   --expected-repo-id "$EXPECTED_REPO_ID" \
   --expected-revision-ref "$EXPECTED_REVISION_REF" \
-  --engine-sha "$ENGINE_SHA" \
-  > "$TRANSACTION_RESULT"
+  --engine-sha "$ENGINE_SHA")
+if [ -n "$BATCH_BINDING_FILE" ]; then
+  INGEST+=(
+    --batch-binding-file "$BATCH_BINDING_FILE"
+    --verify-json "$VERIFY"
+    --domain-spec-py "$SPEC"
+  )
+fi
+"${INGEST[@]}" > "$TRANSACTION_RESULT"
 python3 "$HERE/finalize_ingest.py" --validate-transaction "$TRANSACTION_RESULT" >/dev/null
 
 if [ "$DEFER_FINALIZE" = "1" ]; then

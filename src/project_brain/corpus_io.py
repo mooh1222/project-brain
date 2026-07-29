@@ -17,6 +17,13 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from project_brain.transaction_receipt import (
+    BatchBinding,
+    batch_binding_dict,
+    batch_intent_id,
+    normalize_batch_binding,
+)
+
 
 class JournalState(StrEnum):
     PREPARING = "preparing"
@@ -1288,6 +1295,431 @@ def recover_unfinished_transaction_unlocked(
     return RecoveryResult(tuple(recovered))
 
 
+def batch_intent_relative_path(
+    binding: BatchBinding | Mapping[str, object],
+) -> Path:
+    """Return the stable root-relative intent path for one batch item."""
+    return Path(".brain-local") / "batch-intents" / (
+        f"{batch_intent_id(binding)}.json"
+    )
+
+
+def _canonical_json_bytes(value: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _canonical_manifest_bytes(manifest: Mapping[str, object]) -> bytes:
+    return _canonical_json_bytes(manifest)
+
+
+def _batch_intent_payload(
+    manifest: Mapping[str, object],
+    binding: BatchBinding,
+) -> dict[str, object]:
+    transaction_id = manifest.get("transaction_id")
+    operation = manifest.get("operation")
+    engine_sha = manifest.get("engine_sha")
+    return {
+        "version": 1,
+        "intent_id": batch_intent_id(binding),
+        "batch_binding": batch_binding_dict(binding),
+        "transaction_id": transaction_id,
+        "manifest_sha256": hashlib.sha256(
+            _canonical_manifest_bytes(manifest)
+        ).hexdigest(),
+        "operation": operation,
+        "engine_sha": engine_sha,
+    }
+
+
+def _publish_batch_intent_anchored(
+    anchored: _AnchoredRoot,
+    manifest: Mapping[str, object],
+    binding: BatchBinding,
+) -> None:
+    intent = _batch_intent_payload(manifest, binding)
+    payload = _canonical_json_bytes(intent)
+    intents = anchored.pin_directory(
+        ".brain-local/batch-intents",
+        create=True,
+    )
+    name = f"{intent['intent_id']}.json"
+    try:
+        _write_bytes_at(
+            intents.fd,
+            name,
+            payload,
+            replace_existing=False,
+        )
+    except FileExistsError:
+        try:
+            existing = _read_bytes_at(intents.fd, name)
+        except OSError as exc:
+            raise _anchored_path_error(
+                anchored.path / batch_intent_relative_path(binding),
+                exc,
+            ) from exc
+        if existing != payload:
+            raise CorpusIOError(
+                "batch_intent_mismatch",
+                "existing batch intent does not match the planned transaction",
+                paths=(
+                    anchored.path / batch_intent_relative_path(binding),
+                ),
+            )
+
+
+def _read_batch_intent_anchored(
+    anchored: _AnchoredRoot,
+    binding: BatchBinding,
+) -> dict[str, object]:
+    relative = batch_intent_relative_path(binding)
+    try:
+        intents = anchored.pin_directory(
+            relative.parent.as_posix(),
+            create=False,
+        )
+        raw = _read_bytes_at(intents.fd, relative.name)
+    except (FileNotFoundError, OSError, CorpusIOError) as exc:
+        raise CorpusIOError(
+            "batch_intent_missing",
+            f"batch intent is unavailable: {relative}",
+            paths=(anchored.path / relative,),
+        ) from exc
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise CorpusIOError(
+            "batch_intent_invalid",
+            f"batch intent is not canonical JSON: {exc}",
+            paths=(anchored.path / relative,),
+        ) from exc
+    if not isinstance(value, dict) or _canonical_json_bytes(value) != raw:
+        raise CorpusIOError(
+            "batch_intent_invalid",
+            "batch intent bytes are not canonical",
+            paths=(anchored.path / relative,),
+        )
+    expected_fields = {
+        "version",
+        "intent_id",
+        "batch_binding",
+        "transaction_id",
+        "manifest_sha256",
+        "operation",
+        "engine_sha",
+    }
+    if set(value) != expected_fields or value.get("version") != 1:
+        raise CorpusIOError(
+            "batch_intent_invalid",
+            "batch intent fields do not match the contract",
+            paths=(anchored.path / relative,),
+        )
+    if value.get("intent_id") != batch_intent_id(binding):
+        raise CorpusIOError(
+            "batch_intent_mismatch",
+            "batch intent identity does not match the requested item",
+            paths=(anchored.path / relative,),
+        )
+    try:
+        stored_binding = normalize_batch_binding(value.get("batch_binding"))
+    except ValueError as exc:
+        raise CorpusIOError(
+            "batch_intent_invalid",
+            str(exc),
+            paths=(anchored.path / relative,),
+        ) from exc
+    if stored_binding != binding:
+        raise CorpusIOError(
+            "batch_intent_mismatch",
+            "batch intent binding does not match the requested item",
+            paths=(anchored.path / relative,),
+        )
+    if (
+        not _is_sha256(value.get("transaction_id"))
+        or not _is_sha256(value.get("manifest_sha256"))
+        or value.get("operation") != "ingest"
+        or value.get("engine_sha") != binding.engine_sha
+    ):
+        raise CorpusIOError(
+            "batch_intent_invalid",
+            "batch intent transaction fields are invalid",
+            paths=(anchored.path / relative,),
+        )
+    return value
+
+
+def _manifest_action_object_ids(
+    manifest: Mapping[str, object],
+) -> list[str]:
+    object_ids: set[str] = set()
+    for field_name in ("creates", "updates", "deletes"):
+        actions = manifest.get(field_name)
+        if not isinstance(actions, list):
+            raise CorpusIOError(
+                "committed_receipt_invalid",
+                f"manifest.{field_name} is invalid",
+            )
+        for action in actions:
+            if not isinstance(action, Mapping):
+                raise CorpusIOError(
+                    "committed_receipt_invalid",
+                    f"manifest.{field_name} action is invalid",
+                )
+            object_id = action.get("object_id")
+            if not isinstance(object_id, str) or not object_id:
+                raise CorpusIOError(
+                    "committed_receipt_invalid",
+                    f"manifest.{field_name} object id is invalid",
+                )
+            object_ids.add(object_id)
+    renames = manifest.get("renames")
+    if not isinstance(renames, list):
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            "manifest.renames is invalid",
+        )
+    for action in renames:
+        if not isinstance(action, Mapping):
+            raise CorpusIOError(
+                "committed_receipt_invalid",
+                "manifest rename action is invalid",
+            )
+        for field_name in ("old_id", "new_id"):
+            object_id = action.get(field_name)
+            if not isinstance(object_id, str) or not object_id:
+                raise CorpusIOError(
+                    "committed_receipt_invalid",
+                    f"manifest rename {field_name} is invalid",
+                )
+            object_ids.add(object_id)
+    return sorted(object_ids)
+
+
+def _recover_committed_receipt_anchored(
+    anchored: _AnchoredRoot,
+    normalized: BatchBinding,
+    *,
+    expected_receipt: Mapping[str, object] | None,
+    verify_current: bool,
+) -> dict[str, object]:
+    intent = _read_batch_intent_anchored(anchored, normalized)
+    transaction_id = str(intent["transaction_id"])
+    try:
+        transactions = anchored.pin_directory(
+            ".brain-local/transactions",
+            create=False,
+        )
+        transaction_fd = _open_directory_at(
+            transactions.fd,
+            transaction_id,
+            create=False,
+            expected_device=anchored.device,
+        )
+    except (FileNotFoundError, OSError, CorpusIOError) as exc:
+        raise CorpusIOError(
+            "committed_receipt_missing",
+            f"{transaction_id}: committed journal is unavailable",
+        ) from exc
+    try:
+        journal = _read_journal_at(transaction_fd, transaction_id)
+    finally:
+        os.close(transaction_fd)
+    if journal.get("state") != JournalState.COMMITTED.value:
+        raise CorpusIOError(
+            "receipt_not_committed",
+            f"{transaction_id}: journal is not COMMITTED",
+        )
+    if journal.get("batch_binding") != batch_binding_dict(normalized):
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            f"{transaction_id}: journal batch binding mismatch",
+        )
+    manifest = journal.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            f"{transaction_id}: journal manifest is invalid",
+        )
+    manifest_sha256 = hashlib.sha256(
+        _canonical_manifest_bytes(manifest)
+    ).hexdigest()
+    if manifest_sha256 != intent.get("manifest_sha256"):
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            f"{transaction_id}: canonical manifest SHA mismatch",
+        )
+    if (
+        manifest.get("transaction_id") != transaction_id
+        or manifest.get("operation") != "ingest"
+        or manifest.get("engine_sha") != normalized.engine_sha
+        or manifest.get("batch_binding") != batch_binding_dict(normalized)
+    ):
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            f"{transaction_id}: manifest binding mismatch",
+        )
+    if verify_current:
+        try:
+            _verify_committed_state(anchored, journal)
+        except (CorpusIOError, ValueError) as exc:
+            raise CorpusIOError(
+                "committed_receipt_state_mismatch",
+                f"{transaction_id}: {exc}",
+            ) from exc
+    object_ids = _manifest_action_object_ids(manifest)
+    if not object_ids:
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            f"{transaction_id}: committed transaction has no object actions",
+        )
+    receipt: dict[str, object] = {
+        "ok": True,
+        "transaction_id": transaction_id,
+        "operation": "ingest",
+        "committed": True,
+        "manifest_sha256": manifest_sha256,
+        "before_fingerprint": manifest["before_fingerprint"],
+        "after_fingerprint": manifest["expected_after_fingerprint"],
+        "ingested_ids": object_ids,
+        "ingested_count": len(object_ids),
+    }
+    if expected_receipt is not None and dict(expected_receipt) != receipt:
+        raise CorpusIOError(
+            "receipt_mismatch",
+            f"{transaction_id}: supplied receipt does not match durable state",
+        )
+    return receipt
+
+
+def recover_committed_receipts(
+    brain_root: Path,
+    bindings: Iterable[BatchBinding | Mapping[str, object]],
+    *,
+    expected_receipts: Iterable[Mapping[str, object] | None],
+) -> tuple[dict[str, object] | None, ...]:
+    """Verify an ordered batch receipt chain and its current committed tail."""
+    normalized_bindings = tuple(
+        normalize_batch_binding(binding)
+        for binding in bindings
+    )
+    if any(binding is None for binding in normalized_bindings):
+        raise ValueError("committed receipt bindings cannot contain None")
+    expected = tuple(expected_receipts)
+    if len(normalized_bindings) != len(expected):
+        raise ValueError("receipt bindings and expected receipts length mismatch")
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=False):
+            return recover_committed_receipts(
+                brain_root,
+                tuple(
+                    binding
+                    for binding in normalized_bindings
+                    if binding is not None
+                ),
+                expected_receipts=expected,
+            )
+    scope = _current_lock_scope(brain_root)
+    scope.verify_lexical_bindings()
+    anchored = scope.anchored
+    receipts: list[dict[str, object] | None] = []
+    missing_seen = False
+    for binding, expected_receipt in zip(
+        normalized_bindings,
+        expected,
+    ):
+        assert binding is not None
+        try:
+            receipt = _recover_committed_receipt_anchored(
+                anchored,
+                binding,
+                expected_receipt=expected_receipt,
+                verify_current=False,
+            )
+        except CorpusIOError as exc:
+            if (
+                expected_receipt is None
+                and exc.code in {
+                    "batch_intent_missing",
+                    "committed_receipt_missing",
+                    "receipt_not_committed",
+                }
+            ):
+                receipt = None
+            else:
+                raise
+        if receipt is None:
+            missing_seen = True
+        elif missing_seen:
+            raise CorpusIOError(
+                "committed_receipt_gap",
+                "a committed batch receipt appears after a missing item",
+            )
+        receipts.append(receipt)
+    committed = [
+        receipt
+        for receipt in receipts
+        if receipt is not None
+    ]
+    for previous, current in zip(committed, committed[1:]):
+        if previous["after_fingerprint"] != current["before_fingerprint"]:
+            raise CorpusIOError(
+                "committed_receipt_chain_mismatch",
+                "batch receipt before/after fingerprints do not form a chain",
+            )
+    if committed:
+        tail_index = max(
+            index
+            for index, receipt in enumerate(receipts)
+            if receipt is not None
+        )
+        tail_binding = normalized_bindings[tail_index]
+        assert tail_binding is not None
+        _recover_committed_receipt_anchored(
+            anchored,
+            tail_binding,
+            expected_receipt=committed[-1],
+            verify_current=True,
+        )
+    return tuple(receipts)
+
+
+def recover_committed_receipt(
+    brain_root: Path,
+    binding: BatchBinding | Mapping[str, object],
+    *,
+    expected_receipt: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Recover and verify the exact receipt for one durably committed item."""
+    normalized = normalize_batch_binding(binding)
+    assert normalized is not None
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=False):
+            return recover_committed_receipt(
+                brain_root,
+                normalized,
+                expected_receipt=expected_receipt,
+            )
+    scope = _current_lock_scope(brain_root)
+    scope.verify_lexical_bindings()
+    return _recover_committed_receipt_anchored(
+        scope.anchored,
+        normalized,
+        expected_receipt=expected_receipt,
+        verify_current=True,
+    )
+
+
 def apply_transaction(
     brain_root: Path,
     *,
@@ -1322,6 +1754,9 @@ def apply_transaction(
     journal: dict[str, Any] | None = None
     try:
             _validate_manifest_model(manifest, transaction_id)
+            batch_binding = normalize_batch_binding(
+                manifest.get("batch_binding")
+            )
             entries = _build_entries_anchored(
                 anchored,
                 manifest,
@@ -1345,6 +1780,7 @@ def apply_transaction(
                     _empty_derived_fingerprint()
                 ),
                 "applied": [],
+                "batch_binding": batch_binding_dict(batch_binding),
             }
             _validate_journal_model(journal, transaction_id)
 
@@ -1413,6 +1849,17 @@ def apply_transaction(
             )
             os.fsync(preparing.fd)
             os.fsync(transactions.fd)
+            if batch_binding is not None:
+                _publish_batch_intent_anchored(
+                    anchored,
+                    manifest,
+                    batch_binding,
+                )
+                _inject(
+                    failure_injector,
+                    "after_batch_intent_fsync",
+                )
+                scope.verify_lexical_bindings()
 
             live_parents = _pin_live_parents(
                 anchored,
@@ -1588,9 +2035,17 @@ def apply_transaction(
             _verify_live_bindings(anchored, live_parents)
             journal["state"] = JournalState.COMMITTED.value
             _write_journal_at(private_fd, journal)
+            if batch_binding is not None:
+                _inject(
+                    failure_injector,
+                    "after_journal_committed",
+                )
     except CorpusIOError as exc:
         if (
-            exc.code != "path_binding_changed"
+            exc.code not in {
+                "path_binding_changed",
+                "batch_intent_mismatch",
+            }
             or journal is None
             or private_fd is None
         ):
@@ -1614,7 +2069,7 @@ def apply_transaction(
             raise RecoveryRequiredError(
                 (
                     f"{transaction_id}: automatic rollback after "
-                    f"binding change failed: {rollback_exc}"
+                    f"pre-commit validation failure failed: {rollback_exc}"
                 ),
                 transaction_ids=(transaction_id,),
             ) from rollback_exc
@@ -2106,6 +2561,17 @@ def _validate_journal_model(
     if not isinstance(manifest, Mapping):
         raise ValueError("manifest must be an object")
     expected_entries = _validate_manifest_model(manifest, transaction_id)
+    try:
+        manifest_binding = normalize_batch_binding(
+            manifest.get("batch_binding")
+        )
+        journal_binding = normalize_batch_binding(
+            journal.get("batch_binding")
+        )
+    except ValueError as exc:
+        raise ValueError(f"batch binding is invalid: {exc}") from exc
+    if journal_binding != manifest_binding:
+        raise ValueError("journal batch binding does not match manifest")
 
     raw_entries = journal.get("entries")
     if not isinstance(raw_entries, list):
@@ -2208,6 +2674,7 @@ def _validate_manifest_model(
         "expected_after_fingerprint",
         "grandfathered_problems_before",
         "grandfathered_problems_after",
+        "batch_binding",
     }
     if set(manifest) != required:
         raise ValueError("manifest keys do not match the contract")
@@ -2224,6 +2691,17 @@ def _validate_manifest_model(
         raise ValueError("manifest before_fingerprint is invalid")
     if not _is_sha256(manifest.get("expected_after_fingerprint")):
         raise ValueError("manifest expected_after_fingerprint is invalid")
+    try:
+        batch_binding = normalize_batch_binding(
+            manifest.get("batch_binding")
+        )
+    except ValueError as exc:
+        raise ValueError(f"manifest batch_binding is invalid: {exc}") from exc
+    if batch_binding is not None:
+        if manifest.get("operation") != "ingest":
+            raise ValueError("manifest batch_binding requires ingest operation")
+        if batch_binding.engine_sha != manifest.get("engine_sha"):
+            raise ValueError("manifest batch_binding engine_sha mismatch")
     for field_name in (
         "grandfathered_problems_before",
         "grandfathered_problems_after",

@@ -32,6 +32,11 @@ from project_brain.schema import (
     validate_object_id,
 )
 from project_brain.store import BrainStore, StoreLoadError
+from project_brain.transaction_receipt import (
+    BatchBinding,
+    batch_binding_dict,
+    normalize_batch_binding,
+)
 
 
 _COORDINATE_FIELDS = (
@@ -82,6 +87,7 @@ class MutationRequest:
     preconditions: Mapping[str, str] = field(default_factory=dict)
     expected_corpus_fingerprint: str | None = None
     auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = ()
+    batch_binding: BatchBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,7 @@ class MutationManifest:
     expected_after_fingerprint: str
     grandfathered_problems_before: tuple[dict, ...]
     grandfathered_problems_after: tuple[dict, ...]
+    batch_binding: dict[str, str] | None
 
 
 @dataclass(frozen=True)
@@ -862,6 +869,16 @@ def _validate_request_shape(
             raise ValueError(
                 "expected_corpus_fingerprint must be None or a non-empty string"
             )
+        binding = normalize_batch_binding(request.batch_binding)
+        if binding is not None:
+            if request.operation is not MutationOperation.INGEST:
+                raise ValueError(
+                    "batch_binding is allowed only for ingest mutations"
+                )
+            if binding.engine_sha != request.engine_sha:
+                raise ValueError(
+                    "batch_binding.engine_sha must match request.engine_sha"
+                )
         return tuple(dict(obj) for obj in raw_inputs), None
     except Exception as exc:
         return None, _failure("request_invalid", str(exc))
@@ -1287,6 +1304,7 @@ def _build_manifest(
             key=lambda item: item.path,
         )
     )
+    batch_binding = batch_binding_dict(request.batch_binding)
     seed = {
         "operation": request.operation.value,
         "engine_sha": request.engine_sha,
@@ -1300,6 +1318,7 @@ def _build_manifest(
         "expected_after_fingerprint": expected_after_fingerprint,
         "grandfathered_problems_before": before_grandfathered,
         "grandfathered_problems_after": after_grandfathered,
+        "batch_binding": batch_binding,
     }
     transaction_id = hashlib.sha256(
         json.dumps(
@@ -1323,6 +1342,7 @@ def _build_manifest(
         expected_after_fingerprint=expected_after_fingerprint,
         grandfathered_problems_before=before_grandfathered,
         grandfathered_problems_after=after_grandfathered,
+        batch_binding=batch_binding,
     )
 
 

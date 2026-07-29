@@ -14,6 +14,7 @@ from project_brain.mutation import (
     MutationService,
 )
 from project_brain.repo_context import RepoContext
+from project_brain.transaction_receipt import BatchBinding
 
 
 class IngestError(RuntimeError):
@@ -29,6 +30,7 @@ def ingest(
     repo_context: RepoContext | None = None,
     operation: MutationOperation = MutationOperation.INGEST,
     expected_corpus_fingerprint: str | None = None,
+    batch_binding: BatchBinding | None = None,
 ):
     """한 bundle을 공통 mutation service로 원자 적용한다."""
     inputs = tuple(objects)
@@ -40,6 +42,7 @@ def ingest(
         objects=inputs,
         preconditions=preconditions or {},
         expected_corpus_fingerprint=expected_corpus_fingerprint,
+        batch_binding=batch_binding,
     )
     result = MutationService().apply(inputs, request=request)
     if not result.ok:

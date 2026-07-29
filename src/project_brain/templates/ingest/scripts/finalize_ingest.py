@@ -11,6 +11,10 @@ from typing import Any, Callable
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
+ReceiptRecoverer = Callable[
+    [Path, tuple[dict[str, str], ...], tuple[dict[str, Any], ...]],
+    tuple[dict[str, Any] | None, ...],
+]
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TRANSACTION_FIELDS = {
     "ok",
@@ -122,6 +126,101 @@ def validate_transaction_results(value: Any) -> list[dict[str, Any]]:
             raise ValueError(f"{prefix}.ingested_count가 ingested_ids와 다릅니다")
         normalized.append(dict(raw))
     return normalized
+
+
+def validate_item_records(value: Any) -> list[dict[str, Any]]:
+    """Validate the authoritative batch records before journal recovery."""
+    from project_brain.transaction_receipt import (
+        batch_binding_dict,
+        normalize_batch_binding,
+    )
+
+    if not isinstance(value, list) or not value:
+        raise ValueError("item records는 비어 있지 않은 배열이어야 합니다")
+    normalized: list[dict[str, Any]] = []
+    item_keys: set[str] = set()
+    for index, raw in enumerate(value):
+        prefix = f"item records[{index}]"
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"binding", "status", "failure", "transaction"}
+        ):
+            raise ValueError(f"{prefix} 필드가 정확하지 않습니다")
+        binding = normalize_batch_binding(raw.get("binding"))
+        assert binding is not None
+        binding_payload = batch_binding_dict(binding)
+        assert binding_payload is not None
+        if binding.item_key in item_keys:
+            raise ValueError(f"{prefix}.binding.item_key가 중복입니다")
+        item_keys.add(binding.item_key)
+        if raw.get("status") != "committed":
+            raise ValueError(f"{prefix}.status는 committed여야 합니다")
+        if raw.get("failure") is not None:
+            raise ValueError(f"{prefix}.failure는 null이어야 합니다")
+        transaction = validate_transaction_results([raw.get("transaction")])[0]
+        normalized.append({
+            "binding": binding_payload,
+            "status": "committed",
+            "failure": None,
+            "transaction": transaction,
+        })
+    return normalized
+
+
+def _default_config_loader(start: Path) -> dict[str, Any] | None:
+    from project_brain.config import load_config
+
+    return load_config(start=start)
+
+
+def _default_receipt_recoverer(
+    brain_root: Path,
+    bindings: tuple[dict[str, str], ...],
+    expected_receipts: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any] | None, ...]:
+    from project_brain.corpus_io import recover_committed_receipts
+
+    return recover_committed_receipts(
+        brain_root,
+        bindings,
+        expected_receipts=expected_receipts,
+    )
+
+
+def recover_item_record_transactions(
+    value: Any,
+    *,
+    repo_root: Path,
+    receipt_recoverer: ReceiptRecoverer = _default_receipt_recoverer,
+    config_loader: Callable[[Path], dict[str, Any] | None] = _default_config_loader,
+) -> list[dict[str, Any]]:
+    """Resolve exact committed receipts from the durable intent/journal chain."""
+    records = validate_item_records(value)
+    root = Path(repo_root).resolve()
+    configured = config_loader(root)
+    if (
+        not isinstance(configured, dict)
+        or Path(configured.get("root", "")).resolve() != root
+        or not isinstance(configured.get("brain_root"), Path)
+    ):
+        raise ValueError("item record receipt verification config is unavailable")
+    bindings = tuple(record["binding"] for record in records)
+    expected = tuple(record["transaction"] for record in records)
+    recovered = receipt_recoverer(
+        configured["brain_root"],
+        bindings,
+        expected,
+    )
+    if len(recovered) != len(expected):
+        raise ValueError("durable receipt result length mismatch")
+    transactions: list[dict[str, Any]] = []
+    for index, (actual, expected_receipt) in enumerate(zip(recovered, expected)):
+        if actual != expected_receipt:
+            raise ValueError(
+                f"item records[{index}] durable receipt does not match"
+            )
+        transactions.append(expected_receipt)
+    return transactions
 
 
 def normalize_baseline(value: Any, expected_unmerged_locator_ids: Any = ()) -> dict[str, Any]:
@@ -244,10 +343,31 @@ def capture_isolation_baseline(runner: CommandRunner = _default_runner) -> dict:
             "unmerged_locator_ids": git_state["unmerged_locator_ids"]}
 
 
-def run_finalization(contract: Any, baseline_ids: Any, transaction_results: Any = None,
-                     runner: CommandRunner = _default_runner) -> dict:
+def run_finalization(
+    contract: Any,
+    baseline_ids: Any,
+    transaction_results: Any = None,
+    runner: CommandRunner = _default_runner,
+    *,
+    item_records: Any = None,
+    repo_root: Path | None = None,
+    receipt_recoverer: ReceiptRecoverer = _default_receipt_recoverer,
+    config_loader: Callable[[Path], dict[str, Any] | None] = _default_config_loader,
+) -> dict:
     config = validate_contract(contract)
-    transactions = validate_transaction_results(transaction_results)
+    if item_records is not None:
+        if transaction_results is not None or repo_root is None:
+            raise ValueError(
+                "item records에는 repo_root가 필요하며 transaction results와 함께 쓸 수 없습니다"
+            )
+        transactions = recover_item_record_transactions(
+            item_records,
+            repo_root=repo_root,
+            receipt_recoverer=receipt_recoverer,
+            config_loader=config_loader,
+        )
+    else:
+        transactions = validate_transaction_results(transaction_results)
     baseline = normalize_baseline(baseline_ids, config["expected_unmerged_locator_ids"])
     commands = {
         "index_rebuild": _run_command(
@@ -395,12 +515,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--transactions", type=Path)
     parser.add_argument("--transaction-result", type=Path)
+    parser.add_argument("--item-records", type=Path)
+    parser.add_argument("--repo-root", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.validate_config is not None:
             if (args.capture_baseline or args.config is not None
                     or args.baseline is not None or args.transactions is not None
                     or args.transaction_result is not None
+                    or args.item_records is not None or args.repo_root is not None
                     or args.validate_transaction is not None):
                 raise ValueError("--validate-config은 다른 모드 인자와 함께 쓸 수 없습니다")
             validate_contract(_read_json(args.validate_config))
@@ -408,34 +531,49 @@ def main(argv: list[str] | None = None) -> int:
         elif args.validate_transaction is not None:
             if (args.capture_baseline or args.config is not None
                     or args.baseline is not None or args.transactions is not None
-                    or args.transaction_result is not None):
+                    or args.transaction_result is not None
+                    or args.item_records is not None or args.repo_root is not None):
                 raise ValueError("--validate-transaction은 다른 모드 인자와 함께 쓸 수 없습니다")
             validate_transaction_results([_read_json(args.validate_transaction)])
             report = {"ok": True, "validated_transactions": 1}
         elif args.capture_baseline:
             if (args.config is not None or args.baseline is not None
-                    or args.transactions is not None
-                    or args.transaction_result is not None):
+                    or args.transactions is not None or args.transaction_result is not None
+                    or args.item_records is not None or args.repo_root is not None):
                 raise ValueError("--capture-baseline은 다른 인자와 함께 쓸 수 없습니다")
             report = capture_isolation_baseline()
         else:
             if (
                 args.config is None
                 or args.baseline is None
-                or (args.transactions is None) == (args.transaction_result is None)
+                or sum(
+                    value is not None
+                    for value in (
+                        args.transactions,
+                        args.transaction_result,
+                        args.item_records,
+                    )
+                ) != 1
+                or (args.item_records is None) != (args.repo_root is None)
             ):
                 raise ValueError(
-                    "--config, --baseline과 --transactions 또는 --transaction-result 하나가 필요합니다"
+                    "--config, --baseline과 transaction 입력 하나가 필요합니다"
                 )
-            transaction_results = (
-                _read_json(args.transactions)
-                if args.transactions is not None
-                else [_read_json(args.transaction_result)]
-            )
+            transaction_results = None
+            if args.transactions is not None:
+                transaction_results = _read_json(args.transactions)
+            elif args.transaction_result is not None:
+                transaction_results = [_read_json(args.transaction_result)]
             report = run_finalization(
                 _read_json(args.config),
                 _read_json(args.baseline),
                 transaction_results,
+                item_records=(
+                    _read_json(args.item_records)
+                    if args.item_records is not None
+                    else None
+                ),
+                repo_root=args.repo_root,
             )
     except ValueError as exc:
         report = {"ok": False, "transactions": [], "commands": {},

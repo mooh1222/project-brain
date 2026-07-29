@@ -10,12 +10,16 @@ import pytest
 
 import project_brain.corpus_io as corpus_io
 from project_brain.corpus_io import (
+    CorpusIOError,
     JournalState,
     RecoveryRequiredError,
     apply_transaction,
+    batch_intent_relative_path,
     corpus_lock,
     fsync_directory,
     fsync_file,
+    recover_committed_receipt,
+    recover_committed_receipts,
     recover_unfinished_transaction,
 )
 from project_brain.mutation import (
@@ -25,6 +29,7 @@ from project_brain.mutation import (
     MutationService,
 )
 from project_brain.store import BrainStore
+from project_brain.transaction_receipt import BatchBinding, batch_intent_id
 from tests.test_ingest import candidate_term, context
 from tests.test_mutation import _code_locator
 
@@ -58,13 +63,39 @@ def _write_object(brain_root: Path, obj: dict) -> Path:
     return path
 
 
-def _request(brain_root: Path, objects: tuple[dict, ...]) -> MutationRequest:
+def _batch_binding(
+    *,
+    item_key: str = "one",
+    item_input_fingerprint: str = "1" * 64,
+) -> BatchBinding:
+    return BatchBinding(
+        batch_manifest_sha256="a" * 64,
+        item_key=item_key,
+        item_input_fingerprint=item_input_fingerprint,
+        verify_json_sha256="b" * 64,
+        domain_spec_py_sha256="c" * 64,
+        repo_root="/repo",
+        expected_repo_id="demo",
+        expected_revision_ref="HEAD",
+        target_revision_sha="d" * 40,
+        engine_root="/engine",
+        engine_sha="e" * 40,
+    )
+
+
+def _request(
+    brain_root: Path,
+    objects: tuple[dict, ...],
+    *,
+    batch_binding: BatchBinding | None = None,
+) -> MutationRequest:
     return MutationRequest(
         operation=MutationOperation.INGEST,
         brain_root=brain_root,
         repo_context=None,
         engine_sha="e" * 40,
         objects=objects,
+        batch_binding=batch_binding,
     )
 
 
@@ -152,6 +183,231 @@ def test_low_level_api_exposes_exact_journal_states_and_fsyncs(tmp_path):
     fsync_directory(brain_root)
     with corpus_lock(brain_root, exclusive=False):
         assert (brain_root / ".brain-local" / "corpus.lock").is_file()
+
+
+def test_batch_intent_identity_binds_key_even_when_input_bytes_match():
+    first = _batch_binding(item_key="one")
+    second = _batch_binding(item_key="two")
+
+    assert first.item_input_fingerprint == second.item_input_fingerprint
+    assert batch_intent_id(first) != batch_intent_id(second)
+    assert batch_intent_id(first) == hashlib.sha256(
+        json.dumps(
+            {
+                "batch_manifest_sha256": first.batch_manifest_sha256,
+                "item_input_fingerprint": first.item_input_fingerprint,
+                "item_key": first.item_key,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_batch_intent_is_durable_before_commit_and_noncommitted_is_rejected(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding()
+
+    with pytest.raises(InjectedCrash, match="after_batch_intent_fsync"):
+        MutationService().apply(
+            (after,),
+            request=_request(
+                brain_root,
+                (after,),
+                batch_binding=binding,
+            ),
+            failure_injector=_crash_at("after_batch_intent_fsync"),
+        )
+
+    intent_path = brain_root / batch_intent_relative_path(binding)
+    assert intent_path.is_file()
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert intent["batch_binding"] == asdict(binding)
+    journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / intent["transaction_id"]
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["state"] != "committed"
+    with pytest.raises(CorpusIOError, match="receipt_not_committed"):
+        recover_committed_receipt(brain_root, binding)
+
+
+def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding()
+
+    with pytest.raises(InjectedCrash, match="after_journal_committed"):
+        MutationService().apply(
+            (after,),
+            request=_request(
+                brain_root,
+                (after,),
+                batch_binding=binding,
+            ),
+            failure_injector=_crash_at("after_journal_committed"),
+        )
+
+    receipt = recover_committed_receipt(brain_root, binding)
+
+    assert receipt == {
+        "ok": True,
+        "transaction_id": receipt["transaction_id"],
+        "operation": "ingest",
+        "committed": True,
+        "manifest_sha256": receipt["manifest_sha256"],
+        "before_fingerprint": receipt["before_fingerprint"],
+        "after_fingerprint": receipt["after_fingerprint"],
+        "ingested_ids": [after["id"]],
+        "ingested_count": 1,
+    }
+    assert len(receipt["transaction_id"]) == 64
+    assert len(receipt["manifest_sha256"]) == 64
+    assert BrainStore.load(brain_root).get(after["id"]) == after
+
+
+def test_committed_receipt_rejects_forged_envelope_and_intent(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding()
+    result = MutationService().apply(
+        (after,),
+        request=_request(brain_root, (after,), batch_binding=binding),
+    )
+    receipt = recover_committed_receipt(brain_root, binding)
+
+    forged = dict(receipt, manifest_sha256="0" * 64)
+    with pytest.raises(CorpusIOError, match="receipt_mismatch"):
+        recover_committed_receipt(
+            brain_root,
+            binding,
+            expected_receipt=forged,
+        )
+
+    intent_path = brain_root / batch_intent_relative_path(binding)
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["transaction_id"] = "f" * 64
+    intent_path.write_text(
+        json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        (CorpusIOError, RecoveryRequiredError),
+        match="intent|transaction|journal",
+    ):
+        recover_committed_receipt(brain_root, binding)
+    assert result.manifest is not None
+
+
+def test_existing_batch_intent_never_overwrites_mismatched_plan(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding()
+    service = MutationService()
+
+    with pytest.raises(InjectedCrash):
+        service.apply(
+            (after,),
+            request=_request(brain_root, (after,), batch_binding=binding),
+            failure_injector=_crash_at("after_batch_intent_fsync"),
+        )
+    recover_unfinished_transaction(brain_root)
+    original_intent = (
+        brain_root / batch_intent_relative_path(binding)
+    ).read_bytes()
+    different = dict(after, title="different")
+
+    with pytest.raises(CorpusIOError, match="batch_intent_mismatch"):
+        service.apply(
+            (different,),
+            request=_request(
+                brain_root,
+                (different,),
+                batch_binding=binding,
+            ),
+        )
+    assert (
+        brain_root / batch_intent_relative_path(binding)
+    ).read_bytes() == original_intent
+    assert BrainStore.load(brain_root).get(before["id"]) == before
+
+
+def test_committed_receipt_chain_verifies_all_items_and_current_tail(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    original = context()
+    first_after = dict(original, title="first")
+    second_after = dict(original, title="second")
+    _write_object(brain_root, original)
+    first_binding = _batch_binding(item_key="one")
+    second_binding = _batch_binding(item_key="two")
+    service = MutationService()
+    service.apply(
+        (first_after,),
+        request=_request(
+            brain_root,
+            (first_after,),
+            batch_binding=first_binding,
+        ),
+    )
+    service.apply(
+        (second_after,),
+        request=_request(
+            brain_root,
+            (second_after,),
+            batch_binding=second_binding,
+        ),
+    )
+
+    receipts = recover_committed_receipts(
+        brain_root,
+        (first_binding, second_binding),
+        expected_receipts=(None, None),
+    )
+
+    assert all(receipt is not None for receipt in receipts)
+    assert receipts[0]["after_fingerprint"] == receipts[1]["before_fingerprint"]
+    assert receipts[0]["transaction_id"] != receipts[1]["transaction_id"]
+    assert BrainStore.load(brain_root).get(original["id"]) == second_after
+
+
+def test_committed_receipt_chain_allows_missing_tail_but_not_gaps(tmp_path):
+    brain_root = tmp_path / "brain"
+    original, first_after = _changed_context()
+    _write_object(brain_root, original)
+    first_binding = _batch_binding(item_key="one")
+    missing_binding = _batch_binding(item_key="two")
+    MutationService().apply(
+        (first_after,),
+        request=_request(
+            brain_root,
+            (first_after,),
+            batch_binding=first_binding,
+        ),
+    )
+
+    receipts = recover_committed_receipts(
+        brain_root,
+        (first_binding, missing_binding),
+        expected_receipts=(None, None),
+    )
+
+    assert receipts[0] is not None
+    assert receipts[1] is None
 
 
 def test_locked_reader_uses_pinned_root_after_lexical_root_swap(tmp_path):

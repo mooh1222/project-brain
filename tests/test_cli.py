@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
@@ -24,8 +25,12 @@ from project_brain.mutation import (
     MutationService,
     corpus_fingerprint,
 )
-from project_brain.repo_context import RepoContext
+from project_brain.repo_context import (
+    RepoContext,
+    resolve_git_checkout,
+)
 from project_brain.store import BrainStore
+from project_brain.transaction_receipt import BatchBinding
 from tests.test_ingest import (
     candidate_term,
     context,
@@ -385,6 +390,103 @@ class TestCli(unittest.TestCase):
         self.assertTrue(store.has("manifest.neutral.source"))
         self.assertTrue(store.has("evref.neutral.ref"))
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
+
+    def test_cli_batch_ingest_binds_inputs_state_and_durable_receipt(self):
+        project = self.input_dir / "batch-project"
+        brain = project / "brain"
+        project.mkdir()
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain", "repo": "demo"}),
+            encoding="utf-8",
+        )
+        _commit_git_fixture(project)
+        target_sha = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        engine = resolve_git_checkout(Path(cli.__file__))
+        verify = self.input_dir / "batch-verify.json"
+        domain = self.input_dir / "batch-domain.py"
+        verify.write_text("{}\n", encoding="utf-8")
+        domain.write_text("# domain\n", encoding="utf-8")
+        binding = BatchBinding(
+            batch_manifest_sha256="a" * 64,
+            item_key="one",
+            item_input_fingerprint="b" * 64,
+            verify_json_sha256=hashlib.sha256(
+                verify.read_bytes()
+            ).hexdigest(),
+            domain_spec_py_sha256=hashlib.sha256(
+                domain.read_bytes()
+            ).hexdigest(),
+            repo_root=str(project.resolve()),
+            expected_repo_id="demo",
+            expected_revision_ref="HEAD",
+            target_revision_sha=target_sha,
+            engine_root=str(engine.root),
+            engine_sha=engine.head_sha,
+        )
+        binding_file = self.input_dir / "batch-binding.json"
+        binding_file.write_text(
+            json.dumps(
+                asdict(binding),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        objects_file = self.input_dir / "batch-objects.json"
+        obj = context()
+        objects_file.write_text(
+            json.dumps([obj], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        out = io.StringIO()
+        original_apply = MutationService.apply
+        argv = [
+            "cli",
+            "ingest",
+            "--brain-root",
+            str(brain.resolve()),
+            "--objects-file",
+            str(objects_file),
+            "--repo-root",
+            str(project.resolve()),
+            "--expected-repo-id",
+            "demo",
+            "--expected-revision-ref",
+            "HEAD",
+            "--engine-sha",
+            engine.head_sha,
+            "--batch-binding-file",
+            str(binding_file.resolve()),
+            "--verify-json",
+            str(verify.resolve()),
+            "--domain-spec-py",
+            str(domain.resolve()),
+        ]
+
+        with mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch("sys.argv", argv), redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+
+        payload = json.loads(out.getvalue())
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["ingested_ids"], [obj["id"]])
+        request = apply.call_args.kwargs["request"]
+        self.assertEqual(request.batch_binding, binding)
+        self.assertEqual(
+            request.repo_context.target_revision_sha,
+            binding.target_revision_sha,
+        )
 
     def test_cli_ingest_resolves_config_repo_context_and_exact_revision(self):
         from tests.test_mutation import _code_locator, _write_raw

@@ -22,14 +22,18 @@
 ## 실행 후 일곱 게이트
 
 1. 동적 workflow 결과가 있으면 `scripts/validate_workflow_result.py <결과.json>`이 통과했다. 직접 단건 실행이면 `해당 없음`으로 기록한다.
-2. batch 모드면 `batch-report.json`에서 `expected == len(succeeded)`, `failed=[]`, `finalized=true`,
-   `finalization.ok=true`다. `transactions`가 성공 item과 일대일이고 각 transaction의
-   `committed=true`, exact `manifest_sha256`, ingest ID/count가 확인됐다. transaction이 없거나
-   불일치하거나 noncommitted면 `finalized=false`여야 한다. 최초 `isolation_baseline`이 보존됐고
-   absolute repo identity, engine SHA, batch manifest hash, finalization 계약을 포함한
-   `manifest_fingerprint`가 resume 입력과 일치한다. post head == baseline head이고, post unmerged는
-   baseline union expected와 일치한다. legacy baseline은 그 제한을 그대로 적용하며, 사용할 수 없는
-   감사 상태를 만들어 내지 않는다. 직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.
+2. batch 모드면 `batch-report.json`에서 `expected == len(item_records)`, 모든 record의
+   `status=committed`, `failed=[]`, `finalized=true`, `finalization.ok=true`다. authoritative
+   `item_records` 각각에 item/input binding과 exact transaction이 한 객체로 묶였고, root-anchored
+   intent/journal의 `durable receipt`와 일치한다. canonical `manifest_sha256`, operation, engine SHA,
+   action object IDs, before/after/current corpus fingerprint, ingest ID/count가 확인됐다. receipt가
+   없거나 불일치하거나 noncommitted면 `finalized=false`여야 한다. 최초 `isolation_baseline`이
+   보존됐고 absolute repo identity, resolved `target_revision_sha`, 실제 engine root/HEAD, root
+   inode, batch manifest hash, immutable staged 입력 hash, finalization 계약이 resume 입력과
+   일치한다. `transactions`·`succeeded`·`failed`는 item_records에서 파생된 호환 필드다.
+   post head == baseline head이고, post unmerged는 baseline union expected와 일치한다. legacy
+   baseline은 그 제한을 그대로 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
+   직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.
 3. lint 결과가 0건이다.
 4. `project-brain eval`이 모두 통과했다.
 5. finalization의 `unexpected_new_ids=[]`다. 이번 적재로 새로 생긴 고립 객체 중
