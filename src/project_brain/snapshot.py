@@ -1173,16 +1173,22 @@ def _append_phase(phase_fd: int, phase: str) -> None:
     os.fsync(phase_fd)
 
 
-def _read_phases(phase_fd: int, *, paths: tuple[Path, ...]) -> tuple[str, ...]:
-    try:
-        text = _read_descriptor(phase_fd).decode("ascii")
-    except UnicodeError as exc:
-        _fail("recovery_required", f"restore phase log is invalid: {exc}", paths=paths)
-    phases = tuple(text.splitlines())
-    allowed = ("preparing", "prepared", "moved_live", "activated")
-    if not phases or phases != allowed[:len(phases)]:
+def _read_phases(phase_fd: int, *, paths: tuple[Path, ...]) -> tuple[bytes, ...]:
+    payload = _read_descriptor(phase_fd)
+    if not payload.endswith(b"\n"):
+        _fail(
+            "recovery_required",
+            "restore phase log has a torn final record",
+            paths=paths,
+        )
+    records = payload.split(b"\n")
+    if records[-1] != b"":
+        raise AssertionError("LF-terminated split must have one trailing empty record")
+    records = records[:-1]
+    allowed = (b"preparing", b"prepared", b"moved_live", b"activated")
+    if not records or tuple(records) != allowed[:len(records)]:
         _fail("recovery_required", "restore phase sequence is invalid", paths=paths)
-    return phases
+    return tuple(records)
 
 
 def _create_restore_journal(
@@ -1574,7 +1580,7 @@ def _recover_restore(
                 root_binding != bindings["staged"]
                 or backup_binding != bindings["backup"]
                 or staged_binding is not None
-                or phases[-1] not in {"moved_live", "activated"}
+                or phases[-1] not in {b"moved_live", b"activated"}
             ):
                 _fail(
                     "recovery_required",

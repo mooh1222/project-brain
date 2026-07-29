@@ -520,6 +520,100 @@ def test_recovery_rejects_inode_replacement_without_mutation(tmp_path, artifact)
     assert journal_path.read_bytes() == journal_before
 
 
+_INVALID_PHASE_LOGS = (
+    pytest.param(b"preparing", id="torn-preparing"),
+    pytest.param(b"preparing\nprepared", id="torn-prepared"),
+    pytest.param(
+        b"preparing\nprepared\nmoved_live",
+        id="torn-moved-live",
+    ),
+    pytest.param(
+        b"preparing\nprepared\nmoved_live\nactivated",
+        id="torn-activated",
+    ),
+    pytest.param(
+        b"preparing\r\nprepared\r\nmoved_live\r\n",
+        id="crlf",
+    ),
+    pytest.param(
+        b"preparing\vprepared\nmoved_live\n",
+        id="vertical-tab",
+    ),
+    pytest.param(
+        b"preparing\fprepared\nmoved_live\n",
+        id="form-feed",
+    ),
+    pytest.param(b"\npreparing\n", id="leading-empty"),
+    pytest.param(b"preparing\n\nprepared\n", id="internal-empty"),
+    pytest.param(b"preparing\x00\n", id="nul"),
+    pytest.param(b"preparing\xc3\xa9\n", id="non-ascii"),
+    pytest.param(b"preparing\npreparing\n", id="duplicate"),
+    pytest.param(b"preparing\nmoved_live\n", id="out-of-order"),
+    pytest.param(b"prepar\n", id="partial-token"),
+)
+
+
+@pytest.mark.parametrize("invalid_log", _INVALID_PHASE_LOGS)
+def test_recovery_rejects_noncanonical_phase_log_without_mutation(
+    tmp_path,
+    invalid_log,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    original_rename = snapshot._rename_entry
+    calls = 0
+
+    def fail_activation_and_rollback(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls in {2, 3}:
+            raise OSError(f"injected rename failure {calls}")
+        original_rename(source_fd, source_name, destination_fd, destination_name)
+
+    with mock.patch.object(
+        snapshot,
+        "_rename_entry",
+        side_effect=fail_activation_and_rollback,
+    ):
+        with pytest.raises(SnapshotError):
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    state_root = snapshot._restore_state_root(request.brain_root)
+    journal_path = state_root / "journal.json"
+    phase_path = state_root / "phases.log"
+    journal_before = journal_path.read_bytes()
+    phase_path.write_bytes(invalid_log)
+    workspace = Path(json.loads(journal_before)["workspace"])
+    backup = workspace / "backup"
+    staged = workspace / "staged"
+    backup_binding = backup.stat().st_ino
+    staged_binding = staged.stat().st_ino
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "recovery_required"
+    assert not request.brain_root.exists()
+    assert journal_path.read_bytes() == journal_before
+    assert phase_path.read_bytes() == invalid_log
+    assert backup.stat().st_ino == backup_binding
+    assert staged.stat().st_ino == staged_binding
+
+
 def test_restore_preserves_recovery_state_if_activation_and_rollback_fail(
     tmp_path,
 ):
