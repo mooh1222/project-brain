@@ -448,6 +448,9 @@ class IngestSkillContractTest(unittest.TestCase):
 
         for token in (
             "absolute `repo_root`",
+            "canonical `brain_root`",
+            "`brain_root_device`",
+            "`brain_root_inode`",
             "`expected_repo_id`",
             "`expected_revision_ref`",
             "`target_revision_sha`",
@@ -458,6 +461,8 @@ class IngestSkillContractTest(unittest.TestCase):
             "`item_records`",
             "durable receipt",
             "immutable staged",
+            "post-gate",
+            "post-finalizer",
             "`committed=true`",
         ):
             self.assertIn(token, ingest_tools)
@@ -481,6 +486,8 @@ class IngestSkillContractTest(unittest.TestCase):
             "item_records",
             "durable receipt",
             "target_revision_sha",
+            "brain_root_inode",
+            "post-gate",
             "manifest_sha256",
             "finalized=false",
         ):

@@ -91,6 +91,7 @@ class BatchRunnerCliTest(unittest.TestCase):
     def setUp(self):
         self._td = TemporaryDirectory()
         self.root = Path(self._td.name)
+        (self.root / "brain").mkdir()
         self.runtime = self.root / "runtime"
         self.runtime.mkdir()
         self.manifest_dir = self.root / "manifest"
@@ -605,6 +606,8 @@ class BatchRunnerApiTest(unittest.TestCase):
     def setUp(self):
         self._td = TemporaryDirectory()
         self.root = Path(self._td.name)
+        self.brain_root = self.root / "brain"
+        self.brain_root.mkdir()
         self.manifest_dir = self.root / "manifest"
         self.manifest_dir.mkdir()
         (self.manifest_dir / "verify.json").write_text("{}\n", encoding="utf-8")
@@ -640,6 +643,9 @@ class BatchRunnerApiTest(unittest.TestCase):
         root_stat = self.root.stat()
         state = {
             "repo_root": str(self.root.resolve()),
+            "brain_root": str(self.brain_root.resolve()),
+            "brain_root_device": self.brain_root.stat().st_dev,
+            "brain_root_inode": self.brain_root.stat().st_ino,
             "expected_repo_id": "demo",
             "expected_revision_ref": "HEAD",
             "target_revision_sha": "1" * 40,
@@ -667,6 +673,7 @@ class BatchRunnerApiTest(unittest.TestCase):
 
         self.assertTrue(report["finalized"])
         self.assertEqual(report["repo_root"], str(self.root.resolve()))
+        self.assertEqual(report["brain_root"], str(self.brain_root.resolve()))
         self.assertTrue(Path(report["repo_root"]).is_absolute())
         self.assertEqual(report["expected_repo_id"], "demo")
         self.assertEqual(report["expected_revision_ref"], "HEAD")
@@ -682,6 +689,18 @@ class BatchRunnerApiTest(unittest.TestCase):
         self.assertEqual(observed, [report["item_records"]])
         self.assertEqual(len(report["item_records"]), 1)
         record = report["item_records"][0]
+        self.assertEqual(
+            record["binding"]["brain_root"],
+            report["brain_root"],
+        )
+        self.assertEqual(
+            record["binding"]["brain_root_device"],
+            report["brain_root_device"],
+        )
+        self.assertEqual(
+            record["binding"]["brain_root_inode"],
+            report["brain_root_inode"],
+        )
         self.assertEqual(set(record), {
             "binding", "status", "failure", "transaction",
         })
@@ -709,6 +728,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         )
         self.assertEqual(set(report), {
             "repo_root", "expected_repo_id", "expected_revision_ref", "engine_sha",
+            "brain_root", "brain_root_device", "brain_root_inode",
             "target_revision_sha", "engine_root",
             "repo_root_device", "repo_root_inode",
             "engine_root_device", "engine_root_inode", "manifest_sha256",
@@ -734,6 +754,7 @@ class BatchRunnerApiTest(unittest.TestCase):
             ("target_revision_sha", "2" * 40),
             ("engine_sha", "f" * 40),
             ("engine_root_inode", prior["engine_root_inode"] + 1),
+            ("brain_root_inode", prior["brain_root_inode"] + 1),
         ):
             with self.subTest(field=field):
                 calls: list[str] = []
@@ -798,6 +819,51 @@ class BatchRunnerApiTest(unittest.TestCase):
                     item_calls,
                     [] if drift_call == 2 else ["one"],
                 )
+
+    def test_post_finalizer_state_or_receipt_drift_cannot_set_finalized(self):
+        module = self._module()
+        for drift_kind in ("execution_state", "input", "receipt_tail"):
+            with self.subTest(drift_kind=drift_kind):
+                drifted = False
+                base_state = self._execution_state()
+
+                def resolver(_declared):
+                    state = dict(base_state)
+                    if drifted and drift_kind == "execution_state":
+                        state["target_revision_sha"] = "f" * 40
+                    return state
+
+                def recoverer(_root, _bindings, expected):
+                    if drifted and drift_kind == "receipt_tail":
+                        raise ValueError("object corpus tail changed")
+                    return expected
+
+                def finalizer(_contract, _baseline, records):
+                    nonlocal drifted
+                    drifted = True
+                    if drift_kind == "input":
+                        (self.manifest_dir / "verify.json").write_text(
+                            '{"changed":true}\n',
+                            encoding="utf-8",
+                        )
+                    return finalization_result(records)
+
+                report = module.run_batch(
+                    self.manifest,
+                    self.root / f"post-finalizer-{drift_kind}.json",
+                    item_runner=lambda item: transaction_result(item["key"]),
+                    finalizer=finalizer,
+                    state_resolver=resolver,
+                    receipt_recoverer=recoverer,
+                )
+
+                self.assertFalse(report["finalized"])
+                self.assertIsNotNone(report["finalize_failure"])
+                if drift_kind == "input":
+                    (self.manifest_dir / "verify.json").write_text(
+                        "{}\n",
+                        encoding="utf-8",
+                    )
 
     def test_failure_is_fail_fast_and_resume_restarts_at_tail_head(self):
         module = self._module()
@@ -886,7 +952,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         )
 
         self.assertEqual(calls, [])
-        self.assertEqual(recover_calls, 2)
+        self.assertEqual(recover_calls, 3)
         self.assertEqual(
             resumed["item_records"][0]["status"],
             "committed",
@@ -1392,6 +1458,8 @@ class RunIngestCleanupTest(unittest.TestCase):
     def setUp(self):
         self._td = TemporaryDirectory()
         self.root = Path(self._td.name)
+        self.brain_root = self.root / "brain"
+        self.brain_root.mkdir()
         self.runtime = self.root / "runtime"
         self.runtime.mkdir()
         self.bin_dir = self.root / "bin"
@@ -1521,6 +1589,7 @@ class RunIngestCleanupTest(unittest.TestCase):
                    FAKE_OMIT_FINALIZATION="1" if omit_finalization else "0")
         context_flags = [
             "--repo-root", str(self.root.resolve()),
+            "--brain-root", str(self.brain_root.resolve()),
             "--expected-repo-id", "demo",
             "--expected-revision-ref", "HEAD",
             "--engine-sha", "e" * 40,
@@ -1588,6 +1657,7 @@ class RunIngestCleanupTest(unittest.TestCase):
                            FAKE_OMIT_FINALIZATION="0")
                 context_flags = [
                     "--repo-root", str(self.root.resolve()),
+                    "--brain-root", str(self.brain_root.resolve()),
                     "--expected-repo-id", "demo",
                     "--expected-revision-ref", "HEAD",
                     "--engine-sha", "e" * 40,

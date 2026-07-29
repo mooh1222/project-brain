@@ -21,6 +21,9 @@ _BATCH_BINDING_FIELDS = {
     "verify_json_sha256",
     "domain_spec_py_sha256",
     "repo_root",
+    "brain_root",
+    "brain_root_device",
+    "brain_root_inode",
     "expected_repo_id",
     "expected_revision_ref",
     "target_revision_sha",
@@ -39,6 +42,9 @@ class BatchBinding:
     verify_json_sha256: str
     domain_spec_py_sha256: str
     repo_root: str
+    brain_root: str
+    brain_root_device: int
+    brain_root_inode: int
     expected_repo_id: str
     expected_revision_ref: str
     target_revision_sha: str
@@ -85,7 +91,7 @@ def normalize_batch_binding(
             or "\x00" in value_
         ):
             raise ValueError(f"batch_binding.{field_name} must be non-empty")
-    for field_name in ("repo_root", "engine_root"):
+    for field_name in ("repo_root", "brain_root", "engine_root"):
         value_ = raw.get(field_name)
         if (
             not isinstance(value_, str)
@@ -93,15 +99,27 @@ def normalize_batch_binding(
             or "\x00" in value_
         ):
             raise ValueError(f"batch_binding.{field_name} must be an absolute path")
+    for field_name in ("brain_root_device", "brain_root_inode"):
+        value_ = raw.get(field_name)
+        if (
+            not isinstance(value_, int)
+            or isinstance(value_, bool)
+            or value_ < 0
+        ):
+            raise ValueError(f"batch_binding.{field_name} must be a non-negative int")
     return BatchBinding(**{
-        field_name: str(raw[field_name])
+        field_name: (
+            raw[field_name]
+            if field_name in {"brain_root_device", "brain_root_inode"}
+            else str(raw[field_name])
+        )
         for field_name in BatchBinding.__dataclass_fields__
     })
 
 
 def batch_binding_dict(
     value: BatchBinding | Mapping[str, object] | None,
-) -> dict[str, str] | None:
+) -> dict[str, object] | None:
     normalized = normalize_batch_binding(value)
     return None if normalized is None else asdict(normalized)
 

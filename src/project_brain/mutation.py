@@ -105,7 +105,7 @@ class MutationManifest:
     expected_after_fingerprint: str
     grandfathered_problems_before: tuple[dict, ...]
     grandfathered_problems_after: tuple[dict, ...]
-    batch_binding: dict[str, str] | None
+    batch_binding: dict[str, object] | None
 
 
 @dataclass(frozen=True)
@@ -878,6 +878,16 @@ def _validate_request_shape(
             if binding.engine_sha != request.engine_sha:
                 raise ValueError(
                     "batch_binding.engine_sha must match request.engine_sha"
+                )
+            brain_root = request.brain_root.resolve(strict=True)
+            brain_stat = brain_root.stat()
+            if (
+                binding.brain_root != str(brain_root)
+                or binding.brain_root_device != brain_stat.st_dev
+                or binding.brain_root_inode != brain_stat.st_ino
+            ):
+                raise ValueError(
+                    "batch_binding brain_root identity must match request.brain_root"
                 )
         return tuple(dict(obj) for obj in raw_inputs), None
     except Exception as exc:

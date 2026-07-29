@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
 ReceiptRecoverer = Callable[
-    [Path, tuple[dict[str, str], ...], tuple[dict[str, Any], ...]],
+    [Path, tuple[dict[str, object], ...], tuple[dict[str, Any], ...]],
     tuple[dict[str, Any] | None, ...],
 ]
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -175,7 +175,7 @@ def _default_config_loader(start: Path) -> dict[str, Any] | None:
 
 def _default_receipt_recoverer(
     brain_root: Path,
-    bindings: tuple[dict[str, str], ...],
+    bindings: tuple[dict[str, object], ...],
     expected_receipts: tuple[dict[str, Any], ...],
 ) -> tuple[dict[str, Any] | None, ...]:
     from project_brain.corpus_io import recover_committed_receipts
@@ -205,12 +205,28 @@ def recover_item_record_transactions(
     ):
         raise ValueError("item record receipt verification config is unavailable")
     bindings = tuple(record["binding"] for record in records)
+    brain_root = configured["brain_root"].resolve()
+    try:
+        brain_stat = brain_root.stat()
+    except OSError as exc:
+        raise ValueError(f"item record brain_root is unavailable: {exc}") from exc
+    if any(
+        binding.get("repo_root") != str(root)
+        or binding.get("brain_root") != str(brain_root)
+        or binding.get("brain_root_device") != brain_stat.st_dev
+        or binding.get("brain_root_inode") != brain_stat.st_ino
+        for binding in bindings
+    ):
+        raise ValueError("item record brain_root identity does not match config")
     expected = tuple(record["transaction"] for record in records)
-    recovered = receipt_recoverer(
-        configured["brain_root"],
-        bindings,
-        expected,
-    )
+    try:
+        recovered = receipt_recoverer(
+            brain_root,
+            bindings,
+            expected,
+        )
+    except Exception as exc:
+        raise ValueError(f"durable receipt recovery failed: {exc}") from exc
     if len(recovered) != len(expected):
         raise ValueError("durable receipt result length mismatch")
     transactions: list[dict[str, Any]] = []
@@ -492,6 +508,21 @@ def run_finalization(
         })
         if not ok:
             errors.append(f"recall check failed: {check['key']}")
+
+    if item_records is not None:
+        try:
+            post_gate_transactions = recover_item_record_transactions(
+                item_records,
+                repo_root=repo_root,
+                receipt_recoverer=receipt_recoverer,
+                config_loader=config_loader,
+            )
+            if post_gate_transactions != transactions:
+                raise ValueError("recovered transactions changed")
+        except (OSError, ValueError) as exc:
+            errors.append(
+                f"post-gate durable receipt verification failed: {exc}"
+            )
 
     return {"ok": not errors, "transactions": transactions,
             "commands": commands, "isolation": isolation,

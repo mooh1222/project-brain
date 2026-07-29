@@ -454,6 +454,10 @@ def _resolve_execution_state(
             raise ValueError(
                 "repo_root의 .project-brain.json을 찾을 수 없습니다"
             )
+        brain_root = configured["brain_root"].resolve(strict=True)
+        if not brain_root.is_dir():
+            raise ValueError("configured brain_root가 directory가 아닙니다")
+        brain_stat = brain_root.stat()
         repo_context = resolve_repo_context(
             repo_root,
             expected_repo_id=declared["expected_repo_id"],
@@ -471,6 +475,9 @@ def _resolve_execution_state(
     repo_stat = repo_context.repo_root.stat()
     return {
         "repo_root": str(repo_context.repo_root),
+        "brain_root": str(brain_root),
+        "brain_root_device": brain_stat.st_dev,
+        "brain_root_inode": brain_stat.st_ino,
         "expected_repo_id": repo_context.expected_repo_id,
         "expected_revision_ref": repo_context.expected_revision_ref,
         "target_revision_sha": repo_context.target_revision_sha,
@@ -631,6 +638,9 @@ def _bind_items(
             verify_json_sha256=item["_verify_snapshot"].sha256,
             domain_spec_py_sha256=item["_domain_snapshot"].sha256,
             repo_root=execution_state["repo_root"],
+            brain_root=execution_state["brain_root"],
+            brain_root_device=execution_state["brain_root_device"],
+            brain_root_inode=execution_state["brain_root_inode"],
             expected_repo_id=execution_state["expected_repo_id"],
             expected_revision_ref=execution_state[
                 "expected_revision_ref"
@@ -688,13 +698,29 @@ def _default_receipt_recoverer(
     from project_brain.corpus_io import recover_committed_receipts
 
     configured = load_config(start=repo_root)
+    if not bindings:
+        raise ValueError("receipt verification bindings are empty")
+    brain_roots = {binding.get("brain_root") for binding in bindings}
+    if len(brain_roots) != 1:
+        raise ValueError("receipt verification brain_root mismatch")
+    brain_root = Path(next(iter(brain_roots)))
+    try:
+        brain_stat = brain_root.stat()
+    except OSError as exc:
+        raise ValueError(f"receipt verification brain_root unavailable: {exc}") from exc
     if (
         configured is None
         or configured["root"].resolve() != repo_root
+        or configured["brain_root"].resolve() != brain_root
+        or any(
+            binding.get("brain_root_device") != brain_stat.st_dev
+            or binding.get("brain_root_inode") != brain_stat.st_ino
+            for binding in bindings
+        )
     ):
         raise ValueError("receipt verification config is unavailable")
     return recover_committed_receipts(
-        configured["brain_root"],
+        brain_root,
         bindings,
         expected_receipts=expected_receipts,
     )
@@ -745,6 +771,8 @@ def _default_item_runner(item: dict[str, Any]) -> subprocess.CompletedProcess[st
             "--defer-finalize",
             "--repo-root",
             item["repo_root"],
+            "--brain-root",
+            item["brain_root"],
             "--expected-repo-id",
             item["expected_repo_id"],
             "--expected-revision-ref",
@@ -943,6 +971,9 @@ def _load_resume_state(
         raise ValueError(f"resume report를 읽을 수 없습니다: {exc}") from exc
     required = {
         "repo_root",
+        "brain_root",
+        "brain_root_device",
+        "brain_root_inode",
         "expected_repo_id",
         "expected_revision_ref",
         "target_revision_sha",
@@ -1258,7 +1289,7 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
                 raise ValueError(
                     "finalizer 전에 모든 item record가 committed여야 합니다"
                 )
-        except ValueError as exc:
+        except Exception as exc:
             report["finalize_failure"] = {
                 "exit_code": 1,
                 "stderr": str(exc)[-2000:],
@@ -1294,6 +1325,28 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
             final_exit_code = 1
             final_stderr = str(exc)
         report["finalization"] = finalization
+        try:
+            _revalidate_execution_state(
+                resolver,
+                declared_contract,
+                repo_contract,
+            )
+            for item in staged_items:
+                _verify_item_inputs(manifest_snapshot, item)
+            _recover_item_records(
+                report["item_records"],
+                repo_root=Path(repo_contract["repo_root"]),
+                recoverer=recoverer,
+            )
+            _sync_compatibility_fields(report)
+        except Exception as exc:
+            finalization["ok"] = False
+            finalization["errors"] = [
+                *finalization.get("errors", []),
+                f"post-finalizer verification failed: {exc}",
+            ]
+            final_exit_code = 1
+            final_stderr = str(exc)
         transactions_match = (
             finalization.get("transactions")
             == report["transactions"]

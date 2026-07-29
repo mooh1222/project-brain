@@ -30,6 +30,9 @@ BINDING = {
     "verify_json_sha256": "7" * 64,
     "domain_spec_py_sha256": "8" * 64,
     "repo_root": "/tmp/project-brain-consumer",
+    "brain_root": "/tmp/project-brain-consumer/brain",
+    "brain_root_device": 101,
+    "brain_root_inode": 202,
     "expected_repo_id": "demo",
     "expected_revision_ref": "HEAD",
     "target_revision_sha": "9" * 40,
@@ -56,6 +59,22 @@ def load_module():
 
 class SemanticFinalizerTest(unittest.TestCase):
     def setUp(self):
+        self._td = TemporaryDirectory()
+        self.repo_root = Path(self._td.name)
+        self.brain_root = self.repo_root / "brain"
+        self.brain_root.mkdir()
+        brain_stat = self.brain_root.stat()
+        self.binding = {
+            **BINDING,
+            "repo_root": str(self.repo_root.resolve()),
+            "brain_root": str(self.brain_root.resolve()),
+            "brain_root_device": brain_stat.st_dev,
+            "brain_root_inode": brain_stat.st_ino,
+        }
+        self.item_record = {
+            **ITEM_RECORD,
+            "binding": self.binding,
+        }
         self.contract = {
             "recall_checks": [{
                 "key": "feature-a",
@@ -66,6 +85,9 @@ class SemanticFinalizerTest(unittest.TestCase):
             "intentional_terminal_ids": ["code.allowed"],
             "expected_unmerged_locator_ids": [],
         }
+
+    def tearDown(self):
+        self._td.cleanup()
 
     def _finalize(self, module, contract, baseline, **kwargs):
         transaction_results = kwargs.pop("transaction_results", [TRANSACTION])
@@ -170,29 +192,30 @@ class SemanticFinalizerTest(unittest.TestCase):
         report = module.run_finalization(
             self.contract,
             ["code.before"],
-            item_records=[ITEM_RECORD],
-            repo_root=Path(BINDING["repo_root"]),
+            item_records=[self.item_record],
+            repo_root=self.repo_root,
             receipt_recoverer=recoverer,
             config_loader=lambda start: {
-                "root": Path(BINDING["repo_root"]),
-                "brain_root": Path(BINDING["repo_root"]) / "brain",
+                "root": self.repo_root,
+                "brain_root": self.brain_root,
             },
             runner=self._runner(),
         )
 
         self.assertTrue(report["ok"])
         self.assertEqual(report["transactions"], [TRANSACTION])
-        self.assertEqual(observed, [(
-            Path(BINDING["repo_root"]) / "brain",
-            (BINDING,),
+        expected_call = (
+            self.brain_root.resolve(),
+            (self.binding,),
             (TRANSACTION,),
-        )])
+        )
+        self.assertEqual(observed, [expected_call, expected_call])
 
     def test_item_record_forgery_or_noncommitted_state_blocks_before_commands(self):
         module = load_module()
         cases = (
-            [{**ITEM_RECORD, "status": "pending", "transaction": None}],
-            [{**ITEM_RECORD, "transaction": {**TRANSACTION, "manifest_sha256": "f" * 64}}],
+            [{**self.item_record, "status": "pending", "transaction": None}],
+            [{**self.item_record, "transaction": {**TRANSACTION, "manifest_sha256": "f" * 64}}],
         )
         for records in cases:
             calls = []
@@ -201,15 +224,98 @@ class SemanticFinalizerTest(unittest.TestCase):
                     self.contract,
                     ["code.before"],
                     item_records=records,
-                    repo_root=Path(BINDING["repo_root"]),
+                    repo_root=self.repo_root,
                     receipt_recoverer=lambda _root, _bindings, _expected: (TRANSACTION,),
                     config_loader=lambda start: {
-                        "root": Path(BINDING["repo_root"]),
-                        "brain_root": Path(BINDING["repo_root"]) / "brain",
+                        "root": self.repo_root,
+                        "brain_root": self.brain_root,
                     },
                     runner=lambda command: calls.append(command),
                 )
             self.assertEqual(calls, [])
+
+    def test_receipt_chain_is_revalidated_after_semantic_commands(self):
+        module = load_module()
+        recover_calls = 0
+        commands = []
+
+        def recoverer(_brain_root, _bindings, expected_receipts):
+            nonlocal recover_calls
+            recover_calls += 1
+            if recover_calls == 2:
+                raise ValueError("object corpus tail changed")
+            return expected_receipts
+
+        runner = self._runner()
+
+        def observed_runner(command):
+            commands.append(command)
+            return runner(command)
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[self.item_record],
+            repo_root=self.repo_root,
+            receipt_recoverer=recoverer,
+            config_loader=lambda start: {
+                "root": self.repo_root,
+                "brain_root": self.brain_root,
+            },
+            runner=observed_runner,
+        )
+
+        self.assertEqual(recover_calls, 2)
+        self.assertTrue(commands)
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "post-gate durable receipt verification failed",
+            "\n".join(report["errors"]),
+        )
+
+    def test_post_gate_allows_derived_change_but_rejects_brain_root_swap(self):
+        module = load_module()
+        for change in ("derived", "brain_root_swap"):
+            with self.subTest(change=change):
+                changed = False
+                runner = self._runner()
+
+                def changing_runner(command):
+                    nonlocal changed
+                    if not changed:
+                        changed = True
+                        if change == "derived":
+                            local = self.brain_root / ".brain-local"
+                            local.mkdir()
+                            (local / "index.db").write_bytes(b"derived")
+                        else:
+                            detached = self.repo_root / "brain-detached"
+                            self.brain_root.rename(detached)
+                            self.brain_root.mkdir()
+                    return runner(command)
+
+                report = module.run_finalization(
+                    self.contract,
+                    ["code.before"],
+                    item_records=[self.item_record],
+                    repo_root=self.repo_root,
+                    receipt_recoverer=lambda _root, _bindings, expected: expected,
+                    config_loader=lambda start: {
+                        "root": self.repo_root,
+                        "brain_root": self.brain_root,
+                    },
+                    runner=changing_runner,
+                )
+
+                self.assertIs(
+                    report["ok"],
+                    change == "derived",
+                )
+                if change == "brain_root_swap":
+                    self.assertIn(
+                        "post-gate durable receipt verification failed",
+                        "\n".join(report["errors"]),
+                    )
 
     def test_unmerged_expected_ids_are_compared_as_exact_union(self):
         module = load_module()

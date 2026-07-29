@@ -4,6 +4,7 @@ set -euo pipefail
 DRY=0
 DEFER_FINALIZE=0
 REPO_ROOT=""
+BRAIN_ROOT=""
 EXPECTED_REPO_ID=""
 EXPECTED_REVISION_REF=""
 ENGINE_SHA=""
@@ -13,6 +14,7 @@ while [ "$#" -gt 0 ]; do
     --dry) DRY=1; shift ;;
     --defer-finalize) DEFER_FINALIZE=1; shift ;;
     --repo-root) REPO_ROOT="${2:?--repo-root requires a value}"; shift 2 ;;
+    --brain-root) BRAIN_ROOT="${2:?--brain-root requires a value}"; shift 2 ;;
     --expected-repo-id) EXPECTED_REPO_ID="${2:?--expected-repo-id requires a value}"; shift 2 ;;
     --expected-revision-ref) EXPECTED_REVISION_REF="${2:?--expected-revision-ref requires a value}"; shift 2 ;;
     --engine-sha) ENGINE_SHA="${2:?--engine-sha requires a value}"; shift 2 ;;
@@ -28,8 +30,8 @@ if [ "$#" -ne 2 ]; then
   echo "usage: run_ingest.sh [--dry] [--defer-finalize] [mutation context] <verify.json> <domain_spec.py>" >&2
   exit 2
 fi
-if [ "$DRY" = "0" ] && { [ -z "$REPO_ROOT" ] || [ -z "$EXPECTED_REPO_ID" ] || [ -z "$EXPECTED_REVISION_REF" ] || [ -z "$ENGINE_SHA" ]; }; then
-  echo "write mode requires --repo-root, --expected-repo-id, --expected-revision-ref, --engine-sha" >&2
+if [ "$DRY" = "0" ] && { [ -z "$REPO_ROOT" ] || [ -z "$BRAIN_ROOT" ] || [ -z "$EXPECTED_REPO_ID" ] || [ -z "$EXPECTED_REVISION_REF" ] || [ -z "$ENGINE_SHA" ]; }; then
+  echo "write mode requires --repo-root, --brain-root, --expected-repo-id, --expected-revision-ref, --engine-sha" >&2
   exit 2
 fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,6 +70,7 @@ fi
 
 step "ingest"
 INGEST=(project-brain ingest \
+  --brain-root "$BRAIN_ROOT" \
   --objects-file "$OBJS" \
   --preconditions-file "$BUILD_REPORT" \
   --repo-root "$REPO_ROOT" \

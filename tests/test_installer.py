@@ -895,7 +895,7 @@ class InstallTest(unittest.TestCase):
                 if name.endswith(".sh") and script.is_file():
                     self.assertTrue(script.stat().st_mode & stat.S_IXUSR)
         run_ingest = (scripts / "run_ingest.sh").read_text(encoding="utf-8")
-        for flag in ("--repo-root", "--expected-repo-id", "--expected-revision-ref",
+        for flag in ("--repo-root", "--brain-root", "--expected-repo-id", "--expected-revision-ref",
                      "--engine-sha", "--batch-binding-file", "--validate-transaction"):
             self.assertIn(flag, run_ingest)
         installed_batch = (scripts / "run_ingest_batch.py").read_text(encoding="utf-8")
@@ -905,6 +905,8 @@ class InstallTest(unittest.TestCase):
             "target_revision_sha",
             "batch-binding.json",
             "recover_committed_receipts",
+            "brain_root_inode",
+            "post-finalizer verification",
         ):
             self.assertIn(token, installed_batch + installed_finalizer)
         installed_query = self._skill("demo-brain-query").read_text(encoding="utf-8")

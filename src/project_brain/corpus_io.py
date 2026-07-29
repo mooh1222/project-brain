@@ -937,6 +937,18 @@ def _read_journal_at(
             f"{transaction_id}: journal must contain a JSON object",
             transaction_ids=(transaction_id,),
         )
+    manifest = payload.get("manifest")
+    if (
+        isinstance(manifest, dict)
+        and "batch_binding" not in payload
+        and "batch_binding" not in manifest
+    ):
+        # Read-only compatibility for pre-batch non-batch artifacts. New
+        # manifests/journals always write the field explicitly as null.
+        payload = dict(payload)
+        payload["manifest"] = dict(manifest)
+        payload["batch_binding"] = None
+        payload["manifest"]["batch_binding"] = None
     try:
         _validate_journal_model(payload, transaction_id)
     except (TypeError, ValueError) as exc:
@@ -2552,6 +2564,23 @@ def _validate_journal_model(
     journal: Mapping[str, object],
     transaction_id: str,
 ) -> None:
+    required_fields = {
+        "version",
+        "transaction_id",
+        "state",
+        "manifest",
+        "entries",
+        "derived",
+        "before_derived_fingerprint",
+        "expected_after_derived_fingerprint",
+        "applied",
+        "batch_binding",
+    }
+    if (
+        not required_fields.issubset(journal)
+        or set(journal) - required_fields - {"recovery_error"}
+    ):
+        raise ValueError("journal keys do not match the contract")
     if journal.get("version") != 1:
         raise ValueError("version must be 1")
     if _SHA256.fullmatch(transaction_id) is None:
@@ -2560,6 +2589,8 @@ def _validate_journal_model(
     manifest = journal.get("manifest")
     if not isinstance(manifest, Mapping):
         raise ValueError("manifest must be an object")
+    if "batch_binding" not in journal:
+        raise ValueError("journal batch_binding field is missing")
     expected_entries = _validate_manifest_model(manifest, transaction_id)
     try:
         manifest_binding = normalize_batch_binding(

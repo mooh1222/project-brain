@@ -63,6 +63,9 @@ class RawReplayDriverTest(unittest.TestCase):
             "recover_committed_receipts",
             "target_revision_sha",
             "batch-binding.json",
+            "--brain-root",
+            "brain_root_inode",
+            "post-finalizer verification",
         ):
             self.assertIn(token, combined)
         self.assertNotIn("allow_missing_quote", combined)

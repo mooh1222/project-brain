@@ -102,9 +102,11 @@ description: |
 report의 `item_records`가 manifest 항목과 같은 순서·key인지 확인한다. 각 record는 item/input
 바인딩, 상태, 실패 정보, exact transaction을 한 객체에 묶으며 성공 record는 `status=committed`다.
 `transactions`·`succeeded`·`failed`는 이 정본에서 파생된 호환 필드일 뿐 독립 근거가 아니다.
-batch `manifest_sha256`, immutable staged 입력 hash, resolved target commit과 실제 engine HEAD를
-포함한 resume 계약이 그대로인지 확인한다. finalization은 durable intent/journal에서 복구한 receipt와
-record가 정확히 일치한 뒤에만 실행한다.
+batch `manifest_sha256`, target config가 해석한 canonical brain root와 inode, immutable staged
+입력 hash, resolved target commit과 실제 engine HEAD를 포함한 resume 계약이 그대로인지 확인한다.
+finalization은 durable intent/journal에서 복구한 receipt와 record가 정확히 일치한 뒤에만 실행한다.
+semantic gate가 끝난 뒤에도 receipt/current object corpus tail을 post-gate로 다시 확인하고, batch는
+finalizer가 돌아온 뒤 state/input/receipt를 post-finalizer로 다시 확인해야만 완료한다.
 새 wave용 임시 스크립트로 운영 규약을 우회하지 않는다.
 
 중단된 묶음은 같은 입력과 보고서로 재개한다. durable receipt가 확인된 committed prefix만 건너뛰고,

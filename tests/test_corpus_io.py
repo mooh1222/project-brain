@@ -65,9 +65,11 @@ def _write_object(brain_root: Path, obj: dict) -> Path:
 
 def _batch_binding(
     *,
+    brain_root: Path,
     item_key: str = "one",
     item_input_fingerprint: str = "1" * 64,
 ) -> BatchBinding:
+    brain_stat = brain_root.stat()
     return BatchBinding(
         batch_manifest_sha256="a" * 64,
         item_key=item_key,
@@ -75,6 +77,9 @@ def _batch_binding(
         verify_json_sha256="b" * 64,
         domain_spec_py_sha256="c" * 64,
         repo_root="/repo",
+        brain_root=str(brain_root.resolve()),
+        brain_root_device=brain_stat.st_dev,
+        brain_root_inode=brain_stat.st_ino,
         expected_repo_id="demo",
         expected_revision_ref="HEAD",
         target_revision_sha="d" * 40,
@@ -185,9 +190,11 @@ def test_low_level_api_exposes_exact_journal_states_and_fsyncs(tmp_path):
         assert (brain_root / ".brain-local" / "corpus.lock").is_file()
 
 
-def test_batch_intent_identity_binds_key_even_when_input_bytes_match():
-    first = _batch_binding(item_key="one")
-    second = _batch_binding(item_key="two")
+def test_batch_intent_identity_binds_key_even_when_input_bytes_match(tmp_path):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    first = _batch_binding(brain_root=brain_root, item_key="one")
+    second = _batch_binding(brain_root=brain_root, item_key="two")
 
     assert first.item_input_fingerprint == second.item_input_fingerprint
     assert batch_intent_id(first) != batch_intent_id(second)
@@ -205,13 +212,142 @@ def test_batch_intent_identity_binds_key_even_when_input_bytes_match():
     ).hexdigest()
 
 
+def test_legacy_nonbatch_committed_journal_without_binding_remains_readable(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    result = MutationService().apply(
+        (after,),
+        request=_request(brain_root, (after,)),
+    )
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal.pop("batch_binding") is None
+    assert journal["manifest"].pop("batch_binding") is None
+    journal_path.write_text(
+        json.dumps(journal, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    assert BrainStore.load(brain_root).get(after["id"]) == after
+    newer = dict(after)
+    newer["title"] = "legacy followup"
+    followup = MutationService().apply(
+        (newer,),
+        request=_request(brain_root, (newer,)),
+    )
+    assert followup.ok and followup.manifest is not None
+    assert followup.manifest.batch_binding is None
+
+
+@pytest.mark.parametrize(
+    ("legacy_state", "unfinished"),
+    (
+        ("rolled_back", False),
+        ("preparing", True),
+        ("committing", True),
+    ),
+)
+def test_legacy_nonbatch_terminal_and_unfinished_journals_recover_then_write_null(
+    tmp_path,
+    legacy_state,
+    unfinished,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    result = MutationService().apply(
+        (after,),
+        request=_request(brain_root, (after,)),
+    )
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal.pop("batch_binding")
+    journal["manifest"].pop("batch_binding")
+    journal["state"] = legacy_state
+    if legacy_state == "rolled_back":
+        _write_object(brain_root, before)
+    journal_path.write_text(
+        json.dumps(journal, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    if unfinished:
+        recovered = recover_unfinished_transaction(brain_root)
+        assert recovered.recovered_transaction_ids == (
+            result.manifest.transaction_id,
+        )
+    assert BrainStore.load(brain_root).get(before["id"]) == before
+
+    newer = dict(before)
+    newer["title"] = f"after legacy {legacy_state}"
+    followup = MutationService().apply(
+        (newer,),
+        request=_request(brain_root, (newer,)),
+    )
+    assert followup.ok and followup.manifest is not None
+    followup_journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / followup.manifest.transaction_id
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert "batch_binding" in followup_journal
+    assert followup_journal["batch_binding"] is None
+    assert "batch_binding" in followup_journal["manifest"]
+    assert followup_journal["manifest"]["batch_binding"] is None
+
+
+def test_legacy_batch_binding_partial_presence_is_rejected(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    result = MutationService().apply(
+        (after,),
+        request=_request(brain_root, (after,)),
+    )
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal.pop("batch_binding")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(RecoveryRequiredError, match="journal structure is invalid"):
+        BrainStore.load(brain_root)
+
+
 def test_batch_intent_is_durable_before_commit_and_noncommitted_is_rejected(
     tmp_path,
 ):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    binding = _batch_binding()
+    binding = _batch_binding(brain_root=brain_root)
 
     with pytest.raises(InjectedCrash, match="after_batch_intent_fsync"):
         MutationService().apply(
@@ -246,7 +382,7 @@ def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    binding = _batch_binding()
+    binding = _batch_binding(brain_root=brain_root)
 
     with pytest.raises(InjectedCrash, match="after_journal_committed"):
         MutationService().apply(
@@ -281,7 +417,7 @@ def test_committed_receipt_rejects_forged_envelope_and_intent(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    binding = _batch_binding()
+    binding = _batch_binding(brain_root=brain_root)
     result = MutationService().apply(
         (after,),
         request=_request(brain_root, (after,), batch_binding=binding),
@@ -315,7 +451,7 @@ def test_existing_batch_intent_never_overwrites_mismatched_plan(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    binding = _batch_binding()
+    binding = _batch_binding(brain_root=brain_root)
     service = MutationService()
 
     with pytest.raises(InjectedCrash):
@@ -353,8 +489,8 @@ def test_committed_receipt_chain_verifies_all_items_and_current_tail(
     first_after = dict(original, title="first")
     second_after = dict(original, title="second")
     _write_object(brain_root, original)
-    first_binding = _batch_binding(item_key="one")
-    second_binding = _batch_binding(item_key="two")
+    first_binding = _batch_binding(brain_root=brain_root, item_key="one")
+    second_binding = _batch_binding(brain_root=brain_root, item_key="two")
     service = MutationService()
     service.apply(
         (first_after,),
@@ -389,8 +525,8 @@ def test_committed_receipt_chain_allows_missing_tail_but_not_gaps(tmp_path):
     brain_root = tmp_path / "brain"
     original, first_after = _changed_context()
     _write_object(brain_root, original)
-    first_binding = _batch_binding(item_key="one")
-    missing_binding = _batch_binding(item_key="two")
+    first_binding = _batch_binding(brain_root=brain_root, item_key="one")
+    missing_binding = _batch_binding(brain_root=brain_root, item_key="two")
     MutationService().apply(
         (first_after,),
         request=_request(

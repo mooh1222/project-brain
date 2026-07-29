@@ -246,7 +246,7 @@ def _run_ingest(argv) -> int:
     _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
-    brain_root = resolve_brain_root(args.brain_root)
+    brain_root = resolve_brain_root(args.brain_root).resolve()
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
     batch_binding = None
     batch_paths = (
@@ -288,14 +288,29 @@ def _run_ingest(argv) -> int:
         ),
     )
     if batch_binding is not None:
+        from project_brain.config import load_config
         from project_brain.repo_context import resolve_git_checkout
 
         try:
+            if args.brain_root is None:
+                raise ValueError("batch ingest requires explicit --brain-root")
             engine_state = resolve_git_checkout(Path(__file__))
             if repo_context is None:
                 raise ValueError("batch ingest requires repo context")
+            configured = load_config(start=repo_context.repo_root)
+            if (
+                configured is None
+                or configured["root"].resolve() != repo_context.repo_root
+                or configured["brain_root"].resolve() != brain_root
+                or brain_root != Path(batch_binding.brain_root)
+            ):
+                raise ValueError("batch binding brain_root/config mismatch")
+            brain_stat = brain_root.stat()
             expected_state = {
                 "repo_root": str(repo_context.repo_root),
+                "brain_root": str(brain_root),
+                "brain_root_device": brain_stat.st_dev,
+                "brain_root_inode": brain_stat.st_ino,
                 "expected_repo_id": repo_context.expected_repo_id,
                 "expected_revision_ref": repo_context.expected_revision_ref,
                 "target_revision_sha": repo_context.target_revision_sha,

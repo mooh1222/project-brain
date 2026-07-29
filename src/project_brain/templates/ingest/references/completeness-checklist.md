@@ -28,9 +28,12 @@
    intent/journal의 `durable receipt`와 일치한다. canonical `manifest_sha256`, operation, engine SHA,
    action object IDs, before/after/current corpus fingerprint, ingest ID/count가 확인됐다. receipt가
    없거나 불일치하거나 noncommitted면 `finalized=false`여야 한다. 최초 `isolation_baseline`이
-   보존됐고 absolute repo identity, resolved `target_revision_sha`, 실제 engine root/HEAD, root
-   inode, batch manifest hash, immutable staged 입력 hash, finalization 계약이 resume 입력과
+   보존됐고 absolute repo identity, target config의 canonical brain root와
+   `brain_root_inode`, resolved `target_revision_sha`, 실제 engine root/HEAD, root inode,
+   batch manifest hash, immutable staged 입력 hash, finalization 계약이 resume 입력과
    일치한다. `transactions`·`succeeded`·`failed`는 item_records에서 파생된 호환 필드다.
+   semantic commands 뒤 post-gate receipt/current object tail 검증과 finalizer return 뒤
+   post-finalizer state/input/receipt 검증이 모두 통과했다.
    post head == baseline head이고, post unmerged는 baseline union expected와 일치한다. legacy
    baseline은 그 제한을 그대로 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
    직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.

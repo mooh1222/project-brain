@@ -9,6 +9,7 @@ ingest 서브커맨드가 ingest()를 호출해 store에 적재하는지(test_cl
 import io
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -395,6 +396,7 @@ class TestCli(unittest.TestCase):
         project = self.input_dir / "batch-project"
         brain = project / "brain"
         project.mkdir()
+        brain.mkdir()
         (project / ".project-brain.json").write_text(
             json.dumps({"brain_root": "brain", "repo": "demo"}),
             encoding="utf-8",
@@ -407,6 +409,7 @@ class TestCli(unittest.TestCase):
             text=True,
         ).stdout.strip()
         engine = resolve_git_checkout(Path(cli.__file__))
+        brain_stat = brain.stat()
         verify = self.input_dir / "batch-verify.json"
         domain = self.input_dir / "batch-domain.py"
         verify.write_text("{}\n", encoding="utf-8")
@@ -422,6 +425,9 @@ class TestCli(unittest.TestCase):
                 domain.read_bytes()
             ).hexdigest(),
             repo_root=str(project.resolve()),
+            brain_root=str(brain.resolve()),
+            brain_root_device=brain_stat.st_dev,
+            brain_root_inode=brain_stat.st_ino,
             expected_repo_id="demo",
             expected_revision_ref="HEAD",
             target_revision_sha=target_sha,
@@ -445,6 +451,18 @@ class TestCli(unittest.TestCase):
             json.dumps([obj], ensure_ascii=False),
             encoding="utf-8",
         )
+        wrong_project = self.input_dir / "wrong-batch-project"
+        wrong_brain = wrong_project / "brain"
+        wrong_brain.mkdir(parents=True)
+        (wrong_project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain", "repo": "demo"}),
+            encoding="utf-8",
+        )
+        wrong_obj = dict(obj)
+        wrong_obj["title"] = "wrong corpus sentinel"
+        wrong_path = BrainStore.object_path(wrong_brain, wrong_obj)
+        wrong_path.parent.mkdir(parents=True)
+        wrong_path.write_bytes(BrainStore.object_bytes(wrong_obj))
         out = io.StringIO()
         original_apply = MutationService.apply
         argv = [
@@ -470,13 +488,18 @@ class TestCli(unittest.TestCase):
             str(domain.resolve()),
         ]
 
-        with mock.patch.object(
-            MutationService,
-            "apply",
-            autospec=True,
-            side_effect=original_apply,
-        ) as apply, mock.patch("sys.argv", argv), redirect_stdout(out):
-            self.assertEqual(cli.main(), 0)
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(wrong_project)
+            with mock.patch.object(
+                MutationService,
+                "apply",
+                autospec=True,
+                side_effect=original_apply,
+            ) as apply, mock.patch("sys.argv", argv), redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+        finally:
+            os.chdir(original_cwd)
 
         payload = json.loads(out.getvalue())
         self.assertTrue(payload["committed"])
@@ -486,6 +509,10 @@ class TestCli(unittest.TestCase):
         self.assertEqual(
             request.repo_context.target_revision_sha,
             binding.target_revision_sha,
+        )
+        self.assertEqual(
+            BrainStore.load(wrong_brain).get(obj["id"])["title"],
+            "wrong corpus sentinel",
         )
 
     def test_cli_ingest_resolves_config_repo_context_and_exact_revision(self):
