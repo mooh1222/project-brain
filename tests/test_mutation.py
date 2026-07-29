@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from project_brain.mutation import (
+    AuxiliaryFileUpdate,
     MutationManifest,
     MutationOperation,
     MutationRequest,
@@ -52,6 +53,7 @@ def _request(
     renames: dict[str, str] | None = None,
     preconditions: dict[str, str] | None = None,
     expected_corpus_fingerprint: str | None = None,
+    auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = (),
 ) -> MutationRequest:
     return MutationRequest(
         operation=operation,
@@ -63,6 +65,7 @@ def _request(
         renames=renames or {},
         preconditions=preconditions or {},
         expected_corpus_fingerprint=expected_corpus_fingerprint,
+        auxiliary_updates=auxiliary_updates,
     )
 
 
@@ -90,6 +93,15 @@ def _write_raw(brain_root: Path, obj: dict) -> None:
 
 def _object_hash(obj: dict) -> str:
     return hashlib.sha256(BrainStore.object_bytes(obj)).hexdigest()
+
+
+def _file_update(path: str, before: bytes, after: bytes) -> AuxiliaryFileUpdate:
+    return AuxiliaryFileUpdate(
+        path=path,
+        before_sha256=hashlib.sha256(before).hexdigest(),
+        after_sha256=hashlib.sha256(after).hexdigest(),
+        after_bytes=after,
+    )
 
 
 def _problem_object_hash(obj: dict) -> str:
@@ -219,6 +231,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "renames",
         "preconditions",
         "expected_corpus_fingerprint",
+        "auxiliary_updates",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
@@ -229,6 +242,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "deletes",
         "renames",
         "reference_rewrites",
+        "auxiliary_updates",
         "before_fingerprint",
         "expected_after_fingerprint",
         "grandfathered_problems_before",
@@ -990,6 +1004,212 @@ def test_id_only_migration_rejects_non_identity_payload_change(tmp_path):
     )
 
     assert result.error_code == "id_only_payload_changed"
+
+
+def test_id_only_plan_binds_existing_eval_update_to_exact_bytes(tmp_path):
+    brain_root = tmp_path / "brain"
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy display",
+    )
+    _write_raw(brain_root, old)
+    new = dict(old)
+    new["id"] = "code.neutral.legacy"
+    before = (
+        b'{"scenarios":[{"id":"s","query":"q","expect":'
+        b'{"top5_any":["code.Legacy"]}}]}\n'
+    )
+    after = (
+        b'{"scenarios":[{"expect":{"top5_any":["code.neutral.legacy"]},'
+        b'"id":"s","query":"q"}]}\n'
+    )
+    (brain_root / "eval_scenarios.json").write_bytes(before)
+    update = _file_update("eval_scenarios.json", before, after)
+
+    result = _plan(
+        brain_root,
+        [new],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        delete_ids=(old["id"],),
+        auxiliary_updates=(update,),
+    )
+
+    assert result.ok is True
+    assert result.manifest.auxiliary_updates == ({
+        "path": "eval_scenarios.json",
+        "before_sha256": hashlib.sha256(before).hexdigest(),
+        "after_sha256": hashlib.sha256(after).hexdigest(),
+    },)
+    assert result.auxiliary_after_files == {
+        "eval_scenarios.json": after,
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "path", "expected_error"),
+    [
+        (
+            MutationOperation.INGEST,
+            "eval_scenarios.json",
+            "auxiliary_update_operation_invalid",
+        ),
+        (
+            MutationOperation.ID_ONLY_MIGRATION,
+            "other.json",
+            "auxiliary_update_path_invalid",
+        ),
+        (
+            MutationOperation.ID_ONLY_MIGRATION,
+            "../eval_scenarios.json",
+            "auxiliary_update_path_invalid",
+        ),
+        (
+            MutationOperation.ID_ONLY_MIGRATION,
+            "/eval_scenarios.json",
+            "auxiliary_update_path_invalid",
+        ),
+    ],
+)
+def test_auxiliary_update_allowlist_fails_closed(
+    tmp_path,
+    operation,
+    path,
+    expected_error,
+):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    before = b"{}\n"
+    after = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(before)
+    update = _file_update(path, before, after)
+
+    result = _plan(
+        brain_root,
+        [],
+        operation=operation,
+        auxiliary_updates=(update,),
+    )
+
+    assert result.error_code == expected_error
+
+
+def test_auxiliary_update_rejects_missing_before_file(tmp_path):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    update = _file_update(
+        "eval_scenarios.json",
+        b"{}\n",
+        b'{"scenarios":[]}\n',
+    )
+
+    result = _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(update,),
+    )
+
+    assert result.error_code == "auxiliary_update_missing"
+
+
+def test_auxiliary_update_rejects_wrong_hashes_and_duplicate_path(tmp_path):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    before = b"{}\n"
+    after = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(before)
+    valid = _file_update("eval_scenarios.json", before, after)
+    wrong_before = replace(valid, before_sha256="0" * 64)
+    wrong_after = replace(valid, after_sha256="0" * 64)
+
+    assert _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(wrong_before,),
+    ).error_code == "auxiliary_before_hash_mismatch"
+    assert _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(wrong_after,),
+    ).error_code == "auxiliary_after_hash_mismatch"
+    assert _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(valid, valid),
+    ).error_code == "duplicate_auxiliary_update"
+
+
+@pytest.mark.parametrize(
+    ("entry_kind", "expected_error"),
+    [
+        ("symlink", "symlink_forbidden"),
+        ("directory", "file_type_invalid"),
+    ],
+)
+def test_auxiliary_update_rejects_unsafe_existing_eval_entry(
+    tmp_path,
+    entry_kind,
+    expected_error,
+):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    eval_path = brain_root / "eval_scenarios.json"
+    if entry_kind == "symlink":
+        target = tmp_path / "outside.json"
+        target.write_bytes(b"{}\n")
+        eval_path.symlink_to(target)
+    else:
+        eval_path.mkdir()
+    update = _file_update(
+        "eval_scenarios.json",
+        b"{}\n",
+        b'{"scenarios":[]}\n',
+    )
+
+    result = _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(update,),
+    )
+
+    assert result.error_code == expected_error
+
+
+def test_auxiliary_update_rejects_cross_device_entry(tmp_path, monkeypatch):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    before = b"{}\n"
+    after = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(before)
+    update = _file_update("eval_scenarios.json", before, after)
+    original = __import__(
+        "project_brain.corpus_io",
+        fromlist=["_observed_device"],
+    )._observed_device
+
+    def cross_device(relative_path, actual_device):
+        if relative_path == "eval_scenarios.json":
+            return actual_device + 1
+        return original(relative_path, actual_device)
+
+    monkeypatch.setattr(
+        "project_brain.corpus_io._observed_device",
+        cross_device,
+    )
+
+    result = _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(update,),
+    )
+
+    assert result.error_code == "filesystem_mismatch"
 
 
 def test_id_only_no_quote_rename_requires_old_invalid_id(tmp_path):

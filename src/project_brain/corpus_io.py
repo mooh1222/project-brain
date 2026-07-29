@@ -724,6 +724,58 @@ def read_tracked_json_files(
     return tuple(sorted(results, key=lambda item: item[0].as_posix()))
 
 
+def read_tracked_file_bytes(
+    brain_root: Path,
+    relative_path: str,
+) -> bytes:
+    """Read one existing tracked file through the pinned corpus root."""
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=False):
+            return read_tracked_file_bytes(brain_root, relative_path)
+    scope = _current_lock_scope(brain_root)
+    normalized = _validated_relative_path(relative_path)
+    inspected = scope.anchored.inspect_file(normalized)
+    if not inspected["had_before"]:
+        raise CorpusIOError(
+            "tracked_file_missing",
+            f"tracked file does not exist: {normalized}",
+            paths=(Path(scope.brain_root_identity) / normalized,),
+        )
+    parent, name = scope.anchored.pin_existing_parent(
+        normalized,
+        create=False,
+    )
+    payload = _read_bytes_at(parent.fd, name)
+    after_read = scope.anchored.inspect_file(normalized)
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if (
+        after_read != inspected
+        or actual_sha256 != inspected["before_sha256"]
+    ):
+        raise CorpusIOError(
+            "before_hash_mismatch",
+            f"tracked file changed while reading: {normalized}",
+            paths=(Path(scope.brain_root_identity) / normalized,),
+        )
+    return payload
+
+
+def inspect_tracked_file(
+    brain_root: Path,
+    relative_path: str,
+) -> Mapping[str, object]:
+    """Inspect one tracked path without following links or reading its bytes."""
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=False):
+            return inspect_tracked_file(brain_root, relative_path)
+    scope = _current_lock_scope(brain_root)
+    return scope.anchored.inspect_file(
+        _validated_relative_path(relative_path)
+    )
+
+
 def _collect_json_files_at(
     scope: _CorpusLockScope,
     directory_fd: int,
@@ -2151,6 +2203,7 @@ def _validate_manifest_model(
         "deletes",
         "renames",
         "reference_rewrites",
+        "auxiliary_updates",
         "before_fingerprint",
         "expected_after_fingerprint",
         "grandfathered_problems_before",
@@ -2263,6 +2316,33 @@ def _validate_manifest_model(
             )
         ):
             raise ValueError("manifest reference rewrite values are invalid")
+
+    auxiliary_updates = manifest.get("auxiliary_updates")
+    if not isinstance(auxiliary_updates, (list, tuple)):
+        raise ValueError("manifest auxiliary_updates must be a sequence")
+    if auxiliary_updates and manifest.get("operation") != "id_only_migration":
+        raise ValueError(
+            "auxiliary updates are allowed only for id_only_migration"
+        )
+    for action in auxiliary_updates:
+        if not isinstance(action, Mapping) or set(action) != {
+            "path",
+            "before_sha256",
+            "after_sha256",
+        }:
+            raise ValueError("manifest auxiliary update is invalid")
+        path = _validated_relative_path(action.get("path"))
+        if path != "eval_scenarios.json":
+            raise ValueError("manifest auxiliary update path is invalid")
+        before_sha = action.get("before_sha256")
+        after_sha = action.get("after_sha256")
+        _require_hashes(
+            before_sha,
+            after_sha,
+            before=True,
+            after=True,
+        )
+        _add_expected_entry(entries, path, before_sha, after_sha)
     return [entries[path] for path in sorted(entries)]
 
 
@@ -2381,6 +2461,7 @@ def _verify_rolled_back_state(
         raise ValueError(
             f"corpus rollback fingerprint mismatch: {actual} != {expected}"
         )
+    _verify_entry_state(anchored, journal.get("entries"), after=False)
     _verify_inventory(anchored, journal.get("derived"))
     current_derived = [
         anchored.inspect_file(relative_path)
@@ -2406,6 +2487,7 @@ def _verify_committed_state(
         raise ValueError(
             f"post-commit corpus fingerprint mismatch: {actual} != {expected}"
         )
+    _verify_entry_state(anchored, journal.get("entries"), after=True)
     for relative_path in _DERIVED_PATHS:
         if anchored.inspect_file(relative_path)["had_before"]:
             raise ValueError(
@@ -2420,6 +2502,38 @@ def _verify_committed_state(
         != journal.get("expected_after_derived_fingerprint")
     ):
         raise ValueError("post-commit derived fingerprint mismatch")
+
+
+def _verify_entry_state(
+    anchored: _AnchoredRoot,
+    raw_entries: object,
+    *,
+    after: bool,
+) -> None:
+    if not isinstance(raw_entries, list):
+        raise ValueError("transaction entry inventory is invalid")
+    for entry in raw_entries:
+        if not isinstance(entry, Mapping):
+            raise ValueError("transaction entry is invalid")
+        relative_path = _validated_relative_path(entry.get("path"))
+        expected_sha = entry.get(
+            "after_sha256" if after else "before_sha256"
+        )
+        actual = anchored.inspect_file(relative_path)
+        if expected_sha is None:
+            if actual["had_before"]:
+                raise ValueError(
+                    f"{relative_path}: unexpected transaction file exists"
+                )
+            continue
+        if (
+            not actual["had_before"]
+            or actual["before_sha256"] != expected_sha
+        ):
+            state = "after" if after else "before"
+            raise ValueError(
+                f"{relative_path}: transaction {state} hash mismatch"
+            )
 
 
 def _verify_inventory(

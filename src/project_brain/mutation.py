@@ -18,6 +18,7 @@ from project_brain.corpus_io import (
     CorpusIOError,
     apply_transaction,
     corpus_lock,
+    read_tracked_file_bytes,
     recover_unfinished_transaction_unlocked,
 )
 from project_brain.hash_utils import stable_json
@@ -41,6 +42,7 @@ _COORDINATE_FIELDS = (
     "verified_quote",
 )
 _EXACT_GIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _LOGICAL_KEY_FIELDS = (
     "logical_key",
     "mapping_key",
@@ -61,6 +63,14 @@ class MutationOperation(StrEnum):
 
 
 @dataclass(frozen=True)
+class AuxiliaryFileUpdate:
+    path: str
+    before_sha256: str
+    after_sha256: str
+    after_bytes: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
 class MutationRequest:
     operation: MutationOperation
     brain_root: Path
@@ -71,6 +81,7 @@ class MutationRequest:
     renames: Mapping[str, str] = field(default_factory=dict)
     preconditions: Mapping[str, str] = field(default_factory=dict)
     expected_corpus_fingerprint: str | None = None
+    auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,6 +94,7 @@ class MutationManifest:
     deletes: tuple[dict, ...]
     renames: tuple[dict, ...]
     reference_rewrites: tuple[dict, ...]
+    auxiliary_updates: tuple[dict, ...]
     before_fingerprint: str
     expected_after_fingerprint: str
     grandfathered_problems_before: tuple[dict, ...]
@@ -99,6 +111,7 @@ class MutationPlanResult:
     manifest: MutationManifest | None = None
     manifest_bytes: bytes = b""
     manifest_sha256: str = ""
+    auxiliary_after_files: Mapping[str, bytes] = field(default_factory=dict)
 
 
 class MutationService:
@@ -136,6 +149,7 @@ class MutationService:
                 writable_actions
                 + result.manifest.deletes
                 + result.manifest.renames
+                + result.manifest.auxiliary_updates
             )
             if not actions:
                 return result
@@ -157,6 +171,7 @@ class MutationService:
                     ).relative_to(request.brain_root).as_posix()
                 ) in after_paths
             }
+            after_files.update(result.auxiliary_after_files)
             apply_transaction(
                 request.brain_root,
                 manifest=asdict(result.manifest),
@@ -228,6 +243,10 @@ class MutationService:
         else:
             existing_store = _existing_store
         existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
+
+        auxiliary_error = _validate_auxiliary_updates(request)
+        if auxiliary_error is not None:
+            return auxiliary_error
 
         # 3) schema와 enum.
         for obj in inputs:
@@ -554,11 +573,75 @@ class MutationService:
             manifest=manifest,
             manifest_bytes=manifest_bytes,
             manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            auxiliary_after_files={
+                update.path: update.after_bytes
+                for update in request.auxiliary_updates
+            },
         )
 
 
 def _failure(code: str, detail: str) -> MutationPlanResult:
     return MutationPlanResult(ok=False, error_code=code, detail=detail)
+
+
+def _validate_auxiliary_updates(
+    request: MutationRequest,
+) -> MutationPlanResult | None:
+    updates = request.auxiliary_updates
+    if not updates:
+        return None
+    if request.operation is not MutationOperation.ID_ONLY_MIGRATION:
+        return _failure(
+            "auxiliary_update_operation_invalid",
+            "auxiliary updates are allowed only for ID-only migration",
+        )
+    seen: set[str] = set()
+    for update in updates:
+        if update.path in seen:
+            return _failure(
+                "duplicate_auxiliary_update",
+                f"duplicate auxiliary update path: {update.path}",
+            )
+        seen.add(update.path)
+        if update.path != "eval_scenarios.json":
+            return _failure(
+                "auxiliary_update_path_invalid",
+                "only eval_scenarios.json may be updated",
+            )
+        if (
+            _SHA256.fullmatch(update.before_sha256) is None
+            or _SHA256.fullmatch(update.after_sha256) is None
+        ):
+            return _failure(
+                "auxiliary_update_hash_invalid",
+                f"{update.path}: auxiliary hashes must be lowercase SHA-256",
+            )
+        if (
+            hashlib.sha256(update.after_bytes).hexdigest()
+            != update.after_sha256
+        ):
+            return _failure(
+                "auxiliary_after_hash_mismatch",
+                f"{update.path}: after bytes do not match after_sha256",
+            )
+        try:
+            before_bytes = read_tracked_file_bytes(
+                request.brain_root,
+                update.path,
+            )
+        except CorpusIOError as exc:
+            return _failure(
+                "auxiliary_update_missing"
+                if exc.code == "tracked_file_missing"
+                else exc.code,
+                exc.detail,
+            )
+        if hashlib.sha256(before_bytes).hexdigest() != update.before_sha256:
+            return _failure(
+                "auxiliary_before_hash_mismatch",
+                f"{update.path}: current bytes do not match before_sha256",
+            )
+    return None
 
 
 def _validate_projection_repair_request(
@@ -750,6 +833,20 @@ def _validate_request_shape(
             for object_id, expected_hash in request.preconditions.items()
         ):
             raise ValueError("preconditions must be Mapping[str, str]")
+        if (
+            not isinstance(request.auxiliary_updates, tuple)
+            or not all(
+                isinstance(update, AuxiliaryFileUpdate)
+                and isinstance(update.path, str)
+                and isinstance(update.before_sha256, str)
+                and isinstance(update.after_sha256, str)
+                and isinstance(update.after_bytes, bytes)
+                for update in request.auxiliary_updates
+            )
+        ):
+            raise ValueError(
+                "auxiliary_updates must be tuple[AuxiliaryFileUpdate, ...]"
+            )
         if (
             request.expected_corpus_fingerprint is not None
             and (
@@ -1174,6 +1271,17 @@ def _build_manifest(
         planned_by_id,
         rename_pairs,
     )
+    auxiliary_updates = tuple(
+        {
+            "path": update.path,
+            "before_sha256": update.before_sha256,
+            "after_sha256": update.after_sha256,
+        }
+        for update in sorted(
+            request.auxiliary_updates,
+            key=lambda item: item.path,
+        )
+    )
     seed = {
         "operation": request.operation.value,
         "engine_sha": request.engine_sha,
@@ -1182,6 +1290,7 @@ def _build_manifest(
         "deletes": deletes,
         "renames": renames,
         "reference_rewrites": reference_rewrites,
+        "auxiliary_updates": auxiliary_updates,
         "before_fingerprint": before_fingerprint,
         "expected_after_fingerprint": expected_after_fingerprint,
         "grandfathered_problems_before": before_grandfathered,
@@ -1204,6 +1313,7 @@ def _build_manifest(
         deletes=deletes,
         renames=renames,
         reference_rewrites=reference_rewrites,
+        auxiliary_updates=auxiliary_updates,
         before_fingerprint=before_fingerprint,
         expected_after_fingerprint=expected_after_fingerprint,
         grandfathered_problems_before=before_grandfathered,

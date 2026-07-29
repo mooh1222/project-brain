@@ -1419,6 +1419,128 @@ def _run_context_replace(argv) -> int:
         return 1
 
 
+def _run_migration(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli migration")
+    modes = parser.add_subparsers(dest="mode", required=True)
+    for mode in ("id", "display"):
+        mode_parser = modes.add_parser(mode)
+        actions = mode_parser.add_subparsers(dest="action", required=True)
+        plan = actions.add_parser("plan")
+        plan.add_argument("--brain-root", required=True)
+        plan.add_argument("--snapshot-root", required=True)
+        plan.add_argument(
+            "--expected-snapshot-manifest-sha256",
+            required=True,
+        )
+        plan.add_argument("--manifest", required=True)
+        plan.add_argument("--engine-sha", required=True)
+        if mode == "id":
+            plan.add_argument("--renames-file", required=True)
+        apply = actions.add_parser("apply")
+        apply.add_argument("--brain-root", required=True)
+        apply.add_argument("--snapshot-root", required=True)
+        apply.add_argument(
+            "--expected-snapshot-manifest-sha256",
+            required=True,
+        )
+        apply.add_argument("--manifest", required=True)
+        apply.add_argument("--expected-manifest-sha256", required=True)
+        apply.add_argument("--engine-sha", required=True)
+    args = parser.parse_args(argv)
+
+    from project_brain.migration import (
+        MigrationError,
+        apply_migration_artifact,
+        create_migration_artifact,
+        plan_display_migration,
+        plan_id_migration,
+        verify_snapshot,
+    )
+    from project_brain.snapshot import SnapshotError
+
+    brain_root = resolve_brain_root(args.brain_root).resolve()
+    try:
+        if args.action == "plan":
+            snapshot = verify_snapshot(
+                Path(args.snapshot_root).absolute(),
+                expected_manifest_sha256=(
+                    args.expected_snapshot_manifest_sha256
+                ),
+            )
+            store = BrainStore.load(brain_root)
+            if args.mode == "id":
+                renames = _read_json_argument(args.renames_file, {})
+                plan = plan_id_migration(
+                    existing=store,
+                    brain_root=brain_root,
+                    engine_sha=args.engine_sha,
+                    renames=renames,
+                    snapshot_id=snapshot.snapshot_id,
+                    snapshot_manifest_sha256=snapshot.manifest_sha256,
+                )
+            else:
+                plan = plan_display_migration(
+                    existing=store,
+                    brain_root=brain_root,
+                    engine_sha=args.engine_sha,
+                    snapshot_id=snapshot.snapshot_id,
+                    snapshot_manifest_sha256=snapshot.manifest_sha256,
+                )
+            artifact = create_migration_artifact(plan)
+            manifest_path = Path(args.manifest)
+            _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+            print(json.dumps({
+                "ok": True,
+                "migration_kind": plan.migration_kind,
+                "manifest": str(manifest_path),
+                "manifest_sha256": artifact.manifest_sha256,
+                "transaction_id": plan.mutation_plan.manifest.transaction_id,
+                "row_count": len(plan.rows),
+                "action_count": (
+                    len(plan.mutation_plan.manifest.creates)
+                    + len(plan.mutation_plan.manifest.updates)
+                    + len(plan.mutation_plan.manifest.deletes)
+                    + len(plan.mutation_plan.manifest.renames)
+                    + len(plan.mutation_plan.manifest.auxiliary_updates)
+                ),
+                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_manifest_sha256": snapshot.manifest_sha256,
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        manifest_bytes = Path(args.manifest).read_bytes()
+        result = apply_migration_artifact(
+            manifest_bytes=manifest_bytes,
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            brain_root=brain_root,
+            engine_sha=args.engine_sha,
+            snapshot_root=Path(args.snapshot_root).absolute(),
+            expected_snapshot_manifest_sha256=(
+                args.expected_snapshot_manifest_sha256
+            ),
+        )
+        print(json.dumps({
+            "ok": True,
+            "transaction_id": result.transaction_id,
+            "action_count": result.action_count,
+            "snapshot_id": result.snapshot_id,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    except (
+        MigrationError,
+        SnapshotError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        print(json.dumps({
+            "ok": False,
+            "error_code": getattr(exc, "code", "migration_failed"),
+            "error": getattr(exc, "detail", str(exc)),
+        }, ensure_ascii=False, indent=2))
+        return 1
+
+
 def main() -> int:
     argv = sys.argv[1:]
     try:
@@ -1465,6 +1587,8 @@ def main() -> int:
             return _run_snapshot(argv[1:])
         if argv and argv[0] == "context-replace":
             return _run_context_replace(argv[1:])
+        if argv and argv[0] == "migration":
+            return _run_migration(argv[1:])
         return _run_query(argv)
     except (ConfigError, RepoVerificationError) as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.

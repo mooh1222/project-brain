@@ -368,7 +368,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
 
     def test_cli_ingest_resolves_config_repo_context_and_exact_revision(self):
-        from tests.test_mutation import _code_locator
+        from tests.test_mutation import _code_locator, _write_raw
 
         project = self.input_dir / "project"
         brain = project / "brain"
@@ -2393,6 +2393,171 @@ class TestCliShow(unittest.TestCase):
         store = BrainStore.load(brain)
         self.assertFalse(store.has(old["id"]))
         self.assertTrue(store.has(new["id"]))
+
+    def test_id_migration_cli_plan_is_read_only_and_apply_requires_receipts(self):
+        from project_brain.snapshot import SnapshotVerification
+        from tests.test_mutation import _code_locator, _write_raw
+
+        brain = (self.root / "migration-brain").resolve()
+        input_dir = self.root / "migration-inputs"
+        input_dir.mkdir()
+        old = _code_locator(
+            object_id="code.Legacy",
+            quote=None,
+            title="legacy display",
+        )
+        _write_raw(brain, old)
+        (brain / "eval_scenarios.json").write_text(
+            json.dumps({
+                "scenarios": [{
+                    "id": "s",
+                    "query": "q",
+                    "expect": {"top5_any": [old["id"]]},
+                }],
+            }),
+            encoding="utf-8",
+        )
+        renames_file = input_dir / "renames.json"
+        manifest_file = input_dir / "id-migration.manifest.json"
+        renames_file.write_text(
+            json.dumps({old["id"]: "code.neutral.legacy"}),
+            encoding="utf-8",
+        )
+        snapshot_root = input_dir / "snapshot"
+        snapshot_receipt = "a" * 64
+        verification = SnapshotVerification(
+            ok=True,
+            snapshot_id="trusted-migration-snapshot",
+            manifest_sha256=snapshot_receipt,
+            file_count=1,
+        )
+
+        plan_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ) as verify, mock.patch("sys.argv", [
+            "cli", "migration", "id", "plan",
+            "--brain-root", str(brain),
+            "--renames-file", str(renames_file),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            *ENGINE_ARGS,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        self.assertEqual(verify.call_count, 1)
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+        artifact = json.loads(manifest_file.read_bytes())
+        self.assertEqual(
+            set(artifact["rows"][0]),
+            {
+                "old_id",
+                "new_id",
+                "kind",
+                "canonical_payload_hash",
+                "reference_rewrites",
+                "dependent_artifacts",
+                "snapshot_id",
+            },
+        )
+
+        wrong_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "id", "apply",
+            "--brain-root", str(brain),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", "0" * 64,
+            *ENGINE_ARGS,
+        ]), redirect_stdout(wrong_out):
+            self.assertEqual(cli.main(), 1)
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+
+        apply_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "id", "apply",
+            "--brain-root", str(brain),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+            *ENGINE_ARGS,
+        ]), redirect_stdout(apply_out):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        store = BrainStore.load(brain)
+        self.assertFalse(store.has(old["id"]))
+        self.assertTrue(store.has("code.neutral.legacy"))
+
+    def test_display_migration_cli_normalizes_only_locator_titles(self):
+        from project_brain.snapshot import SnapshotVerification
+        from tests.test_mutation import _code_locator
+
+        brain = (self.root / "display-brain").resolve()
+        input_dir = self.root / "display-inputs"
+        input_dir.mkdir()
+        locator = _code_locator(
+            object_id="code.neutral.display",
+            title="semantic label",
+            symbol="Display::Run",
+            quote=None,
+        )
+        BrainStore.save_object(brain, locator)
+        manifest_file = input_dir / "display-migration.manifest.json"
+        snapshot_receipt = "b" * 64
+        verification = SnapshotVerification(
+            ok=True,
+            snapshot_id="trusted-display-snapshot",
+            manifest_sha256=snapshot_receipt,
+            file_count=1,
+        )
+        snapshot_root = input_dir / "snapshot"
+
+        plan_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "display", "plan",
+            "--brain-root", str(brain),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            *ENGINE_ARGS,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        self.assertEqual(
+            BrainStore.load(brain).get(locator["id"])["title"],
+            "semantic label",
+        )
+
+        apply_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "display", "apply",
+            "--brain-root", str(brain),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+            *ENGINE_ARGS,
+        ]), redirect_stdout(apply_out):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        self.assertEqual(
+            BrainStore.load(brain).get(locator["id"])["title"],
+            "Display::Run",
+        )
 
 
 if __name__ == "__main__":

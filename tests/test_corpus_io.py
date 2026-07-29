@@ -19,12 +19,14 @@ from project_brain.corpus_io import (
     recover_unfinished_transaction,
 )
 from project_brain.mutation import (
+    AuxiliaryFileUpdate,
     MutationOperation,
     MutationRequest,
     MutationService,
 )
 from project_brain.store import BrainStore
 from tests.test_ingest import candidate_term, context
+from tests.test_mutation import _code_locator
 
 
 FAILURE_POINTS = (
@@ -97,12 +99,24 @@ def _state_fingerprint(brain_root: Path) -> str:
         path = local / name
         if path.exists():
             paths.append(path)
+    eval_path = brain_root / "eval_scenarios.json"
+    if eval_path.exists():
+        paths.append(eval_path)
     for path in sorted(paths):
         digest.update(path.relative_to(brain_root).as_posix().encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _auxiliary_update(before: bytes, after: bytes) -> AuxiliaryFileUpdate:
+    return AuxiliaryFileUpdate(
+        path="eval_scenarios.json",
+        before_sha256=hashlib.sha256(before).hexdigest(),
+        after_sha256=hashlib.sha256(after).hexdigest(),
+        after_bytes=after,
+    )
 
 
 def _changed_context() -> tuple[dict, dict]:
@@ -921,6 +935,192 @@ def test_next_mutation_rolls_back_every_injected_crash_without_roll_forward(
         / "journal.json"
     )
     assert json.loads(journal_path.read_text(encoding="utf-8"))["state"] == "rolled_back"
+
+
+@pytest.mark.parametrize("failure_point", FAILURE_POINTS)
+def test_id_migration_rolls_object_eval_and_derived_back_together(
+    tmp_path,
+    failure_point,
+):
+    brain_root = tmp_path / "brain"
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy display",
+    )
+    new = dict(old)
+    new["id"] = "code.neutral.legacy"
+    _write_object(brain_root, old)
+    eval_before = (
+        b'{"scenarios":[{"id":"s","query":"q","expect":'
+        b'{"top5_any":["code.Legacy"]}}]}\n'
+    )
+    eval_after = (
+        b'{"scenarios":[{"expect":{"top5_any":["code.neutral.legacy"]},'
+        b'"id":"s","query":"q"}]}\n'
+    )
+    (brain_root / "eval_scenarios.json").write_bytes(eval_before)
+    _seed_derived_files(brain_root)
+    update = _auxiliary_update(eval_before, eval_after)
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=(new,),
+        delete_ids=(old["id"],),
+        auxiliary_updates=(update,),
+    )
+    before_fingerprint = _state_fingerprint(brain_root)
+
+    with pytest.raises(InjectedCrash, match=failure_point):
+        MutationService().apply(
+            (new,),
+            request=request,
+            failure_injector=_crash_at(failure_point),
+        )
+
+    recovery_request = _request(brain_root, ())
+    assert MutationService().apply((), request=recovery_request).ok is True
+    assert _state_fingerprint(brain_root) == before_fingerprint
+    assert BrainStore.load(brain_root).has(old["id"])
+    assert not BrainStore.load(brain_root).has(new["id"])
+    assert (brain_root / "eval_scenarios.json").read_bytes() == eval_before
+
+
+def test_id_migration_commits_object_eval_and_derived_together(tmp_path):
+    brain_root = tmp_path / "brain"
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy display",
+    )
+    new = dict(old)
+    new["id"] = "code.neutral.legacy"
+    _write_object(brain_root, old)
+    eval_before = b'{"scenarios":[{"expect":{"top5_any":["code.Legacy"]}}]}\n'
+    eval_after = b'{"scenarios":[{"expect":{"top5_any":["code.neutral.legacy"]}}]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(eval_before)
+    _seed_derived_files(brain_root)
+    update = _auxiliary_update(eval_before, eval_after)
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=(new,),
+        delete_ids=(old["id"],),
+        auxiliary_updates=(update,),
+    )
+
+    result = MutationService().apply((new,), request=request)
+
+    assert result.ok is True
+    assert BrainStore.load(brain_root).has(new["id"])
+    assert not BrainStore.load(brain_root).has(old["id"])
+    assert (brain_root / "eval_scenarios.json").read_bytes() == eval_after
+    assert not (brain_root / ".brain-local" / "index.db").exists()
+    assert not (brain_root / ".brain-local" / "stale-set.json").exists()
+
+
+def test_transaction_rejects_missing_or_unexpected_auxiliary_after_bytes(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    before = b"{}\n"
+    after = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(before)
+    update = _auxiliary_update(before, after)
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=(),
+        auxiliary_updates=(update,),
+    )
+    planned = MutationService().plan((), request=request)
+    assert planned.ok is True
+
+    with pytest.raises(corpus_io.CorpusIOError) as missing:
+        apply_transaction(
+            brain_root,
+            manifest=asdict(planned.manifest),
+            after_files={},
+        )
+    assert missing.value.code == "after_payload_invalid"
+
+    with pytest.raises(corpus_io.CorpusIOError) as unexpected:
+        apply_transaction(
+            brain_root,
+            manifest=asdict(planned.manifest),
+            after_files={
+                "eval_scenarios.json": after,
+                "unexpected.json": b"unexpected",
+            },
+        )
+    assert unexpected.value.code == "after_payload_invalid"
+    assert (brain_root / "eval_scenarios.json").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_message"),
+    [
+        (
+            lambda manifest: manifest.update(operation="ingest"),
+            "allowed only for id_only_migration",
+        ),
+        (
+            lambda manifest: manifest["auxiliary_updates"][0].update(
+                path="other.json",
+            ),
+            "path is invalid",
+        ),
+        (
+            lambda manifest: manifest["auxiliary_updates"][0].update(
+                path="../eval_scenarios.json",
+            ),
+            "stay below brain_root",
+        ),
+        (
+            lambda manifest: manifest["auxiliary_updates"][0].update(
+                before_sha256=None,
+            ),
+            "before_sha256 is invalid",
+        ),
+    ],
+)
+def test_low_level_manifest_auxiliary_allowlist_fails_closed(
+    tmp_path,
+    mutation,
+    expected_message,
+):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    before = b"{}\n"
+    after = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(before)
+    update = _auxiliary_update(before, after)
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=(),
+        auxiliary_updates=(update,),
+    )
+    planned = MutationService().plan((), request=request)
+    manifest = asdict(planned.manifest)
+    mutation(manifest)
+
+    with pytest.raises(ValueError, match=expected_message):
+        apply_transaction(
+            brain_root,
+            manifest=manifest,
+            after_files={"eval_scenarios.json": after},
+        )
+    assert (brain_root / "eval_scenarios.json").read_bytes() == before
 
 
 def test_reader_fails_closed_while_unfinished_journal_exists(tmp_path):
