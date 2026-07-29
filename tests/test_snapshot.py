@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import errno
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
+from project_brain import cli as brain_cli
 from project_brain import snapshot
 from project_brain.snapshot import (
     SnapshotError,
@@ -752,6 +756,137 @@ def test_recovery_rejects_concurrent_phase_log_change_without_mutation(
         assert phase_path.stat().st_ino != phase_inode
     else:
         assert phase_path.stat().st_ino == phase_inode
+    assert backup.stat().st_ino == backup_inode
+    assert staged.stat().st_ino == staged_inode
+
+
+def test_recovery_retries_one_shot_eintr_and_completes(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    original_object = paths["object"].read_bytes()
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    state_root, _, _, _, _ = _leave_double_failure_restore(request, result)
+    phase_inode = (state_root / "phases.log").stat().st_ino
+    original_read = snapshot.os.read
+    interrupted = False
+
+    def interrupt_once(descriptor, count):
+        nonlocal interrupted
+        if os.fstat(descriptor).st_ino == phase_inode and not interrupted:
+            interrupted = True
+            raise InterruptedError(errno.EINTR, "injected EINTR")
+        return original_read(descriptor, count)
+
+    with mock.patch.object(snapshot.os, "read", side_effect=interrupt_once):
+        restored = restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert interrupted is True
+    assert restored.snapshot_id == result.snapshot_id
+    assert paths["object"].read_bytes() == original_object
+    assert not state_root.exists()
+
+
+@pytest.mark.parametrize("failure", ["repeated_eintr", "eio", "ebadf"])
+def test_recovery_structures_phase_read_failures_and_preserves_evidence(
+    tmp_path,
+    failure,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    state_root, journal_path, journal_before, backup, staged = (
+        _leave_double_failure_restore(request, result)
+    )
+    phase_path = state_root / "phases.log"
+    phase_before = phase_path.read_bytes()
+    phase_inode = phase_path.stat().st_ino
+    backup_inode = backup.stat().st_ino
+    staged_inode = staged.stat().st_ino
+    original_read = snapshot.os.read
+    failures = 0
+
+    def fail_phase_read(descriptor, count):
+        nonlocal failures
+        if os.fstat(descriptor).st_ino == phase_inode:
+            failures += 1
+            if failure == "repeated_eintr":
+                raise InterruptedError(errno.EINTR, "injected EINTR")
+            error_number = errno.EIO if failure == "eio" else errno.EBADF
+            raise OSError(error_number, f"injected {failure}")
+        return original_read(descriptor, count)
+
+    with mock.patch.object(snapshot.os, "read", side_effect=fail_phase_read):
+        with pytest.raises(SnapshotError) as caught:
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    assert caught.value.code == "recovery_required"
+    if failure == "repeated_eintr":
+        assert failures == snapshot._PHASE_READ_EINTR_RETRY_LIMIT + 1
+    else:
+        assert failures == 1
+    assert not request.brain_root.exists()
+    assert journal_path.read_bytes() == journal_before
+    assert phase_path.read_bytes() == phase_before
+    assert phase_path.stat().st_ino == phase_inode
+    assert backup.stat().st_ino == backup_inode
+    assert staged.stat().st_ino == staged_inode
+
+
+def test_snapshot_restore_cli_structures_eio_without_traceback(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    state_root, journal_path, journal_before, backup, staged = (
+        _leave_double_failure_restore(request, result)
+    )
+    phase_path = state_root / "phases.log"
+    phase_before = phase_path.read_bytes()
+    phase_inode = phase_path.stat().st_ino
+    backup_inode = backup.stat().st_ino
+    staged_inode = staged.stat().st_ino
+    original_read = snapshot.os.read
+
+    def fail_with_eio(descriptor, count):
+        if os.fstat(descriptor).st_ino == phase_inode:
+            raise OSError(errno.EIO, "injected EIO")
+        return original_read(descriptor, count)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        mock.patch.object(snapshot.os, "read", side_effect=fail_with_eio),
+        mock.patch("sys.argv", [
+            "cli",
+            "snapshot",
+            "restore",
+            "--snapshot-root",
+            str(result.snapshot_root),
+            "--brain-root",
+            str(request.brain_root),
+            "--expected-manifest-sha256",
+            result.manifest_sha256,
+        ]),
+        redirect_stdout(stdout),
+        redirect_stderr(stderr),
+    ):
+        exit_code = brain_cli.main()
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert payload["error_code"] == "recovery_required"
+    assert "Traceback" not in stdout.getvalue() + stderr.getvalue()
+    assert not request.brain_root.exists()
+    assert journal_path.read_bytes() == journal_before
+    assert phase_path.read_bytes() == phase_before
     assert backup.stat().st_ino == backup_inode
     assert staged.stat().st_ino == staged_inode
 

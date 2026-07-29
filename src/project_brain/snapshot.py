@@ -37,6 +37,7 @@ _BRAIN_FILES = (
 _INDEX_FILES = ("index.db", "index.db-wal", "index.db-shm")
 _PHASE_RECORDS = (b"preparing", b"prepared", b"moved_live", b"activated")
 _PHASE_LOG_MAX_BYTES = sum(len(record) + 1 for record in _PHASE_RECORDS)
+_PHASE_READ_EINTR_RETRY_LIMIT = 8
 
 
 class SnapshotError(RuntimeError):
@@ -1195,9 +1196,35 @@ def _read_phases(
     os.lseek(phase_fd, 0, os.SEEK_SET)
     chunks: list[bytes] = []
     bytes_read = 0
+    interrupted_retries = 0
     read_limit = _PHASE_LOG_MAX_BYTES + 1
     while bytes_read < read_limit:
-        chunk = os.read(phase_fd, read_limit - bytes_read)
+        try:
+            chunk = os.read(phase_fd, read_limit - bytes_read)
+        except InterruptedError:
+            interrupted_retries += 1
+            if interrupted_retries > _PHASE_READ_EINTR_RETRY_LIMIT:
+                _fail(
+                    "recovery_required",
+                    "restore phase log read exceeded the EINTR retry limit",
+                    paths=paths,
+                )
+            continue
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                interrupted_retries += 1
+                if interrupted_retries <= _PHASE_READ_EINTR_RETRY_LIMIT:
+                    continue
+                _fail(
+                    "recovery_required",
+                    "restore phase log read exceeded the EINTR retry limit",
+                    paths=paths,
+                )
+            _fail(
+                "recovery_required",
+                f"restore phase log read failed: {exc}",
+                paths=paths,
+            )
         if not chunk:
             break
         chunks.append(chunk)
