@@ -160,6 +160,9 @@ def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
 
     assert verification.ok is True
     assert verification.manifest_sha256 == result.manifest_sha256
+    assert verification.repo_head == manifest["repo_head"]
+    assert verification.engine_head == manifest["engine_head"]
+    assert verification.corpus_fingerprint == manifest["corpus"]["fingerprint"]
     assert manifest["brain_targets"]["object_kinds"] == dict(
         sorted(BrainStore._KIND_DIR.items())
     )

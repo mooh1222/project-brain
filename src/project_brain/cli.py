@@ -1427,6 +1427,8 @@ def _run_migration(argv) -> int:
         actions = mode_parser.add_subparsers(dest="action", required=True)
         plan = actions.add_parser("plan")
         plan.add_argument("--brain-root", required=True)
+        plan.add_argument("--repo-root", required=True)
+        plan.add_argument("--engine-root", required=True)
         plan.add_argument("--snapshot-root", required=True)
         plan.add_argument(
             "--expected-snapshot-manifest-sha256",
@@ -1438,6 +1440,8 @@ def _run_migration(argv) -> int:
             plan.add_argument("--renames-file", required=True)
         apply = actions.add_parser("apply")
         apply.add_argument("--brain-root", required=True)
+        apply.add_argument("--repo-root", required=True)
+        apply.add_argument("--engine-root", required=True)
         apply.add_argument("--snapshot-root", required=True)
         apply.add_argument(
             "--expected-snapshot-manifest-sha256",
@@ -1473,18 +1477,20 @@ def _run_migration(argv) -> int:
                 plan = plan_id_migration(
                     existing=store,
                     brain_root=brain_root,
+                    repo_root=Path(args.repo_root).absolute(),
+                    engine_root=Path(args.engine_root).absolute(),
                     engine_sha=args.engine_sha,
                     renames=renames,
-                    snapshot_id=snapshot.snapshot_id,
-                    snapshot_manifest_sha256=snapshot.manifest_sha256,
+                    snapshot=snapshot,
                 )
             else:
                 plan = plan_display_migration(
                     existing=store,
                     brain_root=brain_root,
+                    repo_root=Path(args.repo_root).absolute(),
+                    engine_root=Path(args.engine_root).absolute(),
                     engine_sha=args.engine_sha,
-                    snapshot_id=snapshot.snapshot_id,
-                    snapshot_manifest_sha256=snapshot.manifest_sha256,
+                    snapshot=snapshot,
                 )
             artifact = create_migration_artifact(plan)
             manifest_path = Path(args.manifest)
@@ -1513,6 +1519,8 @@ def _run_migration(argv) -> int:
             manifest_bytes=manifest_bytes,
             expected_manifest_sha256=args.expected_manifest_sha256,
             brain_root=brain_root,
+            repo_root=Path(args.repo_root).absolute(),
+            engine_root=Path(args.engine_root).absolute(),
             engine_sha=args.engine_sha,
             snapshot_root=Path(args.snapshot_root).absolute(),
             expected_snapshot_manifest_sha256=(

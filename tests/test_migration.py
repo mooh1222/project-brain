@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import fields, replace
 from pathlib import Path
 from unittest import mock
@@ -17,6 +18,7 @@ from project_brain.migration import (
     plan_display_migration,
     plan_id_migration,
 )
+from project_brain.mutation import corpus_fingerprint
 from project_brain.store import BrainStore
 from project_brain.snapshot import SnapshotVerification
 from tests.test_ingest import evidence_ref, manifest, review_record_for
@@ -32,28 +34,109 @@ def _snapshot_verification(
     *,
     snapshot_id: str = SNAPSHOT_ID,
     manifest_sha256: str = SNAPSHOT_SHA,
+    repo_head: str = "b" * 40,
+    engine_head: str = ENGINE_SHA,
+    corpus_fingerprint_value: str = "c" * 64,
 ) -> SnapshotVerification:
     return SnapshotVerification(
         ok=True,
         snapshot_id=snapshot_id,
         manifest_sha256=manifest_sha256,
         file_count=1,
+        repo_head=repo_head,
+        engine_head=engine_head,
+        corpus_fingerprint=corpus_fingerprint_value,
     )
 
 
+def _git_repo(root: Path) -> str:
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / ".git").is_dir():
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "migration@test.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "Migration Test"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _migration_roots(
+    brain_root: Path,
+) -> tuple[Path, Path, str, str]:
+    repo_root = brain_root.parent.resolve()
+    engine_root = (repo_root / "engine-fixture").resolve()
+    repo_head = _git_repo(repo_root)
+    engine_head = _git_repo(engine_root)
+    return repo_root, engine_root, repo_head, engine_head
+
+
+def _trusted_snapshot_for(
+    brain_root: Path,
+    *,
+    snapshot_id: str = SNAPSHOT_ID,
+    manifest_sha256: str = SNAPSHOT_SHA,
+) -> tuple[SnapshotVerification, Path, Path, str]:
+    repo_root, engine_root, repo_head, engine_head = _migration_roots(
+        brain_root,
+    )
+    snapshot = _snapshot_verification(
+        snapshot_id=snapshot_id,
+        manifest_sha256=manifest_sha256,
+        repo_head=repo_head,
+        engine_head=engine_head,
+        corpus_fingerprint_value=corpus_fingerprint(
+            BrainStore.load(brain_root)
+        ),
+    )
+    return snapshot, repo_root, engine_root, engine_head
+
+
 def _apply(artifact, brain_root: Path, **overrides):
+    snapshot, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
     kwargs = {
         "manifest_bytes": artifact.manifest_bytes,
         "expected_manifest_sha256": artifact.manifest_sha256,
         "brain_root": brain_root,
-        "engine_sha": ENGINE_SHA,
+        "repo_root": repo_root,
+        "engine_root": engine_root,
+        "engine_sha": engine_head,
         "snapshot_root": brain_root.parent / "snapshot",
         "expected_snapshot_manifest_sha256": SNAPSHOT_SHA,
         **overrides,
     }
     with mock.patch(
         "project_brain.migration.verify_snapshot",
-        return_value=_snapshot_verification(),
+        return_value=snapshot,
     ):
         return apply_migration_artifact(**kwargs)
 
@@ -73,14 +156,279 @@ def _write_eval(brain_root: Path, payload: dict) -> bytes:
 
 
 def _id_plan(brain_root: Path, renames: dict[str, str]):
+    snapshot, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
     return plan_id_migration(
         existing=BrainStore.load(brain_root),
         brain_root=brain_root,
-        engine_sha=ENGINE_SHA,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_head,
         renames=renames,
-        snapshot_id=SNAPSHOT_ID,
-        snapshot_manifest_sha256=SNAPSHOT_SHA,
+        snapshot=snapshot,
     )
+
+
+def test_plan_binds_explicit_git_roots_heads_and_snapshot_corpus(tmp_path):
+    repo_root = (tmp_path / "repo").resolve()
+    brain_root = repo_root / "brain"
+    engine_root = (tmp_path / "engine").resolve()
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy",
+    )
+    _write_raw(brain_root, old)
+    repo_head = _git_repo(repo_root)
+    engine_head = _git_repo(engine_root)
+    existing = BrainStore.load(brain_root)
+    snapshot = _snapshot_verification(
+        repo_head=repo_head,
+        engine_head=engine_head,
+        corpus_fingerprint_value=corpus_fingerprint(existing),
+    )
+
+    plan = plan_id_migration(
+        existing=existing,
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_head,
+        renames={old["id"]: "code.neutral.legacy"},
+        snapshot=snapshot,
+    )
+
+    assert plan.request.repo_context is not None
+    assert plan.request.repo_context.repo_root == repo_root
+    assert plan.request.repo_context.target_revision_sha == repo_head
+    assert plan.request.engine_sha == engine_head
+
+
+@pytest.mark.parametrize(
+    ("change", "error_code"),
+    [
+        ("repo_head", "snapshot_repo_head_mismatch"),
+        ("engine_head", "snapshot_engine_head_mismatch"),
+        ("engine_sha", "snapshot_engine_head_mismatch"),
+        ("corpus", "snapshot_corpus_fingerprint_mismatch"),
+    ],
+)
+def test_plan_rejects_snapshot_or_current_binding_mismatch(
+    tmp_path,
+    change,
+    error_code,
+):
+    repo_root = (tmp_path / "repo").resolve()
+    brain_root = repo_root / "brain"
+    engine_root = (tmp_path / "engine").resolve()
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy",
+    )
+    _write_raw(brain_root, old)
+    repo_head = _git_repo(repo_root)
+    engine_head = _git_repo(engine_root)
+    snapshot = _snapshot_verification(
+        repo_head=(
+            "0" * 40 if change == "repo_head" else repo_head
+        ),
+        engine_head=(
+            "0" * 40 if change == "engine_head" else engine_head
+        ),
+        corpus_fingerprint_value=(
+            "0" * 64
+            if change == "corpus"
+            else corpus_fingerprint(BrainStore.load(brain_root))
+        ),
+    )
+
+    with pytest.raises(MigrationError) as caught:
+        plan_id_migration(
+            existing=BrainStore.load(brain_root),
+            brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+            engine_sha=(
+                "0" * 40 if change == "engine_sha" else engine_head
+            ),
+            renames={old["id"]: "code.neutral.legacy"},
+            snapshot=snapshot,
+        )
+
+    assert caught.value.code == error_code
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "non_git"])
+def test_plan_rejects_unsafe_or_non_git_explicit_roots(
+    tmp_path,
+    unsafe_kind,
+):
+    real_repo = (tmp_path / "real-repo").resolve()
+    brain_root = real_repo / "brain"
+    engine_root = (tmp_path / "engine").resolve()
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy",
+    )
+    _write_raw(brain_root, old)
+    repo_head = _git_repo(real_repo)
+    engine_head = _git_repo(engine_root)
+    if unsafe_kind == "symlink":
+        repo_root = (tmp_path / "repo-link").absolute()
+        repo_root.symlink_to(real_repo, target_is_directory=True)
+        plan_brain_root = repo_root / "brain"
+    else:
+        repo_root = real_repo
+        plan_brain_root = brain_root
+        engine_root = (tmp_path / "not-git").resolve()
+        engine_root.mkdir()
+    snapshot = _snapshot_verification(
+        repo_head=repo_head,
+        engine_head=engine_head,
+        corpus_fingerprint_value=corpus_fingerprint(
+            BrainStore.load(brain_root)
+        ),
+    )
+
+    with pytest.raises(MigrationError) as caught:
+        plan_id_migration(
+            existing=BrainStore.load(brain_root),
+            brain_root=plan_brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+            engine_sha=engine_head,
+            renames={old["id"]: "code.neutral.legacy"},
+            snapshot=snapshot,
+        )
+
+    assert caught.value.code in {
+        "symlink_forbidden",
+        "source_unavailable",
+        "git_head_invalid",
+    }
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ["repo_head", "engine_head", "corpus", "root_swap"],
+)
+def test_apply_rejects_checkout_or_corpus_drift_since_plan(tmp_path, drift):
+    repo_root = (tmp_path / "repo").resolve()
+    brain_root = repo_root / "brain"
+    engine_root = (tmp_path / "engine").resolve()
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy",
+    )
+    _write_raw(brain_root, old)
+    repo_head = _git_repo(repo_root)
+    engine_head = _git_repo(engine_root)
+    snapshot = _snapshot_verification(
+        repo_head=repo_head,
+        engine_head=engine_head,
+        corpus_fingerprint_value=corpus_fingerprint(
+            BrainStore.load(brain_root)
+        ),
+    )
+    plan = plan_id_migration(
+        existing=BrainStore.load(brain_root),
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_head,
+        renames={old["id"]: "code.neutral.legacy"},
+        snapshot=snapshot,
+    )
+    artifact = create_migration_artifact(plan)
+    if drift in {"repo_head", "engine_head"}:
+        drift_root = repo_root if drift == "repo_head" else engine_root
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(drift_root),
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "drift",
+            ],
+            check=True,
+        )
+    elif drift == "corpus":
+        changed = dict(old)
+        changed["title"] = "drifted"
+        _write_raw(brain_root, changed)
+    else:
+        moved = tmp_path / "repo-moved"
+        repo_root.rename(moved)
+        repo_root.symlink_to(moved, target_is_directory=True)
+
+    with mock.patch(
+        "project_brain.migration.verify_snapshot",
+        return_value=snapshot,
+    ), pytest.raises(MigrationError) as caught:
+        apply_migration_artifact(
+            manifest_bytes=artifact.manifest_bytes,
+            expected_manifest_sha256=artifact.manifest_sha256,
+            brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+            engine_sha=engine_head,
+            snapshot_root=tmp_path / "snapshot",
+            expected_snapshot_manifest_sha256=SNAPSHOT_SHA,
+        )
+
+    assert caught.value.code in {
+        "snapshot_repo_head_mismatch",
+        "snapshot_engine_head_mismatch",
+        "snapshot_corpus_fingerprint_mismatch",
+        "symlink_forbidden",
+        "source_unavailable",
+    }
+
+
+def test_apply_replan_reuses_strict_eval_validator_before_mutation(tmp_path):
+    brain_root = tmp_path / "brain"
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy",
+    )
+    _write_raw(brain_root, old)
+    _write_eval(brain_root, {
+        "scenarios": [{
+            "id": "s",
+            "query": "q",
+            "expect": {"top5_any": [old["id"]]},
+        }],
+    })
+    local = brain_root / ".brain-local"
+    local.mkdir()
+    (local / "index.db").write_bytes(b"index")
+    plan = _id_plan(
+        brain_root,
+        {old["id"]: "code.neutral.legacy"},
+    )
+    artifact = create_migration_artifact(plan)
+    (brain_root / "eval_scenarios.json").write_bytes(
+        b'{"scenarios":[{"id":"s","query":"q","expect":'
+        b'{"top5_any":["code.Legacy"],'
+        b'"top5_any":["code.Legacy"]}}]}\n'
+    )
+
+    with pytest.raises(MigrationError) as caught:
+        _apply(artifact, brain_root)
+
+    assert caught.value.code == "eval_invalid"
+    assert BrainStore.load(brain_root).has(old["id"])
+    assert not BrainStore.load(brain_root).has("code.neutral.legacy")
+    assert (local / "index.db").read_bytes() == b"index"
+    assert not (local / "transactions").exists()
 
 
 def test_migration_row_has_exact_contract_fields():
@@ -221,6 +569,146 @@ def test_canonical_payload_rejects_every_non_registry_semantic_change():
             )
 
 
+def test_canonical_payload_placeholders_do_not_collide_with_literal_tokens():
+    before = {
+        "id": "code.Legacy",
+        "kind": "CodeLocator",
+        "title": "$SELF",
+        "target_object_id": "$REF:000001",
+        "tag_like_literal": (
+            '{"__project_brain_migration_placeholder__":'
+            '{"kind":"reference","ordinal":1}}'
+        ),
+    }
+    after = {
+        **before,
+        "id": "code.neutral.legacy",
+        "target_object_id": "code.neutral.legacy",
+    }
+
+    with pytest.raises(MigrationError, match="canonical payload"):
+        canonical_payload_hash_pair(
+            before,
+            after,
+            renames={"code.Legacy": "code.neutral.legacy"},
+            old_id="code.Legacy",
+            new_id="code.neutral.legacy",
+        )
+
+
+def test_canonical_payload_reference_ordinals_are_deterministic_and_distinct():
+    before = {
+        "id": "code.Z",
+        "kind": "CodeLocator",
+        "target_object_ids": ["code.A", "code.Z"],
+    }
+    after = {
+        **before,
+        "id": "code.new-z",
+        "target_object_ids": ["code.new-a", "code.new-z"],
+    }
+    renames = {
+        "code.Z": "code.new-z",
+        "code.A": "code.new-a",
+    }
+
+    first = canonical_payload_hash_pair(
+        before,
+        after,
+        renames=renames,
+        old_id="code.Z",
+        new_id="code.new-z",
+    )
+    second = canonical_payload_hash_pair(
+        before,
+        after,
+        renames=dict(reversed(tuple(renames.items()))),
+        old_id="code.Z",
+        new_id="code.new-z",
+    )
+
+    assert first == second
+
+
+@pytest.mark.parametrize(
+    "eval_bytes",
+    [
+        b'{"scenarios":[],"scenarios":[]}\n',
+        (
+            b'{"scenarios":[{"id":"s","id":"s2","query":"q",'
+            b'"expect":{"top5_any":["code.Legacy"]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"top5_any":["code.Legacy"],'
+            b'"top5_any":["code.Legacy"]}}]}\n'
+        ),
+        b'{"scenarios":[null]}\n',
+        b'{"scenarios":[{"id":"","query":"q","expect":{"no_answer":true}}]}\n',
+        b'{"scenarios":[{"id":"s","query":"q"}]}\n',
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"unknown":["code.Legacy"]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"top5_any":true}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"top5_any":null}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"top5_any":[["code.Legacy"]]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"top5_any":["code.Legacy","code.Legacy"]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"linked_any_groups":["code.Legacy"]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"linked_any_groups":[[["code.Legacy"]]]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"max_results":true}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"no_answer":null}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"raw_top5_prefix_any":[["raw."]]}}]}\n'
+        ),
+        (
+            b'{"scenarios":['
+            b'{"id":"s","query":"q","expect":{"no_answer":true}},'
+            b'{"id":"s","query":"q2","expect":{"no_answer":true}}]}\n'
+        ),
+    ],
+)
+def test_id_plan_rejects_ambiguous_or_noncanonical_eval(tmp_path, eval_bytes):
+    brain_root = tmp_path / "brain"
+    old = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy",
+    )
+    _write_raw(brain_root, old)
+    (brain_root / "eval_scenarios.json").write_bytes(eval_bytes)
+
+    with pytest.raises(MigrationError) as caught:
+        _id_plan(brain_root, {old["id"]: "code.neutral.legacy"})
+
+    assert caught.value.code == "eval_invalid"
+
+
 @pytest.mark.parametrize(
     ("snapshot_id", "snapshot_sha", "error_code"),
     [
@@ -243,15 +731,28 @@ def test_plan_rejects_empty_or_unsafe_snapshot_binding(
         title="legacy",
     )
     _write_raw(brain_root, old)
+    _, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
+    invalid_snapshot = _snapshot_verification(
+        snapshot_id=snapshot_id,
+        manifest_sha256=snapshot_sha,
+        repo_head=_git_repo(repo_root),
+        engine_head=engine_head,
+        corpus_fingerprint_value=corpus_fingerprint(
+            BrainStore.load(brain_root)
+        ),
+    )
 
     with pytest.raises(MigrationError) as caught:
         plan_id_migration(
             existing=BrainStore.load(brain_root),
             brain_root=brain_root,
-            engine_sha=ENGINE_SHA,
+            repo_root=repo_root,
+            engine_root=engine_root,
+            engine_sha=engine_head,
             renames={old["id"]: "code.neutral.legacy"},
-            snapshot_id=snapshot_id,
-            snapshot_manifest_sha256=snapshot_sha,
+            snapshot=invalid_snapshot,
         )
 
     assert caught.value.code == error_code
@@ -319,13 +820,17 @@ def test_display_plan_changes_only_code_locator_title(tmp_path):
     ref["title"] = "EvidenceRef title is not a target"
     for obj in (with_symbol, without_symbol, source_manifest, ref):
         _write_raw(brain_root, obj)
+    snapshot, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
 
     plan = plan_display_migration(
         existing=BrainStore.load(brain_root),
         brain_root=brain_root,
-        engine_sha=ENGINE_SHA,
-        snapshot_id=SNAPSHOT_ID,
-        snapshot_manifest_sha256=SNAPSHOT_SHA,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_head,
+        snapshot=snapshot,
     )
 
     after = {obj["id"]: obj for obj in plan.mutation_plan.after_objects}
@@ -408,21 +913,24 @@ def test_apply_requires_exact_trusted_snapshot_and_manifest_receipts(tmp_path):
         {old["id"]: "code.neutral.legacy"},
     )
     artifact = create_migration_artifact(plan)
+    trusted, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
 
     for changes, verification, error_code in (
         (
             {"expected_manifest_sha256": "0" * 64},
-            _snapshot_verification(),
+            trusted,
             "manifest_sha256_mismatch",
         ),
         (
             {},
-            _snapshot_verification(snapshot_id="other"),
+            replace(trusted, snapshot_id="other"),
             "snapshot_binding_mismatch",
         ),
         (
             {},
-            _snapshot_verification(manifest_sha256="0" * 64),
+            replace(trusted, manifest_sha256="0" * 64),
             "snapshot_binding_mismatch",
         ),
     ):
@@ -430,7 +938,9 @@ def test_apply_requires_exact_trusted_snapshot_and_manifest_receipts(tmp_path):
             "manifest_bytes": artifact.manifest_bytes,
             "expected_manifest_sha256": artifact.manifest_sha256,
             "brain_root": brain_root,
-            "engine_sha": ENGINE_SHA,
+            "repo_root": repo_root,
+            "engine_root": engine_root,
+            "engine_sha": engine_head,
             "snapshot_root": brain_root.parent / "snapshot",
             "expected_snapshot_manifest_sha256": SNAPSHOT_SHA,
             **changes,

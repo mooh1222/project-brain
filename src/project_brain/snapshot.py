@@ -78,6 +78,9 @@ class SnapshotVerification:
     snapshot_id: str
     manifest_sha256: str
     file_count: int
+    repo_head: str
+    engine_head: str
+    corpus_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -328,14 +331,75 @@ def _git_head(root: Path) -> str | None:
 
 
 def _required_git_head(root: Path, *, label: str) -> str:
-    value = _git_head(root)
-    if value is None or _GIT_SHA.fullmatch(value) is None:
+    root = Path(root)
+    if not root.is_absolute() or root != Path(os.path.abspath(root)):
         _fail(
-            "git_head_invalid",
-            f"{label} must resolve to an exact lowercase 40-hex commit SHA",
+            "git_root_invalid",
+            f"{label} must be an exact absolute path",
             paths=(root,),
         )
-    return value
+    descriptor = _open_absolute_directory(root, create=False)
+    try:
+        pinned = os.fstat(descriptor)
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, ValueError) as exc:
+            _fail(
+                "git_head_invalid",
+                f"{label} Git root check failed: {exc}",
+                paths=(root,),
+            )
+        try:
+            top_path = Path(top.stdout.strip())
+        except (TypeError, ValueError):
+            top_path = Path()
+        value = _git_head(root)
+        try:
+            current = os.stat(root, follow_symlinks=False)
+        except OSError as exc:
+            _fail(
+                "git_root_changed",
+                f"{label} changed during Git verification: {exc}",
+                paths=(root,),
+            )
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino)
+            != (pinned.st_dev, pinned.st_ino)
+        ):
+            _fail(
+                "git_root_changed",
+                f"{label} changed during Git verification",
+                paths=(root,),
+            )
+        if (
+            top.returncode != 0
+            or not top.stdout.strip()
+            or top_path != root
+            or value is None
+            or _GIT_SHA.fullmatch(value) is None
+        ):
+            _fail(
+                "git_head_invalid",
+                (
+                    f"{label} must be an exact Git toplevel at a lowercase "
+                    "40-hex commit SHA"
+                ),
+                paths=(root,),
+            )
+        return value
+    finally:
+        os.close(descriptor)
+
+
+def verify_git_root_head(root: Path, *, label: str) -> str:
+    """Resolve one exact no-follow Git root to its trusted current HEAD."""
+    return _required_git_head(root, label=label)
 
 
 def _managed_inventory(repo_root: Path) -> tuple[list[dict], list[str]]:
@@ -1008,6 +1072,9 @@ def verify_snapshot(
         snapshot_id=manifest["snapshot_id"],
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         file_count=len(manifest["files"]),
+        repo_head=manifest["repo_head"],
+        engine_head=manifest["engine_head"],
+        corpus_fingerprint=manifest["corpus"]["fingerprint"],
     )
 
 

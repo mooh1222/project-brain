@@ -2342,6 +2342,10 @@ def _validate_manifest_model(
             before=True,
             after=True,
         )
+        if before_sha == after_sha:
+            raise ValueError(
+                "manifest auxiliary update must change content"
+            )
         _add_expected_entry(entries, path, before_sha, after_sha)
     return [entries[path] for path in sorted(entries)]
 

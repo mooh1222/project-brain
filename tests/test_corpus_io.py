@@ -1123,6 +1123,50 @@ def test_low_level_manifest_auxiliary_allowlist_fails_closed(
     assert (brain_root / "eval_scenarios.json").read_bytes() == before
 
 
+def test_low_level_manifest_rejects_auxiliary_noop_without_invalidation(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    unchanged = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(unchanged)
+    _seed_derived_files(brain_root)
+    update = _auxiliary_update(
+        unchanged,
+        b'{"scenarios":[{"id":"s","query":"q","expect":'
+        b'{"no_answer":true}}]}\n',
+    )
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=(),
+        auxiliary_updates=(update,),
+    )
+    planned = MutationService().plan((), request=request)
+    manifest = asdict(planned.manifest)
+    action = manifest["auxiliary_updates"][0]
+    action["after_sha256"] = action["before_sha256"]
+
+    with pytest.raises(ValueError, match="must change content"):
+        apply_transaction(
+            brain_root,
+            manifest=manifest,
+            after_files={"eval_scenarios.json": unchanged},
+        )
+
+    assert (brain_root / "eval_scenarios.json").read_bytes() == unchanged
+    assert (brain_root / ".brain-local" / "index.db").read_bytes() == b"index"
+    assert (
+        brain_root / ".brain-local" / "stale-set.json"
+    ).read_bytes() == b'{"stale":true}\n'
+    assert not (brain_root / ".brain-local" / "transactions").exists()
+    assert not (
+        brain_root / ".brain-local" / "preparing-transactions"
+    ).exists()
+
+
 def test_reader_fails_closed_while_unfinished_journal_exists(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()

@@ -1143,6 +1143,34 @@ def test_auxiliary_update_rejects_wrong_hashes_and_duplicate_path(tmp_path):
     ).error_code == "duplicate_auxiliary_update"
 
 
+def test_auxiliary_update_rejects_noop_before_transaction_or_invalidation(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    unchanged = b'{"scenarios":[]}\n'
+    (brain_root / "eval_scenarios.json").write_bytes(unchanged)
+    local = brain_root / ".brain-local"
+    local.mkdir()
+    (local / "index.db").write_bytes(b"index")
+    (local / "stale-set.json").write_bytes(b'{"stale":[]}\n')
+    update = _file_update("eval_scenarios.json", unchanged, unchanged)
+    request = _request(
+        brain_root,
+        (),
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        auxiliary_updates=(update,),
+    )
+
+    result = MutationService().apply((), request=request)
+
+    assert result.error_code == "auxiliary_update_noop"
+    assert (local / "index.db").read_bytes() == b"index"
+    assert (local / "stale-set.json").read_bytes() == b'{"stale":[]}\n'
+    assert not (local / "transactions").exists()
+    assert not (local / "preparing-transactions").exists()
+
+
 @pytest.mark.parametrize(
     ("entry_kind", "expected_error"),
     [

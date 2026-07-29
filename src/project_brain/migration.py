@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path, PurePosixPath
 
@@ -14,6 +15,7 @@ from project_brain.corpus_io import (
     inspect_tracked_file,
     read_tracked_file_bytes,
 )
+from project_brain.eval_harness import ASSERTION_KEYS
 from project_brain.hash_utils import stable_json
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
@@ -24,8 +26,14 @@ from project_brain.mutation import (
     MutationService,
     corpus_fingerprint,
 )
-from project_brain.reference_fields import rewrite_object_refs
-from project_brain.snapshot import SnapshotError, verify_snapshot
+from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
+from project_brain.repo_context import RepoContext
+from project_brain.snapshot import (
+    SnapshotError,
+    SnapshotVerification,
+    verify_git_root_head,
+    verify_snapshot,
+)
 from project_brain.store import BrainStore
 
 
@@ -38,6 +46,8 @@ _EVAL_ID_LIST_KEYS = frozenset({
     "advisories_top5_any",
     "projection_reuse_top5_any",
 })
+_EVAL_STRING_LIST_KEYS = _EVAL_ID_LIST_KEYS | {"raw_top5_prefix_any"}
+_MIGRATION_TAG = "__project_brain_migration_placeholder__"
 _INDEX_PATHS = (
     ".brain-local/index.db",
     ".brain-local/index.db-wal",
@@ -99,21 +109,105 @@ def _object_hash(obj: Mapping[str, object]) -> str:
 
 
 def _validate_snapshot_binding(
-    snapshot_id: str,
-    snapshot_manifest_sha256: str,
+    snapshot: SnapshotVerification,
 ) -> None:
     if (
-        not isinstance(snapshot_id, str)
-        or _SNAPSHOT_ID.fullmatch(snapshot_id) is None
+        not isinstance(snapshot, SnapshotVerification)
+        or snapshot.ok is not True
+    ):
+        _fail("snapshot_verification_invalid", "trusted snapshot is invalid")
+    if (
+        not isinstance(snapshot.snapshot_id, str)
+        or _SNAPSHOT_ID.fullmatch(snapshot.snapshot_id) is None
     ):
         _fail("snapshot_id_invalid", "snapshot_id is empty or unsafe")
     if (
-        not isinstance(snapshot_manifest_sha256, str)
-        or _SHA256.fullmatch(snapshot_manifest_sha256) is None
+        not isinstance(snapshot.manifest_sha256, str)
+        or _SHA256.fullmatch(snapshot.manifest_sha256) is None
     ):
         _fail(
             "snapshot_receipt_invalid",
             "trusted snapshot receipt must be an exact lowercase SHA-256",
+        )
+    if (
+        not isinstance(snapshot.repo_head, str)
+        or re.fullmatch(r"[0-9a-f]{40}", snapshot.repo_head) is None
+        or not isinstance(snapshot.engine_head, str)
+        or re.fullmatch(r"[0-9a-f]{40}", snapshot.engine_head) is None
+    ):
+        _fail(
+            "snapshot_git_head_invalid",
+            "trusted snapshot Git heads must be lowercase 40-hex SHAs",
+        )
+    if (
+        not isinstance(snapshot.corpus_fingerprint, str)
+        or _SHA256.fullmatch(snapshot.corpus_fingerprint) is None
+    ):
+        _fail(
+            "snapshot_corpus_fingerprint_invalid",
+            "trusted snapshot corpus fingerprint must be lowercase SHA-256",
+        )
+
+
+def _trusted_migration_context(
+    *,
+    brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
+    engine_sha: str,
+    snapshot: SnapshotVerification,
+) -> RepoContext:
+    _validate_snapshot_binding(snapshot)
+    _validate_engine_sha(engine_sha)
+    if (
+        not isinstance(brain_root, Path)
+        or not brain_root.is_absolute()
+        or not isinstance(repo_root, Path)
+        or not repo_root.is_absolute()
+        or not isinstance(engine_root, Path)
+        or not engine_root.is_absolute()
+    ):
+        _fail(
+            "request_invalid",
+            "brain_root, repo_root, and engine_root must be absolute Paths",
+        )
+    if not brain_root.is_relative_to(repo_root):
+        _fail(
+            "repo_root_mismatch",
+            "brain_root must be inside the explicit repo_root",
+        )
+    try:
+        repo_head = verify_git_root_head(repo_root, label="repo_root")
+        engine_head = verify_git_root_head(engine_root, label="engine_root")
+    except SnapshotError as exc:
+        _fail(exc.code, exc.detail)
+    if repo_head != snapshot.repo_head:
+        _fail(
+            "snapshot_repo_head_mismatch",
+            "current repo HEAD differs from the trusted snapshot",
+        )
+    if engine_head != snapshot.engine_head or engine_sha != engine_head:
+        _fail(
+            "snapshot_engine_head_mismatch",
+            "current engine HEAD or engine_sha differs from the trusted snapshot",
+        )
+    return RepoContext(
+        repo_root=repo_root,
+        expected_repo_id="migration-snapshot",
+        expected_revision_ref="HEAD",
+        target_revision_sha=repo_head,
+    )
+
+
+def _validate_live_snapshot_corpus(
+    existing: BrainStore,
+    snapshot: SnapshotVerification,
+) -> None:
+    live_fingerprint = corpus_fingerprint(existing)
+    if live_fingerprint != snapshot.corpus_fingerprint:
+        _fail(
+            "snapshot_corpus_fingerprint_mismatch",
+            "live corpus differs from the trusted snapshot baseline",
         )
 
 
@@ -149,29 +243,65 @@ def _validate_renames(
     return dict(sorted(pairs.items()))
 
 
-def _reference_tokens(renames: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    before: dict[str, str] = {}
-    after: dict[str, str] = {}
+def _placeholder(kind: str, ordinal: int | None = None) -> dict:
+    payload: dict[str, object] = {"kind": kind}
+    if ordinal is not None:
+        payload["ordinal"] = ordinal
+    return {_MIGRATION_TAG: payload}
+
+
+def _reference_tokens(
+    renames: Mapping[str, str],
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    before: dict[str, dict] = {}
+    after: dict[str, dict] = {}
     for index, (old_id, new_id) in enumerate(
         sorted(renames.items()),
         start=1,
     ):
-        token = f"$REF:{index:06d}"
+        token = _placeholder("reference", index)
         before[old_id] = token
         after[new_id] = token
     return before, after
+
+
+def _pointer_tokens(pointer: str) -> tuple[str, ...]:
+    return tuple(
+        token.replace("~1", "/").replace("~0", "~")
+        for token in pointer[1:].split("/")
+    )
+
+
+def _set_pointer_value(obj: dict, pointer: str, value: object) -> None:
+    tokens = _pointer_tokens(pointer)
+    current: object = obj
+    for token in tokens[:-1]:
+        current = (
+            current[int(token)]
+            if isinstance(current, list)
+            else current[token]
+        )
+    final = tokens[-1]
+    if isinstance(current, list):
+        current[int(final)] = value
+    else:
+        current[final] = value
 
 
 def _canonical_shape(
     obj: Mapping[str, object],
     *,
     self_id: str,
-    reference_tokens: Mapping[str, str],
+    reference_tokens: Mapping[str, dict],
 ) -> dict:
-    shaped, _ = rewrite_object_refs(obj, reference_tokens)
+    shaped = deepcopy(dict(obj))
+    for ref in iter_object_refs(obj):
+        replacement = reference_tokens.get(ref.object_id)
+        if replacement is not None:
+            _set_pointer_value(shaped, ref.pointer, deepcopy(replacement))
     if shaped.get("id") != self_id:
         _fail("canonical_payload_invalid", "self ID does not match the migration row")
-    shaped["id"] = "$SELF"
+    shaped["id"] = _placeholder("self")
     return shaped
 
 
@@ -281,6 +411,104 @@ def _rewrite_eval(
     return rewritten, tuple(sorted(rewrites, key=lambda item: item["pointer"]))
 
 
+def _duplicate_key_rejector(pairs: list[tuple[str, object]]) -> dict:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            _fail("eval_invalid", f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _validate_string_list(
+    value: object,
+    *,
+    pointer: str,
+) -> None:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        _fail(
+            "eval_invalid",
+            f"{pointer} must be an exact non-empty list of unique strings",
+        )
+
+
+def _validate_eval_payload(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        _fail("eval_invalid", "eval_scenarios.json must contain an object")
+    scenarios = payload.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        _fail("eval_invalid", "scenarios must be a non-empty list")
+    seen_scenario_ids: set[str] = set()
+    for index, scenario in enumerate(scenarios):
+        pointer = f"/scenarios/{index}"
+        if not isinstance(scenario, dict):
+            _fail("eval_invalid", f"{pointer} must be an object")
+        scenario_id = scenario.get("id")
+        query = scenario.get("query")
+        expect = scenario.get("expect")
+        if not isinstance(scenario_id, str) or not scenario_id.strip():
+            _fail("eval_invalid", f"{pointer}/id must be a non-empty string")
+        if scenario_id in seen_scenario_ids:
+            _fail("eval_invalid", f"duplicate scenario id: {scenario_id}")
+        seen_scenario_ids.add(scenario_id)
+        if not isinstance(query, str) or not query.strip():
+            _fail("eval_invalid", f"{pointer}/query must be a non-empty string")
+        if not isinstance(expect, dict) or not expect:
+            _fail("eval_invalid", f"{pointer}/expect must be a non-empty object")
+        unknown = set(expect) - ASSERTION_KEYS
+        if unknown:
+            _fail(
+                "eval_invalid",
+                f"{pointer}/expect has unknown keys: {sorted(unknown)}",
+            )
+        for key in sorted(_EVAL_STRING_LIST_KEYS & set(expect)):
+            _validate_string_list(
+                expect[key],
+                pointer=f"{pointer}/expect/{key}",
+            )
+        if "linked_any_groups" in expect:
+            groups = expect["linked_any_groups"]
+            if not isinstance(groups, list) or not groups:
+                _fail(
+                    "eval_invalid",
+                    f"{pointer}/expect/linked_any_groups must be list[list[str]]",
+                )
+            seen_ids: set[str] = set()
+            for group_index, group in enumerate(groups):
+                _validate_string_list(
+                    group,
+                    pointer=(
+                        f"{pointer}/expect/linked_any_groups/{group_index}"
+                    ),
+                )
+                overlap = seen_ids & set(group)
+                if overlap:
+                    _fail(
+                        "eval_invalid",
+                        f"duplicate linked expected IDs: {sorted(overlap)}",
+                    )
+                seen_ids.update(group)
+        if "max_results" in expect and (
+            type(expect["max_results"]) is not int
+            or expect["max_results"] <= 0
+        ):
+            _fail(
+                "eval_invalid",
+                f"{pointer}/expect/max_results must be a positive integer",
+            )
+        if "no_answer" in expect and expect["no_answer"] is not True:
+            _fail(
+                "eval_invalid",
+                f"{pointer}/expect/no_answer must be true",
+            )
+    return payload
+
+
 def _canonical_json_bytes(payload: object) -> bytes:
     return (
         json.dumps(
@@ -307,9 +535,13 @@ def _eval_update(
             return (), ()
         _fail(exc.code, exc.detail)
     try:
-        before_payload = json.loads(before_bytes)
+        before_payload = json.loads(
+            before_bytes,
+            object_pairs_hook=_duplicate_key_rejector,
+        )
     except (UnicodeError, json.JSONDecodeError) as exc:
         _fail("eval_invalid", str(exc))
+    before_payload = _validate_eval_payload(before_payload)
     after_payload, rewrites = _rewrite_eval(before_payload, renames)
     if not rewrites:
         return (), ()
@@ -414,17 +646,22 @@ def plan_id_migration(
     *,
     existing: BrainStore,
     brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
     engine_sha: str,
     renames: Mapping[str, str],
-    snapshot_id: str,
-    snapshot_manifest_sha256: str,
+    snapshot: SnapshotVerification,
 ) -> MigrationPlan:
-    _validate_snapshot_binding(snapshot_id, snapshot_manifest_sha256)
-    _validate_engine_sha(engine_sha)
     if not isinstance(existing, BrainStore):
         _fail("request_invalid", "existing must be BrainStore")
-    if not isinstance(brain_root, Path) or not brain_root.is_absolute():
-        _fail("request_invalid", "brain_root must be an absolute Path")
+    repo_context = _trusted_migration_context(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_sha,
+        snapshot=snapshot,
+    )
+    _validate_live_snapshot_corpus(existing, snapshot)
     existing_by_id = {obj["id"]: obj for obj in existing.all()}
     pairs = _validate_renames(existing_by_id, renames)
     request_objects: list[dict] = []
@@ -450,7 +687,7 @@ def plan_id_migration(
     request = MutationRequest(
         operation=MutationOperation.ID_ONLY_MIGRATION,
         brain_root=brain_root,
-        repo_context=None,
+        repo_context=repo_context,
         engine_sha=engine_sha,
         objects=tuple(request_objects),
         delete_ids=tuple(pairs),
@@ -499,15 +736,15 @@ def plan_id_migration(
             canonical_payload_hash=canonical_hash,
             reference_rewrites=row_rewrites,
             dependent_artifacts=dependent[old_id],
-            snapshot_id=snapshot_id,
+            snapshot_id=snapshot.snapshot_id,
         ))
     return MigrationPlan(
         migration_kind="id_only",
         request=request,
         mutation_plan=mutation_plan,
         rows=tuple(rows),
-        snapshot_id=snapshot_id,
-        snapshot_manifest_sha256=snapshot_manifest_sha256,
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_manifest_sha256=snapshot.manifest_sha256,
     )
 
 
@@ -538,12 +775,19 @@ def plan_display_migration(
     *,
     existing: BrainStore,
     brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
     engine_sha: str,
-    snapshot_id: str,
-    snapshot_manifest_sha256: str,
+    snapshot: SnapshotVerification,
 ) -> MigrationPlan:
-    _validate_snapshot_binding(snapshot_id, snapshot_manifest_sha256)
-    _validate_engine_sha(engine_sha)
+    repo_context = _trusted_migration_context(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_sha,
+        snapshot=snapshot,
+    )
+    _validate_live_snapshot_corpus(existing, snapshot)
     existing_by_id = {obj["id"]: obj for obj in existing.all()}
     inputs = tuple(
         dict(obj)
@@ -556,7 +800,7 @@ def plan_display_migration(
     request = MutationRequest(
         operation=MutationOperation.DISPLAY_MIGRATION,
         brain_root=brain_root,
-        repo_context=None,
+        repo_context=repo_context,
         engine_sha=engine_sha,
         objects=inputs,
         preconditions={
@@ -583,8 +827,8 @@ def plan_display_migration(
         request=request,
         mutation_plan=mutation_plan,
         rows=(),
-        snapshot_id=snapshot_id,
-        snapshot_manifest_sha256=snapshot_manifest_sha256,
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_manifest_sha256=snapshot.manifest_sha256,
     )
 
 
@@ -659,6 +903,8 @@ def apply_migration_artifact(
     manifest_bytes: bytes,
     expected_manifest_sha256: str,
     brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
     engine_sha: str,
     snapshot_root: Path,
     expected_snapshot_manifest_sha256: str,
@@ -678,7 +924,7 @@ def apply_migration_artifact(
         _fail(exc.code, exc.detail)
     snapshot_id = snapshot.snapshot_id
     snapshot_manifest_sha256 = snapshot.manifest_sha256
-    _validate_snapshot_binding(snapshot_id, snapshot_manifest_sha256)
+    _validate_snapshot_binding(snapshot)
     if (
         artifact["snapshot_id"] != snapshot_id
         or artifact["snapshot_manifest_sha256"]
@@ -690,6 +936,13 @@ def apply_migration_artifact(
         )
     if artifact["engine_sha"] != engine_sha:
         _fail("engine_sha_mismatch", "apply engine SHA differs from the plan")
+    _trusted_migration_context(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_sha,
+        snapshot=snapshot,
+    )
     existing = BrainStore.load(brain_root)
     if artifact["migration_kind"] == "id_only":
         renames: dict[str, str] = {}
@@ -705,18 +958,20 @@ def apply_migration_artifact(
         replanned = plan_id_migration(
             existing=existing,
             brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
             engine_sha=engine_sha,
             renames=renames,
-            snapshot_id=snapshot_id,
-            snapshot_manifest_sha256=snapshot_manifest_sha256,
+            snapshot=snapshot,
         )
     else:
         replanned = plan_display_migration(
             existing=existing,
             brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
             engine_sha=engine_sha,
-            snapshot_id=snapshot_id,
-            snapshot_manifest_sha256=snapshot_manifest_sha256,
+            snapshot=snapshot,
         )
     expected = create_migration_artifact(replanned)
     if expected.manifest_bytes != manifest_bytes:

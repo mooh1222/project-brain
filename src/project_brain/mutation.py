@@ -616,6 +616,11 @@ def _validate_auxiliary_updates(
                 "auxiliary_update_hash_invalid",
                 f"{update.path}: auxiliary hashes must be lowercase SHA-256",
             )
+        if update.before_sha256 == update.after_sha256:
+            return _failure(
+                "auxiliary_update_noop",
+                f"{update.path}: auxiliary update must change content",
+            )
         if (
             hashlib.sha256(update.after_bytes).hexdigest()
             != update.after_sha256

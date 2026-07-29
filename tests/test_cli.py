@@ -19,7 +19,11 @@ from unittest import mock
 from project_brain import cli
 from project_brain.cli import _run_build
 from project_brain.id_grammar import format_id
-from project_brain.mutation import MutationOperation, MutationService
+from project_brain.mutation import (
+    MutationOperation,
+    MutationService,
+    corpus_fingerprint,
+)
 from project_brain.repo_context import RepoContext
 from project_brain.store import BrainStore
 from tests.test_ingest import (
@@ -2425,20 +2429,31 @@ class TestCliShow(unittest.TestCase):
         )
         snapshot_root = input_dir / "snapshot"
         snapshot_receipt = "a" * 64
+        repo_head = "b" * 40
         verification = SnapshotVerification(
             ok=True,
             snapshot_id="trusted-migration-snapshot",
             manifest_sha256=snapshot_receipt,
             file_count=1,
+            repo_head=repo_head,
+            engine_head=ENGINE_ARGS[1],
+            corpus_fingerprint=corpus_fingerprint(BrainStore.load(brain)),
         )
 
         plan_out = io.StringIO()
         with mock.patch(
             "project_brain.migration.verify_snapshot",
             return_value=verification,
-        ) as verify, mock.patch("sys.argv", [
+        ) as verify_snapshot_call, mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
+        ), mock.patch("sys.argv", [
             "cli", "migration", "id", "plan",
             "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
             "--renames-file", str(renames_file),
             "--snapshot-root", str(snapshot_root),
             "--expected-snapshot-manifest-sha256", snapshot_receipt,
@@ -2447,7 +2462,7 @@ class TestCliShow(unittest.TestCase):
         ]), redirect_stdout(plan_out):
             self.assertEqual(cli.main(), 0, plan_out.getvalue())
         planned = json.loads(plan_out.getvalue())
-        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(verify_snapshot_call.call_count, 1)
         self.assertTrue(BrainStore.load(brain).has(old["id"]))
         artifact = json.loads(manifest_file.read_bytes())
         self.assertEqual(
@@ -2467,9 +2482,16 @@ class TestCliShow(unittest.TestCase):
         with mock.patch(
             "project_brain.migration.verify_snapshot",
             return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
         ), mock.patch("sys.argv", [
             "cli", "migration", "id", "apply",
             "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
             "--snapshot-root", str(snapshot_root),
             "--expected-snapshot-manifest-sha256", snapshot_receipt,
             "--manifest", str(manifest_file),
@@ -2483,9 +2505,16 @@ class TestCliShow(unittest.TestCase):
         with mock.patch(
             "project_brain.migration.verify_snapshot",
             return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
         ), mock.patch("sys.argv", [
             "cli", "migration", "id", "apply",
             "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
             "--snapshot-root", str(snapshot_root),
             "--expected-snapshot-manifest-sha256", snapshot_receipt,
             "--manifest", str(manifest_file),
@@ -2513,11 +2542,15 @@ class TestCliShow(unittest.TestCase):
         BrainStore.save_object(brain, locator)
         manifest_file = input_dir / "display-migration.manifest.json"
         snapshot_receipt = "b" * 64
+        repo_head = "c" * 40
         verification = SnapshotVerification(
             ok=True,
             snapshot_id="trusted-display-snapshot",
             manifest_sha256=snapshot_receipt,
             file_count=1,
+            repo_head=repo_head,
+            engine_head=ENGINE_ARGS[1],
+            corpus_fingerprint=corpus_fingerprint(BrainStore.load(brain)),
         )
         snapshot_root = input_dir / "snapshot"
 
@@ -2525,9 +2558,16 @@ class TestCliShow(unittest.TestCase):
         with mock.patch(
             "project_brain.migration.verify_snapshot",
             return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
         ), mock.patch("sys.argv", [
             "cli", "migration", "display", "plan",
             "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
             "--snapshot-root", str(snapshot_root),
             "--expected-snapshot-manifest-sha256", snapshot_receipt,
             "--manifest", str(manifest_file),
@@ -2544,9 +2584,16 @@ class TestCliShow(unittest.TestCase):
         with mock.patch(
             "project_brain.migration.verify_snapshot",
             return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
         ), mock.patch("sys.argv", [
             "cli", "migration", "display", "apply",
             "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
             "--snapshot-root", str(snapshot_root),
             "--expected-snapshot-manifest-sha256", snapshot_receipt,
             "--manifest", str(manifest_file),
