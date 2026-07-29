@@ -49,6 +49,7 @@ def _request(
     operation: MutationOperation = MutationOperation.INGEST,
     repo_context=None,
     delete_ids: tuple[str, ...] = (),
+    renames: dict[str, str] | None = None,
     preconditions: dict[str, str] | None = None,
     expected_corpus_fingerprint: str | None = None,
 ) -> MutationRequest:
@@ -59,6 +60,7 @@ def _request(
         engine_sha="e" * 40,
         objects=objects,
         delete_ids=delete_ids,
+        renames=renames or {},
         preconditions=preconditions or {},
         expected_corpus_fingerprint=expected_corpus_fingerprint,
     )
@@ -214,6 +216,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "engine_sha",
         "objects",
         "delete_ids",
+        "renames",
         "preconditions",
         "expected_corpus_fingerprint",
     ]
@@ -513,6 +516,8 @@ def test_second_promotion_apply_cannot_overwrite_reviewed_target_or_record(tmp_p
         "objects_mismatch",
         "delete_ids_type",
         "delete_id_item",
+        "renames_type",
+        "rename_item",
         "preconditions_type",
         "precondition_item",
         "expected_fingerprint",
@@ -554,6 +559,10 @@ def test_malformed_request_is_rejected_before_store_load(tmp_path, case):
         request = replace(request, delete_ids=[])
     elif case == "delete_id_item":
         request = replace(request, delete_ids=(7,))
+    elif case == "renames_type":
+        request = replace(request, renames=[])
+    elif case == "rename_item":
+        request = replace(request, renames={"context.neutral": 7})
     elif case == "preconditions_type":
         request = replace(request, preconditions=[])
     elif case == "precondition_item":
@@ -565,6 +574,112 @@ def test_malformed_request_is_rejected_before_store_load(tmp_path, case):
 
     assert result.error_code == "request_invalid"
     assert result.manifest is None
+
+
+def test_context_replace_explicit_rename_is_a_real_manifest_action(tmp_path):
+    brain_root = tmp_path / "brain"
+    old = candidate_term("g.neutral.old", term="이전")
+    ctx = context(glossary_term_ids=[old["id"]])
+    _write_raw(brain_root, ctx)
+    _write_raw(brain_root, old)
+
+    new = candidate_term("g.neutral.new", term="새 값")
+    rewritten_context = dict(ctx)
+    rewritten_context["glossary_term_ids"] = [new["id"]]
+    result = _plan(
+        brain_root,
+        [new, rewritten_context],
+        operation=MutationOperation.CONTEXT_REPLACE,
+        delete_ids=(old["id"],),
+        renames={old["id"]: new["id"]},
+    )
+
+    assert result.ok is True
+    assert result.manifest.creates == ()
+    assert result.manifest.deletes == ()
+    assert result.manifest.renames == ({
+        "old_id": old["id"],
+        "new_id": new["id"],
+        "old_path": (
+            "objects/domain/g.neutral.old.json"
+        ),
+        "new_path": (
+            "objects/domain/g.neutral.new.json"
+        ),
+        "before_sha256": _object_hash(old),
+        "after_sha256": _object_hash(new),
+    },)
+    assert {
+        (
+            rewrite["object_id"],
+            rewrite["pointer"],
+            rewrite["before_id"],
+            rewrite["after_id"],
+        )
+        for rewrite in result.manifest.reference_rewrites
+    } == {
+        (
+            ctx["id"],
+            "/glossary_term_ids/0",
+            old["id"],
+            new["id"],
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("wrong_operation", "explicit_rename_operation_invalid"),
+        ("old_not_deleted", "explicit_rename_old_not_deleted"),
+        ("old_missing", "explicit_rename_old_missing"),
+        ("new_missing", "explicit_rename_new_missing"),
+        ("new_existing", "explicit_rename_new_not_create"),
+        ("duplicate_target", "explicit_rename_target_duplicate"),
+    ],
+)
+def test_explicit_rename_contract_fails_closed(tmp_path, case, expected_code):
+    brain_root = tmp_path / "brain"
+    old = candidate_term("g.neutral.old", term="이전")
+    second_old = candidate_term("g.neutral.second-old", term="두 번째")
+    existing_new = candidate_term("g.neutral.existing", term="기존")
+    for obj in (context(), old, second_old, existing_new):
+        _write_raw(brain_root, obj)
+
+    new = candidate_term("g.neutral.new", term="새 값")
+    operation = MutationOperation.CONTEXT_REPLACE
+    delete_ids = (old["id"],)
+    objects = [new]
+    renames = {old["id"]: new["id"]}
+    if case == "wrong_operation":
+        operation = MutationOperation.INGEST
+    elif case == "old_not_deleted":
+        delete_ids = ()
+    elif case == "old_missing":
+        missing = "g.neutral.missing"
+        delete_ids = (missing,)
+        renames = {missing: new["id"]}
+    elif case == "new_missing":
+        objects = []
+    elif case == "new_existing":
+        objects = [existing_new]
+        renames = {old["id"]: existing_new["id"]}
+    elif case == "duplicate_target":
+        delete_ids = (old["id"], second_old["id"])
+        renames = {
+            old["id"]: new["id"],
+            second_old["id"]: new["id"],
+        }
+
+    result = _plan(
+        brain_root,
+        objects,
+        operation=operation,
+        delete_ids=delete_ids,
+        renames=renames,
+    )
+
+    assert result.error_code == expected_code
 
 
 def test_duplicate_full_id_is_rejected_before_dict_fold_and_schema(tmp_path):

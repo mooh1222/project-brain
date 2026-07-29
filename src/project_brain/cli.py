@@ -1,7 +1,9 @@
 import argparse
 import hashlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from project_brain.config import (
@@ -133,6 +135,27 @@ def _object_preconditions(
         ).hexdigest()
         for object_id in object_ids
     }
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _run_query(argv) -> int:
@@ -1192,6 +1215,202 @@ def _run_mark_checked(argv) -> int:
     return 0
 
 
+def _run_snapshot(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli snapshot")
+    sub = parser.add_subparsers(dest="action", required=True)
+    create = sub.add_parser("create")
+    create.add_argument("--brain-root", required=True)
+    create.add_argument("--repo-root", required=True)
+    create.add_argument("--engine-root", required=True)
+    create.add_argument("--output-root", required=True)
+    create.add_argument("--snapshot-id", required=True)
+    verify = sub.add_parser("verify")
+    verify.add_argument("--snapshot-root", required=True)
+    restore = sub.add_parser("restore")
+    restore.add_argument("--snapshot-root", required=True)
+    restore.add_argument("--brain-root", required=True)
+    args = parser.parse_args(argv)
+
+    from project_brain.snapshot import (
+        SnapshotError,
+        SnapshotRequest,
+        create_snapshot,
+        restore_snapshot,
+        verify_snapshot,
+    )
+
+    try:
+        if args.action == "create":
+            result = create_snapshot(SnapshotRequest(
+                brain_root=Path(args.brain_root).resolve(),
+                repo_root=Path(args.repo_root).resolve(),
+                engine_root=Path(args.engine_root).resolve(),
+                output_root=Path(args.output_root).resolve(),
+                snapshot_id=args.snapshot_id,
+            ))
+            payload = {
+                "ok": True,
+                "snapshot_id": result.snapshot_id,
+                "snapshot_root": str(result.snapshot_root),
+                "manifest_path": str(result.manifest_path),
+                "manifest_sha256": result.manifest_sha256,
+                "file_count": result.file_count,
+            }
+        elif args.action == "verify":
+            result = verify_snapshot(Path(args.snapshot_root).resolve())
+            payload = {
+                "ok": result.ok,
+                "snapshot_id": result.snapshot_id,
+                "manifest_sha256": result.manifest_sha256,
+                "file_count": result.file_count,
+            }
+        else:
+            result = restore_snapshot(
+                Path(args.snapshot_root).resolve(),
+                Path(args.brain_root).resolve(),
+            )
+            payload = {
+                "ok": True,
+                "snapshot_id": result.snapshot_id,
+                "brain_root": str(result.brain_root),
+                "restored_files": list(result.restored_files),
+            }
+    except SnapshotError as exc:
+        print(json.dumps(
+            {"ok": False, "error_code": exc.code, "error": exc.detail},
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _read_json_argument(path: str | None, default):
+    if path is None:
+        return default
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _run_context_replace(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli context-replace")
+    sub = parser.add_subparsers(dest="action", required=True)
+    plan = sub.add_parser("plan")
+    plan.add_argument("--brain-root", required=True)
+    plan.add_argument("--context-id", required=True)
+    plan.add_argument("--desired-objects-file", required=True)
+    plan.add_argument("--expected-drop-ids-file")
+    plan.add_argument("--expected-moves-file")
+    plan.add_argument("--external-reference-rewrites-file")
+    plan.add_argument("--manifest", required=True)
+    _add_mutation_context_arguments(plan, engine_required=True)
+    apply = sub.add_parser("apply")
+    apply.add_argument("--brain-root", required=True)
+    apply.add_argument("--manifest", required=True)
+    apply.add_argument("--expected-manifest-sha256", required=True)
+    _add_mutation_context_arguments(apply, engine_required=True)
+    args = parser.parse_args(argv)
+
+    from project_brain.context_replace import (
+        ContextReplaceError,
+        apply_context_replace_artifact,
+        create_context_replace_artifact,
+        plan_context_replace,
+    )
+
+    brain_root = resolve_brain_root(args.brain_root).resolve()
+    try:
+        if args.action == "plan":
+            desired = _read_json_argument(args.desired_objects_file, [])
+            drops = _read_json_argument(args.expected_drop_ids_file, [])
+            moves = _read_json_argument(args.expected_moves_file, {})
+            rewrites = _read_json_argument(
+                args.external_reference_rewrites_file,
+                {},
+            )
+            repo_context = _resolve_mutation_context(
+                args,
+                brain_root,
+                required=(
+                    isinstance(desired, list)
+                    and any(
+                        isinstance(obj, dict)
+                        and obj.get("kind") == "CodeLocator"
+                        for obj in desired
+                    )
+                ),
+            )
+            request = plan_context_replace(
+                context_id=args.context_id,
+                existing=BrainStore.load(brain_root),
+                brain_root=brain_root,
+                repo_context=repo_context,
+                engine_sha=args.engine_sha,
+                desired_objects=desired,
+                expected_drop_ids=drops,
+                expected_moves=moves,
+                external_reference_rewrites=rewrites,
+            )
+            artifact = create_context_replace_artifact(request)
+            manifest_path = Path(args.manifest)
+            _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+            print(json.dumps({
+                "ok": True,
+                "manifest": str(manifest_path),
+                "manifest_sha256": artifact.manifest_sha256,
+                "transaction_id": artifact.manifest["transaction_id"],
+                "creates": len(artifact.manifest["creates"]),
+                "updates": len(artifact.manifest["updates"]),
+                "deletes": len(artifact.manifest["deletes"]),
+                "renames": len(artifact.manifest["renames"]),
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        manifest_path = Path(args.manifest)
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            preview = json.loads(manifest_bytes)
+        except (UnicodeError, json.JSONDecodeError):
+            preview = {}
+        objects = preview.get("objects", []) if isinstance(preview, dict) else []
+        repo_context = _resolve_mutation_context(
+            args,
+            brain_root,
+            required=(
+                isinstance(objects, list)
+                and any(
+                    isinstance(obj, dict)
+                    and obj.get("kind") == "CodeLocator"
+                    for obj in objects
+                )
+            ),
+        )
+        result = apply_context_replace_artifact(
+            manifest_bytes=manifest_bytes,
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+        )
+        print(json.dumps({
+            "ok": True,
+            "transaction_id": result.transaction_id,
+            "action_count": result.action_count,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    except (ContextReplaceError, OSError, json.JSONDecodeError) as exc:
+        print(json.dumps(
+            {
+                "ok": False,
+                "error_code": getattr(exc, "code", "context_replace_failed"),
+                "error": getattr(exc, "detail", str(exc)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+
+
 def main() -> int:
     argv = sys.argv[1:]
     try:
@@ -1234,6 +1453,10 @@ def main() -> int:
             return _run_stale_check(argv[1:])
         if argv and argv[0] == "mark-checked":
             return _run_mark_checked(argv[1:])
+        if argv and argv[0] == "snapshot":
+            return _run_snapshot(argv[1:])
+        if argv and argv[0] == "context-replace":
+            return _run_context_replace(argv[1:])
         return _run_query(argv)
     except (ConfigError, RepoVerificationError) as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.

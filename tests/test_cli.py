@@ -2258,6 +2258,116 @@ class TestCliShow(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("mapping.neutral.missing", payload["error"])
 
+    def test_snapshot_create_verify_restore_subcommands(self):
+        project = self.root / "snapshot-project"
+        brain = project / "brain"
+        engine = self.root / "snapshot-engine"
+        snapshots = project / ".snapshots"
+        engine.mkdir()
+        project.mkdir(exist_ok=True)
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain"}),
+            encoding="utf-8",
+        )
+        original = context()
+        BrainStore.save_object(brain, original)
+
+        create_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "snapshot", "create",
+            "--brain-root", str(brain.resolve()),
+            "--repo-root", str(project.resolve()),
+            "--engine-root", str(engine.resolve()),
+            "--output-root", str(snapshots.resolve()),
+            "--snapshot-id", "cli-snapshot",
+        ]), redirect_stdout(create_out):
+            self.assertEqual(cli.main(), 0)
+        created = json.loads(create_out.getvalue())
+        self.assertTrue(created["ok"])
+
+        verify_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "snapshot", "verify",
+            "--snapshot-root", created["snapshot_root"],
+        ]), redirect_stdout(verify_out):
+            self.assertEqual(cli.main(), 0)
+        self.assertTrue(json.loads(verify_out.getvalue())["ok"])
+
+        changed = dict(original)
+        changed["title"] = "changed"
+        BrainStore.save_object(brain, changed)
+        restore_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "snapshot", "restore",
+            "--snapshot-root", created["snapshot_root"],
+            "--brain-root", str(brain.resolve()),
+        ]), redirect_stdout(restore_out):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(BrainStore.load(brain).get(original["id"]), original)
+
+    def test_context_replace_plan_is_read_only_and_apply_requires_exact_sha(self):
+        brain = (self.root / "context-brain").resolve()
+        input_dir = self.root / "context-inputs"
+        input_dir.mkdir()
+        old = candidate_term("g.neutral.old", term="이전")
+        old_context = context(glossary_term_ids=[old["id"]])
+        for obj in (old_context, old):
+            BrainStore.save_object(brain, obj)
+        new = candidate_term("g.neutral.new", term="새 값")
+        desired_context = dict(old_context)
+        desired_context["glossary_term_ids"] = [new["id"]]
+        desired_file = input_dir / "desired.json"
+        moves_file = input_dir / "moves.json"
+        manifest_file = input_dir / "context-replace.manifest.json"
+        desired_file.write_text(
+            json.dumps([desired_context, new], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        moves_file.write_text(
+            json.dumps({old["id"]: new["id"]}),
+            encoding="utf-8",
+        )
+
+        plan_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "context-replace", "plan",
+            "--brain-root", str(brain),
+            "--context-id", old_context["id"],
+            "--desired-objects-file", str(desired_file),
+            "--expected-moves-file", str(moves_file),
+            "--manifest", str(manifest_file),
+            *ENGINE_ARGS,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0)
+        planned = json.loads(plan_out.getvalue())
+        self.assertTrue(manifest_file.is_file())
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+        self.assertFalse(BrainStore.load(brain).has(new["id"]))
+
+        wrong_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "context-replace", "apply",
+            "--brain-root", str(brain),
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", "0" * 64,
+            *ENGINE_ARGS,
+        ]), redirect_stdout(wrong_out):
+            self.assertEqual(cli.main(), 1)
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+
+        apply_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "context-replace", "apply",
+            "--brain-root", str(brain),
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+            *ENGINE_ARGS,
+        ]), redirect_stdout(apply_out):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        store = BrainStore.load(brain)
+        self.assertFalse(store.has(old["id"]))
+        self.assertTrue(store.has(new["id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

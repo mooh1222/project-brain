@@ -68,6 +68,7 @@ class MutationRequest:
     engine_sha: str
     objects: tuple[dict, ...]
     delete_ids: tuple[str, ...] = ()
+    renames: Mapping[str, str] = field(default_factory=dict)
     preconditions: Mapping[str, str] = field(default_factory=dict)
     expected_corpus_fingerprint: str | None = None
 
@@ -366,6 +367,16 @@ class MutationService:
                 planned["updated_at"] = verification_event_at
 
         # 8) 기존 객체 precondition과 before hash.
+        explicit_rename_pairs, explicit_rename_error = (
+            _validate_explicit_renames(
+                request,
+                existing_by_id=existing_by_id,
+                input_by_id=input_by_id,
+                delete_ids=delete_ids,
+            )
+        )
+        if explicit_rename_error is not None:
+            return explicit_rename_error
         for object_id in delete_ids:
             if object_id not in existing_by_id:
                 return _failure(
@@ -377,11 +388,15 @@ class MutationService:
                     "delete_update_conflict",
                     f"object cannot be updated and deleted together: {object_id}",
                 )
-        rename_pairs, rename_error = _infer_id_only_renames(
-            request.operation,
-            existing_by_id,
-            input_by_id,
-            delete_ids,
+        rename_pairs, rename_error = (
+            _infer_id_only_renames(
+                request.operation,
+                existing_by_id,
+                input_by_id,
+                delete_ids,
+            )
+            if request.operation is MutationOperation.ID_ONLY_MIGRATION
+            else (explicit_rename_pairs, None)
         )
         if rename_error is not None:
             return rename_error
@@ -725,6 +740,11 @@ def _validate_request_shape(
             for object_id in request.delete_ids
         ):
             raise ValueError("delete_ids must be tuple[str, ...]")
+        if not isinstance(request.renames, Mapping) or not all(
+            isinstance(old_id, str) and isinstance(new_id, str)
+            for old_id, new_id in request.renames.items()
+        ):
+            raise ValueError("renames must be Mapping[str, str]")
         if not isinstance(request.preconditions, Mapping) or not all(
             isinstance(object_id, str) and isinstance(expected_hash, str)
             for object_id, expected_hash in request.preconditions.items()
@@ -830,6 +850,62 @@ def corpus_fingerprint(store: BrainStore) -> str:
         obj["id"]: obj
         for obj in store.all()
     })
+
+
+def _validate_explicit_renames(
+    request: MutationRequest,
+    *,
+    existing_by_id: Mapping[str, dict],
+    input_by_id: Mapping[str, dict],
+    delete_ids: tuple[str, ...],
+) -> tuple[tuple[tuple[str, str], ...], MutationPlanResult | None]:
+    pairs = tuple(sorted(request.renames.items()))
+    if not pairs:
+        return (), None
+    if request.operation is not MutationOperation.CONTEXT_REPLACE:
+        return (), _failure(
+            "explicit_rename_operation_invalid",
+            "explicit renames are allowed only for context_replace",
+        )
+    targets = [new_id for _, new_id in pairs]
+    if len(set(targets)) != len(targets):
+        return (), _failure(
+            "explicit_rename_target_duplicate",
+            "explicit renames contain a duplicate target object id",
+        )
+    delete_set = set(delete_ids)
+    for old_id, new_id in pairs:
+        if old_id == new_id:
+            return (), _failure(
+                "explicit_rename_identity",
+                f"{old_id}: rename source and target must differ",
+            )
+        if old_id not in existing_by_id:
+            return (), _failure(
+                "explicit_rename_old_missing",
+                f"{old_id}: rename source is missing from the current store",
+            )
+        if old_id not in delete_set:
+            return (), _failure(
+                "explicit_rename_old_not_deleted",
+                f"{old_id}: rename source must be an explicit delete target",
+            )
+        if old_id in input_by_id:
+            return (), _failure(
+                "explicit_rename_old_conflict",
+                f"{old_id}: rename source cannot also be an input object",
+            )
+        if new_id not in input_by_id:
+            return (), _failure(
+                "explicit_rename_new_missing",
+                f"{new_id}: rename target is missing from input objects",
+            )
+        if new_id in existing_by_id:
+            return (), _failure(
+                "explicit_rename_new_not_create",
+                f"{new_id}: rename target must be a newly created object",
+            )
+    return pairs, None
 
 
 def _infer_id_only_renames(
