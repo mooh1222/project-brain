@@ -553,14 +553,7 @@ _INVALID_PHASE_LOGS = (
 )
 
 
-@pytest.mark.parametrize("invalid_log", _INVALID_PHASE_LOGS)
-def test_recovery_rejects_noncanonical_phase_log_without_mutation(
-    tmp_path,
-    invalid_log,
-):
-    request, paths = _snapshot_fixture(tmp_path)
-    result = create_snapshot(request)
-    paths["object"].write_bytes(b"live-before-double-failure\n")
+def _leave_double_failure_restore(request, result):
     original_rename = snapshot._rename_entry
     calls = 0
 
@@ -590,12 +583,30 @@ def test_recovery_rejects_noncanonical_phase_log_without_mutation(
 
     state_root = snapshot._restore_state_root(request.brain_root)
     journal_path = state_root / "journal.json"
-    phase_path = state_root / "phases.log"
     journal_before = journal_path.read_bytes()
-    phase_path.write_bytes(invalid_log)
     workspace = Path(json.loads(journal_before)["workspace"])
-    backup = workspace / "backup"
-    staged = workspace / "staged"
+    return (
+        state_root,
+        journal_path,
+        journal_before,
+        workspace / "backup",
+        workspace / "staged",
+    )
+
+
+@pytest.mark.parametrize("invalid_log", _INVALID_PHASE_LOGS)
+def test_recovery_rejects_noncanonical_phase_log_without_mutation(
+    tmp_path,
+    invalid_log,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    state_root, journal_path, journal_before, backup, staged = (
+        _leave_double_failure_restore(request, result)
+    )
+    phase_path = state_root / "phases.log"
+    phase_path.write_bytes(invalid_log)
     backup_binding = backup.stat().st_ino
     staged_binding = staged.stat().st_ino
 
@@ -612,6 +623,137 @@ def test_recovery_rejects_noncanonical_phase_log_without_mutation(
     assert phase_path.read_bytes() == invalid_log
     assert backup.stat().st_ino == backup_binding
     assert staged.stat().st_ino == staged_binding
+
+
+@pytest.mark.parametrize("sparse", [False, True], ids=["regular", "sparse"])
+def test_recovery_bounds_oversized_phase_log_reads_and_preserves_evidence(
+    tmp_path,
+    sparse,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    state_root, journal_path, journal_before, backup, staged = (
+        _leave_double_failure_restore(request, result)
+    )
+    phase_path = state_root / "phases.log"
+    if sparse:
+        with phase_path.open("wb") as stream:
+            stream.seek(1024 * 1024)
+            stream.write(b"x")
+    else:
+        phase_path.write_bytes(b"x" * (1024 * 1024))
+    phase_before = phase_path.stat()
+    backup_inode = backup.stat().st_ino
+    staged_inode = staged.stat().st_ino
+    original_read = snapshot.os.read
+    phase_bytes_read = 0
+
+    def counted_read(descriptor, count):
+        nonlocal phase_bytes_read
+        chunk = original_read(descriptor, count)
+        if os.fstat(descriptor).st_ino == phase_before.st_ino:
+            phase_bytes_read += len(chunk)
+        return chunk
+
+    with mock.patch.object(snapshot.os, "read", side_effect=counted_read):
+        with pytest.raises(SnapshotError) as caught:
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    assert caught.value.code == "recovery_required"
+    assert phase_bytes_read <= 41
+    assert not request.brain_root.exists()
+    assert journal_path.read_bytes() == journal_before
+    assert phase_path.stat().st_ino == phase_before.st_ino
+    assert phase_path.stat().st_size == phase_before.st_size
+    assert backup.stat().st_ino == backup_inode
+    assert staged.stat().st_ino == staged_inode
+
+
+def test_full_canonical_phase_log_is_exactly_40_bytes(tmp_path):
+    phase_path = tmp_path / "phases.log"
+    payload = b"preparing\nprepared\nmoved_live\nactivated\n"
+    assert len(payload) == snapshot._PHASE_LOG_MAX_BYTES == 40
+    phase_path.write_bytes(payload)
+    descriptor = os.open(phase_path, os.O_RDONLY)
+    try:
+        assert snapshot._read_phases(
+            descriptor,
+            expected_binding=snapshot._binding(os.fstat(descriptor)),
+            paths=(phase_path,),
+        ) == (
+            b"preparing",
+            b"prepared",
+            b"moved_live",
+            b"activated",
+        )
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("mutation", ["truncate", "growth", "replacement"])
+def test_recovery_rejects_concurrent_phase_log_change_without_mutation(
+    tmp_path,
+    mutation,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    state_root, journal_path, journal_before, backup, staged = (
+        _leave_double_failure_restore(request, result)
+    )
+    phase_path = state_root / "phases.log"
+    phase_before = phase_path.read_bytes()
+    phase_inode = phase_path.stat().st_ino
+    backup_inode = backup.stat().st_ino
+    staged_inode = staged.stat().st_ino
+    displaced = tmp_path / "displaced-phases.log"
+    original_read = snapshot.os.read
+    changed = False
+    phase_bytes_read = 0
+
+    def mutate_during_read(descriptor, count):
+        nonlocal changed, phase_bytes_read
+        chunk = original_read(descriptor, count)
+        if os.fstat(descriptor).st_ino == phase_inode:
+            phase_bytes_read += len(chunk)
+            if not changed:
+                changed = True
+                if mutation == "truncate":
+                    phase_path.write_bytes(b"")
+                elif mutation == "growth":
+                    with phase_path.open("ab") as stream:
+                        stream.write(b"x")
+                else:
+                    phase_path.rename(displaced)
+                    phase_path.write_bytes(phase_before)
+        return chunk
+
+    with mock.patch.object(snapshot.os, "read", side_effect=mutate_during_read):
+        with pytest.raises(SnapshotError) as caught:
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    assert caught.value.code == "recovery_required"
+    assert changed is True
+    assert phase_bytes_read <= 41
+    assert not request.brain_root.exists()
+    assert journal_path.read_bytes() == journal_before
+    assert phase_path.exists()
+    if mutation == "replacement":
+        assert displaced.stat().st_ino == phase_inode
+        assert phase_path.stat().st_ino != phase_inode
+    else:
+        assert phase_path.stat().st_ino == phase_inode
+    assert backup.stat().st_ino == backup_inode
+    assert staged.stat().st_ino == staged_inode
 
 
 def test_restore_preserves_recovery_state_if_activation_and_rollback_fail(

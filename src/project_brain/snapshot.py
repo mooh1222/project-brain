@@ -35,6 +35,8 @@ _BRAIN_FILES = (
     "eval_scenarios.json",
 )
 _INDEX_FILES = ("index.db", "index.db-wal", "index.db-shm")
+_PHASE_RECORDS = (b"preparing", b"prepared", b"moved_live", b"activated")
+_PHASE_LOG_MAX_BYTES = sum(len(record) + 1 for record in _PHASE_RECORDS)
 
 
 class SnapshotError(RuntimeError):
@@ -1165,16 +1167,65 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 def _append_phase(phase_fd: int, phase: str) -> None:
-    allowed = ("preparing", "prepared", "moved_live", "activated")
-    if phase not in allowed:
+    record = phase.encode("ascii")
+    if record not in _PHASE_RECORDS:
         raise ValueError(f"unsupported restore phase: {phase}")
     os.lseek(phase_fd, 0, os.SEEK_END)
-    _write_all(phase_fd, (phase + "\n").encode("ascii"))
+    _write_all(phase_fd, record + b"\n")
     os.fsync(phase_fd)
 
 
-def _read_phases(phase_fd: int, *, paths: tuple[Path, ...]) -> tuple[bytes, ...]:
-    payload = _read_descriptor(phase_fd)
+def _read_phases(
+    phase_fd: int,
+    *,
+    expected_binding: dict,
+    paths: tuple[Path, ...],
+) -> tuple[bytes, ...]:
+    before = os.fstat(phase_fd)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _binding(before) != expected_binding
+        or not 1 <= before.st_size <= _PHASE_LOG_MAX_BYTES
+    ):
+        _fail(
+            "recovery_required",
+            "restore phase log size or binding is invalid",
+            paths=paths,
+        )
+    os.lseek(phase_fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    bytes_read = 0
+    read_limit = _PHASE_LOG_MAX_BYTES + 1
+    while bytes_read < read_limit:
+        chunk = os.read(phase_fd, read_limit - bytes_read)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        bytes_read += len(chunk)
+    payload = b"".join(chunks)
+    after = os.fstat(phase_fd)
+    if (
+        bytes_read > _PHASE_LOG_MAX_BYTES
+        or bytes_read != before.st_size
+        or _binding(after) != expected_binding
+        or (
+            _entry_kind(after.st_mode),
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+        )
+        != (
+            _entry_kind(before.st_mode),
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        )
+    ):
+        _fail(
+            "recovery_required",
+            "restore phase log changed while reading",
+            paths=paths,
+        )
     if not payload.endswith(b"\n"):
         _fail(
             "recovery_required",
@@ -1185,8 +1236,7 @@ def _read_phases(phase_fd: int, *, paths: tuple[Path, ...]) -> tuple[bytes, ...]
     if records[-1] != b"":
         raise AssertionError("LF-terminated split must have one trailing empty record")
     records = records[:-1]
-    allowed = (b"preparing", b"prepared", b"moved_live", b"activated")
-    if not records or tuple(records) != allowed[:len(records)]:
+    if not records or tuple(records) != _PHASE_RECORDS[:len(records)]:
         _fail("recovery_required", "restore phase sequence is invalid", paths=paths)
     return tuple(records)
 
@@ -1455,7 +1505,19 @@ def _recover_restore(
             paths=evidence_paths,
         )
         descriptors.append(phase_fd)
-        phases = _read_phases(phase_fd, paths=evidence_paths)
+        phases = _read_phases(
+            phase_fd,
+            expected_binding=bindings["phases"],
+            paths=evidence_paths,
+        )
+        reopened_phase_fd = _open_bound_entry(
+            state_fd,
+            "phases.log",
+            bindings["phases"],
+            expected_type="regular",
+            paths=evidence_paths,
+        )
+        descriptors.append(reopened_phase_fd)
 
         if set(os.listdir(state_fd)) != {
             "workspace",
