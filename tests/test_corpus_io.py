@@ -993,6 +993,36 @@ def test_reader_waits_for_writer_and_never_observes_partial_corpus(tmp_path):
     assert reader_titles == ["changed"]
 
 
+def test_corpus_lock_remains_exclusive_across_root_inode_swap(tmp_path):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    backup = tmp_path / "backup"
+    reader_started = threading.Event()
+    reader_acquired = threading.Event()
+    reader_errors: list[BaseException] = []
+
+    def run_reader() -> None:
+        reader_started.set()
+        try:
+            with corpus_lock(brain_root, exclusive=False):
+                reader_acquired.set()
+        except BaseException as exc:
+            reader_errors.append(exc)
+
+    with corpus_lock(brain_root, exclusive=True):
+        brain_root.rename(backup)
+        brain_root.mkdir()
+        reader = threading.Thread(target=run_reader)
+        reader.start()
+        assert reader_started.wait(timeout=5)
+        assert not reader_acquired.wait(timeout=0.2)
+
+    reader.join(timeout=5)
+    assert not reader.is_alive()
+    assert reader_errors == []
+    assert reader_acquired.is_set()
+
+
 def test_transaction_temp_and_before_images_share_live_filesystem(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()

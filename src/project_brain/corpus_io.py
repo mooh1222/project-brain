@@ -416,8 +416,109 @@ _CORPUS_LOCK_SCOPE: ContextVar[_CorpusLockScope | None] = ContextVar(
 )
 
 
+@dataclass(frozen=True)
+class _StableCorpusLockScope:
+    brain_root_identity: str
+    exclusive: bool
+
+
+_STABLE_CORPUS_LOCK_SCOPE: ContextVar[_StableCorpusLockScope | None] = ContextVar(
+    "project_brain_stable_corpus_lock_scope",
+    default=None,
+)
+
+
 def _brain_root_identity(brain_root: Path) -> str:
     return os.path.abspath(os.fspath(Path(brain_root)))
+
+
+def restore_state_root(brain_root: Path) -> Path:
+    """Return the stable sibling state directory used by snapshot restore."""
+    identity = Path(_brain_root_identity(brain_root))
+    return identity.parent / f".{identity.name}.project-brain-restore"
+
+
+def _stable_lock_name(brain_root: Path) -> str:
+    identity = Path(_brain_root_identity(brain_root))
+    return f".{identity.name}.project-brain-corpus.lock"
+
+
+@contextmanager
+def stable_corpus_lock(
+    brain_root: Path,
+    *,
+    exclusive: bool,
+) -> Iterator[None]:
+    """Lock a path outside the swappable corpus-root inode."""
+    identity = _brain_root_identity(brain_root)
+    active = _STABLE_CORPUS_LOCK_SCOPE.get()
+    if active is not None:
+        if active.brain_root_identity != identity:
+            raise CorpusIOError(
+                "corpus_lock_scope_mismatch",
+                "cannot nest stable locks for different brain roots",
+                paths=(Path(active.brain_root_identity), Path(identity)),
+            )
+        if exclusive and not active.exclusive:
+            raise CorpusIOError(
+                "exclusive_corpus_lock_required",
+                "cannot upgrade a shared stable corpus lock in place",
+                paths=(Path(identity),),
+            )
+        yield
+        return
+
+    root = Path(identity)
+    parent = root.parent
+    try:
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise _anchored_path_error(parent, exc) from exc
+    lock_fd = -1
+    try:
+        try:
+            lock_fd = os.open(
+                _stable_lock_name(root),
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise _anchored_path_error(
+                parent / _stable_lock_name(root),
+                exc,
+            ) from exc
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode):
+            raise CorpusIOError(
+                "file_type_invalid",
+                "stable corpus lock is not a regular file",
+                paths=(parent / _stable_lock_name(root),),
+            )
+        parent_stat = os.fstat(parent_fd)
+        if lock_stat.st_dev != parent_stat.st_dev:
+            raise CorpusIOError(
+                "filesystem_mismatch",
+                "stable corpus lock is on another filesystem",
+                paths=(parent / _stable_lock_name(root),),
+            )
+        lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(lock_fd, lock_mode)
+        token = _STABLE_CORPUS_LOCK_SCOPE.set(
+            _StableCorpusLockScope(identity, exclusive)
+        )
+        try:
+            yield
+        finally:
+            _STABLE_CORPUS_LOCK_SCOPE.reset(token)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(parent_fd)
 
 
 def _current_lock_scope(
@@ -959,7 +1060,23 @@ def corpus_lock(brain_root: Path, *, exclusive: bool) -> Iterator[None]:
         return
 
     brain_root = Path(identity)
-    brain_root.mkdir(parents=True, exist_ok=True)
+    with stable_corpus_lock(brain_root, exclusive=exclusive):
+        if (restore_state_root(brain_root) / "journal.json").exists():
+            raise RecoveryRequiredError(
+                "snapshot restore recovery is required before corpus access"
+            )
+        brain_root.mkdir(parents=True, exist_ok=True)
+        with _corpus_inode_lock(brain_root, identity, exclusive=exclusive):
+            yield
+
+
+@contextmanager
+def _corpus_inode_lock(
+    brain_root: Path,
+    identity: str,
+    *,
+    exclusive: bool,
+) -> Iterator[None]:
     with _AnchoredRoot(brain_root) as anchored:
         lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(anchored.root_fd, lock_mode)

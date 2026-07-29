@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -83,7 +86,10 @@ def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
     request, paths = _snapshot_fixture(tmp_path)
 
     result = create_snapshot(request)
-    verification = verify_snapshot(result.snapshot_root)
+    verification = verify_snapshot(
+        result.snapshot_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
     assert verification.ok is True
@@ -126,6 +132,73 @@ def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
     }]
 
 
+def test_verify_requires_trusted_receipt_before_manifest_parse(tmp_path):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    result.manifest_path.write_bytes(b"{not-json")
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256="0" * 64,
+        )
+
+    assert caught.value.code == "manifest_sha256_mismatch"
+
+
+def test_coordinated_manifest_and_payload_object_removal_fails_receipt(
+    tmp_path,
+):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    removed = next(
+        entry for entry in manifest["files"]
+        if entry["path"].endswith("/DomainContext.json")
+    )
+    manifest["files"].remove(removed)
+    (result.snapshot_root / removed["snapshot_path"]).unlink()
+    result.manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "manifest_sha256_mismatch"
+
+
+def test_manifest_completeness_metadata_is_internally_derived(tmp_path):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["corpus"]["object_ids"]) == 19
+    assert set(manifest["corpus"]["kind_counts"]) == set(BrainStore._KIND_DIR)
+    assert set(manifest["derived"]["index"]) == {
+        "index.db",
+        "index.db-wal",
+        "index.db-shm",
+    }
+    manifest["corpus"]["kind_counts"]["DomainContext"] = 0
+    tampered = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    result.manifest_path.write_bytes(tampered)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=hashlib.sha256(tampered).hexdigest(),
+        )
+
+    assert caught.value.code == "snapshot_metadata_mismatch"
+
+
 def test_create_snapshot_fails_closed_if_source_changes_during_copy(tmp_path):
     request, paths = _snapshot_fixture(tmp_path)
     original_copy = snapshot._copy_file
@@ -154,7 +227,10 @@ def test_verify_snapshot_rejects_tampered_payload(tmp_path):
     (result.snapshot_root / copied["snapshot_path"]).write_bytes(b"tampered")
 
     with pytest.raises(SnapshotError) as caught:
-        verify_snapshot(result.snapshot_root)
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
 
     assert caught.value.code == "snapshot_payload_hash_mismatch"
 
@@ -167,12 +243,19 @@ def test_restore_snapshot_replaces_captured_scope_and_removes_new_entries(tmp_pa
     extra = paths["object"].parent / "extra.json"
     extra.write_bytes(b"extra\n")
 
-    restored = restore_snapshot(result.snapshot_root, request.brain_root)
+    restored = restore_snapshot(
+        result.snapshot_root,
+        request.brain_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
 
     assert restored.snapshot_id == request.snapshot_id
     assert paths["object"].read_bytes() == original_object
     assert not extra.exists()
-    assert verify_snapshot(result.snapshot_root).ok is True
+    assert verify_snapshot(
+        result.snapshot_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    ).ok is True
 
 
 def test_restore_activation_failure_rolls_live_tree_back(tmp_path):
@@ -192,7 +275,173 @@ def test_restore_activation_failure_rolls_live_tree_back(tmp_path):
 
     with mock.patch.object(snapshot, "_rename_path", side_effect=fail_second_rename):
         with pytest.raises(SnapshotError) as caught:
-            restore_snapshot(result.snapshot_root, request.brain_root)
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
 
     assert caught.value.code == "restore_activation_failed"
     assert paths["object"].read_bytes() == before
+
+
+def test_restore_recovers_after_process_exit_immediately_after_live_rename(
+    tmp_path,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    original_object = paths["object"].read_bytes()
+    paths["object"].write_bytes(b"live-before-crash\n")
+    script = f"""
+import os
+from pathlib import Path
+import project_brain.snapshot as snapshot
+
+brain = Path({str(request.brain_root)!r})
+original_rename = snapshot._rename_path
+def crash_after_live_rename(source, destination):
+    original_rename(source, destination)
+    if Path(source) == brain:
+        os._exit(91)
+snapshot._rename_path = crash_after_live_rename
+snapshot.restore_snapshot(
+    Path({str(result.snapshot_root)!r}),
+    brain,
+    expected_manifest_sha256={result.manifest_sha256!r},
+)
+"""
+    crashed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": "src"},
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+
+    assert crashed.returncode == 91
+    state_root = snapshot._restore_state_root(request.brain_root)
+    assert (state_root / "journal.json").is_file()
+    assert not request.brain_root.exists()
+
+    restored = restore_snapshot(
+        result.snapshot_root,
+        request.brain_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
+
+    assert restored.snapshot_id == request.snapshot_id
+    assert paths["object"].read_bytes() == original_object
+    assert not state_root.exists()
+
+
+def test_restore_preserves_recovery_state_if_activation_and_rollback_fail(
+    tmp_path,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    original_object = paths["object"].read_bytes()
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    original_rename = snapshot._rename_path
+    calls = 0
+
+    def fail_activation_and_rollback(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls in {2, 3}:
+            raise OSError(f"injected rename failure {calls}")
+        original_rename(source, destination)
+
+    with mock.patch.object(
+        snapshot,
+        "_rename_path",
+        side_effect=fail_activation_and_rollback,
+    ):
+        with pytest.raises(SnapshotError) as caught:
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    state_root = snapshot._restore_state_root(request.brain_root)
+    assert caught.value.code == "recovery_required"
+    assert state_root in caught.value.paths
+    assert (state_root / "journal.json").is_file()
+    journal = json.loads((state_root / "journal.json").read_text(encoding="utf-8"))
+    workspace = Path(journal["workspace"])
+    assert (workspace / "backup").is_dir()
+    assert (workspace / "staged").is_dir()
+
+    restore_snapshot(
+        result.snapshot_root,
+        request.brain_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
+
+    assert paths["object"].read_bytes() == original_object
+    assert not state_root.exists()
+
+
+def test_managed_file_intermediate_symlink_is_rejected(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    outside = tmp_path / "outside"
+    outside_skill = outside / "skills" / "demo" / "SKILL.md"
+    _write(outside_skill, paths["managed"].read_bytes())
+    agents = request.repo_root / ".agents"
+    agents.rename(request.repo_root / ".agents-real")
+    agents.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SnapshotError) as caught:
+        create_snapshot(request)
+
+    assert caught.value.code == "symlink_forbidden"
+
+
+def test_symlinked_output_root_cannot_redirect_snapshot_into_brain(tmp_path):
+    request, _ = _snapshot_fixture(tmp_path)
+    request.output_root.symlink_to(
+        request.brain_root / "redirected-snapshots",
+        target_is_directory=True,
+    )
+
+    with pytest.raises(SnapshotError) as caught:
+        create_snapshot(request)
+
+    assert caught.value.code in {"symlink_forbidden", "output_inside_brain"}
+    assert not (request.brain_root / "redirected-snapshots" / request.snapshot_id).exists()
+
+
+def test_symlink_manifest_is_rejected_even_when_target_bytes_match(tmp_path):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    external = tmp_path / "external-manifest.json"
+    result.manifest_path.rename(external)
+    result.manifest_path.symlink_to(external)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "symlink_forbidden"
+
+
+@pytest.mark.parametrize("entry_kind", ["dangling_symlink", "directory", "fifo"])
+def test_verify_rejects_every_unexpected_payload_entry(tmp_path, entry_kind):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    unexpected = result.snapshot_root / "payload" / "unexpected"
+    if entry_kind == "dangling_symlink":
+        unexpected.symlink_to(tmp_path / "missing")
+    elif entry_kind == "directory":
+        unexpected.mkdir()
+    else:
+        os.mkfifo(unexpected)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "snapshot_payload_inventory_mismatch"

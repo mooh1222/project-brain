@@ -2284,11 +2284,13 @@ class TestCliShow(unittest.TestCase):
             self.assertEqual(cli.main(), 0)
         created = json.loads(create_out.getvalue())
         self.assertTrue(created["ok"])
+        self.assertEqual(created["restore_scope"], "brain_only")
 
         verify_out = io.StringIO()
         with mock.patch("sys.argv", [
             "cli", "snapshot", "verify",
             "--snapshot-root", created["snapshot_root"],
+            "--expected-manifest-sha256", created["manifest_sha256"],
         ]), redirect_stdout(verify_out):
             self.assertEqual(cli.main(), 0)
         self.assertTrue(json.loads(verify_out.getvalue())["ok"])
@@ -2301,9 +2303,14 @@ class TestCliShow(unittest.TestCase):
             "cli", "snapshot", "restore",
             "--snapshot-root", created["snapshot_root"],
             "--brain-root", str(brain.resolve()),
+            "--expected-manifest-sha256", created["manifest_sha256"],
         ]), redirect_stdout(restore_out):
             self.assertEqual(cli.main(), 0)
         self.assertEqual(BrainStore.load(brain).get(original["id"]), original)
+        self.assertEqual(
+            json.loads(restore_out.getvalue())["restore_scope"],
+            "brain_only",
+        )
 
     def test_context_replace_plan_is_read_only_and_apply_requires_exact_sha(self):
         brain = (self.root / "context-brain").resolve()

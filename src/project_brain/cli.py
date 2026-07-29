@@ -1226,9 +1226,11 @@ def _run_snapshot(argv) -> int:
     create.add_argument("--snapshot-id", required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--snapshot-root", required=True)
+    verify.add_argument("--expected-manifest-sha256", required=True)
     restore = sub.add_parser("restore")
     restore.add_argument("--snapshot-root", required=True)
     restore.add_argument("--brain-root", required=True)
+    restore.add_argument("--expected-manifest-sha256", required=True)
     args = parser.parse_args(argv)
 
     from project_brain.snapshot import (
@@ -1242,10 +1244,10 @@ def _run_snapshot(argv) -> int:
     try:
         if args.action == "create":
             result = create_snapshot(SnapshotRequest(
-                brain_root=Path(args.brain_root).resolve(),
-                repo_root=Path(args.repo_root).resolve(),
-                engine_root=Path(args.engine_root).resolve(),
-                output_root=Path(args.output_root).resolve(),
+                brain_root=Path(args.brain_root).absolute(),
+                repo_root=Path(args.repo_root).absolute(),
+                engine_root=Path(args.engine_root).absolute(),
+                output_root=Path(args.output_root).absolute(),
                 snapshot_id=args.snapshot_id,
             ))
             payload = {
@@ -1255,9 +1257,13 @@ def _run_snapshot(argv) -> int:
                 "manifest_path": str(result.manifest_path),
                 "manifest_sha256": result.manifest_sha256,
                 "file_count": result.file_count,
+                "restore_scope": "brain_only",
             }
         elif args.action == "verify":
-            result = verify_snapshot(Path(args.snapshot_root).resolve())
+            result = verify_snapshot(
+                Path(args.snapshot_root).absolute(),
+                expected_manifest_sha256=args.expected_manifest_sha256,
+            )
             payload = {
                 "ok": result.ok,
                 "snapshot_id": result.snapshot_id,
@@ -1266,14 +1272,16 @@ def _run_snapshot(argv) -> int:
             }
         else:
             result = restore_snapshot(
-                Path(args.snapshot_root).resolve(),
-                Path(args.brain_root).resolve(),
+                Path(args.snapshot_root).absolute(),
+                Path(args.brain_root).absolute(),
+                expected_manifest_sha256=args.expected_manifest_sha256,
             )
             payload = {
                 "ok": True,
                 "snapshot_id": result.snapshot_id,
                 "brain_root": str(result.brain_root),
                 "restored_files": list(result.restored_files),
+                "restore_scope": "brain_only",
             }
     except SnapshotError as exc:
         print(json.dumps(
