@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +31,34 @@ def _write(path: Path, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
-def _snapshot_fixture(tmp_path: Path) -> tuple[SnapshotRequest, dict[str, Path]]:
+def _git_commit(root: Path) -> str:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "snapshot@test.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "Snapshot Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m", "fixture"],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _snapshot_fixture(
+    tmp_path: Path,
+    *,
+    initialize_git: bool = True,
+) -> tuple[SnapshotRequest, dict[str, Path]]:
     repo_root = tmp_path / "repo"
     brain_root = repo_root / "brain"
     engine_root = tmp_path / "engine"
@@ -62,6 +90,9 @@ def _snapshot_fixture(tmp_path: Path) -> tuple[SnapshotRequest, dict[str, Path]]
             },
         }).encode("utf-8"),
     )
+    if initialize_git:
+        _git_commit(repo_root)
+        _git_commit(engine_root)
     return (
         SnapshotRequest(
             brain_root=brain_root.resolve(),
@@ -80,6 +111,37 @@ def _snapshot_fixture(tmp_path: Path) -> tuple[SnapshotRequest, dict[str, Path]]
             "managed": managed,
         },
     )
+
+
+def test_create_snapshot_rejects_non_git_repo_and_engine_roots(tmp_path):
+    request, _ = _snapshot_fixture(tmp_path, initialize_git=False)
+
+    with pytest.raises(SnapshotError) as caught:
+        create_snapshot(request)
+
+    assert caught.value.code == "git_head_invalid"
+    assert not (request.output_root / request.snapshot_id).exists()
+
+
+@pytest.mark.parametrize("field", ["repo_head", "engine_head"])
+def test_verify_snapshot_rejects_non_exact_git_head(tmp_path, field):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = "a" * 64
+    tampered = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    result.manifest_path.write_bytes(tampered)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=hashlib.sha256(tampered).hexdigest(),
+        )
+
+    assert caught.value.code == "snapshot_manifest_invalid"
 
 
 def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
@@ -263,17 +325,17 @@ def test_restore_activation_failure_rolls_live_tree_back(tmp_path):
     result = create_snapshot(request)
     paths["object"].write_bytes(b"live-before-failed-restore\n")
     before = paths["object"].read_bytes()
-    original_rename = snapshot._rename_path
+    original_rename = snapshot._rename_entry
     calls = 0
 
-    def fail_second_rename(source: Path, destination: Path) -> None:
+    def fail_second_rename(source_fd, source_name, destination_fd, destination_name):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("injected activation failure")
-        original_rename(source, destination)
+        original_rename(source_fd, source_name, destination_fd, destination_name)
 
-    with mock.patch.object(snapshot, "_rename_path", side_effect=fail_second_rename):
+    with mock.patch.object(snapshot, "_rename_entry", side_effect=fail_second_rename):
         with pytest.raises(SnapshotError) as caught:
             restore_snapshot(
                 result.snapshot_root,
@@ -298,12 +360,12 @@ from pathlib import Path
 import project_brain.snapshot as snapshot
 
 brain = Path({str(request.brain_root)!r})
-original_rename = snapshot._rename_path
-def crash_after_live_rename(source, destination):
-    original_rename(source, destination)
-    if Path(source) == brain:
+original_rename = snapshot._rename_entry
+def crash_after_live_rename(source_fd, source_name, destination_fd, destination_name):
+    original_rename(source_fd, source_name, destination_fd, destination_name)
+    if source_name == brain.name and destination_name == "backup":
         os._exit(91)
-snapshot._rename_path = crash_after_live_rename
+snapshot._rename_entry = crash_after_live_rename
 snapshot.restore_snapshot(
     Path({str(result.snapshot_root)!r}),
     brain,
@@ -333,6 +395,131 @@ snapshot.restore_snapshot(
     assert not state_root.exists()
 
 
+def test_recovery_rejects_symlink_replacement_of_backup_without_mutation(
+    tmp_path,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-crash\n")
+    script = f"""
+import os
+from pathlib import Path
+import project_brain.snapshot as snapshot
+
+brain = Path({str(request.brain_root)!r})
+original_rename = snapshot._rename_entry
+def crash_after_live_rename(source_fd, source_name, destination_fd, destination_name):
+    original_rename(source_fd, source_name, destination_fd, destination_name)
+    if source_name == brain.name and destination_name == "backup":
+        os._exit(91)
+snapshot._rename_entry = crash_after_live_rename
+snapshot.restore_snapshot(
+    Path({str(result.snapshot_root)!r}),
+    brain,
+    expected_manifest_sha256={result.manifest_sha256!r},
+)
+"""
+    crashed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": "src"},
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert crashed.returncode == 91
+
+    state_root = snapshot._restore_state_root(request.brain_root)
+    journal_path = state_root / "journal.json"
+    journal_before = journal_path.read_bytes()
+    workspace = Path(json.loads(journal_before)["workspace"])
+    backup = workspace / "backup"
+    external_backup = tmp_path / "external-backup"
+    backup.rename(external_backup)
+    backup.symlink_to(external_backup, target_is_directory=True)
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "recovery_required"
+    assert not request.brain_root.exists()
+    assert backup.is_symlink()
+    assert journal_path.read_bytes() == journal_before
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    ["staged", "workspace", "journal", "phases", "missing_staged"],
+)
+def test_recovery_rejects_inode_replacement_without_mutation(tmp_path, artifact):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-double-failure\n")
+    original_rename = snapshot._rename_entry
+    calls = 0
+
+    def fail_activation_and_rollback(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls in {2, 3}:
+            raise OSError(f"injected rename failure {calls}")
+        original_rename(source_fd, source_name, destination_fd, destination_name)
+
+    with mock.patch.object(
+        snapshot,
+        "_rename_entry",
+        side_effect=fail_activation_and_rollback,
+    ):
+        with pytest.raises(SnapshotError):
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    state_root = snapshot._restore_state_root(request.brain_root)
+    journal_path = state_root / "journal.json"
+    journal_before = journal_path.read_bytes()
+    workspace = Path(json.loads(journal_before)["workspace"])
+    if artifact in {"staged", "missing_staged"}:
+        target = workspace / "staged"
+    elif artifact == "workspace":
+        target = workspace
+    elif artifact == "journal":
+        target = journal_path
+    else:
+        target = state_root / "phases.log"
+    displaced = tmp_path / f"displaced-{artifact}"
+    target.rename(displaced)
+    if artifact not in {"missing_staged"}:
+        if displaced.is_dir():
+            shutil.copytree(displaced, target)
+        else:
+            target.write_bytes(displaced.read_bytes())
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "recovery_required"
+    assert not request.brain_root.exists()
+    if artifact == "missing_staged":
+        assert not target.exists()
+    else:
+        assert target.exists()
+    assert journal_path.read_bytes() == journal_before
+
+
 def test_restore_preserves_recovery_state_if_activation_and_rollback_fail(
     tmp_path,
 ):
@@ -340,19 +527,24 @@ def test_restore_preserves_recovery_state_if_activation_and_rollback_fail(
     result = create_snapshot(request)
     original_object = paths["object"].read_bytes()
     paths["object"].write_bytes(b"live-before-double-failure\n")
-    original_rename = snapshot._rename_path
+    original_rename = snapshot._rename_entry
     calls = 0
 
-    def fail_activation_and_rollback(source: Path, destination: Path) -> None:
+    def fail_activation_and_rollback(
+        source_fd,
+        source_name,
+        destination_fd,
+        destination_name,
+    ) -> None:
         nonlocal calls
         calls += 1
         if calls in {2, 3}:
             raise OSError(f"injected rename failure {calls}")
-        original_rename(source, destination)
+        original_rename(source_fd, source_name, destination_fd, destination_name)
 
     with mock.patch.object(
         snapshot,
-        "_rename_path",
+        "_rename_entry",
         side_effect=fail_activation_and_rollback,
     ):
         with pytest.raises(SnapshotError) as caught:

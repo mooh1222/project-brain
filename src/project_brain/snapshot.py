@@ -22,7 +22,7 @@ from project_brain.store import BrainStore
 
 _SNAPSHOT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_GIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _BRAIN_DIRECTORIES = tuple(sorted({
     *BrainStore._KIND_DIR.values(),
     "raw/sources",
@@ -324,6 +324,17 @@ def _git_head(root: Path) -> str | None:
     return value if result.returncode == 0 and value else None
 
 
+def _required_git_head(root: Path, *, label: str) -> str:
+    value = _git_head(root)
+    if value is None or _GIT_SHA.fullmatch(value) is None:
+        _fail(
+            "git_head_invalid",
+            f"{label} must resolve to an exact lowercase 40-hex commit SHA",
+            paths=(root,),
+        )
+    return value
+
+
 def _managed_inventory(repo_root: Path) -> tuple[list[dict], list[str]]:
     try:
         raw = json.loads(_read_regular(repo_root, MANIFEST_FILENAME))
@@ -583,8 +594,11 @@ def _create_snapshot_locked(request: SnapshotRequest) -> SnapshotResult:
         prefix=f".{request.snapshot_id}.building-",
     ))
     try:
-        repo_head_before = _git_head(request.repo_root)
-        engine_head_before = _git_head(request.engine_root)
+        repo_head_before = _required_git_head(request.repo_root, label="repo_root")
+        engine_head_before = _required_git_head(
+            request.engine_root,
+            label="engine_root",
+        )
         files_before, managed_before = _inventory(request)
         fingerprint_before = _inventory_fingerprint(
             files_before,
@@ -609,8 +623,11 @@ def _create_snapshot_locked(request: SnapshotRequest) -> SnapshotResult:
                 )
 
         files_after, managed_after = _inventory(request)
-        repo_head_after = _git_head(request.repo_root)
-        engine_head_after = _git_head(request.engine_root)
+        repo_head_after = _required_git_head(request.repo_root, label="repo_root")
+        engine_head_after = _required_git_head(
+            request.engine_root,
+            label="engine_root",
+        )
         fingerprint_after = _inventory_fingerprint(
             files_after,
             managed_after,
@@ -736,18 +753,12 @@ def _load_manifest(
         or not isinstance(manifest["source_fingerprint"], str)
         or _SHA256.fullmatch(manifest["source_fingerprint"]) is None
         or (
-            manifest["repo_head"] is not None
-            and (
-                not isinstance(manifest["repo_head"], str)
-                or _GIT_SHA.fullmatch(manifest["repo_head"]) is None
-            )
+            not isinstance(manifest["repo_head"], str)
+            or _GIT_SHA.fullmatch(manifest["repo_head"]) is None
         )
         or (
-            manifest["engine_head"] is not None
-            and (
-                not isinstance(manifest["engine_head"], str)
-                or _GIT_SHA.fullmatch(manifest["engine_head"]) is None
-            )
+            not isinstance(manifest["engine_head"], str)
+            or _GIT_SHA.fullmatch(manifest["engine_head"]) is None
         )
         or not isinstance(manifest["managed_files"], list)
         or not isinstance(manifest["raw_sources"], list)
@@ -997,9 +1008,15 @@ def verify_snapshot(
     )
 
 
-def _copy_tree_no_symlinks(source: Path, destination: Path) -> None:
+def _copy_tree_no_symlinks(
+    source: Path,
+    destination: Path,
+    *,
+    destination_exists: bool = False,
+) -> None:
     directories, files = _scan_tree(source, unsafe_code="restore_live_tree_unsafe")
-    destination.mkdir()
+    if not destination_exists:
+        destination.mkdir()
     for relative in sorted(directories, key=lambda value: (value.count("/"), value)):
         (destination / relative).mkdir()
     for relative in sorted(files):
@@ -1020,7 +1037,23 @@ def _remove_stage_target(path: Path) -> None:
 
 
 def _rename_path(source: Path, destination: Path) -> None:
+    """Rename non-recovery snapshot build paths."""
     os.rename(source, destination)
+
+
+def _rename_entry(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    """Test seam for one verified directory-FD-relative rename."""
+    os.rename(
+        source_name,
+        destination_name,
+        src_dir_fd=source_parent_fd,
+        dst_dir_fd=destination_parent_fd,
+    )
 
 
 def _restore_state_root(brain_root: Path) -> Path:
@@ -1037,56 +1070,225 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _write_journal(state_root: Path, payload: dict) -> None:
-    state_root.mkdir(mode=0o700, parents=False, exist_ok=True)
-    temporary = state_root / ".journal.json.tmp"
-    data = _manifest_bytes(payload)
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+def _entry_kind(mode: int) -> str:
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "regular"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    return "other"
+
+
+def _binding(file_stat: os.stat_result) -> dict:
+    return {
+        "type": _entry_kind(file_stat.st_mode),
+        "device": file_stat.st_dev,
+        "inode": file_stat.st_ino,
+    }
+
+
+def _binding_valid(value: object, *, expected_type: str) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"type", "device", "inode"}
+        and value["type"] == expected_type
+        and type(value["device"]) is int
+        and value["device"] >= 0
+        and type(value["inode"]) is int
+        and value["inode"] > 0
+    )
+
+
+def _stat_entry(parent_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_bound_entry(
+    parent_fd: int,
+    name: str,
+    expected: dict,
+    *,
+    expected_type: str,
+    paths: tuple[Path, ...],
+) -> int:
+    observed = _stat_entry(parent_fd, name)
+    if observed is None or _binding(observed) != expected:
+        _fail(
+            "recovery_required",
+            f"restore artifact binding changed: {name}",
+            paths=paths,
+        )
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if expected_type == "directory":
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        _fail(
+            "recovery_required",
+            f"cannot open bound restore artifact {name}: {exc}",
+            paths=paths,
+        )
+    if _binding(os.fstat(descriptor)) != expected:
+        os.close(descriptor)
+        _fail(
+            "recovery_required",
+            f"restore artifact changed while opening: {name}",
+            paths=paths,
+        )
+    return descriptor
+
+
+def _read_descriptor(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        view = view[written:]
+
+
+def _append_phase(phase_fd: int, phase: str) -> None:
+    allowed = ("preparing", "prepared", "moved_live", "activated")
+    if phase not in allowed:
+        raise ValueError(f"unsupported restore phase: {phase}")
+    os.lseek(phase_fd, 0, os.SEEK_END)
+    _write_all(phase_fd, (phase + "\n").encode("ascii"))
+    os.fsync(phase_fd)
+
+
+def _read_phases(phase_fd: int, *, paths: tuple[Path, ...]) -> tuple[str, ...]:
+    try:
+        text = _read_descriptor(phase_fd).decode("ascii")
+    except UnicodeError as exc:
+        _fail("recovery_required", f"restore phase log is invalid: {exc}", paths=paths)
+    phases = tuple(text.splitlines())
+    allowed = ("preparing", "prepared", "moved_live", "activated")
+    if not phases or phases != allowed[:len(phases)]:
+        _fail("recovery_required", "restore phase sequence is invalid", paths=paths)
+    return phases
+
+
+def _create_restore_journal(
+    *,
+    parent_fd: int,
+    state_fd: int,
+    workspace_fd: int,
+    staged_fd: int,
+    brain_fd: int,
+    state_root: Path,
+    snapshot_root: Path,
+    brain_root: Path,
+    expected_manifest_sha256: str,
+) -> tuple[int, dict]:
+    journal_fd = os.open(
+        "journal.json",
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
         0o600,
+        dir_fd=state_fd,
     )
     try:
-        os.write(descriptor, data)
+        phase_fd = os.open(
+            "phases.log",
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=state_fd,
+        )
+    except Exception:
+        os.close(journal_fd)
+        raise
+    bindings = {
+        "parent": _binding(os.fstat(parent_fd)),
+        "state_root": _binding(os.fstat(state_fd)),
+        "workspace": _binding(os.fstat(workspace_fd)),
+        "staged": _binding(os.fstat(staged_fd)),
+        "backup": _binding(os.fstat(brain_fd)),
+        "journal": _binding(os.fstat(journal_fd)),
+        "phases": _binding(os.fstat(phase_fd)),
+    }
+    journal = {
+        "version": 2,
+        "snapshot_root": str(snapshot_root),
+        "brain_root": str(brain_root),
+        "expected_manifest_sha256": expected_manifest_sha256,
+        "workspace": str(state_root / "workspace"),
+        "bindings": bindings,
+    }
+    try:
+        _write_all(journal_fd, _manifest_bytes(journal))
+        os.fsync(journal_fd)
+        _append_phase(phase_fd, "preparing")
+        os.fsync(workspace_fd)
+        os.fsync(state_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(journal_fd)
+    return phase_fd, journal
+
+
+def _remove_tree_at(parent_fd: int, name: str) -> None:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=parent_fd,
+    )
+    try:
+        for child in sorted(os.listdir(descriptor)):
+            child_stat = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(child_stat.st_mode) and not stat.S_ISLNK(
+                child_stat.st_mode
+            ):
+                _remove_tree_at(descriptor, child)
+            else:
+                os.unlink(child, dir_fd=descriptor)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    os.replace(temporary, state_root / "journal.json")
-    _fsync_directory(state_root)
-    _fsync_directory(state_root.parent)
+    os.rmdir(name, dir_fd=parent_fd)
 
 
-def _read_journal(state_root: Path) -> dict:
-    try:
-        raw = json.loads(_read_regular(state_root, "journal.json"))
-    except (UnicodeError, json.JSONDecodeError, SnapshotError) as exc:
+def _remove_restore_state_at(
+    parent_fd: int,
+    *,
+    state_name: str,
+    expected_state_binding: dict,
+    paths: tuple[Path, ...],
+) -> None:
+    observed = _stat_entry(parent_fd, state_name)
+    if observed is None or _binding(observed) != expected_state_binding:
         _fail(
             "recovery_required",
-            f"restore journal is unreadable: {exc}",
-            paths=(state_root,),
+            "restore state root changed before cleanup",
+            paths=paths,
         )
-    if not isinstance(raw, dict):
-        _fail("recovery_required", "restore journal is invalid", paths=(state_root,))
-    return raw
-
-
-def _remove_restore_state(state_root: Path) -> None:
-    try:
-        mode = state_root.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+    tombstone = f"{state_name}.cleanup-{uuid.uuid4().hex}"
+    _rename_entry(parent_fd, state_name, parent_fd, tombstone)
+    moved = _stat_entry(parent_fd, tombstone)
+    if moved is None or _binding(moved) != expected_state_binding:
         _fail(
             "recovery_required",
-            "restore state root is not a safe directory",
-            paths=(state_root,),
+            "restore state root binding changed during cleanup",
+            paths=paths,
         )
-    tombstone = state_root.with_name(
-        f"{state_root.name}.cleanup-{uuid.uuid4().hex}"
-    )
-    os.rename(state_root, tombstone)
-    _fsync_directory(state_root.parent)
-    shutil.rmtree(tombstone)
+    os.fsync(parent_fd)
+    _remove_tree_at(parent_fd, tombstone)
+    os.fsync(parent_fd)
 
 
 def _brain_snapshot_inventory(brain_root: Path, manifest: dict) -> dict[str, tuple[str, int]]:
@@ -1115,106 +1317,304 @@ def _expected_brain_inventory(manifest: dict) -> dict[str, tuple[str, int]]:
     }
 
 
-def _validate_recovery_journal(
-    journal: dict,
-    *,
-    state_root: Path,
-    snapshot_root: Path,
-    brain_root: Path,
-    expected_manifest_sha256: str,
-) -> tuple[Path, Path, Path, str]:
-    required = {
-        "version",
-        "phase",
-        "snapshot_root",
-        "brain_root",
-        "expected_manifest_sha256",
-        "workspace",
-    }
-    if set(journal) != required or journal.get("version") != 1:
-        _fail("recovery_required", "restore journal contract is invalid", paths=(state_root,))
-    workspace = state_root / "workspace"
-    if (
-        journal["snapshot_root"] != str(snapshot_root)
-        or journal["brain_root"] != str(brain_root)
-        or journal["expected_manifest_sha256"] != expected_manifest_sha256
-        or journal["workspace"] != str(workspace)
-        or journal["phase"] not in {
-            "preparing",
-            "prepared",
-            "moving_live",
-            "activating",
-            "activated",
-        }
-    ):
-        _fail(
-            "recovery_required",
-            "restore journal does not match this trusted restore request",
-            paths=(state_root, workspace),
-        )
-    return workspace, workspace / "staged", workspace / "backup", journal["phase"]
-
-
 def _recover_restore(
     *,
-    state_root: Path,
+    parent_fd: int,
     snapshot_root: Path,
     brain_root: Path,
     expected_manifest_sha256: str,
     manifest: dict,
 ) -> None:
+    state_root = _restore_state_root(brain_root)
+    state_name = state_root.name
+    workspace = state_root / "workspace"
+    staged = workspace / "staged"
+    backup = workspace / "backup"
     journal_path = state_root / "journal.json"
+    evidence_paths = (state_root, workspace, backup, staged, journal_path)
+    state_stat = _stat_entry(parent_fd, state_name)
+    if state_stat is None:
+        return
+    if not stat.S_ISDIR(state_stat.st_mode) or stat.S_ISLNK(state_stat.st_mode):
+        _fail(
+            "recovery_required",
+            "restore state root type changed",
+            paths=evidence_paths,
+        )
     try:
-        journal_path.lstat()
-    except FileNotFoundError:
-        if state_root.exists():
-            _remove_restore_state(state_root)
-        return
-    journal = _read_journal(state_root)
-    workspace, staged, backup, phase = _validate_recovery_journal(
-        journal,
-        state_root=state_root,
-        snapshot_root=snapshot_root,
-        brain_root=brain_root,
-        expected_manifest_sha256=expected_manifest_sha256,
-    )
-    live_exists = brain_root.exists()
-    staged_exists = staged.exists()
-    backup_exists = backup.exists()
-    expected = _expected_brain_inventory(manifest)
-
-    if not live_exists and backup_exists:
+        state_fd = os.open(
+            state_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        _fail(
+            "recovery_required",
+            f"cannot open restore state root: {exc}",
+            paths=evidence_paths,
+        )
+    descriptors = [state_fd]
+    cleanup = False
+    try:
+        journal_stat = _stat_entry(state_fd, "journal.json")
+        if (
+            journal_stat is None
+            or not stat.S_ISREG(journal_stat.st_mode)
+            or stat.S_ISLNK(journal_stat.st_mode)
+        ):
+            _fail(
+                "recovery_required",
+                "restore journal is missing or has the wrong type",
+                paths=evidence_paths,
+            )
+        journal_fd = os.open(
+            "journal.json",
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=state_fd,
+        )
+        descriptors.append(journal_fd)
         try:
-            _rename_path(backup, brain_root)
-            _fsync_directory(brain_root.parent)
-        except Exception as exc:
+            journal = json.loads(_read_descriptor(journal_fd))
+        except (UnicodeError, json.JSONDecodeError) as exc:
             _fail(
                 "recovery_required",
-                f"could not roll back interrupted restore: {exc}",
-                paths=(state_root, workspace, backup, staged),
+                f"restore journal is invalid: {exc}",
+                paths=evidence_paths,
             )
-        _remove_restore_state(state_root)
-        return
-    if live_exists and backup_exists and not staged_exists and phase in {
-        "activating",
-        "activated",
-    }:
-        if _brain_snapshot_inventory(brain_root, manifest) != expected:
+        required = {
+            "version",
+            "snapshot_root",
+            "brain_root",
+            "expected_manifest_sha256",
+            "workspace",
+            "bindings",
+        }
+        if (
+            not isinstance(journal, dict)
+            or set(journal) != required
+            or journal["version"] != 2
+            or journal["snapshot_root"] != str(snapshot_root)
+            or journal["brain_root"] != str(brain_root)
+            or journal["expected_manifest_sha256"] != expected_manifest_sha256
+            or journal["workspace"] != str(workspace)
+            or not isinstance(journal["bindings"], dict)
+        ):
             _fail(
                 "recovery_required",
-                "activated corpus cannot be proven to match the snapshot",
-                paths=(state_root, workspace, backup, brain_root),
+                "restore journal does not match this trusted request",
+                paths=evidence_paths,
             )
-        _remove_restore_state(state_root)
-        return
-    if live_exists and not backup_exists:
-        _remove_restore_state(state_root)
-        return
-    _fail(
-        "recovery_required",
-        "restore state cannot be recovered without operator review",
-        paths=(state_root, workspace, backup, staged),
-    )
+        bindings = journal["bindings"]
+        binding_types = {
+            "parent": "directory",
+            "state_root": "directory",
+            "workspace": "directory",
+            "staged": "directory",
+            "backup": "directory",
+            "journal": "regular",
+            "phases": "regular",
+        }
+        if (
+            set(bindings) != set(binding_types)
+            or any(
+                not _binding_valid(bindings[name], expected_type=expected_type)
+                for name, expected_type in binding_types.items()
+            )
+            or _binding(os.fstat(parent_fd)) != bindings["parent"]
+            or _binding(os.fstat(state_fd)) != bindings["state_root"]
+            or _binding(os.fstat(journal_fd)) != bindings["journal"]
+            or any(
+                value["device"] != bindings["parent"]["device"]
+                for value in bindings.values()
+            )
+        ):
+            _fail(
+                "recovery_required",
+                "restore journal artifact bindings are invalid",
+                paths=evidence_paths,
+            )
+        workspace_fd = _open_bound_entry(
+            state_fd,
+            "workspace",
+            bindings["workspace"],
+            expected_type="directory",
+            paths=evidence_paths,
+        )
+        descriptors.append(workspace_fd)
+        phase_fd = _open_bound_entry(
+            state_fd,
+            "phases.log",
+            bindings["phases"],
+            expected_type="regular",
+            paths=evidence_paths,
+        )
+        descriptors.append(phase_fd)
+        phases = _read_phases(phase_fd, paths=evidence_paths)
+
+        if set(os.listdir(state_fd)) != {
+            "workspace",
+            "journal.json",
+            "phases.log",
+        }:
+            _fail(
+                "recovery_required",
+                "restore state root has unexpected entries",
+                paths=evidence_paths,
+            )
+        workspace_entries = set(os.listdir(workspace_fd))
+        if not workspace_entries <= {"backup", "staged"}:
+            _fail(
+                "recovery_required",
+                "restore workspace has unexpected entries",
+                paths=evidence_paths,
+            )
+
+        root_stat = _stat_entry(parent_fd, brain_root.name)
+        backup_stat = _stat_entry(workspace_fd, "backup")
+        staged_stat = _stat_entry(workspace_fd, "staged")
+        root_binding = _binding(root_stat) if root_stat is not None else None
+        backup_binding = _binding(backup_stat) if backup_stat is not None else None
+        staged_binding = _binding(staged_stat) if staged_stat is not None else None
+        if root_binding not in (
+            None,
+            bindings["backup"],
+            bindings["staged"],
+        ):
+            _fail(
+                "recovery_required",
+                "live brain root binding changed",
+                paths=evidence_paths,
+            )
+        if backup_binding not in (None, bindings["backup"]):
+            _fail(
+                "recovery_required",
+                "backup binding changed",
+                paths=evidence_paths,
+            )
+        if staged_binding not in (None, bindings["staged"]):
+            _fail(
+                "recovery_required",
+                "staged binding changed",
+                paths=evidence_paths,
+            )
+        backup_locations = sum((
+            root_binding == bindings["backup"],
+            backup_binding == bindings["backup"],
+        ))
+        staged_locations = sum((
+            root_binding == bindings["staged"],
+            staged_binding == bindings["staged"],
+        ))
+        if backup_locations != 1 or staged_locations != 1:
+            _fail(
+                "recovery_required",
+                "restore artifact is missing or duplicated",
+                paths=evidence_paths,
+            )
+
+        if root_binding == bindings["backup"]:
+            if backup_binding is not None or staged_binding != bindings["staged"]:
+                _fail(
+                    "recovery_required",
+                    "restore artifact locations are inconsistent",
+                    paths=evidence_paths,
+                )
+            cleanup = True
+        elif root_binding is None:
+            if (
+                backup_binding != bindings["backup"]
+                or staged_binding != bindings["staged"]
+            ):
+                _fail(
+                    "recovery_required",
+                    "interrupted restore artifacts are incomplete",
+                    paths=evidence_paths,
+                )
+            backup_fd = _open_bound_entry(
+                workspace_fd,
+                "backup",
+                bindings["backup"],
+                expected_type="directory",
+                paths=evidence_paths,
+            )
+            staged_fd = _open_bound_entry(
+                workspace_fd,
+                "staged",
+                bindings["staged"],
+                expected_type="directory",
+                paths=evidence_paths,
+            )
+            descriptors.extend((backup_fd, staged_fd))
+            try:
+                _rename_entry(
+                    workspace_fd,
+                    "backup",
+                    parent_fd,
+                    brain_root.name,
+                )
+                os.fsync(workspace_fd)
+                os.fsync(parent_fd)
+            except Exception as exc:
+                _fail(
+                    "recovery_required",
+                    f"could not roll back interrupted restore: {exc}",
+                    paths=evidence_paths,
+                )
+            restored_fd = _open_bound_entry(
+                parent_fd,
+                brain_root.name,
+                bindings["backup"],
+                expected_type="directory",
+                paths=evidence_paths,
+            )
+            descriptors.append(restored_fd)
+            cleanup = True
+        else:
+            if (
+                root_binding != bindings["staged"]
+                or backup_binding != bindings["backup"]
+                or staged_binding is not None
+                or phases[-1] not in {"moved_live", "activated"}
+            ):
+                _fail(
+                    "recovery_required",
+                    "activated restore artifacts are inconsistent",
+                    paths=evidence_paths,
+                )
+            live_fd = _open_bound_entry(
+                parent_fd,
+                brain_root.name,
+                bindings["staged"],
+                expected_type="directory",
+                paths=evidence_paths,
+            )
+            descriptors.append(live_fd)
+            expected = _expected_brain_inventory(manifest)
+            if _brain_snapshot_inventory(brain_root, manifest) != expected:
+                _fail(
+                    "recovery_required",
+                    "activated corpus does not match the trusted snapshot",
+                    paths=evidence_paths,
+                )
+            reopened_fd = _open_bound_entry(
+                parent_fd,
+                brain_root.name,
+                bindings["staged"],
+                expected_type="directory",
+                paths=evidence_paths,
+            )
+            descriptors.append(reopened_fd)
+            cleanup = True
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    if cleanup:
+        _remove_restore_state_at(
+            parent_fd,
+            state_name=state_name,
+            expected_state_binding=journal["bindings"]["state_root"],
+            paths=evidence_paths,
+        )
 
 
 def restore_snapshot(
@@ -1245,22 +1645,27 @@ def restore_snapshot(
     state_root = _restore_state_root(brain_root)
     try:
         with stable_corpus_lock(brain_root, exclusive=True):
-            _recover_restore(
-                state_root=state_root,
-                snapshot_root=snapshot_root,
-                brain_root=brain_root,
-                expected_manifest_sha256=expected_manifest_sha256,
-                manifest=manifest,
-            )
-            with corpus_lock(brain_root, exclusive=True):
-                recover_unfinished_transaction_unlocked(brain_root)
-            return _restore_snapshot_locked(
-                snapshot_root,
-                brain_root,
-                expected_manifest_sha256=expected_manifest_sha256,
-                verification=verification,
-                manifest=manifest,
-            )
+            parent_fd = _open_absolute_directory(brain_root.parent, create=False)
+            try:
+                _recover_restore(
+                    parent_fd=parent_fd,
+                    snapshot_root=snapshot_root,
+                    brain_root=brain_root,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                    manifest=manifest,
+                )
+                with corpus_lock(brain_root, exclusive=True):
+                    recover_unfinished_transaction_unlocked(brain_root)
+                return _restore_snapshot_locked(
+                    snapshot_root,
+                    brain_root,
+                    parent_fd=parent_fd,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                    verification=verification,
+                    manifest=manifest,
+                )
+            finally:
+                os.close(parent_fd)
     except SnapshotError:
         raise
     except CorpusIOError as exc:
@@ -1271,35 +1676,95 @@ def _restore_snapshot_locked(
     snapshot_root: Path,
     brain_root: Path,
     *,
+    parent_fd: int,
     expected_manifest_sha256: str,
     verification: SnapshotVerification,
     manifest: dict,
 ) -> RestoreResult:
-    try:
-        root_mode = brain_root.lstat().st_mode
-    except OSError as exc:
-        _fail("restore_live_root_invalid", str(exc))
-    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
-        _fail("restore_live_root_invalid", f"unsafe brain_root: {brain_root}")
-
     state_root = _restore_state_root(brain_root)
-    state_root.mkdir(mode=0o700, parents=False, exist_ok=False)
-    _fsync_directory(state_root.parent)
+    state_name = state_root.name
     workspace = state_root / "workspace"
-    workspace.mkdir()
     staged = workspace / "staged"
     backup = workspace / "backup"
-    journal = {
-        "version": 1,
-        "phase": "preparing",
-        "snapshot_root": str(snapshot_root),
-        "brain_root": str(brain_root),
-        "expected_manifest_sha256": expected_manifest_sha256,
-        "workspace": str(workspace),
-    }
+    evidence_paths = (
+        state_root,
+        workspace,
+        backup,
+        staged,
+        state_root / "journal.json",
+    )
+    descriptors: list[int] = []
+    journal_created = False
+
+    root_stat = _stat_entry(parent_fd, brain_root.name)
+    if (
+        root_stat is None
+        or not stat.S_ISDIR(root_stat.st_mode)
+        or stat.S_ISLNK(root_stat.st_mode)
+        or root_stat.st_dev != os.fstat(parent_fd).st_dev
+    ):
+        _fail("restore_live_root_invalid", f"unsafe brain_root: {brain_root}")
+    if _stat_entry(parent_fd, state_name) is not None:
+        _fail(
+            "recovery_required",
+            "restore state root was not cleared before a new restore",
+            paths=evidence_paths,
+        )
     try:
-        _write_journal(state_root, journal)
-        _copy_tree_no_symlinks(brain_root, staged)
+        brain_fd = os.open(
+            brain_root.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        descriptors.append(brain_fd)
+        backup_binding = _binding(os.fstat(brain_fd))
+        if backup_binding != _binding(root_stat):
+            _fail("restore_live_root_invalid", "brain_root changed while opening")
+
+        os.mkdir(state_name, 0o700, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        state_fd = os.open(
+            state_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        descriptors.append(state_fd)
+        os.mkdir("workspace", 0o700, dir_fd=state_fd)
+        os.fsync(state_fd)
+        workspace_fd = os.open(
+            "workspace",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=state_fd,
+        )
+        descriptors.append(workspace_fd)
+        os.mkdir("staged", 0o700, dir_fd=workspace_fd)
+        os.fsync(workspace_fd)
+        staged_fd = os.open(
+            "staged",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=workspace_fd,
+        )
+        descriptors.append(staged_fd)
+        phase_fd, journal = _create_restore_journal(
+            parent_fd=parent_fd,
+            state_fd=state_fd,
+            workspace_fd=workspace_fd,
+            staged_fd=staged_fd,
+            brain_fd=brain_fd,
+            state_root=state_root,
+            snapshot_root=snapshot_root,
+            brain_root=brain_root,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+        descriptors.append(phase_fd)
+        journal_created = True
+        bindings = journal["bindings"]
+
+        _copy_tree_no_symlinks(
+            brain_root,
+            staged,
+            destination_exists=True,
+        )
         targets = manifest["brain_targets"]
         for relative in targets["directories"]:
             _remove_stage_target(staged / _safe_relative(relative))
@@ -1319,21 +1784,70 @@ def _restore_snapshot_locked(
                 "restore_staging_mismatch",
                 "restored staging inventory does not match snapshot",
             )
-        journal["phase"] = "prepared"
-        _write_journal(state_root, journal)
-        journal["phase"] = "moving_live"
-        _write_journal(state_root, journal)
-        _rename_path(brain_root, backup)
-        _fsync_directory(brain_root.parent)
-        journal["phase"] = "activating"
-        _write_journal(state_root, journal)
+        rebound_staged_fd = _open_bound_entry(
+            workspace_fd,
+            "staged",
+            bindings["staged"],
+            expected_type="directory",
+            paths=evidence_paths,
+        )
+        descriptors.append(rebound_staged_fd)
+        _append_phase(phase_fd, "prepared")
+        os.fsync(state_fd)
+
+        _rename_entry(
+            parent_fd,
+            brain_root.name,
+            workspace_fd,
+            "backup",
+        )
+        os.fsync(parent_fd)
+        os.fsync(workspace_fd)
+        rebound_backup_fd = _open_bound_entry(
+            workspace_fd,
+            "backup",
+            bindings["backup"],
+            expected_type="directory",
+            paths=evidence_paths,
+        )
+        descriptors.append(rebound_backup_fd)
+        _append_phase(phase_fd, "moved_live")
+        os.fsync(state_fd)
         try:
-            _rename_path(staged, brain_root)
-            _fsync_directory(brain_root.parent)
+            _rename_entry(
+                workspace_fd,
+                "staged",
+                parent_fd,
+                brain_root.name,
+            )
+            os.fsync(workspace_fd)
+            os.fsync(parent_fd)
         except Exception as activation_exc:
             try:
-                _rename_path(backup, brain_root)
-                _fsync_directory(brain_root.parent)
+                verified_backup_fd = _open_bound_entry(
+                    workspace_fd,
+                    "backup",
+                    bindings["backup"],
+                    expected_type="directory",
+                    paths=evidence_paths,
+                )
+                descriptors.append(verified_backup_fd)
+                _rename_entry(
+                    workspace_fd,
+                    "backup",
+                    parent_fd,
+                    brain_root.name,
+                )
+                os.fsync(workspace_fd)
+                os.fsync(parent_fd)
+                restored_fd = _open_bound_entry(
+                    parent_fd,
+                    brain_root.name,
+                    bindings["backup"],
+                    expected_type="directory",
+                    paths=evidence_paths,
+                )
+                descriptors.append(restored_fd)
             except Exception as rollback_exc:
                 _fail(
                     "recovery_required",
@@ -1343,17 +1857,50 @@ def _restore_snapshot_locked(
                     ),
                     paths=(state_root, workspace, backup, staged),
                 )
-            _remove_restore_state(state_root)
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            descriptors.clear()
+            _remove_restore_state_at(
+                parent_fd,
+                state_name=state_name,
+                expected_state_binding=bindings["state_root"],
+                paths=evidence_paths,
+            )
             _fail("restore_activation_failed", str(activation_exc))
-        journal["phase"] = "activated"
-        _write_journal(state_root, journal)
+
+        activated_fd = _open_bound_entry(
+            parent_fd,
+            brain_root.name,
+            bindings["staged"],
+            expected_type="directory",
+            paths=evidence_paths,
+        )
+        descriptors.append(activated_fd)
+        _append_phase(phase_fd, "activated")
+        os.fsync(state_fd)
         if _brain_snapshot_inventory(brain_root, manifest) != expected_inventory:
             _fail(
                 "recovery_required",
                 "activated corpus does not match snapshot",
                 paths=(state_root, workspace, backup, brain_root),
             )
-        _remove_restore_state(state_root)
+        reopened_activated_fd = _open_bound_entry(
+            parent_fd,
+            brain_root.name,
+            bindings["staged"],
+            expected_type="directory",
+            paths=evidence_paths,
+        )
+        descriptors.append(reopened_activated_fd)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        descriptors.clear()
+        _remove_restore_state_at(
+            parent_fd,
+            state_name=state_name,
+            expected_state_binding=bindings["state_root"],
+            paths=evidence_paths,
+        )
         return RestoreResult(
             snapshot_id=verification.snapshot_id,
             brain_root=brain_root,
@@ -1362,11 +1909,13 @@ def _restore_snapshot_locked(
     except SnapshotError:
         raise
     except Exception as exc:
-        if (state_root / "journal.json").exists():
+        if journal_created:
             _fail(
                 "recovery_required",
                 str(exc),
                 paths=(state_root, workspace, backup, staged),
             )
-        shutil.rmtree(state_root, ignore_errors=True)
         _fail("restore_failed", str(exc))
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)

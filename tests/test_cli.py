@@ -32,6 +32,23 @@ from tests.test_ingest import (
 ENGINE_ARGS = ("--engine-sha", "e" * 40)
 
 
+def _commit_git_fixture(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "cli@test.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "CLI Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m", "fixture"],
+        check=True,
+    )
+
+
 def _context_object(ctx):
     from project_brain.assembly import build_context
     return build_context(
@@ -2271,6 +2288,8 @@ class TestCliShow(unittest.TestCase):
         )
         original = context()
         BrainStore.save_object(brain, original)
+        _commit_git_fixture(project)
+        _commit_git_fixture(engine)
 
         create_out = io.StringIO()
         with mock.patch("sys.argv", [

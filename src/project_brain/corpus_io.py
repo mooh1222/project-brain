@@ -1061,7 +1061,11 @@ def corpus_lock(brain_root: Path, *, exclusive: bool) -> Iterator[None]:
 
     brain_root = Path(identity)
     with stable_corpus_lock(brain_root, exclusive=exclusive):
-        if (restore_state_root(brain_root) / "journal.json").exists():
+        try:
+            os.lstat(restore_state_root(brain_root))
+        except FileNotFoundError:
+            pass
+        else:
             raise RecoveryRequiredError(
                 "snapshot restore recovery is required before corpus access"
             )
