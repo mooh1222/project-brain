@@ -122,16 +122,21 @@ Insight는 단일 객체의 재진술이 아니라 여러 객체·구현·결정
 - `context.key`, `glossary[].key`, `mappings[].key`, `decisions[].key`
 - `glossary_keys[]`, `code_evref_keys[]`, `decision_keys[]`, `decisions[].affects[]`
 
-## 코드 앵커 예외
+## 코드 앵커 입력
 
-`code_anchors[].key`와 이를 참조하는 `code_evref_keys[]`는 조립기가 같은 이름을 나눌 때 붙이는 `--N` 접미를 허용한다.
+`code_anchors[].key`와 이를 참조하는 `code_evref_keys[]`는 검증자가 정한 같은 논리 key를
+그대로 쓴다. 예를 들어 `code_anchors[].key="anchor-key"`이면 mapping의
+`code_evref_keys`도 `["anchor-key"]`다.
 
 ```text
-^[a-z0-9]+(?:-[a-z0-9]+)*(?:--[0-9]+)?$
+^[a-z0-9]+(?:-[a-z0-9]+)*$
 ```
 
-`--N`은 조립기가 붙인 순번일 뿐 사람이 임의의 완성 ID 형식을 흉내 내는 방법이 아니다.
-기준 코드의 심볼과 {{DEFAULT_BRANCH}} 이력에서 도달 가능한 commit SHA는 별도 코드 앵커 정보로 남긴다.
+code anchor 입력은 `key`, `path`, `symbol`, `quote`만 전달한다. `title`과 `verified_at`은
+외부 입력으로 받지 않는다. title은 표시 전용이고, `verified_at`은 write verifier가 실제
+repo/commit/blob/symbol/quote를 확인한 뒤 최종 CodeLocator에 기록한다. 숨은 fallback이나
+일반 quote 우회 flag는 두지 않는다. 기준 코드의 심볼과 {{DEFAULT_BRANCH}} 이력에서 도달 가능한
+commit SHA는 별도 코드 앵커 정보로 남긴다.
 
 ## 완성 ID와의 차이
 

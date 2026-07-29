@@ -361,6 +361,21 @@ class TestCli(unittest.TestCase):
             rc = cli.main()
         self.assertEqual(rc, 0)
         self.assertEqual(apply.call_count, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {
+            "ok", "transaction_id", "operation", "committed",
+            "manifest_sha256", "before_fingerprint", "after_fingerprint",
+            "ingested_ids", "ingested_count",
+        })
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["operation"], "ingest")
+        self.assertRegex(payload["transaction_id"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["manifest_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["before_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["after_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["ingested_ids"], [obj["id"] for obj in bundle])
+        self.assertEqual(payload["ingested_count"], len(bundle))
         self.assertIs(
             apply.call_args.kwargs["request"].operation,
             MutationOperation.INGEST,

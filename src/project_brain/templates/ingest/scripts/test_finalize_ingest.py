@@ -12,6 +12,17 @@ from tempfile import TemporaryDirectory
 
 SCRIPT = Path(__file__).with_name("finalize_ingest.py")
 WRAPPER = Path(__file__).with_name("finalize_ingest.sh")
+TRANSACTION = {
+    "ok": True,
+    "transaction_id": "1" * 64,
+    "operation": "ingest",
+    "committed": True,
+    "manifest_sha256": "2" * 64,
+    "before_fingerprint": "3" * 64,
+    "after_fingerprint": "4" * 64,
+    "ingested_ids": ["mapping.a"],
+    "ingested_count": 1,
+}
 
 
 def load_module():
@@ -36,6 +47,15 @@ class SemanticFinalizerTest(unittest.TestCase):
             "intentional_terminal_ids": ["code.allowed"],
             "expected_unmerged_locator_ids": [],
         }
+
+    def _finalize(self, module, contract, baseline, **kwargs):
+        transaction_results = kwargs.pop("transaction_results", [TRANSACTION])
+        return module.run_finalization(
+            contract,
+            baseline,
+            transaction_results=transaction_results,
+            **kwargs,
+        )
 
     @staticmethod
     def _runner(*, current_isolated=None, search_results=None, failures=(),
@@ -79,13 +99,17 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_success_returns_exact_machine_readable_gate_schema(self):
         module = load_module()
-        report = module.run_finalization(
-            self.contract, ["code.before"], runner=self._runner()
+        self.assertEqual(module.validate_transaction_results([TRANSACTION]), [TRANSACTION])
+        report = self._finalize(module,
+            self.contract, ["code.before"], transaction_results=[TRANSACTION],
+            runner=self._runner()
         )
 
         self.assertEqual(set(report),
-                         {"ok", "commands", "isolation", "unmerged", "recall_checks", "errors"})
+                         {"ok", "transactions", "commands", "isolation", "unmerged",
+                          "recall_checks", "errors"})
         self.assertTrue(report["ok"])
+        self.assertEqual(report["transactions"], [TRANSACTION])
         self.assertEqual(set(report["commands"]),
                          {"index_rebuild", "lint", "eval", "graph_isolated", "audit", "corpus_tests"})
         for command in report["commands"].values():
@@ -102,6 +126,20 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertEqual(report["recall_checks"][0]["missing_object_ids"], [])
         self.assertEqual(report["recall_checks"][0]["missing_code_locator_object_ids"], [])
 
+    def test_missing_mismatched_noncommitted_and_needs_user_transactions_fail_closed(self):
+        module = load_module()
+        invalid = (
+            None,
+            [],
+            [{**TRANSACTION, "committed": False}],
+            [{**TRANSACTION, "manifest_sha256": "A" * 64}],
+            [{**TRANSACTION, "status": "needs_user"}],
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "transaction"):
+                    module.validate_transaction_results(value)
+
     def test_unmerged_expected_ids_are_compared_as_exact_union(self):
         module = load_module()
         baseline_ids = [f"code.baseline-{number:02d}" for number in range(1, 8)]
@@ -113,7 +151,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": baseline_ids,
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             contract, baseline,
             runner=self._runner(unmerged_locator_ids=[*baseline_ids, *expected_ids]),
         )
@@ -124,7 +162,7 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertEqual(report["unmerged"]["expected_ids"], expected_ids)
         self.assertEqual(report["unmerged"]["new_ids"], expected_ids)
 
-        blocked = module.run_finalization(
+        blocked = self._finalize(module,
             contract, baseline,
             runner=self._runner(unmerged_locator_ids=[*baseline_ids, *expected_ids,
                                                        "code.unexpected-31"]),
@@ -141,7 +179,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": ["code.existing"],
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             contract, baseline,
             runner=self._runner(unmerged_locator_ids=["code.existing"]),
         )
@@ -157,7 +195,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": ["code.before-unmerged"],
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             self.contract, baseline,
             runner=self._runner(target_head="CHANGED", unmerged_locator_ids=["code.extra"]),
         )
@@ -174,7 +212,7 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_audit_failure_blocks_even_when_other_gates_pass(self):
         module = load_module()
-        report = module.run_finalization(
+        report = self._finalize(module,
             self.contract,
             {"ok": True, "isolated_ids": ["code.before"], "target_head": "TARGET",
              "unmerged_locator_ids": []},
@@ -193,7 +231,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": ["code.before-unmerged"],
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             self.contract, baseline,
             runner=self._runner(
                 failures=("project-brain audit --no-fetch",),
@@ -247,7 +285,7 @@ class SemanticFinalizerTest(unittest.TestCase):
 
         for name, (anchors, diagnostic) in cases.items():
             with self.subTest(name=name):
-                report = module.run_finalization(
+                report = self._finalize(module,
                     contract,
                     baseline,
                     runner=self._runner(
@@ -295,22 +333,22 @@ class SemanticFinalizerTest(unittest.TestCase):
     def test_legacy_baseline_is_allowed_only_without_expected_unmerged_ids(self):
         module = load_module()
         legacy = {"ok": True, "isolated_ids": ["code.before"]}
-        allowed = module.run_finalization(self.contract, legacy, runner=self._runner())
+        allowed = self._finalize(module, self.contract, legacy, runner=self._runner())
         self.assertTrue(allowed["ok"])
 
         calls = []
         contract = dict(self.contract, expected_unmerged_locator_ids=["code.new"])
         with self.assertRaisesRegex(ValueError, "Git baseline"):
-            module.run_finalization(contract, legacy, runner=lambda command: calls.append(command))
+            self._finalize(module, contract, legacy, runner=lambda command: calls.append(command))
         self.assertEqual(calls, [])
 
     def test_new_isolation_is_blocking_except_declared_terminal(self):
         module = load_module()
-        allowed = module.run_finalization(
+        allowed = self._finalize(module,
             self.contract, ["code.before"],
             runner=self._runner(current_isolated=["code.before", "code.allowed"]),
         )
-        blocked = module.run_finalization(
+        blocked = self._finalize(module,
             self.contract, ["code.before"],
             runner=self._runner(current_isolated=["code.before", "code.unexpected"]),
         )
@@ -322,10 +360,10 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_recall_requires_each_expected_id_and_its_linked_code_locator(self):
         module = load_module()
-        missing = module.run_finalization(
+        missing = self._finalize(module,
             self.contract, ["code.before"], runner=self._runner(search_results=[])
         )
-        unlinked = module.run_finalization(
+        unlinked = self._finalize(module,
             self.contract, ["code.before"],
             runner=self._runner(search_results=[{"object_id": "mapping.a", "linked": {}}]),
         )
@@ -388,6 +426,8 @@ class CorpusCheck(unittest.TestCase):
 """, encoding="utf-8")
             config = root / "config.json"
             config.write_text(json.dumps(self.contract), encoding="utf-8")
+            transactions = root / "transactions.json"
+            transactions.write_text(json.dumps([TRANSACTION]), encoding="utf-8")
             env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
             for name, baseline in (
@@ -399,7 +439,8 @@ class CorpusCheck(unittest.TestCase):
                     baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
                     result = subprocess.run(
                         [str(WRAPPER), "--config", str(config),
-                         "--baseline", str(baseline_path)],
+                         "--baseline", str(baseline_path),
+                         "--transactions", str(transactions)],
                         cwd=root, env=env, text=True, capture_output=True, check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -419,7 +460,7 @@ class CorpusCheck(unittest.TestCase):
         for baseline in invalid:
             calls = []
             with self.subTest(baseline=baseline), self.assertRaises(ValueError):
-                module.run_finalization(
+                self._finalize(module,
                     self.contract, baseline,
                     runner=lambda command: calls.append(command),
                 )

@@ -41,7 +41,11 @@ project-brain search "<질문>"
 ## 2. 결과만으로 답한다
 
 - 답의 모든 사실에 근거를 표시한다. 매핑 적중은 동반된 `linked.code_locators`
-  (path:symbol)로 코드 위치까지 핀포인트.
+  (path:symbol)로 코드 위치까지 핀포인트한다. CodeLocator의 `title`은 display_only이고,
+  `verified_quote`와 함께 의미 근거로 쓰지 않는다. 의미 주장은 적중한 DomainMapping과 접근 가능한
+  EvidenceRef에서 가져온다.
+- CodeLocator quote는 `quote_access=allow`일 때만 표시할 수 있다. `deny` 또는 `indeterminate`면
+  숨기며, allow여도 코드 위치를 보여 주는 보조 표시일 뿐 의미를 새로 증명하지 않는다.
 - **검색 결과에 없는 내용을 brain의 답인 것처럼 섞지 않는다.** 내 일반 지식·이전 세션
   기억으로 보강한 부분은 brain 출처가 아니라고 구분해 말한다.
 

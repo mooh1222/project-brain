@@ -894,12 +894,22 @@ class InstallTest(unittest.TestCase):
                 self.assertTrue(script.is_file())
                 if name.endswith(".sh") and script.is_file():
                     self.assertTrue(script.stat().st_mode & stat.S_IXUSR)
+        run_ingest = (scripts / "run_ingest.sh").read_text(encoding="utf-8")
+        for flag in ("--repo-root", "--expected-repo-id", "--expected-revision-ref",
+                     "--engine-sha", "--validate-transaction"):
+            self.assertIn(flag, run_ingest)
+        installed_query = self._skill("demo-brain-query").read_text(encoding="utf-8")
+        installed_audit = self._skill("demo-brain-audit").read_text(encoding="utf-8")
+        self.assertIn("display_only", installed_query)
+        self.assertIn("quote_access=allow", installed_query)
+        self.assertIn("code_quote=missing", installed_audit)
         self.assertFalse((scripts / "test_batch_tools.py").exists())
         self.assertEqual(overlay.read_text(encoding="utf-8"),
                          "프로젝트가 소유하는 코드 검증 규칙\n")
         self.assertNotIn(str(overlay.relative_to(self.target)),
                          json.loads((self.target / MANIFEST_FILENAME).read_text(encoding="utf-8"))["files"])
-        self.assertEqual(second["skipped"], [])
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
 
 
 if __name__ == "__main__":

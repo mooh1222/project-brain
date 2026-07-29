@@ -253,7 +253,7 @@ def _run_ingest(argv) -> int:
         report = json.loads(Path(args.preconditions_file).read_text(encoding="utf-8"))
         preconditions = report.get("preconditions", report)
     try:
-        _apply_mutation(
+        result = _apply_mutation(
             operation=MutationOperation.INGEST,
             brain_root=brain_root,
             repo_context=repo_context,
@@ -264,7 +264,37 @@ def _run_ingest(argv) -> int:
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
-    print(json.dumps({"ok": True, "ingested": len(objects)}, ensure_ascii=False, indent=2))
+    manifest = result.manifest
+    if manifest is None:
+        print(json.dumps(
+            {
+                "ok": False,
+                "error": "mutation result is missing its manifest",
+                "committed": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+    actions = (
+        manifest.creates
+        + manifest.updates
+        + manifest.deletes
+        + manifest.renames
+        + manifest.auxiliary_updates
+    )
+    payload = {
+        "ok": True,
+        "transaction_id": manifest.transaction_id,
+        "operation": manifest.operation,
+        "committed": bool(actions),
+        "manifest_sha256": result.manifest_sha256,
+        "before_fingerprint": manifest.before_fingerprint,
+        "after_fingerprint": manifest.expected_after_fingerprint,
+        "ingested_ids": [obj["id"] for obj in result.after_objects],
+        "ingested_count": len(result.after_objects),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 

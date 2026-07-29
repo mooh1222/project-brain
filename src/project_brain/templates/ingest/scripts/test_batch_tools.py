@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -31,12 +32,36 @@ FINALIZATION = {
 }
 FINALIZATION_RESULT = {
     "ok": True,
+    "transactions": [],
     "commands": {},
     "isolation": {},
     "unmerged": {},
     "recall_checks": [],
     "errors": [],
 }
+REPO_CONTRACT = {
+    "expected_repo_id": "demo",
+    "expected_revision_ref": "HEAD",
+    "engine_sha": "e" * 40,
+}
+
+
+def transaction_result(key: str = "one") -> dict:
+    return {
+        "ok": True,
+        "transaction_id": ("a" * 63) + key[-1].lower(),
+        "operation": "ingest",
+        "committed": True,
+        "manifest_sha256": "b" * 64,
+        "before_fingerprint": "c" * 64,
+        "after_fingerprint": "d" * 64,
+        "ingested_ids": [f"mapping.{key}"],
+        "ingested_count": 1,
+    }
+
+
+def finalization_result(transactions: list[dict]) -> dict:
+    return {**FINALIZATION_RESULT, "transactions": transactions}
 
 
 def load_script(path: Path, module_name: str):
@@ -86,7 +111,7 @@ import json
 from pathlib import Path
 
 args = sys.argv[1:]
-input_args = [arg for arg in args if arg != "--defer-finalize"]
+input_args = args[-2:]
 key = Path(input_args[0]).stem if input_args else "missing-key"
 def observe(path_text):
     path = Path(path_text).resolve()
@@ -105,6 +130,17 @@ with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
 if key in os.environ.get("FAKE_FAIL_KEYS", "").split(","):
     print("x" * 2_100 + f"::{key}::failed-item-stderr-tail::", file=sys.stderr)
     raise SystemExit(17)
+print(json.dumps({
+    "ok": True,
+    "transaction_id": "a" * 63 + key[-1],
+    "operation": "ingest",
+    "committed": True,
+    "manifest_sha256": "b" * 64,
+    "before_fingerprint": "c" * 64,
+    "after_fingerprint": "d" * 64,
+    "ingested_ids": ["mapping." + key],
+    "ingested_count": 1,
+}))
 """,
         )
         self._write_executable(
@@ -123,11 +159,14 @@ if kind == "baseline":
                       "target_head": "TARGET", "unmerged_locator_ids": []}))
     raise SystemExit(0)
 if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
-    print(json.dumps({"ok": False, "commands": {}, "isolation": {}, "unmerged": {},
+    print(json.dumps({"ok": False, "transactions": [], "commands": {},
+                      "isolation": {}, "unmerged": {},
                       "recall_checks": [], "errors": ["finalizer failed"]}))
     print("finalizer failed", file=sys.stderr)
     raise SystemExit(23)
-print(json.dumps({"ok": True, "commands": {}, "isolation": {}, "unmerged": {},
+transactions = json.loads(Path(sys.argv[sys.argv.index("--transactions") + 1]).read_text())
+print(json.dumps({"ok": True, "transactions": transactions, "commands": {},
+                  "isolation": {}, "unmerged": {},
                   "recall_checks": [], "errors": []}))
 """,
         )
@@ -147,7 +186,12 @@ print(json.dumps({"ok": True, "commands": {}, "isolation": {}, "unmerged": {},
                 "domain_spec_py": str(domain_spec.relative_to(self.manifest_dir)),
             })
         manifest = self.manifest_dir / "batch.json"
-        manifest.write_text(json.dumps({"items": items, "finalization": FINALIZATION}),
+        manifest.write_text(json.dumps({
+            **REPO_CONTRACT,
+            "repo_root": str(self.root.resolve()),
+            "items": items,
+            "finalization": FINALIZATION,
+        }),
                             encoding="utf-8")
         return manifest
 
@@ -283,7 +327,12 @@ print(json.dumps({"ok": True, "commands": {}, "isolation": {}, "unmerged": {},
     def test_empty_manifest_is_rejected_before_runner_or_finalizer(self):
         self._copy_runtime_scripts()
         manifest = self.manifest_dir / "empty-batch.json"
-        manifest.write_text(json.dumps({"items": [], "finalization": FINALIZATION}), encoding="utf-8")
+        manifest.write_text(json.dumps({
+            **REPO_CONTRACT,
+            "repo_root": str(self.root.resolve()),
+            "items": [],
+            "finalization": FINALIZATION,
+        }), encoding="utf-8")
         report = self.root / "empty-report.json"
 
         result = self._run_batch(manifest, report)
@@ -473,9 +522,14 @@ class BatchRunnerApiTest(unittest.TestCase):
         (self.manifest_dir / "verify.json").write_text("{}\n", encoding="utf-8")
         (self.manifest_dir / "domain.py").write_text("# fixture\n", encoding="utf-8")
         self.manifest = self.manifest_dir / "batch.json"
-        self.manifest.write_text(json.dumps({"items": [{
-            "key": "one", "verify_json": "verify.json", "domain_spec_py": "domain.py",
-        }], "finalization": FINALIZATION}), encoding="utf-8")
+        self.manifest.write_text(json.dumps({
+            **REPO_CONTRACT,
+            "repo_root": str(self.root.resolve()),
+            "items": [{
+                "key": "one", "verify_json": "verify.json", "domain_spec_py": "domain.py",
+            }],
+            "finalization": FINALIZATION,
+        }), encoding="utf-8")
 
     def tearDown(self):
         self._td.cleanup()
@@ -487,6 +541,103 @@ class BatchRunnerApiTest(unittest.TestCase):
             "target_head": "TARGET", "unmerged_locator_ids": [],
         }
         return module
+
+    def test_report_has_exact_resume_contract_and_transaction_evidence(self):
+        module = self._module()
+        observed = []
+        report = module.run_batch(
+            self.manifest,
+            self.root / "contract-report.json",
+            item_runner=lambda item: transaction_result(item["key"]),
+            finalizer=lambda contract, baseline, transactions: (
+                observed.append(transactions)
+                or {**FINALIZATION_RESULT, "transactions": transactions}
+            ),
+        )
+
+        self.assertTrue(report["finalized"])
+        self.assertEqual(report["repo_root"], str(self.root.resolve()))
+        self.assertTrue(Path(report["repo_root"]).is_absolute())
+        self.assertEqual(report["expected_repo_id"], "demo")
+        self.assertEqual(report["expected_revision_ref"], "HEAD")
+        self.assertEqual(report["engine_sha"], "e" * 40)
+        self.assertEqual(
+            report["manifest_sha256"],
+            hashlib.sha256(self.manifest.read_bytes()).hexdigest(),
+        )
+        self.assertRegex(report["manifest_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(report["transactions"], [transaction_result("one")])
+        self.assertEqual(observed, [[transaction_result("one")]])
+        self.assertEqual(set(report), {
+            "repo_root", "expected_repo_id", "expected_revision_ref", "engine_sha",
+            "repo_root_device", "repo_root_inode", "manifest_sha256",
+            "manifest_fingerprint", "expected", "succeeded", "failed", "transactions",
+            "isolation_baseline", "finalized", "finalization", "finalize_failure",
+        })
+        self.assertIsInstance(report["repo_root_device"], int)
+        self.assertNotIsInstance(report["repo_root_device"], bool)
+        self.assertIsInstance(report["repo_root_inode"], int)
+        self.assertNotIsInstance(report["repo_root_inode"], bool)
+
+    def test_resume_context_mismatch_is_one_fail_closed_error(self):
+        module = self._module()
+        report_path = self.root / "resume-contract.json"
+        module.run_batch(
+            self.manifest,
+            report_path,
+            item_runner=lambda item: (9, "failed"),
+        )
+        prior = json.loads(report_path.read_text(encoding="utf-8"))
+        for field, changed in (
+            ("repo_root", str((self.root / "other").resolve())),
+            ("expected_repo_id", "other"),
+            ("expected_revision_ref", "origin/other"),
+            ("engine_sha", "f" * 40),
+            ("repo_root_inode", prior["repo_root_inode"] + 1),
+            ("manifest_sha256", "0" * 64),
+            ("manifest_fingerprint", "1" * 64),
+            ("unexpected", "raw exception text"),
+        ):
+            with self.subTest(field=field):
+                mutated = dict(prior, **{field: changed})
+                report_path.write_text(json.dumps(mutated), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "resume_contract_mismatch"):
+                    module.run_batch(
+                        self.manifest,
+                        self.root / f"out-{field}.json",
+                        resume_path=report_path,
+                        item_runner=lambda item: transaction_result(item["key"]),
+                    )
+
+    def test_manifest_path_escape_and_symlink_repo_root_fail_before_execution(self):
+        module = self._module()
+        outside = self.root / "outside.json"
+        outside.write_text("{}\n", encoding="utf-8")
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["items"][0]["verify_json"] = "../outside.json"
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        calls = []
+        with self.assertRaisesRegex(ValueError, "경로"):
+            module.run_batch(
+                self.manifest,
+                self.root / "escape-report.json",
+                item_runner=lambda item: calls.append(item) or transaction_result(),
+            )
+        self.assertEqual(calls, [])
+
+        real_root = self.root / "real-root"
+        real_root.mkdir()
+        link_root = self.root / "link-root"
+        link_root.symlink_to(real_root, target_is_directory=True)
+        payload["items"][0]["verify_json"] = "verify.json"
+        payload["repo_root"] = str(link_root)
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "repo_root"):
+            module.run_batch(
+                self.manifest,
+                self.root / "symlink-report.json",
+                item_runner=lambda item: transaction_result(),
+            )
 
     def test_unknown_or_bool_injected_results_fail_closed(self):
         module = self._module()
@@ -506,7 +657,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         module = self._module()
         report = module.run_batch(
             self.manifest, self.root / "exit-only-finalizer.json",
-            item_runner=lambda item: 0,
+            item_runner=lambda item: transaction_result(item["key"]),
             finalizer=lambda *_: 0,
         )
 
@@ -521,7 +672,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.run_batch(
                 self.manifest, report_path,
-                item_runner=lambda item: calls.append(item["key"]) or 0,
+                item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]),
                 baseline_collector=lambda: {"ok": False, "error": "graph failed"},
             )
         self.assertEqual(calls, [])
@@ -555,7 +706,7 @@ class BatchRunnerApiTest(unittest.TestCase):
                         baseline_collector=lambda: calls.append("baseline") or {
                             "ok": True, "isolated_ids": [], "target_head": "TARGET",
                             "unmerged_locator_ids": []},
-                        item_runner=lambda item: calls.append("item") or 0,
+                        item_runner=lambda item: calls.append("item") or transaction_result(item["key"]),
                         finalizer=lambda *_: calls.append("finalizer") or FINALIZATION_RESULT,
                     )
                 self.assertEqual(source.read_bytes(), before)
@@ -566,13 +717,14 @@ class BatchRunnerApiTest(unittest.TestCase):
         observed = []
         report = module.run_batch(
             self.manifest, self.root / "baseline-list.json",
-            item_runner=lambda item: 0,
+            item_runner=lambda item: transaction_result(item["key"]),
             baseline_collector=lambda: {
                 "ok": True, "isolated_ids": ["code.before"],
                 "target_head": "TARGET", "unmerged_locator_ids": ["code.before-unmerged"],
             },
-            finalizer=lambda contract, baseline: (
-                observed.append((contract, baseline)) or FINALIZATION_RESULT
+            finalizer=lambda contract, baseline, transactions: (
+                observed.append((contract, baseline))
+                or finalization_result(transactions)
             ),
         )
 
@@ -593,7 +745,7 @@ class BatchRunnerApiTest(unittest.TestCase):
             module.run_batch(
                 self.manifest, self.root / "expected-unmerged.json",
                 baseline_collector=lambda: {"ok": True, "isolated_ids": []},
-                item_runner=lambda item: calls.append(item["key"]) or 0,
+                item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]),
             )
         self.assertEqual(calls, [])
 
@@ -612,9 +764,9 @@ class BatchRunnerApiTest(unittest.TestCase):
 
         resumed = module.run_batch(
             self.manifest, report_path, resume_path=report_path,
-            item_runner=lambda item: 0,
-            finalizer=lambda _contract, baseline: (
-                observed.append(baseline) or FINALIZATION_RESULT
+            item_runner=lambda item: transaction_result(item["key"]),
+            finalizer=lambda _contract, baseline, transactions: (
+                observed.append(baseline) or finalization_result(transactions)
             ),
         )
         self.assertTrue(resumed["finalized"])
@@ -633,12 +785,15 @@ class BatchRunnerApiTest(unittest.TestCase):
 
             def __call__(self, *args):
                 self.calls += 1
-                return self.result
+                return self.result(*args) if callable(self.result) else self.result
 
-        for index, result in enumerate((0, (0, ""), subprocess.CompletedProcess([], 0, stderr=""))):
+        for index, result in enumerate((transaction_result("one"),)):
             with self.subTest(result=repr(result)):
                 runner = FalseyCallable(result)
-                finalizer = FalseyCallable(FINALIZATION_RESULT)
+                finalizer = FalseyCallable(
+                    lambda _contract, _baseline, transactions:
+                    finalization_result(transactions)
+                )
                 report = module.run_batch(self.manifest, self.root / f"accepted-{index}.json",
                                           item_runner=runner, finalizer=finalizer)
                 self.assertEqual(report["succeeded"], ["one"])
@@ -657,7 +812,7 @@ class BatchRunnerApiTest(unittest.TestCase):
 
         finalizer_failure = module.run_batch(
             self.manifest, self.root / "finalizer-exception.json",
-            item_runner=lambda item: 0,
+            item_runner=lambda item: transaction_result(item["key"]),
             finalizer=lambda *_: (_ for _ in ()).throw(RuntimeError("finalizer boom")),
         )
         self.assertTrue(finalizer_failure["succeeded"])
@@ -700,7 +855,7 @@ class BatchRunnerApiTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     module.run_batch(self.manifest, self.root / f"report-{index}.json",
                                      resume_path=resume,
-                                     item_runner=lambda item: calls.append(item["key"]) or 0)
+                                     item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]))
         self.assertEqual(calls, [])
 
     def test_report_fingerprint_allows_resume_of_unchanged_inputs(self):
@@ -712,8 +867,8 @@ class BatchRunnerApiTest(unittest.TestCase):
         calls: list[str] = []
         resumed = module.run_batch(report_path=report_path, manifest_path=self.manifest,
                                    resume_path=report_path,
-                                   item_runner=lambda item: calls.append(item["key"]) or 0,
-                                   finalizer=lambda *_: FINALIZATION_RESULT)
+                                   item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]),
+                                   finalizer=lambda _c, _b, t: finalization_result(t))
         self.assertEqual(calls, ["one"])
         self.assertTrue(resumed["finalized"])
         self.assertIsInstance(resumed["manifest_fingerprint"], str)
@@ -728,7 +883,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         calls: list[str] = []
         with self.assertRaises(ValueError):
             module.run_batch(self.manifest, report_path, resume_path=report_path,
-                             item_runner=lambda item: calls.append(item["key"]) or 0)
+                             item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]))
         self.assertEqual(calls, [])
 
     def test_resume_rejects_changed_finalization_contract_before_execution(self):
@@ -741,7 +896,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         calls = []
         with self.assertRaises(ValueError):
             module.run_batch(self.manifest, report_path, resume_path=report_path,
-                             item_runner=lambda item: calls.append(item["key"]) or 0)
+                             item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]))
         self.assertEqual(calls, [])
 
     def test_resume_rejects_same_key_with_different_resolved_input(self):
@@ -751,13 +906,18 @@ class BatchRunnerApiTest(unittest.TestCase):
         other_verify = self.manifest_dir / "other-verify.json"
         other_verify.write_text((self.manifest_dir / "verify.json").read_text(encoding="utf-8"),
                                 encoding="utf-8")
-        self.manifest.write_text(json.dumps({"items": [{
+        self.manifest.write_text(json.dumps({
+            **REPO_CONTRACT,
+            "repo_root": str(self.root.resolve()),
+            "items": [{
             "key": "one", "verify_json": "other-verify.json", "domain_spec_py": "domain.py",
-        }], "finalization": FINALIZATION}), encoding="utf-8")
+            }],
+            "finalization": FINALIZATION,
+        }), encoding="utf-8")
         calls: list[str] = []
         with self.assertRaises(ValueError):
             module.run_batch(self.manifest, report_path, resume_path=report_path,
-                             item_runner=lambda item: calls.append(item["key"]) or 0)
+                             item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]))
         self.assertEqual(calls, [])
 
     def test_resume_rejects_missing_or_malformed_fingerprint_before_execution(self):
@@ -776,7 +936,7 @@ class BatchRunnerApiTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     module.run_batch(self.manifest, self.root / f"target-{index}.json",
                                      resume_path=resume,
-                                     item_runner=lambda item: calls.append(item["key"]) or 0)
+                                     item_runner=lambda item: calls.append(item["key"]) or transaction_result(item["key"]))
         self.assertEqual(calls, [])
 
     def test_parent_directory_unsupported_fsync_errno_is_tolerated(self):
@@ -846,9 +1006,18 @@ class RunIngestCleanupTest(unittest.TestCase):
             from pathlib import Path
             with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
                 print(json.dumps({"kind": "validate", "args": sys.argv[1:]}), file=log)
-            payload = json.loads(Path(sys.argv[sys.argv.index("--validate-config") + 1]).read_text())
-            if not payload.get("recall_checks"):
-                raise SystemExit(31)
+            if "--validate-config" in sys.argv:
+                payload = json.loads(Path(sys.argv[sys.argv.index("--validate-config") + 1]).read_text())
+                if not payload.get("recall_checks"):
+                    raise SystemExit(31)
+            elif "--validate-transaction" in sys.argv:
+                payload = json.loads(
+                    Path(sys.argv[sys.argv.index("--validate-transaction") + 1]).read_text()
+                )
+                if payload.get("committed") is not True:
+                    raise SystemExit(32)
+            else:
+                raise SystemExit(33)
             print(json.dumps({"ok": True, "validated": True}))
         """), encoding="utf-8")
         (self.runtime / "finalize_ingest.sh").write_text(textwrap.dedent("""\
@@ -892,7 +1061,19 @@ class RunIngestCleanupTest(unittest.TestCase):
                     observed["preconditions"] = report.read_text(encoding="utf-8")
                 with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
                     print(json.dumps(observed), file=log)
-                raise SystemExit(int(os.environ.get("FAKE_INGEST_EXIT", "0")))
+                exit_code = int(os.environ.get("FAKE_INGEST_EXIT", "0"))
+                print(json.dumps({
+                    "ok": exit_code == 0,
+                    "transaction_id": "a" * 64,
+                    "operation": "ingest",
+                    "committed": exit_code == 0,
+                    "manifest_sha256": "b" * 64,
+                    "before_fingerprint": "c" * 64,
+                    "after_fingerprint": "d" * 64,
+                    "ingested_ids": ["mapping.one"],
+                    "ingested_count": 1,
+                }))
+                raise SystemExit(exit_code)
         """), encoding="utf-8")
         for path in (self.runtime / "run_ingest.sh", self.runtime / "finalize_ingest.sh",
                      self.bin_dir / "project-brain"):
@@ -919,7 +1100,14 @@ class RunIngestCleanupTest(unittest.TestCase):
                    FAKE_BUILD_EXIT=str(build_exit),
                    FAKE_INVALID_FINALIZATION="1" if invalid_finalization else "0",
                    FAKE_OMIT_FINALIZATION="1" if omit_finalization else "0")
+        context_flags = [
+            "--repo-root", str(self.root.resolve()),
+            "--expected-repo-id", "demo",
+            "--expected-revision-ref", "HEAD",
+            "--engine-sha", "e" * 40,
+        ]
         return subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
+                               *context_flags,
                                str(self.verify), str(self.spec)],
                               env=env, text=True, capture_output=True, check=False)
 
@@ -928,7 +1116,8 @@ class RunIngestCleanupTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["kind"], "ingest")
         self.assertIn("--preconditions-file", calls[0]["args"])
         self.assertEqual(json.loads(calls[0]["preconditions"]),
                          {"ok": True, "preconditions": {"expected": "fresh"}})
@@ -939,7 +1128,7 @@ class RunIngestCleanupTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([call["kind"] for call in calls],
-                         ["validate", "baseline", "ingest", "finalize"])
+                         ["validate", "baseline", "ingest", "validate", "finalize"])
         final_args = calls[-1]["args"]
         self.assertIn("--config", final_args)
         self.assertIn("--baseline", final_args)
@@ -978,7 +1167,14 @@ class RunIngestCleanupTest(unittest.TestCase):
                            FAKE_BUILD_EXIT=str(build_exit),
                            FAKE_INVALID_FINALIZATION="0",
                            FAKE_OMIT_FINALIZATION="0")
+                context_flags = [
+                    "--repo-root", str(self.root.resolve()),
+                    "--expected-repo-id", "demo",
+                    "--expected-revision-ref", "HEAD",
+                    "--engine-sha", "e" * 40,
+                ]
                 result = subprocess.run([str(self.runtime / "run_ingest.sh"), *flags,
+                                         *context_flags,
                                          str(self.verify), str(self.spec)],
                                         env=env, text=True, capture_output=True, check=False)
                 self.assertEqual(result.returncode, expected_exit, result.stderr)
@@ -987,6 +1183,7 @@ class RunIngestCleanupTest(unittest.TestCase):
                 self.assertEqual(list(self.tmp_dir.glob("build-report.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("finalization.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("isolation-baseline.*")), [])
+                self.assertEqual(list(self.tmp_dir.glob("transaction-result.*")), [])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 const SCHEMAS = {
   mapping: { mapping_key: "kebab", canonical_summary: "", meaning: "", boundary: "" },
   glossary_term: { term_key: "kebab", term: "", definition: "" },
-  code_anchor: { path: "Classes/...", symbol: "Class::method", quote: "// 코드 인용" },
+  code_anchor: { key: "anchor-key", path: "Classes/...", symbol: "Class::method", quote: "// 코드 인용" },
   // 결정은 코드가 아니라 사람 판정 → domain_spec.DECISIONS에 직접 쓴다(여기서 추출 안 함).
   decision_note: { key: "kebab", decision_type: "improvement|qa_issue|...", title: "", summary: "",
                    decision: "", affects: ["mapping_key"], evidence: [{ type: "commit|jira|pr", ref: "", summary: "" }] },

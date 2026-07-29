@@ -11,7 +11,7 @@
 
 ## 엔진이 강제하는 것
 
-- ingest는 모든 객체의 schema와 병합 store lint를 먼저 통과시킨 뒤 파일을 순서대로 쓴다. 저장 전 검증은 묶음 전체지만 rollback transaction은 아니다.
+- ingest는 모든 객체의 schema와 병합 store lint를 먼저 통과시킨 뒤 하나의 rollback transaction으로 쓴다.
 - reviewed→candidate 강등은 거부한다. reviewed→reviewed same-ID 갱신과 reviewed→superseded 전환은 허용한다.
 - 새 DomainMapping의 `supersedes_mapping_ids`가 가리키는 옛 mapping이 reviewed로 남으면 lint가 거부한다.
 - 같은 subject·predicate에 값이 다른 open reviewed TemporalFact가 둘 이상이면 lint가 거부한다.
@@ -56,3 +56,6 @@ generic supersede 링크가 없다. 같은 ID를 amend하거나 build `updates`�
 코드가 그대로인지 다시 확인한 경우 `project-brain mark-checked`가 `commit_sha`, `verified_at`,
 `updated_at`을 갱신한다. path·symbol 자체를 고칠 때는 direct same-ID amend를 쓴다. 코드 변경이
 mapping 의미까지 바꾸면 CodeLocator만 고치지 말고 DomainMapping 흐름으로 판정한다.
+새 locator와 좌표 변경 locator의 `verified_at`은 write verifier가 실제 blob·symbol·quote를
+확인한 뒤 기록한다. 외부 `verified_at`이나 `title`을 검증 근거로 받지 않는다. title은
+display_only이고, verified quote가 필요한 쓰기에는 일반 quote 우회 flag가 없다.

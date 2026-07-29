@@ -23,7 +23,10 @@
 
 1. 동적 workflow 결과가 있으면 `scripts/validate_workflow_result.py <결과.json>`이 통과했다. 직접 단건 실행이면 `해당 없음`으로 기록한다.
 2. batch 모드면 `batch-report.json`에서 `expected == len(succeeded)`, `failed=[]`, `finalized=true`,
-   `finalization.ok=true`다. 최초 `isolation_baseline`이 보존됐고 finalization 계약을 포함한
+   `finalization.ok=true`다. `transactions`가 성공 item과 일대일이고 각 transaction의
+   `committed=true`, exact `manifest_sha256`, ingest ID/count가 확인됐다. transaction이 없거나
+   불일치하거나 noncommitted면 `finalized=false`여야 한다. 최초 `isolation_baseline`이 보존됐고
+   absolute repo identity, engine SHA, batch manifest hash, finalization 계약을 포함한
    `manifest_fingerprint`가 resume 입력과 일치한다. post head == baseline head이고, post unmerged는
    baseline union expected와 일치한다. legacy baseline은 그 제한을 그대로 적용하며, 사용할 수 없는
    감사 상태를 만들어 내지 않는다. 직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.

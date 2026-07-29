@@ -48,8 +48,8 @@ def build_notes(atoms, spec):
     for a in atoms:
         mk = a["mapping_key"]
         akeys = []
-        for i, ca in enumerate(a.get("code_anchors", [])):
-            ak = f"{mk}--{i}"  # 키 규약(2 표본 입증)
+        for ca in a.get("code_anchors", []):
+            ak = ca["key"]
             akeys.append(ak)
             code_anchors.append({
                 "key": ak,

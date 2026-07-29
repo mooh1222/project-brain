@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,8 +16,10 @@ from typing import Any, Callable
 
 
 ItemRunner = Callable[[dict[str, Any]], Any]
-Finalizer = Callable[[dict[str, Any], dict[str, Any]], Any]
+Finalizer = Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]]], Any]
 BaselineCollector = Callable[[], Any]
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_ENGINE_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 _UNSUPPORTED_PARENT_FSYNC_ERRNOS = {errno.EINVAL}
 for _errno_name in ("ENOTSUP", "EOPNOTSUPP"):
@@ -83,13 +86,81 @@ def _finalizer_module():
     return module
 
 
-def _load_manifest(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _has_symlink_component(path: Path) -> bool:
+    # macOS의 /var -> /private/var 같은 시스템 경로 별칭은 허용하되,
+    # 호출자가 지정한 마지막 경로 자체가 link인 경우는 거부한다.
+    return path.absolute().is_symlink()
+
+
+def _canonical_input_file(path: Path, *, field: str) -> Path:
+    absolute = path.absolute()
+    if _has_symlink_component(absolute):
+        raise ValueError(f"{field} 경로에 symbolic link가 있습니다")
     try:
-        with path.open(encoding="utf-8") as f:
-            payload = json.load(f)
+        resolved = absolute.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{field} 경로가 없습니다: {absolute}: {exc}") from exc
+    if not resolved.is_file():
+        raise ValueError(f"{field} 경로가 regular file이 아닙니다: {resolved}")
+    return resolved
+
+
+def _repo_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    repo_root_value = payload.get("repo_root")
+    if not isinstance(repo_root_value, str) or not Path(repo_root_value).is_absolute():
+        raise ValueError("manifest.repo_root는 absolute path여야 합니다")
+    repo_root_path = Path(repo_root_value)
+    if _has_symlink_component(repo_root_path):
+        raise ValueError("manifest.repo_root는 symbolic link를 포함할 수 없습니다")
+    try:
+        repo_root = repo_root_path.resolve(strict=True)
+        repo_stat = repo_root.stat()
+    except OSError as exc:
+        raise ValueError(f"manifest.repo_root를 확인할 수 없습니다: {exc}") from exc
+    if not repo_root.is_dir():
+        raise ValueError("manifest.repo_root는 directory여야 합니다")
+    expected_repo_id = payload.get("expected_repo_id")
+    expected_revision_ref = payload.get("expected_revision_ref")
+    engine_sha = payload.get("engine_sha")
+    if not isinstance(expected_repo_id, str) or not expected_repo_id.strip():
+        raise ValueError("manifest.expected_repo_id가 없습니다")
+    if not isinstance(expected_revision_ref, str) or not expected_revision_ref.strip():
+        raise ValueError("manifest.expected_revision_ref가 없습니다")
+    if not isinstance(engine_sha, str) or _ENGINE_SHA.fullmatch(engine_sha) is None:
+        raise ValueError("manifest.engine_sha는 exact lowercase Git SHA여야 합니다")
+    return {
+        "repo_root": str(repo_root),
+        "expected_repo_id": expected_repo_id,
+        "expected_revision_ref": expected_revision_ref,
+        "engine_sha": engine_sha,
+        "repo_root_device": repo_stat.st_dev,
+        "repo_root_inode": repo_stat.st_ino,
+    }
+
+
+def _load_manifest(
+    path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], str]:
+    try:
+        manifest_bytes = path.read_bytes()
+        payload = json.loads(manifest_bytes)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"manifest를 읽을 수 없습니다: {exc}") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+    required_fields = {
+        "repo_root",
+        "expected_repo_id",
+        "expected_revision_ref",
+        "engine_sha",
+        "items",
+        "finalization",
+    }
+    if not isinstance(payload, dict):
+        raise ValueError("manifest 필드가 정확하지 않습니다")
+    if "finalization" not in payload:
+        raise ValueError("manifest.finalization이 없습니다")
+    if set(payload) != required_fields:
+        raise ValueError("manifest 필드가 정확하지 않습니다")
+    if not isinstance(payload.get("items"), list):
         raise ValueError("manifest.items는 배열이어야 합니다")
     if not payload["items"]:
         raise ValueError("manifest.items는 최소 1개여야 합니다")
@@ -110,16 +181,27 @@ def _load_manifest(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             value = raw_item.get(field)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"items[{index}].{field}가 없습니다")
-            source_path = (path.parent / value).resolve()
-            if not source_path.is_file():
-                raise ValueError(f"items[{index}].{field} 경로가 없습니다: {source_path}")
+            relative = Path(value)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"items[{index}].{field} 경로는 manifest-relative여야 합니다")
+            source_path = _canonical_input_file(
+                path.parent / relative,
+                field=f"items[{index}].{field}",
+            )
+            if not source_path.is_relative_to(path.parent):
+                raise ValueError(f"items[{index}].{field} 경로가 manifest root를 탈출합니다")
             resolved[field] = source_path
         items.append(resolved)
     try:
         finalization = _finalizer_module().validate_contract(payload.get("finalization"))
     except (OSError, ValueError) as exc:
         raise ValueError(f"manifest.finalization이 올바르지 않습니다: {exc}") from exc
-    return items, finalization
+    return (
+        items,
+        finalization,
+        _repo_contract(payload),
+        hashlib.sha256(manifest_bytes).hexdigest(),
+    )
 
 
 def _manifest_fingerprint(items: list[dict[str, Any]], finalization: dict[str, Any]) -> str:
@@ -155,7 +237,20 @@ def _reject_report_input_collision(report_path: Path, manifest_path: Path,
 def _default_item_runner(item: dict[str, Any]) -> subprocess.CompletedProcess[str]:
     script = Path(__file__).resolve().with_name("run_ingest.sh")
     return subprocess.run(
-        [str(script), "--defer-finalize", str(item["verify_json"]), str(item["domain_spec_py"])],
+        [
+            str(script),
+            "--defer-finalize",
+            "--repo-root",
+            item["repo_root"],
+            "--expected-repo-id",
+            item["expected_repo_id"],
+            "--expected-revision-ref",
+            item["expected_revision_ref"],
+            "--engine-sha",
+            item["engine_sha"],
+            str(item["verify_json"]),
+            str(item["domain_spec_py"]),
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -168,38 +263,84 @@ def _default_baseline_collector() -> subprocess.CompletedProcess[str]:
                           capture_output=True, check=False)
 
 
-def _default_finalizer(contract: dict[str, Any], baseline: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+def _default_finalizer(
+    contract: dict[str, Any],
+    baseline: dict[str, Any],
+    transactions: list[dict[str, Any]],
+) -> subprocess.CompletedProcess[str]:
     script = Path(__file__).resolve().with_name("finalize_ingest.sh")
     with tempfile.TemporaryDirectory(prefix="project-brain-finalize-") as td:
         root = Path(td)
         config_path = root / "config.json"
         baseline_path = root / "baseline.json"
+        transactions_path = root / "transactions.json"
         config_path.write_text(json.dumps(contract, ensure_ascii=False), encoding="utf-8")
         baseline_path.write_text(json.dumps(baseline, ensure_ascii=False), encoding="utf-8")
+        transactions_path.write_text(
+            json.dumps(transactions, ensure_ascii=False),
+            encoding="utf-8",
+        )
         return subprocess.run(
-            [str(script), "--config", str(config_path), "--baseline", str(baseline_path)],
+            [
+                str(script),
+                "--config",
+                str(config_path),
+                "--baseline",
+                str(baseline_path),
+                "--transactions",
+                str(transactions_path),
+            ],
             text=True, capture_output=True, check=False)
 
 
-def _result_details(result: Any) -> tuple[bool, int, str]:
-    if isinstance(result, subprocess.CompletedProcess):
-        if isinstance(result.returncode, int) and not isinstance(result.returncode, bool):
-            return True, result.returncode, _stderr_text(result.stderr)
-    if isinstance(result, int) and not isinstance(result, bool):
-        return True, result, ""
-    if (isinstance(result, tuple) and len(result) == 2
-            and isinstance(result[0], int) and not isinstance(result[0], bool)
-            and isinstance(result[1], str)):
-        return True, result[0], result[1]
-    return False, 1, f"지원하지 않는 실행 결과: {result!r}"
-
-
-def _run_item(runner: ItemRunner, item: dict[str, Any]) -> tuple[int, str]:
+def _transaction_details(
+    result: Any,
+) -> tuple[dict[str, Any] | None, int, str]:
+    if isinstance(result, int) and not isinstance(result, bool) and result != 0:
+        return None, result, ""
+    if (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[0], int)
+        and not isinstance(result[0], bool)
+        and result[0] != 0
+        and isinstance(result[1], str)
+    ):
+        return None, result[0], result[1]
+    if isinstance(result, dict):
+        payload = result
+        exit_code = 0 if payload.get("ok") is True else 1
+        stderr = ""
+    elif isinstance(result, subprocess.CompletedProcess):
+        exit_code = (
+            result.returncode
+            if isinstance(result.returncode, int) and not isinstance(result.returncode, bool)
+            else 1
+        )
+        stderr = _stderr_text(result.stderr)
+        try:
+            payload = json.loads(_stderr_text(result.stdout))
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+    else:
+        return None, 1, f"구조화 transaction 결과가 아님: {result!r}"
+    if exit_code != 0:
+        return None, exit_code, stderr
     try:
-        _, exit_code, stderr = _result_details(runner(item))
-        return exit_code, stderr
+        normalized = _finalizer_module().validate_transaction_results([payload])
+    except (OSError, ValueError) as exc:
+        return None, 1, str(exc)
+    return normalized[0], 0, stderr
+
+
+def _run_item(
+    runner: ItemRunner,
+    item: dict[str, Any],
+) -> tuple[dict[str, Any] | None, int, str]:
+    try:
+        return _transaction_details(runner(item))
     except Exception as exc:  # 실행 오류도 항목 실패로 남겨야 재개할 수 있다.
-        return 1, str(exc)
+        return None, 1, str(exc)
 
 
 def _json_payload(result: Any) -> tuple[dict[str, Any] | None, int, str]:
@@ -236,9 +377,18 @@ def _baseline_details(result: Any, expected_unmerged_locator_ids: list[str]) -> 
 
 def _finalization_details(result: Any) -> tuple[dict[str, Any], int, str]:
     payload, exit_code, stderr = _json_payload(result)
-    required = {"ok", "commands", "isolation", "unmerged", "recall_checks", "errors"}
+    required = {
+        "ok",
+        "transactions",
+        "commands",
+        "isolation",
+        "unmerged",
+        "recall_checks",
+        "errors",
+    }
     valid = (isinstance(payload, dict) and set(payload) == required
              and isinstance(payload.get("ok"), bool)
+             and isinstance(payload.get("transactions"), list)
              and isinstance(payload.get("commands"), dict)
              and isinstance(payload.get("isolation"), dict)
              and isinstance(payload.get("unmerged"), dict)
@@ -246,7 +396,8 @@ def _finalization_details(result: Any) -> tuple[dict[str, Any], int, str]:
              and isinstance(payload.get("errors"), list)
              and all(isinstance(error, str) for error in payload.get("errors", [])))
     if not valid:
-        failure = {"ok": False, "commands": {}, "isolation": {}, "unmerged": {}, "recall_checks": [],
+        failure = {"ok": False, "transactions": [], "commands": {},
+                   "isolation": {}, "unmerged": {}, "recall_checks": [],
                    "errors": [stderr or "finalizer가 구조화 결과를 반환하지 않았습니다"]}
         return failure, 1, stderr
     if payload["ok"] is not (exit_code == 0):
@@ -258,37 +409,61 @@ def _finalization_details(result: Any) -> tuple[dict[str, Any], int, str]:
 
 
 def _load_resume_state(path: Path, *, expected: int, valid_keys: set[str],
-                       manifest_fingerprint: str,
-                       expected_unmerged_locator_ids: list[str]) -> tuple[set[str], dict[str, Any]]:
+                       manifest_fingerprint: str, manifest_sha256: str,
+                       repo_contract: dict[str, Any],
+                       expected_unmerged_locator_ids: list[str]
+                       ) -> tuple[set[str], dict[str, Any], list[dict[str, Any]]]:
     try:
-        with path.open(encoding="utf-8") as f:
+        resume_file = _canonical_input_file(path, field="resume report")
+        with resume_file.open(encoding="utf-8") as f:
             previous = json.load(f)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"resume report를 읽을 수 없습니다: {exc}") from exc
-    required = {"expected", "succeeded", "failed", "finalized", "manifest_fingerprint",
-                "isolation_baseline"}
-    if not isinstance(previous, dict) or not required.issubset(previous):
-        raise ValueError("resume report에 필수 상태 필드가 없습니다")
+    required = {
+        "repo_root",
+        "expected_repo_id",
+        "expected_revision_ref",
+        "engine_sha",
+        "repo_root_device",
+        "repo_root_inode",
+        "manifest_sha256",
+        "manifest_fingerprint",
+        "expected",
+        "succeeded",
+        "failed",
+        "transactions",
+        "isolation_baseline",
+        "finalized",
+        "finalization",
+        "finalize_failure",
+    }
+    if not isinstance(previous, dict) or set(previous) != required:
+        raise ValueError("resume_contract_mismatch: report fields")
+    expected_contract = {
+        **repo_contract,
+        "manifest_sha256": manifest_sha256,
+        "manifest_fingerprint": manifest_fingerprint,
+    }
+    for field, expected_value in expected_contract.items():
+        if previous.get(field) != expected_value:
+            raise ValueError(f"resume_contract_mismatch: {field}")
     if (not isinstance(previous["expected"], int)
             or isinstance(previous["expected"], bool)
             or previous["expected"] != expected):
-        raise ValueError("resume report의 expected가 현재 manifest와 다릅니다")
-    if (not isinstance(previous["manifest_fingerprint"], str)
-            or previous["manifest_fingerprint"] != manifest_fingerprint):
-        raise ValueError("resume report의 manifest_fingerprint가 현재 입력과 다릅니다")
+        raise ValueError("resume_contract_mismatch: expected")
     if not isinstance(previous["succeeded"], list):
-        raise ValueError("resume report의 succeeded는 배열이어야 합니다")
+        raise ValueError("resume_contract_mismatch: succeeded")
     succeeded = previous["succeeded"]
     if (any(not isinstance(key, str) or not key for key in succeeded)
             or len(succeeded) != len(set(succeeded))
             or not set(succeeded).issubset(valid_keys)):
-        raise ValueError("resume report의 succeeded key가 올바르지 않습니다")
+        raise ValueError("resume_contract_mismatch: succeeded")
     if not isinstance(previous["failed"], list):
-        raise ValueError("resume report의 failed는 배열이어야 합니다")
+        raise ValueError("resume_contract_mismatch: failed")
     failed_keys: set[str] = set()
     for failure in previous["failed"]:
         if not isinstance(failure, dict):
-            raise ValueError("resume report의 failed 항목은 객체여야 합니다")
+            raise ValueError("resume_contract_mismatch: failed")
         key = failure.get("key")
         exit_code = failure.get("exit_code")
         stderr = failure.get("stderr")
@@ -296,45 +471,66 @@ def _load_resume_state(path: Path, *, expected: int, valid_keys: set[str],
                 or key in failed_keys or key in succeeded
                 or not isinstance(exit_code, int) or isinstance(exit_code, bool)
                 or not isinstance(stderr, str)):
-            raise ValueError("resume report의 failed 항목이 올바르지 않습니다")
+            raise ValueError("resume_contract_mismatch: failed")
         failed_keys.add(key)
     if not isinstance(previous["finalized"], bool):
-        raise ValueError("resume report의 finalized는 bool이어야 합니다")
+        raise ValueError("resume_contract_mismatch: finalized")
+    if previous["transactions"] == [] and succeeded == []:
+        transactions = []
+    else:
+        try:
+            transactions = _finalizer_module().validate_transaction_results(
+                previous["transactions"]
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"resume_contract_mismatch: transactions: {exc}") from exc
+    if len(transactions) != len(succeeded):
+        raise ValueError("resume_contract_mismatch: transactions")
     try:
         normalized = _finalizer_module().normalize_baseline(
             previous["isolation_baseline"], expected_unmerged_locator_ids)
     except (OSError, ValueError) as exc:
-        raise ValueError(f"resume report의 isolation_baseline이 올바르지 않습니다: {exc}") from exc
+        raise ValueError(f"resume_contract_mismatch: isolation_baseline: {exc}") from exc
     if not normalized["git_baseline_available"]:
-        return set(succeeded), {"ok": True, "isolated_ids": normalized["isolated_ids"]}
+        return (
+            set(succeeded),
+            {"ok": True, "isolated_ids": normalized["isolated_ids"]},
+            transactions,
+        )
     baseline = {key: normalized[key] for key in
                 ("ok", "isolated_ids", "target_head", "unmerged_locator_ids")}
-    return set(succeeded), baseline
+    return set(succeeded), baseline, transactions
 
 
 def run_batch(manifest_path, report_path, *, resume_path=None,
               item_runner=None, finalizer=None, baseline_collector=None) -> dict:
     """manifest의 항목을 실행하고 항목마다 원자적으로 report를 갱신한다.
 
-    ``item_runner``는 절대 경로가 들어간 ``key``, ``verify_json``, ``domain_spec_py`` 항목 dict를
-    받고, ``subprocess.CompletedProcess``, bool이 아닌 종료 코드(int), 또는
-    ``(종료 코드, stderr 문자열)`` tuple을 반환한다.
+    ``item_runner``는 절대 경로가 들어간 ``key``, ``verify_json``, ``domain_spec_py`` 항목
+    dict를 받고, 정확한 transaction dict나 stdout이 그 JSON인
+    ``subprocess.CompletedProcess``를 반환한다. bool이 아닌 종료 코드(int)와
+    ``(종료 코드, stderr 문자열)`` tuple은 실패 경로 테스트용으로만 허용한다.
     """
-    manifest = Path(manifest_path).resolve()
+    manifest = _canonical_input_file(Path(manifest_path), field="manifest")
     report_file = Path(report_path).resolve()
     if report_file.exists() and report_file.is_dir():
         raise ValueError(f"report 경로가 디렉터리입니다: {report_file}")
-    items, finalization_contract = _load_manifest(manifest)  # 실행 전 전체 입력을 검사한다.
+    items, finalization_contract, repo_contract, manifest_sha256 = (
+        _load_manifest(manifest)
+    )  # 실행 전 전체 입력을 검사한다.
     _reject_report_input_collision(report_file, manifest, items)
     manifest_fingerprint = _manifest_fingerprint(items, finalization_contract)
 
     prior_succeeded: set[str] = set()
+    transactions: list[dict[str, Any]] = []
     isolation_baseline: dict[str, Any]
     if resume_path is not None:
         valid_keys = {item["key"] for item in items}
-        prior_succeeded, isolation_baseline = _load_resume_state(
+        prior_succeeded, isolation_baseline, transactions = _load_resume_state(
             Path(resume_path), expected=len(items), valid_keys=valid_keys,
             manifest_fingerprint=manifest_fingerprint,
+            manifest_sha256=manifest_sha256,
+            repo_contract=repo_contract,
             expected_unmerged_locator_ids=finalization_contract["expected_unmerged_locator_ids"])
     else:
         collect: BaselineCollector = (_default_baseline_collector if baseline_collector is None
@@ -348,10 +544,13 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
             raise ValueError(f"적재 전 isolation baseline 수집 실패: {baseline_error}")
 
     report = {
+        **repo_contract,
+        "manifest_sha256": manifest_sha256,
         "expected": len(items),
         "manifest_fingerprint": manifest_fingerprint,
         "succeeded": [item["key"] for item in items if item["key"] in prior_succeeded],
         "failed": [],
+        "transactions": list(transactions),
         "isolation_baseline": isolation_baseline,
         "finalized": False,
         "finalization": None,
@@ -362,9 +561,11 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
     for item in items:
         if item["key"] in prior_succeeded:
             continue
-        exit_code, stderr = _run_item(runner, item)
-        if exit_code == 0:
+        item_input = {**item, **repo_contract}
+        transaction, exit_code, stderr = _run_item(runner, item_input)
+        if exit_code == 0 and transaction is not None:
             report["succeeded"].append(item["key"])
+            report["transactions"].append(transaction)
         else:
             report["failed"].append({
                 "key": item["key"],
@@ -379,14 +580,33 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
     finish: Finalizer = _default_finalizer if finalizer is None else finalizer
     try:
         finalization, final_exit_code, final_stderr = _finalization_details(
-            finish(finalization_contract, isolation_baseline))
+            finish(
+                finalization_contract,
+                isolation_baseline,
+                report["transactions"],
+            ))
     except Exception as exc:
-        finalization = {"ok": False, "commands": {}, "isolation": {}, "unmerged": {},
+        finalization = {"ok": False, "transactions": [], "commands": {},
+                        "isolation": {}, "unmerged": {},
                         "recall_checks": [], "errors": [str(exc)]}
         final_exit_code = 1
         final_stderr = str(exc)
     report["finalization"] = finalization
-    report["finalized"] = final_exit_code == 0 and finalization["ok"] is True
+    transactions_match = finalization.get("transactions") == report["transactions"]
+    if not transactions_match:
+        finalization["ok"] = False
+        finalization["errors"] = [
+            *finalization.get("errors", []),
+            "finalizer transaction results가 batch report와 다릅니다",
+        ]
+        if final_exit_code == 0:
+            final_exit_code = 1
+    report["finalized"] = (
+        final_exit_code == 0
+        and finalization["ok"] is True
+        and transactions_match
+        and bool(report["transactions"])
+    )
     if not report["finalized"]:
         report["finalize_failure"] = {
             "exit_code": final_exit_code,

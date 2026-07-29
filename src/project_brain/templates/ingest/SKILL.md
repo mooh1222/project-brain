@@ -100,6 +100,8 @@ description: |
 실패 항목이 하나라도 있으면 finalization을 호출하지 않는다.
 
 항목 key와 report의 성공 목록이 서로 맞는지 확인한다.
+각 성공 item의 exact transaction 결과가 report의 `transactions`에 있고 `committed=true`인지,
+batch `manifest_sha256`과 repo/engine resume 계약이 그대로인지 확인한다.
 새 wave용 임시 스크립트로 운영 규약을 우회하지 않는다.
 
 중단된 묶음은 같은 입력과 보고서로 재개하며, 이미 성공한 항목만 건너뛴다.
