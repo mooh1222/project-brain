@@ -413,6 +413,27 @@ print(json.dumps({"ok": True, "transactions": transactions, "commands": {},
         self.assertEqual(missing_path.returncode, 1, missing_path.stderr)
         self.assertEqual(self._calls(), [])
 
+    def test_malformed_top_level_project_config_returns_structured_error(self):
+        self._copy_runtime_scripts()
+        manifest = self._manifest()
+        (self.root / ".project-brain.json").write_text(
+            "[]\n",
+            encoding="utf-8",
+        )
+
+        result = self._run_batch(
+            manifest,
+            self.root / "malformed-config-report.json",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(set(payload), {"ok", "finalized", "errors"})
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["finalized"])
+        self.assertIn("execution state", payload["errors"][0])
+
     def test_empty_manifest_is_rejected_before_runner_or_finalizer(self):
         self._copy_runtime_scripts()
         manifest = self.manifest_dir / "empty-batch.json"
@@ -635,7 +656,7 @@ class BatchRunnerApiTest(unittest.TestCase):
             lambda declared: self._execution_state()
         )
         module._default_receipt_recoverer = (
-            lambda _root, _bindings, expected: expected
+            lambda _root, _bindings, expected, **_kwargs: expected
         )
         return module
 
@@ -741,6 +762,71 @@ class BatchRunnerApiTest(unittest.TestCase):
         self.assertIsInstance(report["repo_root_inode"], int)
         self.assertNotIsInstance(report["repo_root_inode"], bool)
 
+    def test_receipt_recovery_uses_post_gate_mode_only_after_finalizer(self):
+        module = self._module()
+        observed_modes = []
+
+        def recoverer(
+            _root,
+            _bindings,
+            expected,
+            *,
+            verification_mode,
+        ):
+            observed_modes.append(verification_mode)
+            return expected
+
+        report = module.run_batch(
+            self.manifest,
+            self.root / "receipt-modes.json",
+            item_runner=lambda item: transaction_result(item["key"]),
+            finalizer=lambda _contract, _baseline, records: (
+                finalization_result(records)
+            ),
+            receipt_recoverer=recoverer,
+        )
+
+        self.assertTrue(report["finalized"])
+        self.assertEqual(
+            observed_modes,
+            [
+                "strict_commit",
+                "strict_commit",
+                "post_gate_object_tail",
+            ],
+        )
+
+    def test_execution_state_normalizes_non_system_config_errors(self):
+        module = load_script(
+            BATCH_SCRIPT,
+            "run_ingest_batch_execution_error_under_test",
+        )
+        declared = {
+            "repo_root": str(self.root.resolve()),
+            **REPO_CONTRACT,
+        }
+        for error in (
+            RuntimeError("runtime config failure"),
+            AttributeError("malformed config"),
+            OSError("config unavailable"),
+        ):
+            with self.subTest(error=type(error).__name__), mock.patch(
+                "project_brain.config.load_config",
+                side_effect=error,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "execution state를 확정할 수 없습니다",
+                ):
+                    module._resolve_execution_state(declared)
+        for system_error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(system_error=type(system_error).__name__), mock.patch(
+                "project_brain.config.load_config",
+                side_effect=system_error,
+            ):
+                with self.assertRaises(type(system_error)):
+                    module._resolve_execution_state(declared)
+
     def test_resume_rejects_moving_ref_or_engine_head_before_item(self):
         module = self._module()
         report_path = self.root / "state-resume.json"
@@ -833,7 +919,7 @@ class BatchRunnerApiTest(unittest.TestCase):
                         state["target_revision_sha"] = "f" * 40
                     return state
 
-                def recoverer(_root, _bindings, expected):
+                def recoverer(_root, _bindings, expected, **_kwargs):
                     if drifted and drift_kind == "receipt_tail":
                         raise ValueError("object corpus tail changed")
                     return expected
@@ -931,7 +1017,7 @@ class BatchRunnerApiTest(unittest.TestCase):
         calls: list[str] = []
         recover_calls = 0
 
-        def recover(_root, bindings, expected):
+        def recover(_root, bindings, expected, **_kwargs):
             nonlocal recover_calls
             recover_calls += 1
             self.assertEqual(

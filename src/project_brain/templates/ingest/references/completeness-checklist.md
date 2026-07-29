@@ -32,8 +32,11 @@
    `brain_root_inode`, resolved `target_revision_sha`, 실제 engine root/HEAD, root inode,
    batch manifest hash, immutable staged 입력 hash, finalization 계약이 resume 입력과
    일치한다. `transactions`·`succeeded`·`failed`는 item_records에서 파생된 호환 필드다.
-   semantic commands 뒤 post-gate receipt/current object tail 검증과 finalizer return 뒤
-   post-finalizer state/input/receipt 검증이 모두 통과했다.
+   semantic commands 전 `strict_commit`, commands 뒤 `post_gate_object_tail` receipt/current
+   object tail 검증과 finalizer return 뒤 post-finalizer state/input/receipt 검증이 모두
+   통과했다. post-gate에서 정상 index/audit derived 출력만 허용됐고 action object 변경이나
+   알 수 없는 object 추가는 없었다. config/실행 상태 오류는 traceback이 아니라
+   `ok=false` 또는 `finalized=false` JSON으로 남았다.
    post head == baseline head이고, post unmerged는 baseline union expected와 일치한다. legacy
    baseline은 그 제한을 그대로 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
    직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.

@@ -105,8 +105,11 @@ report의 `item_records`가 manifest 항목과 같은 순서·key인지 확인�
 batch `manifest_sha256`, target config가 해석한 canonical brain root와 inode, immutable staged
 입력 hash, resolved target commit과 실제 engine HEAD를 포함한 resume 계약이 그대로인지 확인한다.
 finalization은 durable intent/journal에서 복구한 receipt와 record가 정확히 일치한 뒤에만 실행한다.
-semantic gate가 끝난 뒤에도 receipt/current object corpus tail을 post-gate로 다시 확인하고, batch는
+semantic gate 전에는 `strict_commit`, 끝난 뒤에는 derived 출력만 허용하는
+`post_gate_object_tail` mode로 receipt/current object corpus tail을 다시 확인한다. batch는
 finalizer가 돌아온 뒤 state/input/receipt를 post-finalizer로 다시 확인해야만 완료한다.
+config 해석 등 실행 상태 확인에서 발생한 일반 예외는 traceback으로 빠져나오지 않고
+`ok=false` 또는 `finalized=false`인 JSON 실패로 남아야 한다.
 새 wave용 임시 스크립트로 운영 규약을 우회하지 않는다.
 
 중단된 묶음은 같은 입력과 보고서로 재개한다. durable receipt가 확인된 committed prefix만 건너뛰고,

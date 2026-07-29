@@ -303,10 +303,15 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    완료 검사는 post head == baseline head와 post unmerged == baseline union expected를 함께
    확인한다. legacy baseline은 당시 허용한 제한만 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
    semantic commands가 끝난 뒤 finalizer는 durable receipt chain과 current object corpus tail을
-   `post-gate`로 다시 확인한다. batch runner도 finalizer return 뒤 resolved
+   `post_gate_object_tail` mode로 다시 확인한다. commit 직후와 semantic commands 전 검증은
+   derived 파일이 없어야 하는 `strict_commit` mode를 유지한다. post-gate mode는
+   intent/journal, canonical manifest와 receipt, full object corpus fingerprint, object action
+   entry를 그대로 검증하면서 index/audit derived 출력만 허용한다. batch runner도 finalizer return 뒤 resolved
    repo/ref/engine/brain root state, 원본·staged 입력, receipt chain을 `post-finalizer`로 다시
    확인한 직후에만 `finalized=true`를 쓴다. index/audit 같은 derived 파일 변화는 허용하지만 object
    corpus tail이나 ref/engine/brain root가 바뀌면 commands가 성공했어도 완료로 승격하지 않는다.
+   config JSON이 object가 아니거나 config loader가 일반 예외를 내더라도 traceback을 노출하지
+   않고 finalizer는 `ok=false`, batch는 `finalized=false`인 JSON 실패를 기록한다.
 
    finalizer JSON의 `unmerged` 블록은 이 Git 범위 검사의 실제 결과다. `ok`가 false면 완료가 아니다.
    `baseline_ids`는 baseline에 있던 미머지 locator, `expected_ids`는 이번 계약이 허용한 locator,
@@ -335,8 +340,10 @@ root-anchored durable intent/journal의 `COMMITTED` receipt chain으로 다시 �
 action object IDs, 현재 corpus fingerprint가 일치할 때만 아래 게이트를 실행하고 `transactions`, `commands`,
 `isolation`, `unmerged`, `recall_checks`, `errors`를
 가진 JSON 한 개를 낸다. runner는 종료 코드만 보지 않고 이 schema와 `ok`를 함께 확인한다.
-모든 command와 recall check 뒤에도 같은 durable receipt/current object tail을 post-gate로 다시
-검증하며, 이 두 번째 검증 실패도 `ok=false`다.
+모든 command와 recall check 뒤에도 같은 durable receipt/current object tail을
+`post_gate_object_tail` mode로 다시 검증한다. 정상 index/audit derived 출력은 허용하지만
+action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치로 거부하며, 이 두 번째
+검증 실패도 `ok=false`다.
 
 1. **lint clean** — ingest가 성공했으면 연결무결성은 통과한 것. 별도 일괄 작업을 했다면
    `lint_store` 문제 0건 재확인.

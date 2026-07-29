@@ -5,9 +5,20 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from project_brain.corpus_io import recover_committed_receipt
+from project_brain.mutation import (
+    MutationOperation,
+    MutationRequest,
+    MutationService,
+)
+from project_brain.objbase import base
+from project_brain.transaction_receipt import BatchBinding
 
 
 SCRIPT = Path(__file__).with_name("finalize_ingest.py")
@@ -185,8 +196,19 @@ class SemanticFinalizerTest(unittest.TestCase):
         module = load_module()
         observed = []
 
-        def recoverer(brain_root, bindings, expected_receipts):
-            observed.append((brain_root, bindings, expected_receipts))
+        def recoverer(
+            brain_root,
+            bindings,
+            expected_receipts,
+            *,
+            verification_mode,
+        ):
+            observed.append((
+                brain_root,
+                bindings,
+                expected_receipts,
+                verification_mode,
+            ))
             return expected_receipts
 
         report = module.run_finalization(
@@ -209,7 +231,187 @@ class SemanticFinalizerTest(unittest.TestCase):
             (self.binding,),
             (TRANSACTION,),
         )
-        self.assertEqual(observed, [expected_call, expected_call])
+        self.assertEqual(observed, [
+            (*expected_call, "strict_commit"),
+            (*expected_call, "post_gate_object_tail"),
+        ])
+
+    def test_receipt_recovery_uses_strict_then_post_gate_modes(self):
+        module = load_module()
+        observed_modes = []
+
+        def recoverer(
+            _brain_root,
+            _bindings,
+            expected_receipts,
+            *,
+            verification_mode,
+        ):
+            observed_modes.append(verification_mode)
+            return expected_receipts
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[self.item_record],
+            repo_root=self.repo_root,
+            receipt_recoverer=recoverer,
+            config_loader=lambda _start: {
+                "root": self.repo_root,
+                "brain_root": self.brain_root,
+            },
+            runner=self._runner(),
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            observed_modes,
+            ["strict_commit", "post_gate_object_tail"],
+        )
+
+    def test_normal_index_output_passes_real_post_gate_receipt_recovery(self):
+        module = load_module()
+        (self.repo_root / ".project-brain.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        binding = BatchBinding(**self.binding)
+        stamp = "2026-07-29T00:00:00+09:00"
+        obj = base({
+            "id": "context.post-gate-index",
+            "kind": "DomainContext",
+            "status": "reviewed",
+            "truth_role": "domain",
+            "title": "post gate index",
+            "context_key": "post-gate-index",
+            "project_id": "fixture",
+            "display_name": "post gate index",
+            "boundary_summary": "post gate index",
+            "in_scope": ["fixture"],
+            "out_of_scope": ["other"],
+            "injection_profile": {"default_audience": "coding-agent"},
+            "glossary_term_ids": [],
+        }, tags=["fixture"], created_at=stamp, updated_at=stamp)
+        result = MutationService().apply(
+            (obj,),
+            request=MutationRequest(
+                operation=MutationOperation.INGEST,
+                brain_root=self.brain_root,
+                repo_context=None,
+                engine_sha=binding.engine_sha,
+                objects=(obj,),
+                batch_binding=binding,
+            ),
+        )
+        self.assertTrue(result.ok, result.detail)
+        receipt = recover_committed_receipt(self.brain_root, binding)
+        record = {
+            "binding": asdict(binding),
+            "status": "committed",
+            "failure": None,
+            "transaction": receipt,
+        }
+        runner = self._runner()
+
+        def indexing_runner(command):
+            if command[:3] == ["project-brain", "index", "rebuild"]:
+                local = self.brain_root / ".brain-local"
+                local.mkdir(exist_ok=True)
+                (local / "index.db").write_bytes(b"normal index output")
+            return runner(command)
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[record],
+            repo_root=self.repo_root,
+            runner=indexing_runner,
+        )
+
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["transactions"], [receipt])
+
+    def test_config_loader_non_system_exception_is_normalized(self):
+        module = load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "receipt verification config loading failed",
+        ):
+            module.recover_item_record_transactions(
+                [self.item_record],
+                repo_root=self.repo_root,
+                config_loader=lambda _start: (_ for _ in ()).throw(
+                    RuntimeError("broken config loader")
+                ),
+            )
+        for system_error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(system_error=type(system_error).__name__):
+                with self.assertRaises(type(system_error)):
+                    module.recover_item_record_transactions(
+                        [self.item_record],
+                        repo_root=self.repo_root,
+                        config_loader=lambda _start, error=system_error: (
+                            _ for _ in ()
+                        ).throw(error),
+                    )
+
+    def test_main_malformed_top_level_project_config_returns_json_error(self):
+        config_path = self.repo_root / "finalization.json"
+        baseline_path = self.repo_root / "baseline.json"
+        records_path = self.repo_root / "item-records.json"
+        config_path.write_text(
+            json.dumps(self.contract),
+            encoding="utf-8",
+        )
+        baseline_path.write_text(
+            json.dumps(["code.before"]),
+            encoding="utf-8",
+        )
+        records_path.write_text(
+            json.dumps([self.item_record]),
+            encoding="utf-8",
+        )
+        (self.repo_root / ".project-brain.json").write_text(
+            "[]\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--config",
+                str(config_path),
+                "--baseline",
+                str(baseline_path),
+                "--item-records",
+                str(records_path),
+                "--repo-root",
+                str(self.repo_root),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(set(payload), {
+            "ok",
+            "transactions",
+            "commands",
+            "isolation",
+            "unmerged",
+            "recall_checks",
+            "errors",
+        })
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "receipt verification config loading failed",
+            "\n".join(payload["errors"]),
+        )
 
     def test_item_record_forgery_or_noncommitted_state_blocks_before_commands(self):
         module = load_module()
@@ -225,7 +427,9 @@ class SemanticFinalizerTest(unittest.TestCase):
                     ["code.before"],
                     item_records=records,
                     repo_root=self.repo_root,
-                    receipt_recoverer=lambda _root, _bindings, _expected: (TRANSACTION,),
+                    receipt_recoverer=lambda _root, _bindings, _expected, **_kwargs: (
+                        TRANSACTION,
+                    ),
                     config_loader=lambda start: {
                         "root": self.repo_root,
                         "brain_root": self.brain_root,
@@ -239,7 +443,12 @@ class SemanticFinalizerTest(unittest.TestCase):
         recover_calls = 0
         commands = []
 
-        def recoverer(_brain_root, _bindings, expected_receipts):
+        def recoverer(
+            _brain_root,
+            _bindings,
+            expected_receipts,
+            **_kwargs,
+        ):
             nonlocal recover_calls
             recover_calls += 1
             if recover_calls == 2:
@@ -299,7 +508,9 @@ class SemanticFinalizerTest(unittest.TestCase):
                     ["code.before"],
                     item_records=[self.item_record],
                     repo_root=self.repo_root,
-                    receipt_recoverer=lambda _root, _bindings, expected: expected,
+                    receipt_recoverer=lambda _root, _bindings, expected, **_kwargs: (
+                        expected
+                    ),
                     config_loader=lambda start: {
                         "root": self.repo_root,
                         "brain_root": self.brain_root,

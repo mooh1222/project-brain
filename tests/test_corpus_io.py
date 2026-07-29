@@ -521,6 +521,79 @@ def test_committed_receipt_chain_verifies_all_items_and_current_tail(
     assert BrainStore.load(brain_root).get(original["id"]) == second_after
 
 
+def test_post_gate_receipt_mode_allows_derived_index_output(tmp_path):
+    brain_root = tmp_path / "brain"
+    original, after = _changed_context()
+    _write_object(brain_root, original)
+    binding = _batch_binding(brain_root=brain_root)
+    MutationService().apply(
+        (after,),
+        request=_request(
+            brain_root,
+            (after,),
+            batch_binding=binding,
+        ),
+    )
+    receipt = recover_committed_receipt(brain_root, binding)
+    local = brain_root / ".brain-local"
+    local.mkdir(exist_ok=True)
+    (local / "index.db").write_bytes(b"normal derived index output")
+
+    recovered = recover_committed_receipts(
+        brain_root,
+        (binding,),
+        expected_receipts=(receipt,),
+        verification_mode="post_gate_object_tail",
+    )
+
+    assert recovered == (receipt,)
+    with pytest.raises(
+        CorpusIOError,
+        match="committed_receipt_state_mismatch",
+    ):
+        recover_committed_receipts(
+            brain_root,
+            (binding,),
+            expected_receipts=(receipt,),
+            verification_mode="strict_commit",
+        )
+
+
+@pytest.mark.parametrize("drift_kind", ("action_object", "unknown_object"))
+def test_post_gate_receipt_mode_rejects_any_object_corpus_drift(
+    tmp_path,
+    drift_kind,
+):
+    brain_root = tmp_path / drift_kind
+    original, after = _changed_context()
+    _write_object(brain_root, original)
+    binding = _batch_binding(brain_root=brain_root)
+    MutationService().apply(
+        (after,),
+        request=_request(
+            brain_root,
+            (after,),
+            batch_binding=binding,
+        ),
+    )
+    receipt = recover_committed_receipt(brain_root, binding)
+    if drift_kind == "action_object":
+        _write_object(brain_root, dict(after, title="tampered"))
+    else:
+        _write_object(brain_root, context("context.unexpected"))
+
+    with pytest.raises(
+        CorpusIOError,
+        match="committed_receipt_state_mismatch",
+    ):
+        recover_committed_receipts(
+            brain_root,
+            (binding,),
+            expected_receipts=(receipt,),
+            verification_mode="post_gate_object_tail",
+        )
+
+
 def test_committed_receipt_chain_allows_missing_tail_but_not_gaps(tmp_path):
     brain_root = tmp_path / "brain"
     original, first_after = _changed_context()

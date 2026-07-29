@@ -34,6 +34,11 @@ class JournalState(StrEnum):
     RECOVERY_REQUIRED = "recovery_required"
 
 
+class ReceiptVerificationMode(StrEnum):
+    STRICT_COMMIT = "strict_commit"
+    POST_GATE_OBJECT_TAIL = "post_gate_object_tail"
+
+
 @dataclass(frozen=True)
 class RecoveryResult:
     recovered_transaction_ids: tuple[str, ...] = ()
@@ -1521,7 +1526,7 @@ def _recover_committed_receipt_anchored(
     normalized: BatchBinding,
     *,
     expected_receipt: Mapping[str, object] | None,
-    verify_current: bool,
+    verification_mode: ReceiptVerificationMode | None,
 ) -> dict[str, object]:
     intent = _read_batch_intent_anchored(anchored, normalized)
     transaction_id = str(intent["transaction_id"])
@@ -1579,9 +1584,12 @@ def _recover_committed_receipt_anchored(
             "committed_receipt_invalid",
             f"{transaction_id}: manifest binding mismatch",
         )
-    if verify_current:
+    if verification_mode is not None:
         try:
-            _verify_committed_state(anchored, journal)
+            if verification_mode is ReceiptVerificationMode.STRICT_COMMIT:
+                _verify_committed_state(anchored, journal)
+            else:
+                _verify_post_gate_object_tail(anchored, journal)
         except (CorpusIOError, ValueError) as exc:
             raise CorpusIOError(
                 "committed_receipt_state_mismatch",
@@ -1617,8 +1625,18 @@ def recover_committed_receipts(
     bindings: Iterable[BatchBinding | Mapping[str, object]],
     *,
     expected_receipts: Iterable[Mapping[str, object] | None],
+    verification_mode: ReceiptVerificationMode | str = (
+        ReceiptVerificationMode.STRICT_COMMIT
+    ),
 ) -> tuple[dict[str, object] | None, ...]:
     """Verify an ordered batch receipt chain and its current committed tail."""
+    try:
+        normalized_mode = ReceiptVerificationMode(verification_mode)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "receipt verification_mode must be strict_commit or "
+            "post_gate_object_tail"
+        ) from exc
     normalized_bindings = tuple(
         normalize_batch_binding(binding)
         for binding in bindings
@@ -1639,6 +1657,7 @@ def recover_committed_receipts(
                     if binding is not None
                 ),
                 expected_receipts=expected,
+                verification_mode=normalized_mode,
             )
     scope = _current_lock_scope(brain_root)
     scope.verify_lexical_bindings()
@@ -1655,7 +1674,7 @@ def recover_committed_receipts(
                 anchored,
                 binding,
                 expected_receipt=expected_receipt,
-                verify_current=False,
+                verification_mode=None,
             )
         except CorpusIOError as exc:
             if (
@@ -1700,7 +1719,7 @@ def recover_committed_receipts(
             anchored,
             tail_binding,
             expected_receipt=committed[-1],
-            verify_current=True,
+            verification_mode=normalized_mode,
         )
     return tuple(receipts)
 
@@ -1728,7 +1747,7 @@ def recover_committed_receipt(
         scope.anchored,
         normalized,
         expected_receipt=expected_receipt,
-        verify_current=True,
+        verification_mode=ReceiptVerificationMode.STRICT_COMMIT,
     )
 
 
@@ -2985,6 +3004,22 @@ def _verify_rolled_back_state(
         != journal.get("before_derived_fingerprint")
     ):
         raise ValueError("derived rollback fingerprint mismatch")
+
+
+def _verify_post_gate_object_tail(
+    anchored: _AnchoredRoot,
+    journal: Mapping[str, object],
+) -> None:
+    manifest = journal.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("journal manifest is invalid")
+    actual = _corpus_fingerprint(anchored.path)
+    expected = manifest.get("expected_after_fingerprint")
+    if actual != expected:
+        raise ValueError(
+            f"post-gate corpus fingerprint mismatch: {actual} != {expected}"
+        )
+    _verify_entry_state(anchored, journal.get("entries"), after=True)
 
 
 def _verify_committed_state(

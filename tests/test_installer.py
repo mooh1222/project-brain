@@ -907,6 +907,8 @@ class InstallTest(unittest.TestCase):
             "recover_committed_receipts",
             "brain_root_inode",
             "post-finalizer verification",
+            "post_gate_object_tail",
+            "strict_commit",
         ):
             self.assertIn(token, installed_batch + installed_finalizer)
         installed_query = self._skill("demo-brain-query").read_text(encoding="utf-8")

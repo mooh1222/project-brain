@@ -463,6 +463,9 @@ class IngestSkillContractTest(unittest.TestCase):
             "immutable staged",
             "post-gate",
             "post-finalizer",
+            "`strict_commit`",
+            "`post_gate_object_tail`",
+            "`ok=false`",
             "`committed=true`",
         ):
             self.assertIn(token, ingest_tools)
@@ -488,6 +491,8 @@ class IngestSkillContractTest(unittest.TestCase):
             "target_revision_sha",
             "brain_root_inode",
             "post-gate",
+            "post_gate_object_tail",
+            "strict_commit",
             "manifest_sha256",
             "finalized=false",
         ):

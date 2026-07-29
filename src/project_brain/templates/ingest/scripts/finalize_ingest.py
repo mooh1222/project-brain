@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
 ReceiptRecoverer = Callable[
-    [Path, tuple[dict[str, object], ...], tuple[dict[str, Any], ...]],
+    ...,
     tuple[dict[str, Any] | None, ...],
 ]
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -177,6 +177,8 @@ def _default_receipt_recoverer(
     brain_root: Path,
     bindings: tuple[dict[str, object], ...],
     expected_receipts: tuple[dict[str, Any], ...],
+    *,
+    verification_mode: str,
 ) -> tuple[dict[str, Any] | None, ...]:
     from project_brain.corpus_io import recover_committed_receipts
 
@@ -184,6 +186,7 @@ def _default_receipt_recoverer(
         brain_root,
         bindings,
         expected_receipts=expected_receipts,
+        verification_mode=verification_mode,
     )
 
 
@@ -193,17 +196,34 @@ def recover_item_record_transactions(
     repo_root: Path,
     receipt_recoverer: ReceiptRecoverer = _default_receipt_recoverer,
     config_loader: Callable[[Path], dict[str, Any] | None] = _default_config_loader,
+    verification_mode: str = "strict_commit",
 ) -> list[dict[str, Any]]:
     """Resolve exact committed receipts from the durable intent/journal chain."""
     records = validate_item_records(value)
     root = Path(repo_root).resolve()
-    configured = config_loader(root)
+    try:
+        configured = config_loader(root)
+    except Exception as exc:
+        raise ValueError(
+            "item record receipt verification config loading failed: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        config_matches = (
+            isinstance(configured, dict)
+            and Path(configured.get("root", "")).resolve() == root
+            and isinstance(configured.get("brain_root"), Path)
+        )
+    except Exception as exc:
+        raise ValueError(
+            "item record receipt verification config is invalid: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     if (
-        not isinstance(configured, dict)
-        or Path(configured.get("root", "")).resolve() != root
-        or not isinstance(configured.get("brain_root"), Path)
+        not config_matches
     ):
         raise ValueError("item record receipt verification config is unavailable")
+    assert isinstance(configured, dict)
     bindings = tuple(record["binding"] for record in records)
     brain_root = configured["brain_root"].resolve()
     try:
@@ -224,6 +244,7 @@ def recover_item_record_transactions(
             brain_root,
             bindings,
             expected,
+            verification_mode=verification_mode,
         )
     except Exception as exc:
         raise ValueError(f"durable receipt recovery failed: {exc}") from exc
@@ -516,10 +537,11 @@ def run_finalization(
                 repo_root=repo_root,
                 receipt_recoverer=receipt_recoverer,
                 config_loader=config_loader,
+                verification_mode="post_gate_object_tail",
             )
             if post_gate_transactions != transactions:
                 raise ValueError("recovered transactions changed")
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
             errors.append(
                 f"post-gate durable receipt verification failed: {exc}"
             )
@@ -606,7 +628,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 repo_root=args.repo_root,
             )
-    except ValueError as exc:
+    except Exception as exc:
         report = {"ok": False, "transactions": [], "commands": {},
                   "isolation": {}, "unmerged": {},
                   "recall_checks": [], "errors": [str(exc)]}

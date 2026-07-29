@@ -66,6 +66,8 @@ class RawReplayDriverTest(unittest.TestCase):
             "--brain-root",
             "brain_root_inode",
             "post-finalizer verification",
+            "post_gate_object_tail",
+            "strict_commit",
         ):
             self.assertIn(token, combined)
         self.assertNotIn("allow_missing_quote", combined)

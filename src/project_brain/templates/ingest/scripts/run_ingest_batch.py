@@ -22,7 +22,7 @@ ItemRunner = Callable[[dict[str, Any]], Any]
 Finalizer = Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]]], Any]
 BaselineCollector = Callable[[], Any]
 ReceiptRecoverer = Callable[
-    [Path, tuple[dict[str, Any], ...], tuple[dict[str, Any] | None, ...]],
+    ...,
     tuple[dict[str, Any] | None, ...],
 ]
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -440,7 +440,6 @@ def _resolve_execution_state(
         import project_brain
         from project_brain.config import load_config
         from project_brain.repo_context import (
-            RepoVerificationError,
             resolve_git_checkout,
             resolve_repo_context,
         )
@@ -466,7 +465,7 @@ def _resolve_execution_state(
         )
         engine_module = Path(project_brain.__file__)
         engine = resolve_git_checkout(engine_module)
-    except (OSError, ValueError, RepoVerificationError) as exc:
+    except Exception as exc:
         raise ValueError(f"execution state를 확정할 수 없습니다: {exc}") from exc
     if engine.head_sha != declared["engine_sha"]:
         raise ValueError(
@@ -693,6 +692,8 @@ def _default_receipt_recoverer(
     repo_root: Path,
     bindings: tuple[dict[str, Any], ...],
     expected_receipts: tuple[dict[str, Any] | None, ...],
+    *,
+    verification_mode: str,
 ) -> tuple[dict[str, Any] | None, ...]:
     from project_brain.config import load_config
     from project_brain.corpus_io import recover_committed_receipts
@@ -723,6 +724,7 @@ def _default_receipt_recoverer(
         brain_root,
         bindings,
         expected_receipts=expected_receipts,
+        verification_mode=verification_mode,
     )
 
 
@@ -731,6 +733,7 @@ def _recover_item_records(
     *,
     repo_root: Path,
     recoverer: ReceiptRecoverer,
+    verification_mode: str = "strict_commit",
 ) -> None:
     bindings = tuple(record["binding"] for record in records)
     expected = tuple(
@@ -739,7 +742,12 @@ def _recover_item_records(
         else None
         for record in records
     )
-    receipts = recoverer(repo_root, bindings, expected)
+    receipts = recoverer(
+        repo_root,
+        bindings,
+        expected,
+        verification_mode=verification_mode,
+    )
     if len(receipts) != len(records):
         raise ValueError("receipt verifier result length mismatch")
     for record, receipt in zip(records, receipts):
@@ -1337,6 +1345,7 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
                 report["item_records"],
                 repo_root=Path(repo_contract["repo_root"]),
                 recoverer=recoverer,
+                verification_mode="post_gate_object_tail",
             )
             _sync_compatibility_fields(report)
         except Exception as exc:
@@ -1382,8 +1391,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = run_batch(args.manifest, args.report, resume_path=args.resume)
-    except ValueError as exc:
-        print(json.dumps({"ok": False, "errors": [str(exc)]}, ensure_ascii=False))
+    except Exception as exc:
+        print(json.dumps({
+            "ok": False,
+            "finalized": False,
+            "errors": [str(exc)],
+        }, ensure_ascii=False))
         return 1
     print(json.dumps(report, ensure_ascii=False))
     return 0 if not report["failed"] and report["finalized"] else 1
