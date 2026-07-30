@@ -1647,3 +1647,24 @@ def test_plan_fails_closed_when_changed_existing_object_has_no_source_receipt(
 
     assert result.error_code == "source_receipt_missing"
     assert result.manifest is None
+
+
+def test_plan_rejects_malformed_injected_source_receipt_before_manifest(
+    tmp_path,
+):
+    existing = context()
+    replacement = dict(existing)
+    replacement["title"] = "requires valid source receipt"
+    request = _request(tmp_path / "brain", (replacement,))
+
+    result = MutationService().plan(
+        request.objects,
+        request=request,
+        _existing_store=BrainStore(
+            {existing["id"]: existing},
+            source_sha256_by_id={existing["id"]: "not-a-sha"},
+        ),
+    )
+
+    assert result.error_code == "source_receipt_invalid"
+    assert result.manifest is None
