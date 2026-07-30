@@ -1629,3 +1629,21 @@ def test_apply_corrupt_tracked_object_json_returns_corpus_invalid(tmp_path):
     assert not (brain_root / ".brain-local" / "transactions").exists()
     assert result.manifest is None
     assert "broken.json" in result.detail
+
+
+def test_plan_fails_closed_when_changed_existing_object_has_no_source_receipt(
+    tmp_path,
+):
+    existing = context()
+    replacement = dict(existing)
+    replacement["title"] = "requires source receipt"
+    request = _request(tmp_path / "brain", (replacement,))
+
+    result = MutationService().plan(
+        request.objects,
+        request=request,
+        _existing_store=BrainStore({existing["id"]: existing}),
+    )
+
+    assert result.error_code == "source_receipt_missing"
+    assert result.manifest is None

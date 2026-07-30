@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping
@@ -20,8 +21,14 @@ class StoreLoadError(RuntimeError):
 
 
 class BrainStore:
-    def __init__(self, objects: dict[str, dict[str, Any]]):
+    def __init__(
+        self,
+        objects: dict[str, dict[str, Any]],
+        *,
+        source_sha256_by_id: Mapping[str, str] | None = None,
+    ):
         self._objects = objects
+        self._source_sha256_by_id = dict(source_sha256_by_id or {})
         self._by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for obj in objects.values():
             self._by_kind[obj.get("kind", "")].append(obj)
@@ -62,6 +69,7 @@ class BrainStore:
             ) from exc
         objects: dict[str, dict[str, Any]] = {}
         object_paths: dict[str, Path] = {}
+        source_sha256_by_id: dict[str, str] = {}
         for path, data in files:
             try:
                 text = data.decode("utf-8")
@@ -111,7 +119,8 @@ class BrainStore:
                 )
             objects[object_id] = payload
             object_paths[object_id] = path
-        return cls(objects)
+            source_sha256_by_id[object_id] = hashlib.sha256(data).hexdigest()
+        return cls(objects, source_sha256_by_id=source_sha256_by_id)
 
     def get(self, object_id: str) -> dict[str, Any]:
         return self._objects[object_id]
@@ -124,6 +133,10 @@ class BrainStore:
 
     def all(self) -> list[dict[str, Any]]:
         return list(self._objects.values())
+
+    def source_sha256(self, object_id: str) -> str | None:
+        """Return the exact raw receipt captured with this store's scan."""
+        return self._source_sha256_by_id.get(object_id)
 
     # kind → brain root 기준 상대 디렉토리 (storage §4 layout)
     _KIND_DIR = {

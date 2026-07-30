@@ -559,6 +559,21 @@ class MutationService:
             )
 
         expected_after_fingerprint = _corpus_fingerprint(merged)
+        required_source_receipt_ids = _required_source_receipt_ids(
+            existing_by_id=existing_by_id,
+            planned_by_id=planned_by_id,
+            delete_ids=delete_ids,
+            rename_pairs=rename_pairs,
+        )
+        source_sha256_by_id: dict[str, str] = {}
+        for object_id in required_source_receipt_ids:
+            source_sha256 = existing_store.source_sha256(object_id)
+            if source_sha256 is None:
+                return _failure(
+                    "source_receipt_missing",
+                    f"{object_id}: loaded source receipt is missing",
+                )
+            source_sha256_by_id[object_id] = source_sha256
         manifest = _build_manifest(
             request=request,
             existing_by_id=existing_by_id,
@@ -566,6 +581,7 @@ class MutationService:
             merged=merged,
             delete_ids=delete_ids,
             rename_pairs=rename_pairs,
+            source_sha256_by_id=source_sha256_by_id,
             before_fingerprint=before_fingerprint,
             expected_after_fingerprint=expected_after_fingerprint,
             before_grandfathered=before_grandfathered,
@@ -1229,6 +1245,31 @@ def _reference_rewrites(
     return tuple(rewrites)
 
 
+def _required_source_receipt_ids(
+    *,
+    existing_by_id: Mapping[str, dict],
+    planned_by_id: Mapping[str, dict],
+    delete_ids: tuple[str, ...],
+    rename_pairs: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    renamed_old_ids = {old_id for old_id, _ in rename_pairs}
+    required = {
+        object_id
+        for object_id, obj in planned_by_id.items()
+        if (
+            object_id in existing_by_id
+            and _object_hash(existing_by_id[object_id]) != _object_hash(obj)
+        )
+    }
+    required.update(
+        object_id
+        for object_id in delete_ids
+        if object_id not in renamed_old_ids
+    )
+    required.update(renamed_old_ids)
+    return tuple(sorted(required))
+
+
 def _build_manifest(
     *,
     request: MutationRequest,
@@ -1237,6 +1278,7 @@ def _build_manifest(
     merged: Mapping[str, dict],
     delete_ids: tuple[str, ...],
     rename_pairs: tuple[tuple[str, str], ...],
+    source_sha256_by_id: Mapping[str, str],
     before_fingerprint: str,
     expected_after_fingerprint: str,
     before_grandfathered: tuple[dict, ...],
@@ -1259,7 +1301,7 @@ def _build_manifest(
         {
             "object_id": object_id,
             "path": _relative_object_path(request.brain_root, obj),
-            "before_sha256": _object_hash(existing_by_id[object_id]),
+            "before_sha256": source_sha256_by_id[object_id],
             "after_sha256": _object_hash(obj),
         }
         for object_id, obj in sorted(planned_by_id.items())
@@ -1275,7 +1317,7 @@ def _build_manifest(
                 request.brain_root,
                 existing_by_id[object_id],
             ),
-            "before_sha256": _object_hash(existing_by_id[object_id]),
+            "before_sha256": source_sha256_by_id[object_id],
             "after_sha256": None,
         }
         for object_id in sorted(delete_ids)
@@ -1293,7 +1335,7 @@ def _build_manifest(
                 request.brain_root,
                 merged[new_id],
             ),
-            "before_sha256": _object_hash(existing_by_id[old_id]),
+            "before_sha256": source_sha256_by_id[old_id],
             "after_sha256": _object_hash(merged[new_id]),
         }
         for old_id, new_id in sorted(rename_pairs)

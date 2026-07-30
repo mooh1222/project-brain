@@ -6,6 +6,7 @@ save_object가 _KIND_DIR 아래에 쓰므로 스캔도 같은 경계를 따른�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -112,6 +113,26 @@ class LoadScanBoundaryTest(unittest.TestCase):
             path = BrainStore.save_object(brain, obj)
 
             self.assertEqual(path.read_bytes(), BrainStore.object_bytes(obj))
+
+    def test_load_retains_raw_source_receipt_from_tracked_scan(self):
+        with TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            obj = context()
+            path = BrainStore.object_path(brain, obj)
+            path.parent.mkdir(parents=True)
+            raw = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+            path.write_bytes(raw)
+
+            store = BrainStore.load(brain)
+
+            self.assertEqual(
+                store.source_sha256(obj["id"]),
+                hashlib.sha256(raw).hexdigest(),
+            )
+            self.assertNotEqual(
+                store.source_sha256(obj["id"]),
+                hashlib.sha256(BrainStore.object_bytes(obj)).hexdigest(),
+            )
 
     def test_non_object_json_at_root_is_ignored(self):
         with TemporaryDirectory() as td:
