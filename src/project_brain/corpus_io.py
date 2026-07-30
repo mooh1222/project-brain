@@ -1979,6 +1979,10 @@ def apply_transaction(
 
             first_before_rename = True
             _revalidate_case_only_renames(anchored, case_only_bindings)
+            case_only_by_old_path = {
+                binding.old_path: binding
+                for binding in case_only_bindings
+            }
             for entry in entries:
                 if not entry["had_before"]:
                     continue
@@ -1994,6 +1998,9 @@ def apply_transaction(
                     )
                 before_parent_fd, before_name = before_parents[entry["path"]]
                 scope.verify_lexical_bindings()
+                binding = case_only_by_old_path.get(str(entry["path"]))
+                if binding is not None:
+                    _revalidate_case_only_renames(anchored, (binding,))
                 os.replace(
                     live_name,
                     before_name,

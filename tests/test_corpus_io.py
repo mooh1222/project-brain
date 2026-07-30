@@ -214,6 +214,52 @@ def _case_only_apply_inputs(planned, new: dict) -> tuple[dict, dict[str, bytes]]
     )
 
 
+def _case_only_multi_migration(tmp_path, *, count: int = 3):
+    """Build multiple spelling-only renames in one transaction."""
+    brain_root = tmp_path / "brain"
+    old_objects = []
+    new_objects = []
+    for suffix in ("ALegacy", "BLegacy", "ZLegacy")[:count]:
+        old = _code_locator(
+            object_id=f"code.neutral.{suffix}",
+            quote=None,
+            title=f"legacy {suffix}",
+        )
+        new = dict(old)
+        new["id"] = f"code.neutral.{suffix.lower()}"
+        _write_object(brain_root, old)
+        old_objects.append(old)
+        new_objects.append(new)
+    _seed_derived_files(brain_root)
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=tuple(new_objects),
+        delete_ids=tuple(obj["id"] for obj in old_objects),
+    )
+    planned = MutationService().plan(tuple(new_objects), request=request)
+    assert planned.ok and planned.manifest is not None
+    assert len(planned.manifest.renames) == count
+    pairs = tuple(
+        (
+            brain_root / rename["old_path"],
+            brain_root / rename["new_path"],
+            old,
+            new,
+        )
+        for rename, old, new in zip(
+            planned.manifest.renames,
+            old_objects,
+            new_objects,
+            strict=True,
+        )
+    )
+    assert all(old_path.samefile(new_path) for old_path, new_path, _, _ in pairs)
+    return brain_root, request, planned, pairs
+
+
 def test_low_level_api_exposes_exact_journal_states_and_fsyncs(tmp_path):
     assert tuple(state.value for state in JournalState) == (
         "preparing",
@@ -1515,6 +1561,192 @@ def test_next_mutation_recovers_case_only_rename_without_roll_forward(tmp_path):
         ).read_text(encoding="utf-8")
     )
     assert journal["state"] == "rolled_back"
+
+
+def test_multi_case_only_rename_rejects_second_inode_swap_before_move(tmp_path):
+    """Removing per-old revalidation accepts an unseen later inode swap."""
+    brain_root, _request, planned, pairs = _case_only_multi_migration(
+        tmp_path,
+        count=2,
+    )
+    before_fingerprint = _state_fingerprint(brain_root)
+    manifest = asdict(planned.manifest)
+    after_files = {
+        rename["new_path"]: BrainStore.object_bytes(new)
+        for rename, (_old_path, _new_path, _old, new) in zip(
+            planned.manifest.renames,
+            pairs,
+            strict=True,
+        )
+    }
+    second_old_path = pairs[1][0]
+    initial_inode = second_old_path.stat().st_ino
+
+    def replace_second_after_first_move(point: str) -> None:
+        if point != "after_first_before_rename":
+            return
+        replacement = second_old_path.with_name(".same-bytes-new-inode")
+        replacement.write_bytes(second_old_path.read_bytes())
+        os.replace(replacement, second_old_path)
+        assert second_old_path.stat().st_ino != initial_inode
+
+    with pytest.raises(CorpusIOError, match="path_binding_changed"):
+        apply_transaction(
+            brain_root,
+            manifest=manifest,
+            after_files=after_files,
+            failure_injector=replace_second_after_first_move,
+        )
+
+    assert _state_fingerprint(brain_root) == before_fingerprint
+    for old_path, new_path, old, _new in pairs:
+        assert old_path.name in _exact_child_names(old_path.parent)
+        assert new_path.name not in _exact_child_names(new_path.parent)
+        assert old_path.read_bytes() == BrainStore.object_bytes(old)
+    journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / planned.manifest.transaction_id
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["state"] == "rolled_back"
+
+
+def test_three_case_only_renames_commit_exact_new_spellings(tmp_path):
+    """Treating a three-pair transaction as one alias loses a Jira-like rename."""
+    brain_root, request, planned, pairs = _case_only_multi_migration(tmp_path)
+
+    result = MutationService().apply(
+        tuple(new for _old_path, _new_path, _old, new in pairs),
+        request=request,
+    )
+
+    assert result.ok is True
+    assert len(planned.manifest.renames) == 3
+    for old_path, new_path, old, new in pairs:
+        assert old_path.name not in _exact_child_names(old_path.parent)
+        assert new_path.name in _exact_child_names(new_path.parent)
+        assert new_path.read_bytes() == BrainStore.object_bytes(new)
+        assert not BrainStore.load(brain_root).has(old["id"])
+        assert BrainStore.load(brain_root).get(new["id"]) == new
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ("after_first_before_rename", "after_first_live_replace"),
+)
+def test_three_case_only_renames_recover_major_crashes(tmp_path, failure_point):
+    """Rollback must restore every exact old entry in a Jira-shaped batch."""
+    brain_root, request, planned, pairs = _case_only_multi_migration(tmp_path)
+    before_fingerprint = _state_fingerprint(brain_root)
+
+    with pytest.raises(InjectedCrash, match=failure_point):
+        MutationService().apply(
+            tuple(new for _old_path, _new_path, _old, new in pairs),
+            request=request,
+            failure_injector=_crash_at(failure_point),
+        )
+
+    recover_unfinished_transaction(brain_root)
+
+    assert _state_fingerprint(brain_root) == before_fingerprint
+    for old_path, new_path, old, _new in pairs:
+        assert old_path.name in _exact_child_names(old_path.parent)
+        assert new_path.name not in _exact_child_names(new_path.parent)
+        assert old_path.read_bytes() == BrainStore.object_bytes(old)
+    journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / planned.manifest.transaction_id
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["state"] == "rolled_back"
+
+
+def test_folded_rename_with_genuinely_absent_new_lookup_stays_general(tmp_path, monkeypatch):
+    """Forcing a special binding for an absent new lookup breaks normal rename."""
+    brain_root, _request, planned, pairs = _case_only_multi_migration(
+        tmp_path,
+        count=1,
+    )
+    old_path, new_path, old, new = pairs[0]
+    relative_new_path = planned.manifest.renames[0]["new_path"]
+    original_file_stat = corpus_io._file_stat_at
+    original_inspect = corpus_io._AnchoredRoot.inspect_file
+
+    def absent_new_lookup(parent_fd: int, name: str):
+        if name == new_path.name:
+            return None
+        return original_file_stat(parent_fd, name)
+
+    def inspect_with_absent_new_lookup(anchored, relative_path: str):
+        if relative_path == relative_new_path:
+            return {
+                "path": relative_path,
+                "had_before": False,
+                "before_sha256": None,
+            }
+        return original_inspect(anchored, relative_path)
+
+    monkeypatch.setattr(corpus_io, "_file_stat_at", absent_new_lookup)
+    monkeypatch.setattr(
+        corpus_io._AnchoredRoot,
+        "inspect_file",
+        inspect_with_absent_new_lookup,
+    )
+    with corpus_io._AnchoredRoot(brain_root) as anchored:
+        assert corpus_io._inspect_case_only_renames(
+            anchored,
+            asdict(planned.manifest),
+        ) == ()
+    manifest, after_files = _case_only_apply_inputs(planned, new)
+    apply_transaction(brain_root, manifest=manifest, after_files=after_files)
+    assert new_path.name in _exact_child_names(new_path.parent)
+    assert old_path.name not in _exact_child_names(old_path.parent)
+
+    recovery_root, _recovery_request, recovery_plan, recovery_pairs = (
+        _case_only_multi_migration(tmp_path / "recovery", count=1)
+    )
+    recovery_old_path, recovery_new_path, recovery_old, recovery_new = recovery_pairs[0]
+    recovery_relative_new = recovery_plan.manifest.renames[0]["new_path"]
+
+    def inspect_recovery_with_absent_new_lookup(anchored, relative_path: str):
+        if relative_path == recovery_relative_new:
+            return {
+                "path": relative_path,
+                "had_before": False,
+                "before_sha256": None,
+            }
+        return original_inspect(anchored, relative_path)
+
+    monkeypatch.setattr(
+        corpus_io._AnchoredRoot,
+        "inspect_file",
+        inspect_recovery_with_absent_new_lookup,
+    )
+    recovery_manifest, recovery_after_files = _case_only_apply_inputs(
+        recovery_plan,
+        recovery_new,
+    )
+    with pytest.raises(InjectedCrash, match="after_first_live_replace"):
+        apply_transaction(
+            recovery_root,
+            manifest=recovery_manifest,
+            after_files=recovery_after_files,
+            failure_injector=_crash_at("after_first_live_replace"),
+        )
+    recover_unfinished_transaction(recovery_root)
+    assert recovery_old_path.name in _exact_child_names(recovery_old_path.parent)
+    assert recovery_new_path.name not in _exact_child_names(recovery_new_path.parent)
+    assert recovery_old_path.read_bytes() == BrainStore.object_bytes(recovery_old)
+    assert old_path.name not in _exact_child_names(old_path.parent)
+    assert new_path.read_bytes() == BrainStore.object_bytes(new)
 
 
 def test_case_only_rename_rejects_exact_new_entry_collision(tmp_path):
