@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -168,6 +169,49 @@ def _crash_at(point: str):
             raise InjectedCrash(point)
 
     return inject
+
+
+def _case_only_migration(tmp_path):
+    """Build one APFS spelling-only rename from a valid migration plan."""
+    brain_root = tmp_path / "brain"
+    old = _code_locator(
+        object_id="code.neutral.Legacy",
+        quote=None,
+        title="legacy spelling",
+    )
+    new = dict(old)
+    new["id"] = "code.neutral.legacy"
+    _write_object(brain_root, old)
+    _seed_derived_files(brain_root)
+    request = MutationRequest(
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha="e" * 40,
+        objects=(new,),
+        delete_ids=(old["id"],),
+    )
+    planned = MutationService().plan((new,), request=request)
+    assert planned.ok and planned.manifest is not None
+    rename = planned.manifest.renames[0]
+    old_path = brain_root / rename["old_path"]
+    new_path = brain_root / rename["new_path"]
+    assert old_path.is_file()
+    assert new_path.is_file()
+    assert old_path.samefile(new_path)
+    return brain_root, old, new, request, planned, old_path, new_path
+
+
+def _exact_child_names(path: Path) -> set[str]:
+    return {child.name for child in path.iterdir()}
+
+
+def _case_only_apply_inputs(planned, new: dict) -> tuple[dict, dict[str, bytes]]:
+    rename = planned.manifest.renames[0]
+    return (
+        asdict(planned.manifest),
+        {rename["new_path"]: BrainStore.object_bytes(new)},
+    )
 
 
 def test_low_level_api_exposes_exact_journal_states_and_fsyncs(tmp_path):
@@ -1362,6 +1406,294 @@ def test_apply_handles_create_update_delete_and_rename_actions(tmp_path):
     renamed_store = BrainStore.load(legacy_root)
     assert renamed_store.get(canonical["id"]) == canonical
     assert not renamed_store.has(legacy["id"])
+
+
+def test_case_only_rename_commits_exact_new_spelling_on_apfs(tmp_path):
+    """Removing exact-entry handling must fail this APFS transaction."""
+    (
+        brain_root,
+        old,
+        new,
+        request,
+        planned,
+        old_path,
+        new_path,
+    ) = _case_only_migration(tmp_path)
+    before_fingerprint = _state_fingerprint(brain_root)
+
+    result = MutationService().apply((new,), request=request)
+
+    assert result.ok is True
+    assert _state_fingerprint(brain_root) != before_fingerprint
+    assert new_path.name in _exact_child_names(new_path.parent)
+    assert old_path.name not in _exact_child_names(old_path.parent)
+    assert new_path.read_bytes() == BrainStore.object_bytes(new)
+    assert BrainStore.load(brain_root).get(new["id"]) == new
+    assert not BrainStore.load(brain_root).has(old["id"])
+    assert planned.manifest.expected_after_fingerprint == corpus_io._corpus_fingerprint(
+        brain_root
+    )
+    assert not (brain_root / ".brain-local" / "index.db").exists()
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    FAILURE_POINTS,
+)
+def test_case_only_rename_recovery_restores_old_exact_spelling(tmp_path, failure_point):
+    """Changing rollback order to old-first must lose the restored APFS name."""
+    (
+        brain_root,
+        old,
+        new,
+        request,
+        planned,
+        old_path,
+        new_path,
+    ) = _case_only_migration(tmp_path)
+    before_fingerprint = _state_fingerprint(brain_root)
+
+    with pytest.raises(InjectedCrash, match=failure_point):
+        MutationService().apply(
+            (new,),
+            request=request,
+            failure_injector=_crash_at(failure_point),
+        )
+
+    recovered = recover_unfinished_transaction(brain_root)
+
+    assert recovered.recovered_transaction_ids == (planned.manifest.transaction_id,)
+    assert _state_fingerprint(brain_root) == before_fingerprint
+    assert old_path.name in _exact_child_names(old_path.parent)
+    assert new_path.name not in _exact_child_names(new_path.parent)
+    assert old_path.read_bytes() == BrainStore.object_bytes(old)
+    assert not BrainStore.load(brain_root).has(new["id"])
+    journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / planned.manifest.transaction_id
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["state"] == "rolled_back"
+
+
+def test_next_mutation_recovers_case_only_rename_without_roll_forward(tmp_path):
+    """Skipping recovery before the next apply would leave the new spelling live."""
+    (
+        brain_root,
+        old,
+        new,
+        request,
+        planned,
+        old_path,
+        new_path,
+    ) = _case_only_migration(tmp_path)
+    before_fingerprint = _state_fingerprint(brain_root)
+
+    with pytest.raises(InjectedCrash, match="after_first_live_replace"):
+        MutationService().apply(
+            (new,),
+            request=request,
+            failure_injector=_crash_at("after_first_live_replace"),
+        )
+
+    assert MutationService().apply((), request=_request(brain_root, ())).ok
+    assert _state_fingerprint(brain_root) == before_fingerprint
+    assert old_path.name in _exact_child_names(old_path.parent)
+    assert new_path.name not in _exact_child_names(new_path.parent)
+    assert old_path.read_bytes() == BrainStore.object_bytes(old)
+    journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / planned.manifest.transaction_id
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["state"] == "rolled_back"
+
+
+def test_case_only_rename_rejects_exact_new_entry_collision(tmp_path):
+    """Dropping exact new-name collision checks would overwrite a live file."""
+    (
+        brain_root,
+        _old,
+        new,
+        request,
+        _planned,
+        old_path,
+        new_path,
+    ) = _case_only_migration(tmp_path)
+    old_payload = old_path.read_bytes()
+    # APFS cannot host the case-only second entry, so an exact test seam is
+    # needed for the collision matrix; production must reject it before write.
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            corpus_io,
+            "_exact_name_exists_at",
+            lambda _fd, name: name == new_path.name or name == old_path.name,
+        )
+        with pytest.raises(CorpusIOError, match="case_only_rename_collision"):
+            MutationService().apply((new,), request=request)
+
+    assert old_path.read_bytes() == old_payload
+
+
+def test_case_only_rename_rejects_hard_linked_before_image(tmp_path):
+    """Removing link-count validation would make rollback target ambiguous."""
+    (
+        brain_root,
+        _old,
+        new,
+        _request,
+        planned,
+        old_path,
+        _new_path,
+    ) = _case_only_migration(tmp_path)
+    sibling = old_path.with_name("unrelated-hard-link.json")
+    os.link(old_path, sibling)
+
+    with pytest.raises(CorpusIOError, match="case_only_rename_ambiguous"):
+        apply_transaction(
+            brain_root,
+            manifest=asdict(planned.manifest),
+            after_files={
+                planned.manifest.renames[0]["new_path"]: BrainStore.object_bytes(
+                    new
+                )
+            },
+        )
+
+    assert old_path.read_bytes() == sibling.read_bytes()
+
+
+def test_exact_name_helper_does_not_treat_apfs_lookup_alias_as_entry(tmp_path):
+    """Replacing enumeration with stat lookup would claim both spellings exist."""
+    (
+        _brain_root,
+        _old,
+        _new,
+        _request,
+        _planned,
+        old_path,
+        new_path,
+    ) = _case_only_migration(tmp_path)
+    extra = old_path.with_name("zzz-unrelated-entry")
+    extra.write_bytes(b"unrelated")
+    parent_fd = os.open(old_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert corpus_io._exact_name_exists_at(parent_fd, old_path.name)
+        assert not corpus_io._exact_name_exists_at(parent_fd, new_path.name)
+        assert corpus_io._exact_names_at(parent_fd) == tuple(
+            sorted((old_path.name, extra.name))
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def test_case_only_rename_rejects_normalization_equivalent_entry_set(tmp_path):
+    """Accepting a second folded entry would make exact restore non-unique."""
+    (
+        brain_root,
+        _old,
+        new,
+        request,
+        _planned,
+        old_path,
+        new_path,
+    ) = _case_only_migration(tmp_path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            corpus_io,
+            "_exact_names_at",
+            lambda _fd: (old_path.name, new_path.name.swapcase()),
+        )
+        with pytest.raises(CorpusIOError, match="case_only_rename_ambiguous"):
+            MutationService().apply((new,), request=request)
+
+    assert old_path.name in _exact_child_names(old_path.parent)
+
+
+def test_case_only_rename_rejects_raw_content_change_before_journal(tmp_path):
+    """Dropping raw receipt revalidation would commit a changed before image."""
+    (
+        brain_root,
+        _old,
+        new,
+        _request,
+        planned,
+        old_path,
+        _new_path,
+    ) = _case_only_migration(tmp_path)
+    manifest, after_files = _case_only_apply_inputs(planned, new)
+    old_path.write_bytes(old_path.read_bytes() + b" ")
+
+    with pytest.raises(CorpusIOError, match="before_hash_mismatch"):
+        apply_transaction(brain_root, manifest=manifest, after_files=after_files)
+
+    assert not (brain_root / ".brain-local" / "transactions").exists()
+
+
+def test_case_only_rename_rejects_same_content_inode_swap_before_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    """Ignoring the captured inode would accept a same-byte replacement."""
+    (
+        brain_root,
+        _old,
+        new,
+        _request,
+        planned,
+        old_path,
+        _new_path,
+    ) = _case_only_migration(tmp_path)
+    manifest, after_files = _case_only_apply_inputs(planned, new)
+    original_verify = corpus_io._verify_live_bindings
+    swapped = False
+
+    def swap_after_temp(anchored, live_parents):
+        nonlocal swapped
+        original_verify(anchored, live_parents)
+        if swapped:
+            return
+        swapped = True
+        replacement = old_path.with_name(".same-content-replacement")
+        replacement.write_bytes(old_path.read_bytes())
+        os.replace(replacement, old_path)
+
+    monkeypatch.setattr(corpus_io, "_verify_live_bindings", swap_after_temp)
+    with pytest.raises(CorpusIOError, match="path_binding_changed"):
+        apply_transaction(brain_root, manifest=manifest, after_files=after_files)
+
+
+@pytest.mark.parametrize("entry_kind", ("symlink", "fifo"))
+def test_case_only_rename_rejects_non_regular_exact_old_entry(tmp_path, entry_kind):
+    """Following a special or linked old leaf would escape the transaction gate."""
+    (
+        brain_root,
+        _old,
+        new,
+        _request,
+        planned,
+        old_path,
+        _new_path,
+    ) = _case_only_migration(tmp_path)
+    manifest, after_files = _case_only_apply_inputs(planned, new)
+    old_path.unlink()
+    if entry_kind == "symlink":
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"outside")
+        old_path.symlink_to(outside)
+    else:
+        os.mkfifo(old_path)
+
+    with pytest.raises(CorpusIOError, match="symlink_forbidden|file_type_invalid"):
+        apply_transaction(brain_root, manifest=manifest, after_files=after_files)
 
 
 @pytest.mark.parametrize("failure_point", FAILURE_POINTS)

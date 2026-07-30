@@ -359,6 +359,35 @@ def test_context_replace_rename_uses_legacy_raw_before_receipt_and_applies(
     assert new_path.read_bytes() == BrainStore.object_bytes(new)
 
 
+def test_context_replace_case_only_rename_keeps_legacy_raw_receipt(tmp_path):
+    """A newline-normalizing case rename would fail this literal receipt."""
+    brain_root = tmp_path / "brain"
+    old = candidate_term("g.neutral.Legacy", term="이전")
+    ctx = context(glossary_term_ids=[old["id"]])
+    _write_raw(brain_root, ctx)
+    old_path = _write_legacy_without_trailing_lf(brain_root, old)
+    new = candidate_term("g.neutral.legacy", term="새 값")
+    desired_context = dict(ctx)
+    desired_context["glossary_term_ids"] = [new["id"]]
+
+    request = _plan(
+        brain_root,
+        desired_objects=[desired_context, new],
+        expected_moves={old["id"]: new["id"]},
+    )
+    artifact, result = _apply_artifact(brain_root, request)
+    rename = artifact.manifest["renames"][0]
+    new_path = BrainStore.object_path(brain_root, new)
+
+    assert result.action_count == 2
+    assert rename["before_sha256"] == hashlib.sha256(
+        json.dumps(old, ensure_ascii=False, indent=2).encode("utf-8")
+    ).hexdigest()
+    assert new_path.name in {path.name for path in new_path.parent.iterdir()}
+    assert old_path.name not in {path.name for path in old_path.parent.iterdir()}
+    assert new_path.read_bytes() == BrainStore.object_bytes(new)
+
+
 def test_context_replace_rejects_post_plan_legacy_whitespace_change_before_write(
     tmp_path,
 ):

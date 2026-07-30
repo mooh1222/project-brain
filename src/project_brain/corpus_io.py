@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -102,6 +103,20 @@ class _PinnedDirectory:
     fd: int
     device: int
     inode: int
+
+
+@dataclass(frozen=True)
+class _CaseOnlyRenameBinding:
+    """Pinned before-image binding for one case-insensitive rename."""
+
+    old_path: str
+    new_path: str
+    parent: _PinnedDirectory
+    old_name: str
+    new_name: str
+    device: int
+    inode: int
+    before_sha256: str
 
 
 def _observed_device(relative_path: str, actual_device: int) -> int:
@@ -1788,7 +1803,7 @@ def apply_transaction(
             batch_binding = normalize_batch_binding(
                 manifest.get("batch_binding")
             )
-            entries = _build_entries_anchored(
+            entries, case_only_bindings = _build_entries_anchored(
                 anchored,
                 manifest,
                 after_files,
@@ -1928,6 +1943,7 @@ def apply_transaction(
             _inject(failure_injector, "after_temp_fsync")
             scope.verify_lexical_bindings()
             _verify_live_bindings(anchored, live_parents)
+            _revalidate_case_only_renames(anchored, case_only_bindings)
 
             for entry in (*entries, *derived):
                 if not entry["had_before"]:
@@ -1962,6 +1978,7 @@ def apply_transaction(
             scope.verify_lexical_bindings()
 
             first_before_rename = True
+            _revalidate_case_only_renames(anchored, case_only_bindings)
             for entry in entries:
                 if not entry["had_before"]:
                     continue
@@ -2113,18 +2130,212 @@ def apply_transaction(
                 pass
 
 
+def _exact_names_at(parent_fd: int) -> tuple[str, ...]:
+    """Return literal directory entries without resolving lookup aliases."""
+    return tuple(sorted(os.listdir(parent_fd)))
+
+
+def _exact_name_exists_at(parent_fd: int, name: str) -> bool:
+    """Check the literal directory entry, never the filesystem lookup alias."""
+    return name in _exact_names_at(parent_fd)
+
+
+def _casefolded_entry_name(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _case_only_rename_paths(
+    manifest: Mapping[str, object],
+) -> tuple[tuple[str, str], ...]:
+    """Return manifest rename pairs whose leaves differ only by APFS folding."""
+    renames = manifest.get("renames")
+    if not isinstance(renames, (list, tuple)):
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for action in renames:
+        if not isinstance(action, Mapping):
+            continue
+        old_path = action.get("old_path")
+        new_path = action.get("new_path")
+        if not isinstance(old_path, str) or not isinstance(new_path, str):
+            continue
+        old = PurePosixPath(old_path)
+        new = PurePosixPath(new_path)
+        if (
+            old.parent == new.parent
+            and old.name != new.name
+            and _casefolded_entry_name(old.name)
+            == _casefolded_entry_name(new.name)
+        ):
+            pairs.append((old_path, new_path))
+    return tuple(pairs)
+
+
+def _inspect_case_only_renames(
+    anchored: _AnchoredRoot,
+    manifest: Mapping[str, object],
+) -> tuple[_CaseOnlyRenameBinding, ...]:
+    """Bind only valid APFS lookup aliases as one before-image.
+
+    The manifest stays a pair of ordinary paths.  This private binding merely
+    records that the volume currently resolves those two spellings to one
+    literal old directory entry.
+    """
+    actions = manifest.get("renames")
+    if not isinstance(actions, (list, tuple)):
+        return ()
+    bindings: list[_CaseOnlyRenameBinding] = []
+    for action in actions:
+        if not isinstance(action, Mapping):
+            continue
+        old_path = action.get("old_path")
+        new_path = action.get("new_path")
+        before_sha = action.get("before_sha256")
+        if not (
+            isinstance(old_path, str)
+            and isinstance(new_path, str)
+            and isinstance(before_sha, str)
+        ):
+            continue
+        old = PurePosixPath(old_path)
+        new = PurePosixPath(new_path)
+        if (
+            old.parent != new.parent
+            or old.name == new.name
+            or _casefolded_entry_name(old.name)
+            != _casefolded_entry_name(new.name)
+        ):
+            continue
+        parent, old_name = anchored.pin_existing_parent(old_path, create=False)
+        new_name = new.name
+        old_stat = _file_stat_at(parent.fd, old_name)
+        new_stat = _file_stat_at(parent.fd, new_name)
+        # This is an ordinary case-sensitive rename when the new spelling is
+        # genuinely absent; preserve its existing path unchanged.
+        if new_stat is None:
+            continue
+        if old_stat is None:
+            raise CorpusIOError(
+                "case_only_rename_invalid",
+                f"{old_path}: old entry is absent",
+            )
+        if (old_stat.st_dev, old_stat.st_ino) != (
+            new_stat.st_dev,
+            new_stat.st_ino,
+        ):
+            raise CorpusIOError(
+                "case_only_rename_collision",
+                f"{old_path}: old and new spellings resolve differently",
+            )
+        if not _exact_name_exists_at(parent.fd, old_name):
+            raise CorpusIOError(
+                "case_only_rename_invalid",
+                f"{old_path}: old exact directory entry is absent",
+            )
+        if _exact_name_exists_at(parent.fd, new_name):
+            raise CorpusIOError(
+                "case_only_rename_collision",
+                f"{new_path}: new exact directory entry already exists",
+            )
+        equivalent = [
+            name
+            for name in _exact_names_at(parent.fd)
+            if _casefolded_entry_name(name) == _casefolded_entry_name(old_name)
+        ]
+        if equivalent != [old_name]:
+            raise CorpusIOError(
+                "case_only_rename_ambiguous",
+                f"{old_path}: normalization-equivalent entries are ambiguous",
+            )
+        if old_stat.st_nlink != 1:
+            raise CorpusIOError(
+                "case_only_rename_ambiguous",
+                f"{old_path}: hard-linked before image is ambiguous",
+            )
+        if _observed_device(old_path, old_stat.st_dev) != anchored.device:
+            raise CorpusIOError(
+                "filesystem_mismatch",
+                f"{old_path}: live file is on another filesystem",
+            )
+        actual_sha = _sha256_at(parent.fd, old_name)
+        if actual_sha != before_sha:
+            raise CorpusIOError(
+                "before_hash_mismatch",
+                f"{old_path}: before hash changed between plan and apply",
+            )
+        bindings.append(
+            _CaseOnlyRenameBinding(
+                old_path=old_path,
+                new_path=new_path,
+                parent=parent,
+                old_name=old_name,
+                new_name=new_name,
+                device=old_stat.st_dev,
+                inode=old_stat.st_ino,
+                before_sha256=before_sha,
+            )
+        )
+    return tuple(bindings)
+
+
+def _revalidate_case_only_renames(
+    anchored: _AnchoredRoot,
+    bindings: Iterable[_CaseOnlyRenameBinding],
+) -> None:
+    for binding in bindings:
+        anchored.verify_binding(binding.parent)
+        if not _exact_name_exists_at(binding.parent.fd, binding.old_name):
+            raise CorpusIOError(
+                "path_binding_changed",
+                f"{binding.old_path}: old exact directory entry changed",
+            )
+        if _exact_name_exists_at(binding.parent.fd, binding.new_name):
+            raise CorpusIOError(
+                "case_only_rename_collision",
+                f"{binding.new_path}: new exact directory entry appeared",
+            )
+        old_stat = _file_stat_at(binding.parent.fd, binding.old_name)
+        new_stat = _file_stat_at(binding.parent.fd, binding.new_name)
+        if old_stat is None or new_stat is None or (
+            old_stat.st_dev,
+            old_stat.st_ino,
+            old_stat.st_nlink,
+        ) != (binding.device, binding.inode, 1) or (
+            new_stat.st_dev,
+            new_stat.st_ino,
+        ) != (binding.device, binding.inode):
+            raise CorpusIOError(
+                "path_binding_changed",
+                f"{binding.old_path}: case-only binding changed",
+            )
+        if _sha256_at(binding.parent.fd, binding.old_name) != binding.before_sha256:
+            raise CorpusIOError(
+                "before_hash_mismatch",
+                f"{binding.old_path}: before image changed while preparing",
+            )
+
+
 def _build_entries_anchored(
     anchored: _AnchoredRoot,
     manifest: Mapping[str, object],
     after_files: Mapping[str, bytes],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], tuple[_CaseOnlyRenameBinding, ...]]:
     expected = _validate_manifest_model(
         manifest,
         str(manifest["transaction_id"]),
     )
+    case_only_bindings = _inspect_case_only_renames(anchored, manifest)
+    case_only_new_paths = {binding.new_path for binding in case_only_bindings}
     entries: list[dict[str, object]] = []
     for expected_entry in expected:
-        entry = anchored.inspect_file(str(expected_entry["path"]))
+        if str(expected_entry["path"]) in case_only_new_paths:
+            entry = {
+                "path": str(expected_entry["path"]),
+                "had_before": False,
+                "before_sha256": None,
+            }
+        else:
+            entry = anchored.inspect_file(str(expected_entry["path"]))
         if entry["before_sha256"] != expected_entry["before_sha256"]:
             raise CorpusIOError(
                 "before_hash_mismatch",
@@ -2164,7 +2375,7 @@ def _build_entries_anchored(
             "after bytes contain paths absent from manifest: "
             + ", ".join(sorted(unexpected)),
         )
-    return entries
+    return entries, case_only_bindings
 
 
 def _empty_derived_fingerprint() -> str:
@@ -2437,12 +2648,31 @@ def _rollback_transaction_anchored(
     )
     owned_fds.extend((before_fd, snapshots_fd, restore_fd))
 
+    # On a case-insensitive volume the old spelling becomes a lookup alias
+    # for the restored new file.  Remove the literal new entry before any
+    # old before-image is put back, otherwise the generic absent-entry pass
+    # can unlink the restored old file through that alias.
+    case_only_new_paths = {
+        new_path
+        for _old_path, new_path in _case_only_rename_paths(
+            journal["manifest"]
+        )
+    }
+    for relative_path in sorted(case_only_new_paths):
+        live_parent, live_name = live_parents[relative_path]
+        anchored.verify_binding(live_parent)
+        if _exact_name_exists_at(live_parent.fd, live_name):
+            os.unlink(live_name, dir_fd=live_parent.fd)
+            os.fsync(live_parent.fd)
+
     for entry in (*entries, *derived):
         relative_path = str(entry["path"])
         live_parent, live_name = live_parents[relative_path]
         anchored.verify_binding(live_parent)
         live_stat = _file_stat_at(live_parent.fd, live_name)
         if not entry["had_before"]:
+            if relative_path in case_only_new_paths:
+                continue
             if live_stat is not None:
                 os.unlink(live_name, dir_fd=live_parent.fd)
                 os.fsync(live_parent.fd)
@@ -2993,7 +3223,12 @@ def _verify_rolled_back_state(
         raise ValueError(
             f"corpus rollback fingerprint mismatch: {actual} != {expected}"
         )
-    _verify_entry_state(anchored, journal.get("entries"), after=False)
+    _verify_entry_state(
+        anchored,
+        journal.get("entries"),
+        after=False,
+        exact_paths=_case_only_paths_from_journal(journal),
+    )
     _verify_inventory(anchored, journal.get("derived"))
     current_derived = [
         anchored.inspect_file(relative_path)
@@ -3019,7 +3254,12 @@ def _verify_post_gate_object_tail(
         raise ValueError(
             f"post-gate corpus fingerprint mismatch: {actual} != {expected}"
         )
-    _verify_entry_state(anchored, journal.get("entries"), after=True)
+    _verify_entry_state(
+        anchored,
+        journal.get("entries"),
+        after=True,
+        exact_paths=_case_only_paths_from_journal(journal),
+    )
 
 
 def _verify_committed_state(
@@ -3035,7 +3275,12 @@ def _verify_committed_state(
         raise ValueError(
             f"post-commit corpus fingerprint mismatch: {actual} != {expected}"
         )
-    _verify_entry_state(anchored, journal.get("entries"), after=True)
+    _verify_entry_state(
+        anchored,
+        journal.get("entries"),
+        after=True,
+        exact_paths=_case_only_paths_from_journal(journal),
+    )
     for relative_path in _DERIVED_PATHS:
         if anchored.inspect_file(relative_path)["had_before"]:
             raise ValueError(
@@ -3057,6 +3302,7 @@ def _verify_entry_state(
     raw_entries: object,
     *,
     after: bool,
+    exact_paths: set[str] | None = None,
 ) -> None:
     if not isinstance(raw_entries, list):
         raise ValueError("transaction entry inventory is invalid")
@@ -3067,6 +3313,30 @@ def _verify_entry_state(
         expected_sha = entry.get(
             "after_sha256" if after else "before_sha256"
         )
+        if exact_paths is not None and relative_path in exact_paths:
+            parent, name = anchored.pin_existing_parent(
+                relative_path,
+                create=False,
+            )
+            exact_exists = _exact_name_exists_at(parent.fd, name)
+            expected_sha = entry.get(
+                "after_sha256" if after else "before_sha256"
+            )
+            if expected_sha is None:
+                if exact_exists:
+                    raise ValueError(
+                        f"{relative_path}: unexpected transaction file exists"
+                    )
+                continue
+            if (
+                not exact_exists
+                or _sha256_at(parent.fd, name) != expected_sha
+            ):
+                state = "after" if after else "before"
+                raise ValueError(
+                    f"{relative_path}: transaction {state} hash mismatch"
+                )
+            continue
         actual = anchored.inspect_file(relative_path)
         if expected_sha is None:
             if actual["had_before"]:
@@ -3082,6 +3352,17 @@ def _verify_entry_state(
             raise ValueError(
                 f"{relative_path}: transaction {state} hash mismatch"
             )
+
+
+def _case_only_paths_from_journal(journal: Mapping[str, object]) -> set[str]:
+    manifest = journal.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("journal manifest is invalid")
+    return {
+        path
+        for pair in _case_only_rename_paths(manifest)
+        for path in pair
+    }
 
 
 def _verify_inventory(
