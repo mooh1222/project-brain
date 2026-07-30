@@ -21,7 +21,7 @@ from project_brain.migration import (
 from project_brain.mutation import corpus_fingerprint
 from project_brain.store import BrainStore
 from project_brain.snapshot import SnapshotVerification
-from tests.test_ingest import evidence_ref, manifest, review_record_for
+from tests.test_ingest import context, evidence_ref, manifest, review_record_for
 from tests.test_mutation import _code_locator, _write_raw
 
 
@@ -578,6 +578,28 @@ def test_id_plan_renames_unknown_grammar_review_and_rewrites_reference(
             "code.neutral.legacy",
         ),
     }
+
+
+def test_id_plan_unknown_grammar_rename_still_requires_zero_structured_debt(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    source = review_record_for(
+        "review.disturb-boostedbomb.depth-config",
+        "context.neutral",
+    )
+    remaining = context("context.Legacy")
+    remaining["context_key"] = "Legacy"
+    _write_raw(brain_root, context())
+    _write_raw(brain_root, source)
+    _write_raw(brain_root, remaining)
+
+    with pytest.raises(MigrationError) as caught:
+        _id_plan(brain_root, {
+            source["id"]: "review.context.neutral",
+        })
+
+    assert caught.value.code == "grandfathered_problems_remaining"
 
 
 def test_canonical_payload_rejects_every_non_registry_semantic_change():

@@ -21,6 +21,7 @@ from project_brain.objbase import base
 from project_brain.hash_utils import stable_json
 from project_brain.hash_utils import source_content_hash
 from project_brain.repo_context import resolve_repo_context
+from project_brain.schema import validate_object_id
 from project_brain.store import BrainStore
 from project_brain.transaction_receipt import BatchBinding
 from tests.test_ingest import (
@@ -1381,7 +1382,7 @@ def test_unchanged_unknown_grammar_uses_stable_json_not_key_insertion_order(
     assert result.manifest.grandfathered_problems_after
 
 
-@pytest.mark.parametrize("change", ["payload", "problem_list", "new"])
+@pytest.mark.parametrize("change", ["payload", "new"])
 def test_changed_or_new_unknown_grammar_is_rejected(tmp_path, change):
     brain_root = tmp_path / "brain"
     legacy = _legacy_unknown_review()
@@ -1390,12 +1391,37 @@ def test_changed_or_new_unknown_grammar_is_rejected(tmp_path, change):
     candidate = dict(legacy)
     if change == "payload":
         candidate["title"] = "changed"
-    elif change == "problem_list":
-        candidate["target_object_id"] = "mystery.neutral"
     else:
         candidate["id"] = "review.disturb-hedgehog.cloud-fix"
 
     result = _plan(brain_root, [candidate])
+
+    assert result.error_code == "new_or_modified_lint_problem"
+
+
+def test_unknown_grammar_with_changed_problem_list_is_rejected(tmp_path):
+    brain_root = tmp_path / "brain"
+    before = review_record_for(
+        "review.context.neutral",
+        "mystery.neutral",
+    )
+    after = dict(before)
+    after["target_object_id"] = "mystery.other"
+    before_errors = [
+        "review.context.neutral: invalid id fields: target_object_id "
+        "'mystery.neutral' does not match ID target 'context.neutral'",
+    ]
+    after_errors = [
+        "review.context.neutral: invalid id fields: target_object_id "
+        "'mystery.other' does not match ID target 'context.neutral'",
+    ]
+
+    assert validate_object_id(before) == before_errors
+    assert validate_object_id(after) == after_errors
+    assert before_errors != after_errors
+    _write_raw(brain_root, before)
+
+    result = _plan(brain_root, [after])
 
     assert result.error_code == "new_or_modified_lint_problem"
 
