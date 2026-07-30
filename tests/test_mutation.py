@@ -118,6 +118,15 @@ def _legacy_invalid_context(*, title: str = "legacy") -> dict:
     return obj
 
 
+def _legacy_unknown_review(*, title: str = "legacy") -> dict:
+    record = review_record_for(
+        "review.disturb-boostedbomb.depth-config",
+        "context.neutral",
+    )
+    record["title"] = title
+    return record
+
+
 def _projection(
     *,
     object_id: str = "projection.neutral.req.reuse",
@@ -1328,6 +1337,97 @@ def test_unchanged_invalid_id_uses_stable_json_not_key_insertion_order(tmp_path)
 
     assert result.ok is True
     assert result.manifest.grandfathered_problems_after
+
+
+def test_unchanged_unknown_grammar_is_grandfathered_with_exact_problem_binding(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    legacy = _legacy_unknown_review()
+    _write_raw(brain_root, context())
+    _write_raw(brain_root, legacy)
+
+    result = _plan(brain_root, [])
+
+    assert result.ok is True
+    assert result.manifest.grandfathered_problems_before == (
+        {
+            "object_id": legacy["id"],
+            "problem": (
+                "review.disturb-boostedbomb.depth-config: invalid id for "
+                "ReviewRecord: unknown ID prefix 'disturb-boostedbomb'"
+            ),
+            "object_hash": _problem_object_hash(legacy),
+        },
+    )
+    assert (
+        result.manifest.grandfathered_problems_after
+        == result.manifest.grandfathered_problems_before
+    )
+
+
+def test_unchanged_unknown_grammar_uses_stable_json_not_key_insertion_order(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    legacy = _legacy_unknown_review()
+    _write_raw(brain_root, context())
+    _write_raw(brain_root, legacy)
+    reordered = dict(reversed(tuple(legacy.items())))
+
+    result = _plan(brain_root, [reordered])
+
+    assert result.ok is True
+    assert result.manifest.grandfathered_problems_after
+
+
+@pytest.mark.parametrize("change", ["payload", "problem_list", "new"])
+def test_changed_or_new_unknown_grammar_is_rejected(tmp_path, change):
+    brain_root = tmp_path / "brain"
+    legacy = _legacy_unknown_review()
+    _write_raw(brain_root, context())
+    _write_raw(brain_root, legacy)
+    candidate = dict(legacy)
+    if change == "payload":
+        candidate["title"] = "changed"
+    elif change == "problem_list":
+        candidate["target_object_id"] = "mystery.neutral"
+    else:
+        candidate["id"] = "review.disturb-hedgehog.cloud-fix"
+
+    result = _plan(brain_root, [candidate])
+
+    assert result.error_code == "new_or_modified_lint_problem"
+
+
+def test_unknown_grammar_does_not_grandfather_an_existing_non_id_problem(tmp_path):
+    brain_root = tmp_path / "brain"
+    _write_raw(brain_root, context())
+    _write_raw(brain_root, _legacy_unknown_review())
+    _write_raw(
+        brain_root,
+        context("context.broken", glossary_term_ids=["g.neutral.missing"]),
+    )
+
+    result = _plan(brain_root, [])
+
+    assert result.error_code == "dangling_reference"
+
+
+def test_id_migration_completion_gate_rejects_remaining_unknown_grammar(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    _write_raw(brain_root, context())
+    _write_raw(brain_root, _legacy_unknown_review())
+
+    result = _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+    )
+
+    assert result.error_code == "grandfathered_problems_remaining"
 
 
 def test_existing_non_id_lint_problem_is_never_grandfathered(tmp_path):

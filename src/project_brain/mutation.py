@@ -53,6 +53,7 @@ _LOGICAL_KEY_FIELDS = (
     "mapping_key",
     "context_key",
 )
+_STRUCTURED_ID_LINT_CODES = frozenset({"invalid_id", "unknown_grammar"})
 
 
 class MutationOperation(StrEnum):
@@ -261,13 +262,14 @@ class MutationService:
             if errors:
                 return _failure("schema_invalid", "; ".join(errors))
 
-        # 4) ID parse와 필드 합치. 기존 invalid_id grandfather 판단은 merged lint에서
-        # object hash까지 묶어 하므로 여기서는 unknown grammar만 즉시 닫는다.
+        # 4) ID parse와 필드 합치. 구조화된 ID 문제는 merged lint에서 기존 문제·객체
+        # hash까지 묶어 grandfather 여부를 판단한다.
         for obj in inputs:
             id_errors = validate_object_id(obj)
-            if id_errors and id_problem_code(obj) == "unknown_grammar":
-                return _failure("unknown_grammar", "; ".join(id_errors))
-            if id_errors:
+            if (
+                id_errors
+                and id_problem_code(obj) in _STRUCTURED_ID_LINT_CODES
+            ):
                 object_id = obj.get("id")
                 previous = (
                     existing_by_id.get(object_id)
@@ -481,7 +483,7 @@ class MutationService:
             before_non_id = tuple(
                 problem
                 for problem in before_report
-                if problem.code != "invalid_id"
+                if problem.code not in _STRUCTURED_ID_LINT_CODES
             )
             disallowed_before = tuple(
                 problem
@@ -508,11 +510,9 @@ class MutationService:
                 )
         else:
             for problem in before_report:
-                if problem.code != "invalid_id":
+                if problem.code not in _STRUCTURED_ID_LINT_CODES:
                     return _failure(
-                        problem.code
-                        if problem.code == "unknown_grammar"
-                        else "existing_lint_problem",
+                        "existing_lint_problem",
                         problem.message,
                     )
 
@@ -527,7 +527,7 @@ class MutationService:
         non_id_after = [
             problem
             for problem in after_report
-            if problem.code != "invalid_id"
+            if problem.code not in _STRUCTURED_ID_LINT_CODES
         ]
         if (
             request.operation is MutationOperation.PROJECTION_REPAIR
@@ -1080,19 +1080,19 @@ def _infer_id_only_renames(
             "ID-only migration contains a new object without a legacy source",
         )
 
-    invalid_existing_ids = {
+    structured_id_problem_ids = {
         object_id
         for problem in lint_store_report(BrainStore(dict(existing_by_id)))
-        if problem.code == "invalid_id"
+        if problem.code in _STRUCTURED_ID_LINT_CODES
         for object_id in problem.object_ids
     }
     for old_id, new_id in pairs:
-        if old_id not in invalid_existing_ids:
+        if old_id not in structured_id_problem_ids:
             return (), _failure(
                 "id_only_legacy_source_not_invalid",
                 (
                     f"{old_id}: ID-only rename source has no structured "
-                    "invalid_id problem"
+                    "ID problem"
                 ),
             )
         new_id_errors = validate_object_id(input_by_id[new_id])
@@ -1173,7 +1173,7 @@ def _grandfathered_problems(
     return tuple(
         _grandfathered_problem(problem, objects)
         for problem in report
-        if problem.code == "invalid_id"
+        if problem.code in _STRUCTURED_ID_LINT_CODES
     )
 
 

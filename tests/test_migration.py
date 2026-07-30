@@ -530,6 +530,56 @@ def test_id_plan_tokenizes_self_and_registered_refs_and_lists_every_pointer(
     assert rewritten_eval["note"] == eval_before["note"]
 
 
+def test_id_plan_renames_unknown_grammar_review_and_rewrites_reference(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    old_locator = _code_locator(
+        object_id="code.Legacy",
+        quote=None,
+        title="legacy display",
+    )
+    old_review = review_record_for(
+        "review.disturb-boostedbomb.depth-config",
+        old_locator["id"],
+    )
+    _write_raw(brain_root, old_locator)
+    _write_raw(brain_root, old_review)
+
+    plan = _id_plan(brain_root, {
+        old_locator["id"]: "code.neutral.legacy",
+        old_review["id"]: "review.code.neutral.legacy",
+    })
+
+    assert plan.mutation_plan.ok is True
+    assert {
+        (row.old_id, row.new_id)
+        for row in plan.rows
+    } == {
+        ("code.Legacy", "code.neutral.legacy"),
+        (
+            "review.disturb-boostedbomb.depth-config",
+            "review.code.neutral.legacy",
+        ),
+    }
+    assert {
+        (
+            rewrite["object_id"],
+            rewrite["pointer"],
+            rewrite["before_id"],
+            rewrite["after_id"],
+        )
+        for rewrite in plan.mutation_plan.manifest.reference_rewrites
+    } == {
+        (
+            "review.code.neutral.legacy",
+            "/target_object_id",
+            "code.Legacy",
+            "code.neutral.legacy",
+        ),
+    }
+
+
 def test_canonical_payload_rejects_every_non_registry_semantic_change():
     before = _code_locator(
         object_id="code.Legacy",

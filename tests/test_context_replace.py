@@ -17,6 +17,7 @@ from tests.test_ingest import (
     context,
     evidence_ref,
     manifest,
+    review_record_for,
 )
 from tests.test_mutation import _write_raw
 
@@ -82,6 +83,36 @@ def test_context_replace_does_not_force_old_and_new_counts_to_match(tmp_path):
     assert {item["object_id"] for item in result.manifest.deletes} == {
         drop["id"],
     }
+
+
+def test_context_replace_keeps_unchanged_external_unknown_grammar_bound(tmp_path):
+    brain_root = tmp_path / "brain"
+    keep = candidate_term("g.neutral.keep", term="유지")
+    drop = candidate_term("g.neutral.drop", term="삭제")
+    ctx = context(glossary_term_ids=[keep["id"], drop["id"]])
+    legacy = review_record_for(
+        "review.disturb-boostedbomb.depth-config",
+        ctx["id"],
+    )
+    for obj in (ctx, keep, drop, legacy):
+        _write_raw(brain_root, obj)
+    desired_context = dict(ctx)
+    desired_context["glossary_term_ids"] = [keep["id"]]
+
+    request = _plan(
+        brain_root,
+        desired_objects=[desired_context, keep],
+        expected_drop_ids=(drop["id"],),
+    )
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    assert result.manifest.grandfathered_problems_before == (
+        result.manifest.grandfathered_problems_after
+    )
+    assert result.manifest.grandfathered_problems_after[0]["object_id"] == (
+        legacy["id"]
+    )
 
 
 def test_context_membership_follows_registered_forward_references(tmp_path):
