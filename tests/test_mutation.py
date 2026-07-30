@@ -1649,8 +1649,10 @@ def test_plan_fails_closed_when_changed_existing_object_has_no_source_receipt(
     assert result.manifest is None
 
 
+@pytest.mark.parametrize("source_sha256", ["not-a-sha", 7])
 def test_plan_rejects_malformed_injected_source_receipt_before_manifest(
     tmp_path,
+    source_sha256,
 ):
     existing = context()
     replacement = dict(existing)
@@ -1662,7 +1664,7 @@ def test_plan_rejects_malformed_injected_source_receipt_before_manifest(
         request=request,
         _existing_store=BrainStore(
             {existing["id"]: existing},
-            source_sha256_by_id={existing["id"]: "not-a-sha"},
+            source_sha256_by_id={existing["id"]: source_sha256},
         ),
     )
 

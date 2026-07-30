@@ -573,7 +573,10 @@ class MutationService:
                     "source_receipt_missing",
                     f"{object_id}: loaded source receipt is missing",
                 )
-            if _SHA256.fullmatch(source_sha256) is None:
+            if (
+                not isinstance(source_sha256, str)
+                or _SHA256.fullmatch(source_sha256) is None
+            ):
                 return _failure(
                     "source_receipt_invalid",
                     f"{object_id}: loaded source receipt is invalid",
