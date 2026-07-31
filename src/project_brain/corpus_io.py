@@ -480,6 +480,51 @@ def _stable_lock_name(brain_root: Path) -> str:
     return f".{identity.name}.project-brain-corpus.lock"
 
 
+def _open_absolute_directory_no_follow(path: Path) -> int:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        descriptor = os.open(absolute.anchor, flags)
+        descriptors.append(descriptor)
+        for index, part in enumerate(absolute.parts[1:]):
+            try:
+                descriptor = os.open(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                if index != 0 or exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                try:
+                    target = os.readlink(part, dir_fd=descriptor)
+                except OSError:
+                    raise exc
+                target_parts = target.split("/")
+                if (
+                    not target
+                    or target.startswith("/")
+                    or any(
+                        component in ("", ".", "..")
+                        for component in target_parts
+                    )
+                ):
+                    raise exc
+                for target_part in target_parts:
+                    descriptor = os.open(
+                        target_part,
+                        flags,
+                        dir_fd=descriptor,
+                    )
+                    descriptors.append(descriptor)
+                continue
+            descriptors.append(descriptor)
+        return descriptors.pop()
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 @contextmanager
 def stable_corpus_lock(
     brain_root: Path,
@@ -509,10 +554,7 @@ def stable_corpus_lock(
     root = Path(identity)
     parent = root.parent
     try:
-        parent_fd = os.open(
-            parent,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
+        parent_fd = _open_absolute_directory_no_follow(parent)
     except OSError as exc:
         raise _anchored_path_error(parent, exc) from exc
     lock_fd = -1
@@ -600,10 +642,7 @@ def _validated_directory_mode(mode: int) -> int:
 
 def _open_directory_path(path: Path) -> tuple[int, os.stat_result]:
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
+        descriptor = _open_absolute_directory_no_follow(path)
     except OSError as exc:
         raise _anchored_path_error(path, exc) from exc
     try:
@@ -627,9 +666,8 @@ def _open_bound_directory(binding: DirectoryBinding) -> int:
     child_fd = -1
     try:
         try:
-            parent_fd = os.open(
-                binding.path.parent,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            parent_fd = _open_absolute_directory_no_follow(
+                binding.path.parent
             )
         except OSError as exc:
             raise _path_binding_changed(

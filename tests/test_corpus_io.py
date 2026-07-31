@@ -6,10 +6,11 @@ import json
 import multiprocessing
 import os
 import stat
+import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -351,10 +352,11 @@ def test_stable_corpus_lock_nonblocking_reports_busy(tmp_path):
                     blocking=False,
                 ):
                     raise AssertionError("lock body must not run")
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.5
         finally:
             watchdog.cancel()
     assert exc.value.code == "corpus_lock_busy"
-    assert time.monotonic() - started < 0.5
 
 
 def test_stable_corpus_lock_default_still_blocks_until_release(tmp_path):
@@ -395,6 +397,28 @@ def test_stable_corpus_lock_same_process_nesting_remains_reentrant(tmp_path):
             pass
 
 
+def test_stable_corpus_lock_rejects_intermediate_symlink_ancestor(tmp_path):
+    target = _real_directory(tmp_path / "external")
+    target_parent = _real_directory(target / "nested")
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    brain_root = alias / "nested" / "brain"
+    target_lock = target_parent / ".brain.project-brain-corpus.lock"
+    body_ran = False
+    error: CorpusIOError | None = None
+
+    try:
+        with corpus_io.stable_corpus_lock(brain_root, exclusive=True):
+            body_ran = True
+    except CorpusIOError as exc:
+        error = exc
+
+    assert not target_lock.exists()
+    assert body_ran is False
+    assert error is not None
+    assert error.code == "symlink_forbidden"
+
+
 def test_anchored_directory_closes_parent_fd_when_fstat_fails(
     tmp_path,
     monkeypatch,
@@ -421,6 +445,88 @@ def test_anchored_directory_closes_parent_fd_when_fstat_fails(
     with pytest.raises(OSError) as closed:
         real_fstat(failed_fd)
     assert closed.value.errno == errno.EBADF
+
+
+def test_anchored_temp_rejects_intermediate_symlink_ancestor(tmp_path):
+    target = _real_directory(tmp_path / "external")
+    target_snapshots = _real_directory(target / ".snapshots")
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    error: CorpusIOError | None = None
+
+    try:
+        corpus_io.create_anchored_temp_directory(
+            alias / ".snapshots",
+            prefix=".task17-",
+        )
+    except CorpusIOError as exc:
+        error = exc
+
+    assert tuple(target_snapshots.iterdir()) == ()
+    assert error is not None
+    assert error.code == "symlink_forbidden"
+
+
+def test_anchored_named_rejects_intermediate_symlink_ancestor(tmp_path):
+    target = _real_directory(tmp_path / "external")
+    target_snapshots = _real_directory(target / ".snapshots")
+    actual_parent = corpus_io.create_anchored_temp_directory(
+        target_snapshots,
+        prefix=".task17-",
+    )
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    aliased_parent = replace(
+        actual_parent,
+        path=alias / ".snapshots" / actual_parent.path.name,
+    )
+    payload = actual_parent.path / "payload"
+    error: CorpusIOError | None = None
+
+    try:
+        corpus_io.create_anchored_directory(
+            aliased_parent,
+            name=payload.name,
+        )
+    except CorpusIOError as exc:
+        error = exc
+
+    assert not payload.exists()
+    assert error is not None
+    assert error.code == "path_binding_changed"
+
+
+def test_root_level_var_alias_supports_lock_and_anchored_staging(tmp_path):
+    root_alias = Path("/var")
+    if sys.platform == "darwin":
+        assert root_alias.is_symlink()
+    elif not root_alias.is_symlink():
+        pytest.skip("platform has no root-level /var symlink")
+    link_target = Path(os.readlink(root_alias))
+    assert not link_target.is_absolute()
+    physical_var = Path("/") / link_target
+    try:
+        relative_tmp = tmp_path.relative_to(physical_var)
+    except ValueError:
+        pytest.skip("tmp_path is not below the root-level /var alias")
+    lexical_tmp = root_alias / relative_tmp
+    physical_snapshots = _real_directory(tmp_path / "snapshots")
+    lexical_snapshots = lexical_tmp / physical_snapshots.name
+
+    with corpus_io.stable_corpus_lock(
+        lexical_tmp / "brain",
+        exclusive=True,
+    ):
+        pass
+    binding = corpus_io.create_anchored_temp_directory(
+        lexical_snapshots,
+        prefix=".task17-",
+    )
+
+    assert (tmp_path / ".brain.project-brain-corpus.lock").is_file()
+    assert binding.path.parent == lexical_snapshots
+    assert binding.path.is_dir()
+    corpus_io.verify_directory_binding(binding)
 
 
 def test_anchored_staging_creates_bound_direct_children(tmp_path):
