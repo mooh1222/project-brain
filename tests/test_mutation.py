@@ -169,6 +169,7 @@ def _mixed_review_repair_request(
     tmp_path: Path,
     *,
     tamper: str | None = None,
+    source_review_id: str = "review.bundle.Neutral.domain-mapping",
 ) -> MutationRequest:
     request = _mapping_repair_request(tmp_path)
     old_mapping = BrainStore.load(request.brain_root).get(
@@ -183,7 +184,7 @@ def _mixed_review_repair_request(
     _write_raw(request.brain_root, stable_mapping)
 
     old_review = review_record_for(
-        "review.bundle.Neutral.domain-mapping",
+        source_review_id,
         old_mapping["id"],
     )
     old_review.pop("target_object_id")
@@ -952,6 +953,17 @@ def test_canonical_repair_allows_review_target_cleanup_only(tmp_path):
     result = MutationService().plan(request.objects, request=request)
 
     assert result.ok is True
+
+
+def test_canonical_repair_rejects_mismatched_source_bundle_identity(tmp_path):
+    request = _mixed_review_repair_request(
+        tmp_path,
+        source_review_id="review.bundle.other.wrong",
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
 
 
 @pytest.mark.parametrize(

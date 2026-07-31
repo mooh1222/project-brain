@@ -1354,11 +1354,19 @@ def _validate_canonical_review_shape(
     if not isinstance(bundle_key, str):
         return _failure("canonical_repair_payload_changed", intent.source_id)
     try:
+        parsed_source_review = parse_id(
+            intent.source_id.lower(),
+            "ReviewRecord",
+        )
         parsed_review = parse_id(intent.new_id, "ReviewRecord")
     except IdGrammarError:
         return _failure("canonical_repair_payload_changed", intent.source_id)
     if (
-        parsed_review.variant != "bundle"
+        parsed_source_review.variant != "bundle"
+        or parsed_source_review.ctx != parsed_review.ctx
+        or parsed_source_review.key != parsed_review.key
+        or parsed_source_review.bundle_key != bundle_key
+        or parsed_review.variant != "bundle"
         or parsed_review.bundle_key != bundle_key
         or intent.new_id != f"review.{bundle_key}"
         or before.get("review_scope") != "mapping_bundle"
