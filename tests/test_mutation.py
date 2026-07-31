@@ -170,6 +170,7 @@ def _mixed_review_repair_request(
     *,
     tamper: str | None = None,
     source_review_id: str = "review.bundle.Neutral.domain-mapping",
+    cleanup_target_id: str = "g.neutral.term",
 ) -> MutationRequest:
     request = _mapping_repair_request(tmp_path)
     old_mapping = BrainStore.load(request.brain_root).get(
@@ -196,7 +197,7 @@ def _mixed_review_repair_request(
         "target_object_ids": [
             old_mapping["id"],
             stable_mapping["id"],
-            "g.neutral.term",
+            cleanup_target_id,
         ],
     })
     _write_raw(request.brain_root, old_review)
@@ -231,7 +232,7 @@ def _mixed_review_repair_request(
         before=[
             new_mapping["id"],
             stable_mapping["id"],
-            "g.neutral.term",
+            cleanup_target_id,
         ],
         after=[new_mapping["id"], stable_mapping["id"]],
     )
@@ -953,6 +954,40 @@ def test_canonical_repair_allows_review_target_cleanup_only(tmp_path):
     result = MutationService().plan(request.objects, request=request)
 
     assert result.ok is True
+
+
+@pytest.mark.parametrize(
+    "absent_target_id",
+    [
+        "mapping.neutral.absent",
+        "g.neutral.absent",
+    ],
+)
+def test_canonical_repair_rejects_absent_mixed_review_target(
+    tmp_path,
+    absent_target_id,
+):
+    request = _mixed_review_repair_request(
+        tmp_path,
+        cleanup_target_id=absent_target_id,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
+def test_canonical_repair_rejects_mapping_shaped_non_mapping_cleanup(tmp_path):
+    target_id = "mapping.neutral.not-a-domain-mapping"
+    request = _mixed_review_repair_request(
+        tmp_path,
+        cleanup_target_id=target_id,
+    )
+    _write_raw(request.brain_root, candidate_term(target_id))
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
 
 
 def test_canonical_repair_rejects_mismatched_source_bundle_identity(tmp_path):

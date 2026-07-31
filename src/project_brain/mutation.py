@@ -1389,7 +1389,12 @@ def _validate_canonical_review_shape(
     for target in before_targets:
         mapped_target = replacements.get(target, target)
         target_obj = existing_by_id.get(target)
-        if target_obj is not None and target_obj.get("kind") == "DomainMapping":
+        if target_obj is None:
+            return _failure(
+                "canonical_repair_payload_changed",
+                intent.source_id,
+            )
+        if target_obj.get("kind") == "DomainMapping":
             mapped_obj = input_by_id.get(mapped_target) or existing_by_id.get(
                 mapped_target
             )
