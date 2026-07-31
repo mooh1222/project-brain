@@ -1011,6 +1011,35 @@ def test_historical_terminal_manifest_compatibility_remains_fail_closed(
         BrainStore.load(brain_root)
 
 
+def test_historical_terminal_manifest_rejects_combined_legacy_omissions(
+    tmp_path,
+):
+    brain_root, journal_path, _ = _historical_context_replace_journal(
+        tmp_path,
+        state=JournalState.COMMITTED.value,
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal.pop("batch_binding") is None
+    assert journal["manifest"].pop("batch_binding") is None
+    journal_path.write_bytes(
+        (
+            json.dumps(
+                journal,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    before_bytes = journal_path.read_bytes()
+
+    with pytest.raises(RecoveryRequiredError, match="journal structure is invalid"):
+        BrainStore.load(brain_root)
+
+    assert journal_path.read_bytes() == before_bytes
+
+
 def test_current_noncanonical_journal_writes_explicit_null_canonical_binding(
     tmp_path,
 ):
@@ -1199,6 +1228,76 @@ def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
     assert len(receipt["transaction_id"]) == 64
     assert len(receipt["manifest_sha256"]) == 64
     assert BrainStore.load(brain_root).get(after["id"]) == after
+
+
+def test_historical_committed_batch_receipt_preserves_original_manifest_sha(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding(brain_root=brain_root)
+    result = MutationService().apply(
+        (after,),
+        request=_request(brain_root, (after,), batch_binding=binding),
+    )
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    intent_path = brain_root / batch_intent_relative_path(binding)
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["manifest"].pop("canonical_repair_binding") is None
+    historical_manifest_bytes = (
+        json.dumps(
+            journal["manifest"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    historical_manifest_sha256 = hashlib.sha256(
+        historical_manifest_bytes
+    ).hexdigest()
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["manifest_sha256"] = historical_manifest_sha256
+    journal_path.write_bytes(
+        (
+            json.dumps(
+                journal,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    intent_path.write_bytes(
+        (
+            json.dumps(
+                intent,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    journal_before = journal_path.read_bytes()
+    intent_before = intent_path.read_bytes()
+
+    receipt = recover_committed_receipt(brain_root, binding)
+
+    assert receipt["transaction_id"] == result.manifest.transaction_id
+    assert receipt["manifest_sha256"] == historical_manifest_sha256
+    assert receipt["ingested_ids"] == [after["id"]]
+    assert journal_path.read_bytes() == journal_before
+    assert intent_path.read_bytes() == intent_before
 
 
 def test_committed_receipt_rejects_forged_envelope_and_intent(tmp_path):

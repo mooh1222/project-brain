@@ -1302,6 +1302,11 @@ def _read_journal_at(
             f"{transaction_id}: journal must contain a JSON object",
             transaction_ids=(transaction_id,),
         )
+    validation_payload = _with_historical_terminal_manifest_compatibility(
+        payload,
+        transaction_id,
+    )
+    uses_historical_manifest_compatibility = validation_payload is not payload
     manifest = payload.get("manifest")
     if (
         isinstance(manifest, dict)
@@ -1314,12 +1319,10 @@ def _read_journal_at(
         payload["manifest"] = dict(manifest)
         payload["batch_binding"] = None
         payload["manifest"]["batch_binding"] = None
-    payload = _with_historical_terminal_manifest_compatibility(
-        payload,
-        transaction_id,
-    )
+    if not uses_historical_manifest_compatibility:
+        validation_payload = payload
     try:
-        _validate_journal_model(payload, transaction_id)
+        _validate_journal_model(validation_payload, transaction_id)
     except (TypeError, ValueError) as exc:
         raise RecoveryRequiredError(
             f"{transaction_id}: journal structure is invalid: {exc}",
@@ -1337,6 +1340,7 @@ def _with_historical_terminal_manifest_compatibility(
         or _SHA256.fullmatch(transaction_id) is None
         or payload.get("transaction_id") != transaction_id
         or payload.get("state") not in _TERMINAL_STATES
+        or "batch_binding" not in payload
     ):
         return payload
     manifest = payload.get("manifest")
