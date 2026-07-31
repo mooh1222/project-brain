@@ -353,6 +353,153 @@ def test_allowlisted_extra_does_not_hide_baseline_content_change(tmp_path):
     assert exc.value.code == "git_dirt_content_changed"
 
 
+def test_git_dirt_receipt_preserves_same_path_status_occurrences(tmp_path):
+    root, _ = _clean_git_repo(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(root), "rm", "tracked.txt"],
+        check=True,
+        capture_output=True,
+    )
+    (root / "tracked.txt").write_bytes(b"untracked replacement\n")
+    raw_status = subprocess.run(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v1", "-z",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert raw_status == b"D  tracked.txt\0?? tracked.txt\0"
+
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    rows = [
+        row for row in _manifest_rows(baseline) if row["path"] == "tracked.txt"
+    ]
+
+    assert baseline.entry_count == 2
+    assert [row["status"] for row in rows] == ["??", "D "]
+    assert snapshot.verify_git_dirt_preserved(
+        root,
+        baseline_status_bytes=baseline.status_bytes,
+        baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+        label="user_dirt",
+    ) == baseline
+
+
+def test_git_dirt_capture_rechecks_first_path_after_later_path_processing(
+    tmp_path,
+):
+    root, _ = _clean_git_repo(tmp_path)
+    _write(root / "later.txt", b"committed\n")
+    subprocess.run(["git", "-C", str(root), "add", "later.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "add later"],
+        check=True,
+    )
+    (root / "tracked.txt").write_bytes(b"first dirty bytes\n")
+    (root / "later.txt").write_bytes(b"later dirty bytes\n")
+    status_before = subprocess.run(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v1", "-z",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    original_row = snapshot._git_dirt_row
+    calls = 0
+
+    def mutate_after_first_row(root_fd, captured_root, raw_path, status_code):
+        nonlocal calls
+        row = original_row(root_fd, captured_root, raw_path, status_code)
+        calls += 1
+        if calls == 1:
+            (root / os.fsdecode(raw_path)).write_bytes(
+                b"changed after first hash\n"
+            )
+        return row
+
+    with mock.patch.object(
+        snapshot,
+        "_git_dirt_row",
+        side_effect=mutate_after_first_row,
+    ):
+        with pytest.raises(SnapshotError) as exc:
+            snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+
+    assert exc.value.code == "git_dirt_content_changed"
+    assert subprocess.run(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v1", "-z",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout == status_before
+
+
+def test_git_dirt_capture_keeps_one_root_fd_for_both_passes_during_replacement(
+    tmp_path,
+):
+    root, _ = _clean_git_repo(tmp_path)
+    _write(root / "later.txt", b"committed\n")
+    subprocess.run(["git", "-C", str(root), "add", "later.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "add later"],
+        check=True,
+    )
+    (root / "tracked.txt").write_bytes(b"first dirty bytes\n")
+    (root / "later.txt").write_bytes(b"later dirty bytes\n")
+    moved = tmp_path / "moved-original"
+    original_row = snapshot._git_dirt_row
+    root_inodes = []
+
+    def replace_root_after_first_row(root_fd, captured_root, raw_path, status_code):
+        row = original_row(root_fd, captured_root, raw_path, status_code)
+        root_inodes.append(os.fstat(root_fd).st_ino)
+        if len(root_inodes) == 1:
+            root.rename(moved)
+            shutil.copytree(moved, root, symlinks=True)
+        return row
+
+    with mock.patch.object(
+        snapshot,
+        "_git_dirt_row",
+        side_effect=replace_root_after_first_row,
+    ):
+        with pytest.raises(SnapshotError) as exc:
+            snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+
+    assert exc.value.code == "git_root_changed"
+    assert len(root_inodes) == 4
+    assert len(set(root_inodes)) == 1
+
+
+def test_verify_git_root_clean_rejects_dirty_submodule_before_content_scan(
+    tmp_path,
+):
+    root = tmp_path / "git-repo"
+    submodule = root / "nested-repo"
+    _write(submodule / "tracked.txt", b"submodule clean\n")
+    _git_commit(submodule)
+    _write(root / "root.txt", b"root clean\n")
+    _git_commit(root)
+    (submodule / "tracked.txt").write_bytes(b"submodule dirty\n")
+    assert subprocess.run(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v1", "-z",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout == b" M nested-repo\0"
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_root_clean(root, label="engine_root")
+
+    assert exc.value.code == "engine_worktree_dirty"
+
+
 def _snapshot_fixture(
     tmp_path: Path,
     *,

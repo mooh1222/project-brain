@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
+from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -471,7 +472,6 @@ def _parse_git_status(status_bytes: bytes) -> list[tuple[bytes, str]]:
         _fail("git_dirt_status_invalid", "NUL Git status is unterminated")
     fields.pop()
     parsed: list[tuple[bytes, str]] = []
-    seen: set[bytes] = set()
     index = 0
     while index < len(fields):
         record = fields[index]
@@ -493,12 +493,6 @@ def _parse_git_status(status_bytes: bytes) -> list[tuple[bytes, str]]:
             index += 1
         for raw_path in raw_paths:
             _git_dirt_path(raw_path)
-            if raw_path in seen:
-                _fail(
-                    "git_dirt_status_invalid",
-                    f"duplicate Git dirt path: {raw_path!r}",
-                )
-            seen.add(raw_path)
             parsed.append((raw_path, status_code))
     return parsed
 
@@ -656,17 +650,17 @@ def _git_dirt_row(
         os.close(descriptor)
 
 
-def _git_dirt_manifest(root: Path, status_bytes: bytes) -> tuple[bytes, int]:
+def _git_dirt_manifest(
+    root_fd: int,
+    root: Path,
+    status_bytes: bytes,
+) -> tuple[bytes, int]:
     entries = _parse_git_status(status_bytes)
-    root_fd = _open_absolute_directory(root, create=False)
-    try:
-        rows = [
-            _git_dirt_row(root_fd, root, raw_path, status_code)
-            for raw_path, status_code in entries
-        ]
-    finally:
-        os.close(root_fd)
-    rows.sort(key=lambda row: row["path"])
+    rows = [
+        _git_dirt_row(root_fd, root, raw_path, status_code)
+        for raw_path, status_code in entries
+    ]
+    rows.sort(key=lambda row: (row["path"], row["status"]))
     manifest = (
         json.dumps(
             rows,
@@ -679,10 +673,16 @@ def _git_dirt_manifest(root: Path, status_bytes: bytes) -> tuple[bytes, int]:
     return manifest, len(rows)
 
 
-def _root_stat(root: Path, *, label: str) -> os.stat_result:
-    descriptor = _open_absolute_directory(root, create=False)
+def _git_root_still_bound(
+    root_fd: int,
+    root: Path,
+    *,
+    label: str,
+) -> None:
+    current_fd = _open_absolute_directory(root, create=False)
     try:
-        return os.fstat(descriptor)
+        pinned = os.fstat(root_fd)
+        current = os.fstat(current_fd)
     except OSError as exc:
         _fail(
             "git_root_changed",
@@ -690,24 +690,26 @@ def _root_stat(root: Path, *, label: str) -> os.stat_result:
             paths=(root,),
         )
     finally:
-        os.close(descriptor)
-
-
-def _capture_git_dirt(root: Path, *, label: str) -> GitDirtReceipt:
-    root = Path(root)
-    head = _required_git_head(root, label=label)
-    pinned = _root_stat(root, label=label)
-    status_bytes = _git_status_bytes(root, label=label)
-    content_manifest_bytes, entry_count = _git_dirt_manifest(root, status_bytes)
-    status_after = _git_status_bytes(root, label=label)
-    head_after = _required_git_head(root, label=label)
-    current = _root_stat(root, label=label)
+        os.close(current_fd)
     if (pinned.st_dev, pinned.st_ino) != (current.st_dev, current.st_ino):
         _fail(
             "git_root_changed",
             f"{label} changed during Git receipt capture",
             paths=(root,),
         )
+
+
+def _verify_git_state_stable(
+    root_fd: int,
+    root: Path,
+    *,
+    label: str,
+    head: str,
+    status_bytes: bytes,
+) -> None:
+    status_after = _git_status_bytes(root, label=label)
+    head_after = _required_git_head(root, label=label)
+    _git_root_still_bound(root_fd, root, label=label)
     if head_after != head:
         _fail(
             "git_head_changed",
@@ -720,6 +722,42 @@ def _capture_git_dirt(root: Path, *, label: str) -> GitDirtReceipt:
             f"{label} status changed during Git receipt capture",
             paths=(root,),
         )
+
+
+def _capture_git_dirt(root: Path, *, label: str) -> GitDirtReceipt:
+    root = Path(root)
+    root_fd = _open_absolute_directory(root, create=False)
+    try:
+        head = _required_git_head(root, label=label)
+        status_bytes = _git_status_bytes(root, label=label)
+        content_manifest_bytes, entry_count = _git_dirt_manifest(
+            root_fd,
+            root,
+            status_bytes,
+        )
+        verified_manifest_bytes, verified_entry_count = _git_dirt_manifest(
+            root_fd,
+            root,
+            status_bytes,
+        )
+        _verify_git_state_stable(
+            root_fd,
+            root,
+            label=label,
+            head=head,
+            status_bytes=status_bytes,
+        )
+        if (
+            verified_entry_count != entry_count
+            or verified_manifest_bytes != content_manifest_bytes
+        ):
+            _fail(
+                "git_dirt_content_changed",
+                f"{label} content changed during Git receipt capture",
+                paths=(root,),
+            )
+    finally:
+        os.close(root_fd)
     return GitDirtReceipt(
         root=str(root),
         head=head,
@@ -733,19 +771,32 @@ def _capture_git_dirt(root: Path, *, label: str) -> GitDirtReceipt:
 
 def verify_git_root_clean(root: Path, *, label: str) -> GitWorktreeReceipt:
     """Return a receipt for one exact Git root, rejecting all visible dirt."""
-    receipt = _capture_git_dirt(root, label=label)
-    if receipt.status_bytes:
+    root = Path(root)
+    root_fd = _open_absolute_directory(root, create=False)
+    try:
+        head = _required_git_head(root, label=label)
+        status_bytes = _git_status_bytes(root, label=label)
+        _verify_git_state_stable(
+            root_fd,
+            root,
+            label=label,
+            head=head,
+            status_bytes=status_bytes,
+        )
+    finally:
+        os.close(root_fd)
+    if status_bytes:
         prefix = label.removesuffix("_root")
         _fail(
             f"{prefix}_worktree_dirty",
             f"{label} has tracked, staged, or untracked changes",
-            paths=(Path(root),),
+            paths=(root,),
         )
     return GitWorktreeReceipt(
-        root=receipt.root,
-        head=receipt.head,
-        status_bytes=receipt.status_bytes,
-        status_sha256=receipt.status_sha256,
+        root=str(root),
+        head=head,
+        status_bytes=status_bytes,
+        status_sha256=hashlib.sha256(status_bytes).hexdigest(),
     )
 
 
@@ -767,14 +818,14 @@ _GIT_DIRT_MANIFEST_KEYS = {
 def _validated_git_dirt_manifest(
     manifest_bytes: bytes,
     status_entries: list[tuple[bytes, str]],
-) -> dict[str, dict]:
+) -> list[dict]:
     try:
         rows = json.loads(manifest_bytes)
     except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
         _fail("git_dirt_receipt_invalid", f"invalid content manifest: {exc}")
     if not isinstance(rows, list):
         _fail("git_dirt_receipt_invalid", "content manifest must be an array")
-    by_path: dict[str, dict] = {}
+    validated: list[dict] = []
     for row in rows:
         if not isinstance(row, dict) or set(row) != _GIT_DIRT_MANIFEST_KEYS:
             _fail("git_dirt_receipt_invalid", "content manifest row shape is invalid")
@@ -784,8 +835,6 @@ def _validated_git_dirt_manifest(
         if not isinstance(path, str):
             _fail("git_dirt_receipt_invalid", "content manifest path is invalid")
         _git_dirt_path(os.fsencode(path))
-        if path in by_path:
-            _fail("git_dirt_receipt_invalid", f"duplicate manifest path: {path!r}")
         if not isinstance(status_code, str) or len(status_code) != 2:
             _fail("git_dirt_receipt_invalid", f"invalid status for {path!r}")
         if entry_type not in {"regular", "symlink", "missing"}:
@@ -809,16 +858,20 @@ def _validated_git_dirt_manifest(
             )
         if not valid_metadata:
             _fail("git_dirt_receipt_invalid", f"invalid metadata for {path!r}")
-        by_path[path] = row
-    expected_status = {
-        os.fsdecode(raw_path): status_code
+        validated.append(row)
+    expected_status = Counter(
+        (os.fsdecode(raw_path), status_code)
         for raw_path, status_code in status_entries
-    }
-    if {path: row["status"] for path, row in by_path.items()} != expected_status:
+    )
+    actual_status = Counter(
+        (row["path"], row["status"])
+        for row in validated
+    )
+    if actual_status != expected_status:
         _fail("git_dirt_receipt_invalid", "status and content manifest disagree")
     canonical = (
         json.dumps(
-            sorted(rows, key=lambda row: row["path"]),
+            sorted(rows, key=lambda row: (row["path"], row["status"])),
             ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),
@@ -827,7 +880,18 @@ def _validated_git_dirt_manifest(
     ).encode("utf-8")
     if canonical != manifest_bytes:
         _fail("git_dirt_receipt_invalid", "content manifest is not canonical")
-    return by_path
+    return validated
+
+
+def _git_dirt_row_key(row: dict) -> tuple:
+    return (
+        row["path"],
+        row["status"],
+        row["type"],
+        row["mode"],
+        row["size"],
+        row["content_sha256"],
+    )
 
 
 def verify_git_dirt_preserved(
@@ -853,35 +917,50 @@ def verify_git_dirt_preserved(
 
     current = _capture_git_dirt(Path(root), label=label)
     current_entries = _parse_git_status(current.status_bytes)
-    current_status = {
-        os.fsdecode(raw_path): status_code
+    current_status = Counter(
+        (os.fsdecode(raw_path), status_code)
         for raw_path, status_code in current_entries
-    }
-    baseline_status = {
-        os.fsdecode(raw_path): status_code
+    )
+    baseline_status = Counter(
+        (os.fsdecode(raw_path), status_code)
         for raw_path, status_code in baseline_entries
+    )
+    baseline_paths = {path for path, _ in baseline_status}
+    for occurrence, count in baseline_status.items():
+        if current_status[occurrence] < count:
+            path, _ = occurrence
+            _fail(
+                "git_dirt_status_changed",
+                f"{label} baseline status changed for {path!r}",
+                paths=(Path(root) / path,),
+            )
+    added_status = current_status - baseline_status
+    changed_baseline_paths = {
+        path for path, _ in added_status if path in baseline_paths
     }
-    unexpected = set(current_status) - set(baseline_status) - allowed
+    if changed_baseline_paths:
+        path = sorted(changed_baseline_paths)[0]
+        _fail(
+            "git_dirt_status_changed",
+            f"{label} baseline status changed for {path!r}",
+            paths=(Path(root) / path,),
+        )
+    unexpected = {
+        path for path, _ in added_status
+        if path not in allowed
+    }
     if unexpected:
         _fail(
             "git_dirt_unexpected_path",
             f"{label} has unexpected dirt paths: {sorted(unexpected)!r}",
             paths=tuple(Path(root) / value for value in sorted(unexpected)),
         )
-    for path, status_code in baseline_status.items():
-        if current_status.get(path) != status_code:
-            _fail(
-                "git_dirt_status_changed",
-                f"{label} baseline status changed for {path!r}",
-                paths=(Path(root) / path,),
-            )
-
-    current_rows = {
-        row["path"]: row
-        for row in json.loads(current.content_manifest_bytes)
-    }
-    for path, baseline_row in baseline_rows.items():
-        if current_rows.get(path) != baseline_row:
+    current_rows = json.loads(current.content_manifest_bytes)
+    baseline_content = Counter(_git_dirt_row_key(row) for row in baseline_rows)
+    current_content = Counter(_git_dirt_row_key(row) for row in current_rows)
+    for row_key, count in baseline_content.items():
+        if current_content[row_key] < count:
+            path = row_key[0]
             _fail(
                 "git_dirt_content_changed",
                 f"{label} baseline content changed for {path!r}",
