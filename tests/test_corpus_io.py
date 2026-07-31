@@ -32,7 +32,11 @@ from project_brain.mutation import (
 from project_brain.store import BrainStore
 from project_brain.transaction_receipt import BatchBinding, batch_intent_id
 from tests.test_ingest import candidate_term, context
-from tests.test_mutation import _code_locator
+from tests.test_mutation import (
+    _canonical_repair_binding,
+    _code_locator,
+    _mapping_repair_request,
+)
 
 
 FAILURE_POINTS = (
@@ -278,6 +282,141 @@ def test_low_level_api_exposes_exact_journal_states_and_fsyncs(tmp_path):
     fsync_directory(brain_root)
     with corpus_lock(brain_root, exclusive=False):
         assert (brain_root / ".brain-local" / "corpus.lock").is_file()
+
+
+def test_manifest_always_contains_canonical_repair_binding(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+
+    planned = MutationService().plan(
+        (after,),
+        request=_request(brain_root, (after,)),
+    )
+
+    assert planned.ok and planned.manifest is not None
+    assert "canonical_repair_binding" in asdict(planned.manifest)
+    assert planned.manifest.canonical_repair_binding is None
+
+
+@pytest.mark.parametrize(
+    ("operation", "binding"),
+    (
+        (
+            "canonical_repair",
+            {
+                "decision_ledger_sha256": "a" * 64,
+                "unexpected": "b" * 64,
+            },
+        ),
+        (
+            "canonical_repair",
+            {
+                "decision_ledger_sha256": "A" * 64,
+                "phase_a_classification_sha256": "b" * 64,
+            },
+        ),
+        ("ingest", _canonical_repair_binding()),
+        ("canonical_repair", None),
+    ),
+)
+def test_invalid_canonical_repair_binding_is_rejected_before_journal_publish(
+    tmp_path,
+    operation,
+    binding,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    planned = MutationService().plan(
+        (after,),
+        request=_request(brain_root, (after,)),
+    )
+    assert planned.ok and planned.manifest is not None
+    manifest = asdict(planned.manifest)
+    manifest["operation"] = operation
+    manifest["canonical_repair_binding"] = binding
+    after_path = planned.manifest.updates[0]["path"]
+
+    with pytest.raises(ValueError, match="canonical_repair_binding"):
+        apply_transaction(
+            brain_root,
+            manifest=manifest,
+            after_files={after_path: BrainStore.object_bytes(after)},
+        )
+
+    transactions = brain_root / ".brain-local" / "transactions"
+    assert not transactions.exists() or not tuple(
+        transactions.rglob("journal.json")
+    )
+
+
+def test_manifest_missing_canonical_repair_binding_is_rejected_before_publish(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    planned = MutationService().plan(
+        (after,),
+        request=_request(brain_root, (after,)),
+    )
+    assert planned.ok and planned.manifest is not None
+    manifest = asdict(planned.manifest)
+    manifest.pop("canonical_repair_binding")
+
+    with pytest.raises(ValueError, match="manifest keys"):
+        apply_transaction(brain_root, manifest=manifest, after_files={})
+
+    transactions = brain_root / ".brain-local" / "transactions"
+    assert not transactions.exists() or not tuple(
+        transactions.rglob("journal.json")
+    )
+
+
+def test_direct_canonical_repair_apply_revalidates_current_source(tmp_path):
+    request = _mapping_repair_request(tmp_path)
+    initially_valid = MutationService().plan(
+        request.objects,
+        request=request,
+    )
+    assert initially_valid.ok is True
+    current_source = BrainStore.load(request.brain_root).get(
+        request.delete_ids[0]
+    )
+    current_source["title"] = "concurrent drift"
+    _write_object(request.brain_root, current_source)
+
+    result = MutationService().apply(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+    store = BrainStore.load(request.brain_root)
+    assert store.get(current_source["id"]) == current_source
+    assert not store.has(request.objects[0]["id"])
+
+
+@pytest.mark.parametrize("failure_point", FAILURE_POINTS)
+def test_canonical_repair_rolls_back_every_transaction_failure_point(
+    tmp_path,
+    failure_point,
+):
+    request = _mapping_repair_request(tmp_path)
+    _seed_derived_files(request.brain_root)
+    before_fingerprint = _state_fingerprint(request.brain_root)
+
+    with pytest.raises(InjectedCrash, match=failure_point):
+        MutationService().apply(
+            request.objects,
+            request=request,
+            failure_injector=_crash_at(failure_point),
+        )
+
+    recovery_request = _request(request.brain_root, ())
+    assert MutationService().apply((), request=recovery_request).ok is True
+    assert _state_fingerprint(request.brain_root) == before_fingerprint
+    store = BrainStore.load(request.brain_root)
+    assert store.has(request.delete_ids[0])
+    assert not store.has(request.objects[0]["id"])
 
 
 def test_batch_intent_identity_binds_key_even_when_input_bytes_match(tmp_path):

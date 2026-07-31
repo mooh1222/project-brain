@@ -67,6 +67,22 @@ class MutationOperation(StrEnum):
     CONTEXT_REPLACE = "context_replace"
     ID_ONLY_MIGRATION = "id_only_migration"
     DISPLAY_MIGRATION = "display_migration"
+    CANONICAL_REPAIR = "canonical_repair"
+
+
+@dataclass(frozen=True)
+class CanonicalFieldChange:
+    pointer: str
+    before: object
+    after: object
+
+
+@dataclass(frozen=True)
+class CanonicalRepairIntent:
+    source_id: str
+    new_id: str
+    reason_code: str
+    field_changes: tuple[CanonicalFieldChange, ...]
 
 
 @dataclass(frozen=True)
@@ -90,6 +106,8 @@ class MutationRequest:
     expected_corpus_fingerprint: str | None = None
     auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = ()
     batch_binding: BatchBinding | None = None
+    canonical_repair_intents: tuple[CanonicalRepairIntent, ...] = ()
+    canonical_repair_binding: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +126,7 @@ class MutationManifest:
     grandfathered_problems_before: tuple[dict, ...]
     grandfathered_problems_after: tuple[dict, ...]
     batch_binding: dict[str, object] | None
+    canonical_repair_binding: dict[str, object] | None
 
 
 @dataclass(frozen=True)
@@ -257,6 +276,16 @@ class MutationService:
         if auxiliary_error is not None:
             return auxiliary_error
 
+        if request.operation is MutationOperation.CANONICAL_REPAIR:
+            canonical_error = _validate_canonical_repair_request(
+                request,
+                existing_by_id=existing_by_id,
+                input_by_id=input_by_id,
+                rename_pairs=tuple(sorted(request.renames.items())),
+            )
+            if canonical_error is not None:
+                return canonical_error
+
         # 3) schema와 enum.
         for obj in inputs:
             errors = validate_mutation_input_schema(obj)
@@ -279,7 +308,18 @@ class MutationService:
                 )
                 if (
                     previous is None
-                    or _stable_object_hash(previous) != _stable_object_hash(obj)
+                    or (
+                        _stable_object_hash(previous) != _stable_object_hash(obj)
+                        and not (
+                            request.operation
+                            is MutationOperation.CANONICAL_REPAIR
+                            and _canonical_repair_objects_equivalent(
+                                previous,
+                                obj,
+                                request.renames,
+                            )
+                        )
+                    )
                     or validate_object_id(previous) != id_errors
                 ):
                     return _failure(
@@ -520,6 +560,11 @@ class MutationService:
         before_grandfathered = _grandfathered_problems(
             before_report,
             existing_by_id,
+            replacements=(
+                dict(rename_pairs)
+                if request.operation is MutationOperation.CANONICAL_REPAIR
+                else None
+            ),
         )
         before_keys = {_grandfather_key(item) for item in before_grandfathered}
         after_report = lint_store_report(merged_store)
@@ -894,6 +939,74 @@ def _validate_request_shape(
             raise ValueError(
                 "expected_corpus_fingerprint must be None or a non-empty string"
             )
+        if (
+            not isinstance(request.canonical_repair_intents, tuple)
+            or not all(
+                isinstance(intent, CanonicalRepairIntent)
+                and isinstance(intent.source_id, str)
+                and isinstance(intent.new_id, str)
+                and isinstance(intent.reason_code, str)
+                and isinstance(intent.field_changes, tuple)
+                and all(
+                    isinstance(change, CanonicalFieldChange)
+                    and isinstance(change.pointer, str)
+                    for change in intent.field_changes
+                )
+                for intent in request.canonical_repair_intents
+            )
+        ):
+            raise ValueError(
+                "canonical_repair_intents must be "
+                "tuple[CanonicalRepairIntent, ...]"
+            )
+        if (
+            request.canonical_repair_binding is not None
+            and (
+                not isinstance(request.canonical_repair_binding, Mapping)
+                or set(request.canonical_repair_binding) != {
+                    "decision_ledger_sha256",
+                    "phase_a_classification_sha256",
+                }
+                or not all(
+                    isinstance(value, str)
+                    and _SHA256.fullmatch(value) is not None
+                    for value in request.canonical_repair_binding.values()
+                )
+            )
+        ):
+            raise ValueError("canonical_repair_binding is invalid")
+        if (
+            request.canonical_repair_intents
+            and request.operation is not MutationOperation.CANONICAL_REPAIR
+        ):
+            return None, _failure(
+                "canonical_repair_intent_operation_invalid",
+                "canonical repair intents require canonical_repair operation",
+            )
+        if (
+            request.operation is MutationOperation.CANONICAL_REPAIR
+            and not request.canonical_repair_intents
+        ):
+            return None, _failure(
+                "canonical_repair_intent_required",
+                "canonical_repair requires at least one repair intent",
+            )
+        if (
+            request.canonical_repair_binding is not None
+            and request.operation is not MutationOperation.CANONICAL_REPAIR
+        ):
+            return None, _failure(
+                "canonical_repair_binding_operation_invalid",
+                "canonical repair binding requires canonical_repair operation",
+            )
+        if (
+            request.operation is MutationOperation.CANONICAL_REPAIR
+            and request.canonical_repair_binding is None
+        ):
+            return None, _failure(
+                "canonical_repair_binding_required",
+                "canonical_repair requires a binding",
+            )
         binding = normalize_batch_binding(request.batch_binding)
         if binding is not None:
             if request.operation is not MutationOperation.INGEST:
@@ -1016,7 +1129,10 @@ def _validate_explicit_renames(
     pairs = tuple(sorted(request.renames.items()))
     if not pairs:
         return (), None
-    if request.operation is not MutationOperation.CONTEXT_REPLACE:
+    if request.operation not in {
+        MutationOperation.CONTEXT_REPLACE,
+        MutationOperation.CANONICAL_REPAIR,
+    }:
         return (), _failure(
             "explicit_rename_operation_invalid",
             "explicit renames are allowed only for context_replace",
@@ -1060,6 +1176,243 @@ def _validate_explicit_renames(
                 f"{new_id}: rename target must be a newly created object",
             )
     return pairs, None
+
+
+def _replace_exact_pointer(
+    obj: dict,
+    pointer: str,
+    *,
+    before: object,
+    after: object,
+) -> None:
+    if (
+        not pointer.startswith("/")
+        or pointer == "/"
+        or "/" in pointer[1:]
+        or "~" in pointer
+    ):
+        raise ValueError(f"unsupported canonical repair pointer: {pointer!r}")
+    key = pointer[1:]
+    if key not in obj or obj[key] != before:
+        raise ValueError(f"canonical repair before mismatch at {pointer}")
+    obj[key] = after
+
+
+def _validate_canonical_repair_request(
+    request: MutationRequest,
+    *,
+    existing_by_id: Mapping[str, dict],
+    input_by_id: Mapping[str, dict],
+    rename_pairs: tuple[tuple[str, str], ...],
+) -> MutationPlanResult | None:
+    intents = request.canonical_repair_intents
+    sources = [intent.source_id for intent in intents]
+    targets = [intent.new_id for intent in intents]
+    if len(set(sources)) != len(sources) or len(set(targets)) != len(targets):
+        return _failure(
+            "canonical_repair_intent_duplicate",
+            "canonical repair intent source and target IDs must be one-to-one",
+        )
+
+    intent_pairs = tuple(sorted(zip(sources, targets, strict=True)))
+    if rename_pairs != intent_pairs:
+        return _failure(
+            "canonical_repair_intent_mismatch",
+            "canonical repair intents must exactly cover explicit renames",
+        )
+    if set(request.delete_ids) != set(sources):
+        return _failure(
+            "canonical_repair_intent_mismatch",
+            "canonical repair deletes must exactly match intent sources",
+        )
+    created_ids = set(input_by_id) - set(existing_by_id)
+    if created_ids != set(targets):
+        return _failure(
+            "canonical_repair_intent_mismatch",
+            "canonical repair creates must exactly match intent targets",
+        )
+
+    replacements = dict(rename_pairs)
+    for intent in intents:
+        before = existing_by_id.get(intent.source_id)
+        after = input_by_id.get(intent.new_id)
+        if before is None or after is None or intent.new_id in existing_by_id:
+            return _failure(
+                "canonical_repair_intent_mismatch",
+                f"{intent.source_id}: repair requires source-delete/new-create",
+            )
+        if intent.source_id == intent.new_id:
+            return _failure(
+                "canonical_repair_intent_mismatch",
+                f"{intent.source_id}: repair source and target must differ",
+            )
+        if intent.reason_code not in {
+            "projected_field_repair",
+            "review_shape_repair",
+        }:
+            return _failure(
+                "canonical_repair_reason_invalid",
+                f"{intent.source_id}: unsupported canonical repair reason",
+            )
+        if intent.reason_code == "projected_field_repair":
+            if (
+                before.get("kind") != "DomainMapping"
+                or after.get("kind") != "DomainMapping"
+                or len(intent.field_changes) != 1
+                or intent.field_changes[0].pointer != "/mapping_key"
+            ):
+                return _failure(
+                    "canonical_repair_payload_changed",
+                    intent.source_id,
+                )
+            try:
+                parsed_new = parse_id(intent.new_id, "DomainMapping")
+            except IdGrammarError:
+                return _failure(
+                    "canonical_repair_payload_changed",
+                    intent.source_id,
+                )
+            if intent.field_changes[0].after != parsed_new.key:
+                return _failure(
+                    "canonical_repair_payload_changed",
+                    intent.source_id,
+                )
+        else:
+            review_error = _validate_canonical_review_shape(
+                intent,
+                before=before,
+                after=after,
+                existing_by_id=existing_by_id,
+                input_by_id=input_by_id,
+                replacements=replacements,
+            )
+            if review_error is not None:
+                return review_error
+
+        expected, _ = rewrite_object_refs(before, replacements)
+        expected["id"] = intent.new_id
+        try:
+            for change in intent.field_changes:
+                _replace_exact_pointer(
+                    expected,
+                    change.pointer,
+                    before=change.before,
+                    after=change.after,
+                )
+        except ValueError:
+            return _failure(
+                "canonical_repair_payload_changed",
+                intent.source_id,
+            )
+        if expected != after:
+            return _failure(
+                "canonical_repair_payload_changed",
+                intent.source_id,
+            )
+
+    for object_id in sorted(set(existing_by_id) & set(input_by_id)):
+        expected, _ = rewrite_object_refs(
+            existing_by_id[object_id],
+            replacements,
+        )
+        if expected != input_by_id[object_id]:
+            return _failure(
+                "canonical_repair_payload_changed",
+                object_id,
+            )
+    return None
+
+
+def _validate_canonical_review_shape(
+    intent: CanonicalRepairIntent,
+    *,
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    existing_by_id: Mapping[str, dict],
+    input_by_id: Mapping[str, dict],
+    replacements: Mapping[str, str],
+) -> MutationPlanResult | None:
+    if (
+        before.get("kind") != "ReviewRecord"
+        or after.get("kind") != "ReviewRecord"
+        or len(intent.field_changes) != 1
+        or intent.field_changes[0].pointer != "/target_object_ids"
+    ):
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+    for field_name in (
+        "review_scope",
+        "bundle_key",
+        "confirmation_key",
+        "review_type",
+    ):
+        if before.get(field_name) != after.get(field_name):
+            return _failure(
+                "canonical_repair_payload_changed",
+                intent.source_id,
+            )
+    bundle_key = before.get("bundle_key")
+    if not isinstance(bundle_key, str):
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+    try:
+        parsed_review = parse_id(intent.new_id, "ReviewRecord")
+    except IdGrammarError:
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+    if (
+        parsed_review.variant != "bundle"
+        or parsed_review.bundle_key != bundle_key
+        or intent.new_id != f"review.{bundle_key}"
+        or before.get("review_scope") != "mapping_bundle"
+        or before.get("confirmation_key") != bundle_key
+    ):
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+
+    before_targets = before.get("target_object_ids")
+    after_targets = after.get("target_object_ids")
+    if (
+        not isinstance(before_targets, list)
+        or not all(isinstance(target, str) for target in before_targets)
+        or not isinstance(after_targets, list)
+        or not after_targets
+        or not all(isinstance(target, str) for target in after_targets)
+    ):
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+
+    preserved: list[str] = []
+    for target in before_targets:
+        mapped_target = replacements.get(target, target)
+        target_obj = existing_by_id.get(target)
+        if target_obj is not None and target_obj.get("kind") == "DomainMapping":
+            mapped_obj = input_by_id.get(mapped_target) or existing_by_id.get(
+                mapped_target
+            )
+            try:
+                parsed_target = parse_id(mapped_target, "DomainMapping")
+            except IdGrammarError:
+                return _failure(
+                    "canonical_repair_payload_changed",
+                    intent.source_id,
+                )
+            if (
+                mapped_obj is None
+                or mapped_obj.get("kind") != "DomainMapping"
+                or validate_object_id(mapped_obj)
+                or parsed_target.ctx != parsed_review.ctx
+            ):
+                return _failure(
+                    "canonical_repair_payload_changed",
+                    intent.source_id,
+                )
+            preserved.append(mapped_target)
+            continue
+        try:
+            parse_id(target, "DomainMapping")
+        except IdGrammarError:
+            continue
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+
+    if not preserved or after_targets != preserved:
+        return _failure("canonical_repair_payload_changed", intent.source_id)
+    return None
 
 
 def is_target_derived_single_review_rename(
@@ -1230,9 +1583,16 @@ def _id_only_shape(obj: Mapping[str, object]) -> dict:
 def _problem_object_hash(
     problem: LintProblem,
     objects: Mapping[str, Mapping[str, object]],
+    *,
+    replacements: Mapping[str, str] | None = None,
 ) -> str:
     serialized = [
-        stable_json(dict(objects[object_id]))
+        stable_json(
+            _canonical_repair_comparison_shape(
+                objects[object_id],
+                replacements,
+            )
+        )
         for object_id in sorted(problem.object_ids)
         if object_id in objects
     ]
@@ -1242,22 +1602,55 @@ def _problem_object_hash(
 def _grandfathered_problem(
     problem: LintProblem,
     objects: Mapping[str, Mapping[str, object]],
+    *,
+    replacements: Mapping[str, str] | None = None,
 ) -> dict:
     return {
         "object_id": problem.object_ids[0] if len(problem.object_ids) == 1 else None,
         "problem": problem.message,
-        "object_hash": _problem_object_hash(problem, objects),
+        "object_hash": _problem_object_hash(
+            problem,
+            objects,
+            replacements=replacements,
+        ),
     }
 
 
 def _grandfathered_problems(
     report: Sequence[LintProblem],
     objects: Mapping[str, Mapping[str, object]],
+    *,
+    replacements: Mapping[str, str] | None = None,
 ) -> tuple[dict, ...]:
     return tuple(
-        _grandfathered_problem(problem, objects)
+        _grandfathered_problem(
+            problem,
+            objects,
+            replacements=replacements,
+        )
         for problem in report
         if problem.code in _STRUCTURED_ID_LINT_CODES
+    )
+
+
+def _canonical_repair_comparison_shape(
+    obj: Mapping[str, object],
+    replacements: Mapping[str, str] | None,
+) -> dict:
+    if not replacements:
+        return dict(obj)
+    rewritten, _ = rewrite_object_refs(obj, replacements)
+    return rewritten
+
+
+def _canonical_repair_objects_equivalent(
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    replacements: Mapping[str, str],
+) -> bool:
+    return (
+        _canonical_repair_comparison_shape(before, replacements)
+        == dict(after)
     )
 
 
@@ -1425,6 +1818,11 @@ def _build_manifest(
         )
     )
     batch_binding = batch_binding_dict(request.batch_binding)
+    canonical_repair_binding = (
+        dict(request.canonical_repair_binding)
+        if request.canonical_repair_binding is not None
+        else None
+    )
     seed = {
         "operation": request.operation.value,
         "engine_sha": request.engine_sha,
@@ -1439,6 +1837,7 @@ def _build_manifest(
         "grandfathered_problems_before": before_grandfathered,
         "grandfathered_problems_after": after_grandfathered,
         "batch_binding": batch_binding,
+        "canonical_repair_binding": canonical_repair_binding,
     }
     transaction_id = hashlib.sha256(
         json.dumps(
@@ -1463,6 +1862,7 @@ def _build_manifest(
         grandfathered_problems_before=before_grandfathered,
         grandfathered_problems_after=after_grandfathered,
         batch_binding=batch_binding,
+        canonical_repair_binding=canonical_repair_binding,
     )
 
 

@@ -94,6 +94,7 @@ _MUTATION_OPERATIONS = {
     "context_replace",
     "id_only_migration",
     "display_migration",
+    "canonical_repair",
 }
 
 
@@ -2962,6 +2963,7 @@ def _validate_manifest_model(
         "grandfathered_problems_before",
         "grandfathered_problems_after",
         "batch_binding",
+        "canonical_repair_binding",
     }
     if set(manifest) != required:
         raise ValueError("manifest keys do not match the contract")
@@ -2989,6 +2991,26 @@ def _validate_manifest_model(
             raise ValueError("manifest batch_binding requires ingest operation")
         if batch_binding.engine_sha != manifest.get("engine_sha"):
             raise ValueError("manifest batch_binding engine_sha mismatch")
+    canonical_repair_binding = manifest.get("canonical_repair_binding")
+    if manifest.get("operation") == "canonical_repair":
+        if (
+            not isinstance(canonical_repair_binding, Mapping)
+            or set(canonical_repair_binding) != {
+                "decision_ledger_sha256",
+                "phase_a_classification_sha256",
+            }
+            or not all(
+                _is_sha256(value)
+                for value in canonical_repair_binding.values()
+            )
+        ):
+            raise ValueError(
+                "manifest canonical_repair_binding is invalid"
+            )
+    elif canonical_repair_binding is not None:
+        raise ValueError(
+            "manifest canonical_repair_binding requires canonical_repair operation"
+        )
     for field_name in (
         "grandfathered_problems_before",
         "grandfathered_problems_after",

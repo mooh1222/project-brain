@@ -58,6 +58,8 @@ def _request(
     expected_corpus_fingerprint: str | None = None,
     auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = (),
     batch_binding: BatchBinding | None = None,
+    canonical_repair_intents: tuple[object, ...] = (),
+    canonical_repair_binding: dict[str, str] | None = None,
 ) -> MutationRequest:
     return MutationRequest(
         operation=operation,
@@ -71,6 +73,8 @@ def _request(
         expected_corpus_fingerprint=expected_corpus_fingerprint,
         auxiliary_updates=auxiliary_updates,
         batch_binding=batch_binding,
+        canonical_repair_intents=canonical_repair_intents,
+        canonical_repair_binding=canonical_repair_binding,
     )
 
 
@@ -111,6 +115,141 @@ def _file_update(path: str, before: bytes, after: bytes) -> AuxiliaryFileUpdate:
 
 def _problem_object_hash(obj: dict) -> str:
     return hashlib.sha256(stable_json(obj).encode("utf-8")).hexdigest()
+
+
+def _canonical_repair_binding() -> dict[str, str]:
+    return {
+        "decision_ledger_sha256": "a" * 64,
+        "phase_a_classification_sha256": "b" * 64,
+    }
+
+
+def _mapping_repair_request(
+    tmp_path: Path,
+    *,
+    operation=None,
+    tamper_field: str | None = None,
+) -> MutationRequest:
+    brain_root = tmp_path / "brain"
+    old = candidate_mapping(
+        "mapping.neutral.Legacy",
+        glossary_term_ids=["g.neutral.term"],
+        mapping_key="Legacy",
+    )
+    new = dict(old)
+    new["id"] = "mapping.neutral.legacy"
+    new["mapping_key"] = "legacy"
+    if tamper_field is not None:
+        new[tamper_field] = f"changed-{tamper_field}"
+    for obj in (context(), candidate_term("g.neutral.term"), old):
+        _write_raw(brain_root, obj)
+    change = mutation.CanonicalFieldChange(
+        pointer="/mapping_key",
+        before="Legacy",
+        after="legacy",
+    )
+    intent = mutation.CanonicalRepairIntent(
+        source_id=old["id"],
+        new_id=new["id"],
+        reason_code="projected_field_repair",
+        field_changes=(change,),
+    )
+    return _request(
+        brain_root,
+        (new,),
+        operation=operation or MutationOperation.CANONICAL_REPAIR,
+        delete_ids=(old["id"],),
+        renames={old["id"]: new["id"]},
+        canonical_repair_intents=(intent,),
+        canonical_repair_binding=_canonical_repair_binding(),
+    )
+
+
+def _mixed_review_repair_request(
+    tmp_path: Path,
+    *,
+    tamper: str | None = None,
+) -> MutationRequest:
+    request = _mapping_repair_request(tmp_path)
+    old_mapping = BrainStore.load(request.brain_root).get(
+        request.delete_ids[0]
+    )
+    new_mapping = request.objects[0]
+    stable_mapping = candidate_mapping(
+        "mapping.neutral.stable",
+        glossary_term_ids=["g.neutral.term"],
+        mapping_key="stable",
+    )
+    _write_raw(request.brain_root, stable_mapping)
+
+    old_review = review_record_for(
+        "review.bundle.Neutral.domain-mapping",
+        old_mapping["id"],
+    )
+    old_review.pop("target_object_id")
+    old_review.update({
+        "review_scope": "mapping_bundle",
+        "review_type": "meaning_review",
+        "bundle_key": "bundle.neutral.domain-mapping",
+        "confirmation_key": "bundle.neutral.domain-mapping",
+        "target_object_ids": [
+            old_mapping["id"],
+            stable_mapping["id"],
+            "g.neutral.term",
+        ],
+    })
+    _write_raw(request.brain_root, old_review)
+    new_review = dict(old_review)
+    new_review["id"] = "review.bundle.neutral.domain-mapping"
+    new_review["target_object_ids"] = [
+        new_mapping["id"],
+        stable_mapping["id"],
+    ]
+    if tamper == "add_target":
+        new_review["target_object_ids"].append(stable_mapping["id"])
+    elif tamper == "drop_mapping":
+        new_review["target_object_ids"].pop()
+    elif tamper == "change_scope":
+        new_review["review_scope"] = "single_object"
+    elif tamper == "change_bundle_key":
+        new_review["bundle_key"] = "bundle.neutral.other"
+    elif tamper == "replace_target":
+        replacement = candidate_mapping(
+            "mapping.neutral.replacement",
+            glossary_term_ids=["g.neutral.term"],
+            mapping_key="replacement",
+        )
+        _write_raw(request.brain_root, replacement)
+        new_review["target_object_ids"][1] = replacement["id"]
+    elif tamper == "reorder":
+        new_review["target_object_ids"].reverse()
+
+    mapping_intent = request.canonical_repair_intents[0]
+    review_change = mutation.CanonicalFieldChange(
+        pointer="/target_object_ids",
+        before=[
+            new_mapping["id"],
+            stable_mapping["id"],
+            "g.neutral.term",
+        ],
+        after=[new_mapping["id"], stable_mapping["id"]],
+    )
+    review_intent = mutation.CanonicalRepairIntent(
+        source_id=old_review["id"],
+        new_id=new_review["id"],
+        reason_code="review_shape_repair",
+        field_changes=(review_change,),
+    )
+    return replace(
+        request,
+        objects=(new_mapping, new_review),
+        delete_ids=(old_mapping["id"], old_review["id"]),
+        renames={
+            old_mapping["id"]: new_mapping["id"],
+            old_review["id"]: new_review["id"],
+        },
+        canonical_repair_intents=(mapping_intent, review_intent),
+    )
 
 
 def _legacy_invalid_context(*, title: str = "legacy") -> dict:
@@ -247,6 +386,8 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "expected_corpus_fingerprint",
         "auxiliary_updates",
         "batch_binding",
+        "canonical_repair_intents",
+        "canonical_repair_binding",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
@@ -263,6 +404,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "grandfathered_problems_before",
         "grandfathered_problems_after",
         "batch_binding",
+        "canonical_repair_binding",
     ]
     assert {operation.value for operation in MutationOperation} == {
         "ingest",
@@ -274,7 +416,61 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "context_replace",
         "id_only_migration",
         "display_migration",
+        "canonical_repair",
     }
+
+
+def test_canonical_repair_operation_and_manifest_binding_are_registered():
+    assert MutationOperation.CANONICAL_REPAIR.value == "canonical_repair"
+    assert "canonical_repair_binding" in {
+        field.name for field in fields(MutationManifest)
+    }
+
+
+def test_canonical_intent_is_rejected_for_ingest(tmp_path):
+    request = _mapping_repair_request(
+        tmp_path,
+        operation=MutationOperation.INGEST,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_intent_operation_invalid"
+
+
+def test_canonical_repair_requires_intent_and_binding_before_store_load(tmp_path):
+    brain_root = tmp_path / "brain"
+    broken = brain_root / "objects" / "domain" / "broken.json"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("{", encoding="utf-8")
+    no_intent = _request(
+        brain_root,
+        (),
+        operation=MutationOperation.CANONICAL_REPAIR,
+        canonical_repair_binding=_canonical_repair_binding(),
+    )
+
+    result = MutationService().plan((), request=no_intent)
+
+    assert result.error_code == "canonical_repair_intent_required"
+
+
+def test_canonical_repair_binding_is_rejected_for_ingest_before_store_load(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    broken = brain_root / "objects" / "domain" / "broken.json"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("{", encoding="utf-8")
+    request = _request(
+        brain_root,
+        (),
+        canonical_repair_binding=_canonical_repair_binding(),
+    )
+
+    result = MutationService().plan((), request=request)
+
+    assert result.error_code == "canonical_repair_binding_operation_invalid"
 
 
 def _projection_repair_plan(
@@ -551,6 +747,11 @@ def test_second_promotion_apply_cannot_overwrite_reviewed_target_or_record(tmp_p
         "preconditions_type",
         "precondition_item",
         "expected_fingerprint",
+        "canonical_intents_type",
+        "canonical_intent_source",
+        "canonical_field_changes_type",
+        "canonical_change_pointer",
+        "canonical_binding_shape",
     ],
 )
 def test_malformed_request_is_rejected_before_store_load(tmp_path, case):
@@ -599,11 +800,221 @@ def test_malformed_request_is_rejected_before_store_load(tmp_path, case):
         request = replace(request, preconditions={"context.neutral": 7})
     elif case == "expected_fingerprint":
         request = replace(request, expected_corpus_fingerprint="")
+    elif case == "canonical_intents_type":
+        request = replace(request, canonical_repair_intents=[])
+    elif case == "canonical_intent_source":
+        intent = mutation.CanonicalRepairIntent(7, "new", "reason", ())
+        request = replace(request, canonical_repair_intents=(intent,))
+    elif case == "canonical_field_changes_type":
+        intent = mutation.CanonicalRepairIntent("old", "new", "reason", [])
+        request = replace(request, canonical_repair_intents=(intent,))
+    elif case == "canonical_change_pointer":
+        change = mutation.CanonicalFieldChange(7, "before", "after")
+        intent = mutation.CanonicalRepairIntent(
+            "old", "new", "reason", (change,)
+        )
+        request = replace(request, canonical_repair_intents=(intent,))
+    elif case == "canonical_binding_shape":
+        request = replace(
+            request,
+            canonical_repair_binding={"decision_ledger_sha256": "a" * 64},
+        )
 
     result = MutationService().plan(objects, request=request)
 
     assert result.error_code == "request_invalid"
     assert result.manifest is None
+
+
+def test_canonical_repair_allows_id_and_matching_mapping_key(tmp_path):
+    request = _mapping_repair_request(tmp_path)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    assert result.manifest.renames[0]["old_id"] == request.delete_ids[0]
+    assert (
+        result.manifest.canonical_repair_binding
+        == _canonical_repair_binding()
+    )
+
+
+@pytest.mark.parametrize("field", ["title", "meaning", "status"])
+def test_canonical_repair_rejects_unlisted_mapping_change(tmp_path, field):
+    request = _mapping_repair_request(tmp_path, tamper_field=field)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
+@pytest.mark.parametrize("mismatch", ["after", "before"])
+def test_canonical_repair_rejects_mapping_change_mismatch(tmp_path, mismatch):
+    request = _mapping_repair_request(tmp_path)
+    intent = request.canonical_repair_intents[0]
+    change = intent.field_changes[0]
+    if mismatch == "after":
+        changed = mutation.CanonicalFieldChange(
+            change.pointer,
+            change.before,
+            "other",
+        )
+    else:
+        changed = mutation.CanonicalFieldChange(
+            change.pointer,
+            "other",
+            change.after,
+        )
+    request = replace(
+        request,
+        canonical_repair_intents=(
+            replace(intent, field_changes=(changed,)),
+        ),
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
+def test_canonical_repair_rejects_mapping_key_that_differs_from_new_id(tmp_path):
+    request = _mapping_repair_request(tmp_path)
+    new = dict(request.objects[0])
+    new["mapping_key"] = "other"
+    intent = request.canonical_repair_intents[0]
+    change = replace(intent.field_changes[0], after="other")
+    request = replace(
+        request,
+        objects=(new,),
+        canonical_repair_intents=(
+            replace(intent, field_changes=(change,)),
+        ),
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
+@pytest.mark.parametrize("duplicate", ["source", "target"])
+def test_canonical_repair_rejects_duplicate_intent_endpoint(tmp_path, duplicate):
+    request = _mapping_repair_request(tmp_path)
+    first = request.canonical_repair_intents[0]
+    second = first
+    if duplicate == "target":
+        second_old = candidate_mapping(
+            "mapping.neutral.Second",
+            glossary_term_ids=["g.neutral.term"],
+            mapping_key="Second",
+        )
+        _write_raw(request.brain_root, second_old)
+        second = replace(first, source_id=second_old["id"])
+        request = replace(
+            request,
+            delete_ids=request.delete_ids + (second_old["id"],),
+            renames={
+                **request.renames,
+                second_old["id"]: first.new_id,
+            },
+        )
+    request = replace(
+        request,
+        canonical_repair_intents=(first, second),
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_intent_duplicate"
+
+
+@pytest.mark.parametrize("case", ["existing_target", "delete_only"])
+def test_canonical_repair_rejects_merge_or_delete_only(tmp_path, case):
+    request = _mapping_repair_request(tmp_path)
+    if case == "existing_target":
+        _write_raw(request.brain_root, request.objects[0])
+    else:
+        extra = candidate_term("g.neutral.extra")
+        _write_raw(request.brain_root, extra)
+        request = replace(
+            request,
+            delete_ids=request.delete_ids + (extra["id"],),
+        )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is False
+    assert result.manifest is None
+
+
+def test_canonical_repair_allows_review_target_cleanup_only(tmp_path):
+    request = _mixed_review_repair_request(tmp_path)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "add_target",
+        "drop_mapping",
+        "change_scope",
+        "change_bundle_key",
+        "replace_target",
+        "reorder",
+    ],
+)
+def test_canonical_repair_rejects_unapproved_review_shape(tmp_path, tamper):
+    request = _mixed_review_repair_request(tmp_path, tamper=tamper)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
+def test_canonical_repair_rejects_unknown_reason_code(tmp_path):
+    request = _mapping_repair_request(tmp_path)
+    intent = replace(
+        request.canonical_repair_intents[0],
+        reason_code="semantic_repair",
+    )
+    request = replace(request, canonical_repair_intents=(intent,))
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_reason_invalid"
+
+
+def test_canonical_repair_grandfathers_reference_only_invalid_object(tmp_path):
+    request = _mapping_repair_request(tmp_path)
+    old_mapping_id = request.delete_ids[0]
+    new_mapping_id = request.objects[0]["id"]
+    legacy_review = review_record_for(
+        "review.disturb-boostedbomb.depth-config",
+        old_mapping_id,
+    )
+    _write_raw(request.brain_root, legacy_review)
+    rewritten_review = dict(legacy_review)
+    rewritten_review["target_object_id"] = new_mapping_id
+    request = replace(
+        request,
+        objects=request.objects + (rewritten_review,),
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    assert result.manifest.grandfathered_problems_after
+    before_keys = {
+        (item["object_id"], item["problem"], item["object_hash"])
+        for item in result.manifest.grandfathered_problems_before
+    }
+    after_keys = {
+        (item["object_id"], item["problem"], item["object_hash"])
+        for item in result.manifest.grandfathered_problems_after
+    }
+    assert after_keys <= before_keys
 
 
 def test_context_replace_explicit_rename_is_a_real_manifest_action(tmp_path):
