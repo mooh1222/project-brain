@@ -58,6 +58,301 @@ def _git_commit(root: Path) -> str:
     ).stdout.strip()
 
 
+def _clean_git_repo(tmp_path: Path) -> tuple[Path, str]:
+    root = tmp_path / "git-repo"
+    _write(root / "tracked.txt", b"tracked\n")
+    return root, _git_commit(root)
+
+
+def _git_repo_with_dirt(tmp_path: Path, dirt: str) -> Path:
+    root, _ = _clean_git_repo(tmp_path)
+    if dirt == "tracked":
+        (root / "tracked.txt").write_bytes(b"modified\n")
+    elif dirt == "staged":
+        _write(root / "staged.txt", b"staged\n")
+        subprocess.run(["git", "-C", str(root), "add", "staged.txt"], check=True)
+    elif dirt == "untracked":
+        _write(root / "untracked.txt", b"untracked\n")
+    else:
+        raise AssertionError(f"unknown dirt fixture: {dirt}")
+    return root
+
+
+def _dirty_git_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "dirty-repo"
+    _write(root / "tracked.txt", b"tracked-before\n")
+    _write(root / "deleted.txt", b"delete-me\n")
+    _write(root / "rename-old.txt", b"rename-content\n")
+    _git_commit(root)
+
+    (root / "tracked.txt").write_bytes(b"tracked-after\n")
+    (root / "deleted.txt").unlink()
+    subprocess.run(
+        ["git", "-C", str(root), "mv", "rename-old.txt", "rename-new.txt"],
+        check=True,
+    )
+    _write(root / "staged.txt", b"staged\n")
+    subprocess.run(["git", "-C", str(root), "add", "staged.txt"], check=True)
+    _write(root / "untracked\nname.txt", b"untracked\n")
+    os.symlink(b"target-one", os.fsencode(root / "link"))
+    return root
+
+
+def _manifest_rows(receipt) -> list[dict]:
+    return json.loads(receipt.content_manifest_bytes)
+
+
+def test_verify_git_root_clean_returns_exact_head_and_empty_status(tmp_path):
+    root, head = _clean_git_repo(tmp_path)
+
+    receipt = snapshot.verify_git_root_clean(root, label="engine_root")
+
+    assert receipt.root == str(root)
+    assert receipt.head == head
+    assert receipt.status_bytes == b""
+    assert receipt.status_sha256 == hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize("dirt", ["tracked", "staged", "untracked"])
+def test_verify_git_root_clean_rejects_all_nonignored_dirt(tmp_path, dirt):
+    root = _git_repo_with_dirt(tmp_path, dirt)
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_root_clean(root, label="engine_root")
+
+    assert exc.value.code == "engine_worktree_dirty"
+
+
+def test_git_dirt_receipt_is_nul_safe_and_covers_each_status_path(tmp_path):
+    root = _dirty_git_repo(tmp_path)
+
+    receipt = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    rows = _manifest_rows(receipt)
+    by_path = {row["path"]: row for row in rows}
+
+    assert receipt.status_bytes == subprocess.run(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v1", "-z",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert receipt.status_sha256 == hashlib.sha256(receipt.status_bytes).hexdigest()
+    assert receipt.entry_count == 7
+    assert set(by_path) == {
+        "deleted.txt",
+        "link",
+        "rename-new.txt",
+        "rename-old.txt",
+        "staged.txt",
+        "tracked.txt",
+        "untracked\nname.txt",
+    }
+    assert by_path["tracked.txt"]["status"] == " M"
+    assert by_path["staged.txt"]["status"] == "A "
+    assert by_path["deleted.txt"]["status"] == " D"
+    assert by_path["rename-new.txt"]["status"] == "R "
+    assert by_path["rename-old.txt"]["status"] == "R "
+    assert by_path["deleted.txt"]["type"] == "missing"
+    assert by_path["rename-old.txt"]["type"] == "missing"
+    assert by_path["link"]["type"] == "symlink"
+    assert by_path["link"]["content_sha256"] == hashlib.sha256(
+        b"target-one"
+    ).hexdigest()
+    assert all(set(row) == {
+        "path", "status", "type", "mode", "size", "content_sha256",
+    } for row in rows)
+    assert receipt.content_manifest_bytes == (
+        json.dumps(
+            rows,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
+    ).encode("utf-8")
+    assert receipt.content_manifest_sha256 == hashlib.sha256(
+        receipt.content_manifest_bytes
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("relative", "replacement"),
+    [
+        ("tracked.txt", b"same status, other tracked bytes\n"),
+        ("staged.txt", b"staged with changed bytes\n"),
+        ("untracked\nname.txt", b"changed but still untracked\n"),
+    ],
+)
+def test_git_dirt_receipt_detects_same_status_different_file_bytes(
+    tmp_path,
+    relative,
+    replacement,
+):
+    root = _dirty_git_repo(tmp_path)
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    (root / relative).write_bytes(replacement)
+    if relative == "staged.txt":
+        subprocess.run(["git", "-C", str(root), "add", relative], check=True)
+    assert subprocess.run(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v1", "-z",
+            "--untracked-files=all",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout == baseline.status_bytes
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_dirt_preserved(
+            root,
+            baseline_status_bytes=baseline.status_bytes,
+            baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+            label="user_dirt",
+        )
+
+    assert exc.value.code == "git_dirt_content_changed"
+
+
+def test_git_dirt_receipt_detects_same_status_different_symlink_target(tmp_path):
+    root = _dirty_git_repo(tmp_path)
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    (root / "link").unlink()
+    os.symlink(b"target-two", os.fsencode(root / "link"))
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_dirt_preserved(
+            root,
+            baseline_status_bytes=baseline.status_bytes,
+            baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+            label="user_dirt",
+        )
+
+    assert exc.value.code == "git_dirt_content_changed"
+
+
+def test_git_dirt_receipt_preserves_deleted_path_as_missing(tmp_path):
+    root = _dirty_git_repo(tmp_path)
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+
+    current = snapshot.verify_git_dirt_preserved(
+        root,
+        baseline_status_bytes=baseline.status_bytes,
+        baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+        label="user_dirt",
+    )
+
+    assert current == baseline
+    deleted = next(
+        row for row in _manifest_rows(current) if row["path"] == "deleted.txt"
+    )
+    assert deleted == {
+        "path": "deleted.txt",
+        "status": " D",
+        "type": "missing",
+        "mode": None,
+        "size": None,
+        "content_sha256": None,
+    }
+
+
+def test_git_dirt_receipt_rejects_special_file(tmp_path):
+    root, _ = _clean_git_repo(tmp_path)
+    (root / "tracked.txt").unlink()
+    os.mkfifo(root / "tracked.txt")
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+
+    assert exc.value.code == "git_dirt_path_unsafe"
+
+
+@pytest.mark.parametrize("unsafe", [b"/absolute", b"../escape"])
+def test_git_dirt_verification_rejects_lexically_unsafe_status_path(
+    tmp_path,
+    unsafe,
+):
+    root, _ = _clean_git_repo(tmp_path)
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_dirt_preserved(
+            root,
+            baseline_status_bytes=b"?? " + unsafe + b"\0",
+            baseline_content_manifest_bytes=b"[]\n",
+            label="user_dirt",
+        )
+
+    assert exc.value.code == "git_dirt_path_unsafe"
+
+
+def test_git_dirt_receipt_rejects_intermediate_symlink_escape(tmp_path):
+    root = tmp_path / "git-repo"
+    outside = tmp_path / "outside"
+    _write(root / "inside" / "tracked.txt", b"tracked\n")
+    _write(outside / "tracked.txt", b"outside\n")
+    _git_commit(root)
+    shutil.rmtree(root / "inside")
+    os.symlink(outside, root / "inside")
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+
+    assert exc.value.code == "git_dirt_path_unsafe"
+
+
+def test_git_dirt_verification_allows_only_allowlisted_extra_paths(tmp_path):
+    root = _git_repo_with_dirt(tmp_path, "tracked")
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    _write(root / "allowed.txt", b"allowed\n")
+
+    current = snapshot.verify_git_dirt_preserved(
+        root,
+        baseline_status_bytes=baseline.status_bytes,
+        baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+        label="user_dirt",
+        allowed_extra_paths=("allowed.txt",),
+    )
+
+    assert {row["path"] for row in _manifest_rows(current)} == {
+        "tracked.txt", "allowed.txt",
+    }
+
+
+def test_git_dirt_verification_rejects_non_allowlisted_extra_path(tmp_path):
+    root = _git_repo_with_dirt(tmp_path, "tracked")
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    _write(root / "unexpected.txt", b"unexpected\n")
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_dirt_preserved(
+            root,
+            baseline_status_bytes=baseline.status_bytes,
+            baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+            label="user_dirt",
+            allowed_extra_paths=("allowed.txt",),
+        )
+
+    assert exc.value.code == "git_dirt_unexpected_path"
+
+
+def test_allowlisted_extra_does_not_hide_baseline_content_change(tmp_path):
+    root = _git_repo_with_dirt(tmp_path, "tracked")
+    baseline = snapshot.capture_git_dirt_receipt(root, label="user_dirt")
+    (root / "tracked.txt").write_bytes(b"other modified bytes\n")
+    _write(root / "allowed.txt", b"allowed\n")
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.verify_git_dirt_preserved(
+            root,
+            baseline_status_bytes=baseline.status_bytes,
+            baseline_content_manifest_bytes=baseline.content_manifest_bytes,
+            label="user_dirt",
+            allowed_extra_paths=("allowed.txt",),
+        )
+
+    assert exc.value.code == "git_dirt_content_changed"
+
+
 def _snapshot_fixture(
     tmp_path: Path,
     *,

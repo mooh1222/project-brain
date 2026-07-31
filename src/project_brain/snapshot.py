@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -88,6 +89,25 @@ class RestoreResult:
     snapshot_id: str
     brain_root: Path
     restored_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GitWorktreeReceipt:
+    root: str
+    head: str
+    status_bytes: bytes
+    status_sha256: str
+
+
+@dataclass(frozen=True)
+class GitDirtReceipt:
+    root: str
+    head: str
+    status_bytes: bytes
+    status_sha256: str
+    entry_count: int
+    content_manifest_bytes: bytes
+    content_manifest_sha256: str
 
 
 def _fail(
@@ -400,6 +420,474 @@ def _required_git_head(root: Path, *, label: str) -> str:
 def verify_git_root_head(root: Path, *, label: str) -> str:
     """Resolve one exact no-follow Git root to its trusted current HEAD."""
     return _required_git_head(root, label=label)
+
+
+def _git_status_bytes(root: Path, *, label: str) -> bytes:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError) as exc:
+        _fail(
+            "git_status_invalid",
+            f"{label} Git status failed: {exc}",
+            paths=(root,),
+        )
+    if result.returncode != 0:
+        _fail(
+            "git_status_invalid",
+            f"{label} Git status failed with exit {result.returncode}",
+            paths=(root,),
+        )
+    return result.stdout
+
+
+def _git_dirt_path(raw_path: bytes) -> tuple[bytes, ...]:
+    if not raw_path or raw_path.startswith(b"/"):
+        _fail("git_dirt_path_unsafe", f"unsafe Git dirt path: {raw_path!r}")
+    parts = tuple(raw_path.split(b"/"))
+    if any(part in {b"", b".", b".."} for part in parts):
+        _fail("git_dirt_path_unsafe", f"unsafe Git dirt path: {raw_path!r}")
+    return parts
+
+
+def _parse_git_status(status_bytes: bytes) -> list[tuple[bytes, str]]:
+    if not isinstance(status_bytes, bytes):
+        _fail("git_dirt_status_invalid", "Git status receipt must be bytes")
+    if not status_bytes:
+        return []
+    fields = status_bytes.split(b"\0")
+    if fields[-1] != b"":
+        _fail("git_dirt_status_invalid", "NUL Git status is unterminated")
+    fields.pop()
+    parsed: list[tuple[bytes, str]] = []
+    seen: set[bytes] = set()
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if len(record) < 4 or record[2:3] != b" ":
+            _fail("git_dirt_status_invalid", "malformed porcelain v1 status")
+        raw_status = record[:2]
+        try:
+            status_code = raw_status.decode("ascii")
+        except UnicodeDecodeError:
+            _fail("git_dirt_status_invalid", "non-ASCII Git status code")
+        if any(value not in b" MADRCUT?!" for value in raw_status):
+            _fail("git_dirt_status_invalid", f"invalid Git status: {raw_status!r}")
+        raw_paths = [record[3:]]
+        if b"R" in raw_status or b"C" in raw_status:
+            if index >= len(fields):
+                _fail("git_dirt_status_invalid", "rename/copy source path is missing")
+            raw_paths.append(fields[index])
+            index += 1
+        for raw_path in raw_paths:
+            _git_dirt_path(raw_path)
+            if raw_path in seen:
+                _fail(
+                    "git_dirt_status_invalid",
+                    f"duplicate Git dirt path: {raw_path!r}",
+                )
+            seen.add(raw_path)
+            parsed.append((raw_path, status_code))
+    return parsed
+
+
+def _missing_git_dirt_row(path: str, status_code: str) -> dict:
+    return {
+        "path": path,
+        "status": status_code,
+        "type": "missing",
+        "mode": None,
+        "size": None,
+        "content_sha256": None,
+    }
+
+
+def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_mode,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_mode,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
+
+
+def _git_dirt_row(
+    root_fd: int,
+    root: Path,
+    raw_path: bytes,
+    status_code: str,
+) -> dict:
+    parts = _git_dirt_path(raw_path)
+    relative = os.fsdecode(raw_path)
+    descriptor = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                return _missing_git_dirt_row(relative, status_code)
+            except OSError as exc:
+                _fail(
+                    "git_dirt_path_unsafe",
+                    f"cannot traverse Git dirt path {root / relative}: {exc}",
+                    paths=(root / relative,),
+                )
+            os.close(descriptor)
+            descriptor = child
+
+        leaf = parts[-1]
+        try:
+            before = os.stat(leaf, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return _missing_git_dirt_row(relative, status_code)
+        except OSError as exc:
+            _fail(
+                "git_dirt_path_unsafe",
+                f"cannot inspect Git dirt path {root / relative}: {exc}",
+                paths=(root / relative,),
+            )
+
+        mode = stat.S_IMODE(before.st_mode)
+        if stat.S_ISREG(before.st_mode):
+            try:
+                file_fd = os.open(
+                    leaf,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except OSError as exc:
+                _fail(
+                    "git_dirt_path_unsafe",
+                    f"cannot open Git dirt path {root / relative}: {exc}",
+                    paths=(root / relative,),
+                )
+            try:
+                opened = os.fstat(file_fd)
+                if not stat.S_ISREG(opened.st_mode) or not _same_stat(before, opened):
+                    _fail(
+                        "git_dirt_content_changed",
+                        f"Git dirt path changed while opening: {root / relative}",
+                        paths=(root / relative,),
+                    )
+                digest = hashlib.sha256()
+                size = 0
+                while True:
+                    chunk = os.read(file_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    size += len(chunk)
+                after = os.fstat(file_fd)
+                if not _same_stat(opened, after) or size != after.st_size:
+                    _fail(
+                        "git_dirt_content_changed",
+                        f"Git dirt path changed while hashing: {root / relative}",
+                        paths=(root / relative,),
+                    )
+            finally:
+                os.close(file_fd)
+            return {
+                "path": relative,
+                "status": status_code,
+                "type": "regular",
+                "mode": mode,
+                "size": size,
+                "content_sha256": digest.hexdigest(),
+            }
+
+        if stat.S_ISLNK(before.st_mode):
+            try:
+                target = os.readlink(leaf, dir_fd=descriptor)
+                after = os.stat(leaf, dir_fd=descriptor, follow_symlinks=False)
+            except OSError as exc:
+                _fail(
+                    "git_dirt_content_changed",
+                    f"Git dirt symlink changed while reading: {root / relative}: {exc}",
+                    paths=(root / relative,),
+                )
+            if not isinstance(target, bytes):
+                target = os.fsencode(target)
+            if not _same_stat(before, after):
+                _fail(
+                    "git_dirt_content_changed",
+                    f"Git dirt symlink changed while reading: {root / relative}",
+                    paths=(root / relative,),
+                )
+            return {
+                "path": relative,
+                "status": status_code,
+                "type": "symlink",
+                "mode": mode,
+                "size": before.st_size,
+                "content_sha256": hashlib.sha256(target).hexdigest(),
+            }
+
+        _fail(
+            "git_dirt_path_unsafe",
+            f"unsupported Git dirt path type: {root / relative}",
+            paths=(root / relative,),
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _git_dirt_manifest(root: Path, status_bytes: bytes) -> tuple[bytes, int]:
+    entries = _parse_git_status(status_bytes)
+    root_fd = _open_absolute_directory(root, create=False)
+    try:
+        rows = [
+            _git_dirt_row(root_fd, root, raw_path, status_code)
+            for raw_path, status_code in entries
+        ]
+    finally:
+        os.close(root_fd)
+    rows.sort(key=lambda row: row["path"])
+    manifest = (
+        json.dumps(
+            rows,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    return manifest, len(rows)
+
+
+def _root_stat(root: Path, *, label: str) -> os.stat_result:
+    descriptor = _open_absolute_directory(root, create=False)
+    try:
+        return os.fstat(descriptor)
+    except OSError as exc:
+        _fail(
+            "git_root_changed",
+            f"{label} changed during Git verification: {exc}",
+            paths=(root,),
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _capture_git_dirt(root: Path, *, label: str) -> GitDirtReceipt:
+    root = Path(root)
+    head = _required_git_head(root, label=label)
+    pinned = _root_stat(root, label=label)
+    status_bytes = _git_status_bytes(root, label=label)
+    content_manifest_bytes, entry_count = _git_dirt_manifest(root, status_bytes)
+    status_after = _git_status_bytes(root, label=label)
+    head_after = _required_git_head(root, label=label)
+    current = _root_stat(root, label=label)
+    if (pinned.st_dev, pinned.st_ino) != (current.st_dev, current.st_ino):
+        _fail(
+            "git_root_changed",
+            f"{label} changed during Git receipt capture",
+            paths=(root,),
+        )
+    if head_after != head:
+        _fail(
+            "git_head_changed",
+            f"{label} HEAD changed during Git receipt capture",
+            paths=(root,),
+        )
+    if status_after != status_bytes:
+        _fail(
+            "git_dirt_status_changed",
+            f"{label} status changed during Git receipt capture",
+            paths=(root,),
+        )
+    return GitDirtReceipt(
+        root=str(root),
+        head=head,
+        status_bytes=status_bytes,
+        status_sha256=hashlib.sha256(status_bytes).hexdigest(),
+        entry_count=entry_count,
+        content_manifest_bytes=content_manifest_bytes,
+        content_manifest_sha256=hashlib.sha256(content_manifest_bytes).hexdigest(),
+    )
+
+
+def verify_git_root_clean(root: Path, *, label: str) -> GitWorktreeReceipt:
+    """Return a receipt for one exact Git root, rejecting all visible dirt."""
+    receipt = _capture_git_dirt(root, label=label)
+    if receipt.status_bytes:
+        prefix = label.removesuffix("_root")
+        _fail(
+            f"{prefix}_worktree_dirty",
+            f"{label} has tracked, staged, or untracked changes",
+            paths=(Path(root),),
+        )
+    return GitWorktreeReceipt(
+        root=receipt.root,
+        head=receipt.head,
+        status_bytes=receipt.status_bytes,
+        status_sha256=receipt.status_sha256,
+    )
+
+
+def capture_git_dirt_receipt(root: Path, *, label: str) -> GitDirtReceipt:
+    """Capture raw Git status and no-follow content evidence for every path."""
+    return _capture_git_dirt(root, label=label)
+
+
+_GIT_DIRT_MANIFEST_KEYS = {
+    "path",
+    "status",
+    "type",
+    "mode",
+    "size",
+    "content_sha256",
+}
+
+
+def _validated_git_dirt_manifest(
+    manifest_bytes: bytes,
+    status_entries: list[tuple[bytes, str]],
+) -> dict[str, dict]:
+    try:
+        rows = json.loads(manifest_bytes)
+    except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        _fail("git_dirt_receipt_invalid", f"invalid content manifest: {exc}")
+    if not isinstance(rows, list):
+        _fail("git_dirt_receipt_invalid", "content manifest must be an array")
+    by_path: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != _GIT_DIRT_MANIFEST_KEYS:
+            _fail("git_dirt_receipt_invalid", "content manifest row shape is invalid")
+        path = row["path"]
+        status_code = row["status"]
+        entry_type = row["type"]
+        if not isinstance(path, str):
+            _fail("git_dirt_receipt_invalid", "content manifest path is invalid")
+        _git_dirt_path(os.fsencode(path))
+        if path in by_path:
+            _fail("git_dirt_receipt_invalid", f"duplicate manifest path: {path!r}")
+        if not isinstance(status_code, str) or len(status_code) != 2:
+            _fail("git_dirt_receipt_invalid", f"invalid status for {path!r}")
+        if entry_type not in {"regular", "symlink", "missing"}:
+            _fail("git_dirt_receipt_invalid", f"invalid type for {path!r}")
+        digest = row["content_sha256"]
+        if entry_type == "missing":
+            valid_metadata = (
+                row["mode"] is None
+                and row["size"] is None
+                and digest is None
+            )
+        else:
+            valid_metadata = (
+                isinstance(row["mode"], int)
+                and not isinstance(row["mode"], bool)
+                and isinstance(row["size"], int)
+                and not isinstance(row["size"], bool)
+                and row["size"] >= 0
+                and isinstance(digest, str)
+                and _SHA256.fullmatch(digest) is not None
+            )
+        if not valid_metadata:
+            _fail("git_dirt_receipt_invalid", f"invalid metadata for {path!r}")
+        by_path[path] = row
+    expected_status = {
+        os.fsdecode(raw_path): status_code
+        for raw_path, status_code in status_entries
+    }
+    if {path: row["status"] for path, row in by_path.items()} != expected_status:
+        _fail("git_dirt_receipt_invalid", "status and content manifest disagree")
+    canonical = (
+        json.dumps(
+            sorted(rows, key=lambda row: row["path"]),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    if canonical != manifest_bytes:
+        _fail("git_dirt_receipt_invalid", "content manifest is not canonical")
+    return by_path
+
+
+def verify_git_dirt_preserved(
+    root: Path,
+    *,
+    baseline_status_bytes: bytes,
+    baseline_content_manifest_bytes: bytes,
+    label: str,
+    allowed_extra_paths: Collection[str] = (),
+) -> GitDirtReceipt:
+    """Verify baseline dirt bytes while permitting only named new status paths."""
+    baseline_entries = _parse_git_status(baseline_status_bytes)
+    baseline_rows = _validated_git_dirt_manifest(
+        baseline_content_manifest_bytes,
+        baseline_entries,
+    )
+    allowed: set[str] = set()
+    for value in allowed_extra_paths:
+        if not isinstance(value, str):
+            _fail("git_dirt_path_unsafe", "allowlisted path must be text")
+        _git_dirt_path(os.fsencode(value))
+        allowed.add(value)
+
+    current = _capture_git_dirt(Path(root), label=label)
+    current_entries = _parse_git_status(current.status_bytes)
+    current_status = {
+        os.fsdecode(raw_path): status_code
+        for raw_path, status_code in current_entries
+    }
+    baseline_status = {
+        os.fsdecode(raw_path): status_code
+        for raw_path, status_code in baseline_entries
+    }
+    unexpected = set(current_status) - set(baseline_status) - allowed
+    if unexpected:
+        _fail(
+            "git_dirt_unexpected_path",
+            f"{label} has unexpected dirt paths: {sorted(unexpected)!r}",
+            paths=tuple(Path(root) / value for value in sorted(unexpected)),
+        )
+    for path, status_code in baseline_status.items():
+        if current_status.get(path) != status_code:
+            _fail(
+                "git_dirt_status_changed",
+                f"{label} baseline status changed for {path!r}",
+                paths=(Path(root) / path,),
+            )
+
+    current_rows = {
+        row["path"]: row
+        for row in json.loads(current.content_manifest_bytes)
+    }
+    for path, baseline_row in baseline_rows.items():
+        if current_rows.get(path) != baseline_row:
+            _fail(
+                "git_dirt_content_changed",
+                f"{label} baseline content changed for {path!r}",
+                paths=(Path(root) / path,),
+            )
+    return current
 
 
 def _managed_inventory(repo_root: Path) -> tuple[list[dict], list[str]]:
