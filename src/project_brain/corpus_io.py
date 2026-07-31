@@ -606,7 +606,12 @@ def _open_directory_path(path: Path) -> tuple[int, os.stat_result]:
         )
     except OSError as exc:
         raise _anchored_path_error(path, exc) from exc
-    return descriptor, os.fstat(descriptor)
+    try:
+        directory_stat = os.fstat(descriptor)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor, directory_stat
 
 
 def _path_binding_changed(binding: DirectoryBinding, detail: str) -> CorpusIOError:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -392,6 +393,34 @@ def test_stable_corpus_lock_same_process_nesting_remains_reentrant(tmp_path):
             blocking=False,
         ):
             pass
+
+
+def test_anchored_directory_closes_parent_fd_when_fstat_fails(
+    tmp_path,
+    monkeypatch,
+):
+    parent = _real_directory(tmp_path / "snapshots")
+    real_fstat = os.fstat
+    failed_fd: int | None = None
+
+    def fail_parent_fstat(descriptor):
+        nonlocal failed_fd
+        failed_fd = descriptor
+        raise OSError(errno.EIO, "injected fstat failure")
+
+    monkeypatch.setattr(corpus_io.os, "fstat", fail_parent_fstat)
+
+    with pytest.raises(OSError) as exc:
+        corpus_io.create_anchored_temp_directory(
+            parent,
+            prefix=".task17-",
+        )
+
+    assert exc.value.errno == errno.EIO
+    assert failed_fd is not None
+    with pytest.raises(OSError) as closed:
+        real_fstat(failed_fd)
+    assert closed.value.errno == errno.EBADF
 
 
 def test_anchored_staging_creates_bound_direct_children(tmp_path):
