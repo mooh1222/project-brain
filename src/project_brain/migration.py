@@ -110,7 +110,7 @@ def _object_hash(obj: Mapping[str, object]) -> str:
     return hashlib.sha256(BrainStore.object_bytes(obj)).hexdigest()
 
 
-def _validate_snapshot_binding(
+def validate_snapshot_binding(
     snapshot: SnapshotVerification,
 ) -> None:
     if (
@@ -151,7 +151,7 @@ def _validate_snapshot_binding(
         )
 
 
-def _trusted_migration_context(
+def trusted_migration_context(
     *,
     brain_root: Path,
     repo_root: Path,
@@ -159,7 +159,7 @@ def _trusted_migration_context(
     engine_sha: str,
     snapshot: SnapshotVerification,
 ) -> RepoContext:
-    _validate_snapshot_binding(snapshot)
+    validate_snapshot_binding(snapshot)
     _validate_engine_sha(engine_sha)
     if (
         not isinstance(brain_root, Path)
@@ -201,7 +201,7 @@ def _trusted_migration_context(
     )
 
 
-def _validate_live_snapshot_corpus(
+def validate_live_snapshot_corpus(
     existing: BrainStore,
     snapshot: SnapshotVerification,
 ) -> None:
@@ -656,14 +656,14 @@ def plan_id_migration(
 ) -> MigrationPlan:
     if not isinstance(existing, BrainStore):
         _fail("request_invalid", "existing must be BrainStore")
-    repo_context = _trusted_migration_context(
+    repo_context = trusted_migration_context(
         brain_root=brain_root,
         repo_root=repo_root,
         engine_root=engine_root,
         engine_sha=engine_sha,
         snapshot=snapshot,
     )
-    _validate_live_snapshot_corpus(existing, snapshot)
+    validate_live_snapshot_corpus(existing, snapshot)
     existing_by_id = {obj["id"]: obj for obj in existing.all()}
     pairs = _validate_renames(existing_by_id, renames)
     request_objects: list[dict] = []
@@ -803,14 +803,14 @@ def plan_display_migration(
     engine_sha: str,
     snapshot: SnapshotVerification,
 ) -> MigrationPlan:
-    repo_context = _trusted_migration_context(
+    repo_context = trusted_migration_context(
         brain_root=brain_root,
         repo_root=repo_root,
         engine_root=engine_root,
         engine_sha=engine_sha,
         snapshot=snapshot,
     )
-    _validate_live_snapshot_corpus(existing, snapshot)
+    validate_live_snapshot_corpus(existing, snapshot)
     existing_by_id = {obj["id"]: obj for obj in existing.all()}
     inputs = tuple(
         dict(obj)
@@ -947,7 +947,7 @@ def apply_migration_artifact(
         _fail(exc.code, exc.detail)
     snapshot_id = snapshot.snapshot_id
     snapshot_manifest_sha256 = snapshot.manifest_sha256
-    _validate_snapshot_binding(snapshot)
+    validate_snapshot_binding(snapshot)
     if (
         artifact["snapshot_id"] != snapshot_id
         or artifact["snapshot_manifest_sha256"]
@@ -959,7 +959,7 @@ def apply_migration_artifact(
         )
     if artifact["engine_sha"] != engine_sha:
         _fail("engine_sha_mismatch", "apply engine SHA differs from the plan")
-    _trusted_migration_context(
+    trusted_migration_context(
         brain_root=brain_root,
         repo_root=repo_root,
         engine_root=engine_root,

@@ -17,6 +17,9 @@ from project_brain.migration import (
     create_migration_artifact,
     plan_display_migration,
     plan_id_migration,
+    trusted_migration_context,
+    validate_live_snapshot_corpus,
+    validate_snapshot_binding,
 )
 from project_brain.mutation import corpus_fingerprint
 from project_brain.store import BrainStore
@@ -34,6 +37,30 @@ from tests.test_mutation import _code_locator, _write_raw
 SNAPSHOT_ID = "trusted-before-id-migration"
 SNAPSHOT_SHA = "a" * 64
 ENGINE_SHA = "e" * 40
+
+
+def test_promoted_migration_context_helpers_preserve_the_trusted_contract(
+    tmp_path,
+):
+    brain_root = (tmp_path / "brain").resolve()
+    _write_raw(brain_root, context())
+    existing = BrainStore.load(brain_root)
+    snapshot, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
+
+    validate_snapshot_binding(snapshot)
+    repo_context = trusted_migration_context(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_head,
+        snapshot=snapshot,
+    )
+    validate_live_snapshot_corpus(existing, snapshot)
+
+    assert repo_context.repo_root == repo_root
+    assert repo_context.target_revision_sha == snapshot.repo_head
 
 
 def _snapshot_verification(
