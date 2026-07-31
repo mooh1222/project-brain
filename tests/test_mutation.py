@@ -966,6 +966,31 @@ def test_canonical_repair_rejects_mismatched_source_bundle_identity(tmp_path):
     assert result.error_code == "canonical_repair_payload_changed"
 
 
+def test_canonical_repair_rejects_single_record_new_review_id(tmp_path):
+    request = _mixed_review_repair_request(tmp_path)
+    mapping, review = request.objects
+    single_review_id = f"review.{mapping['id']}"
+    single_review = dict(review)
+    single_review["id"] = single_review_id
+    mapping_intent, review_intent = request.canonical_repair_intents
+    request = replace(
+        request,
+        objects=(mapping, single_review),
+        renames={
+            mapping_intent.source_id: mapping_intent.new_id,
+            review_intent.source_id: single_review_id,
+        },
+        canonical_repair_intents=(
+            mapping_intent,
+            replace(review_intent, new_id=single_review_id),
+        ),
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
 @pytest.mark.parametrize(
     "tamper",
     [
