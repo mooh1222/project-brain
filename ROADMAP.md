@@ -33,6 +33,29 @@
 
 ---
 
+## 진행 중
+
+### Task 17 canonical ID 복구 (2026-07-31~)
+
+strict ID grammar를 유지한 채 ID-only migration과 제한된 canonical repair를 분리하고,
+decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 구현을
+진행 중이다. canonical repair와 다음 ID-only migration 사이에는 검증된 intermediate
+snapshot을 두며, 실제 BB2 corpus의 canonical ID 판단과 증거는 데이터 레포가 소유한다.
+
+Task 17 전체는 아직 완료가 아니다. 다음 조건을 모두 만족해야 완료 단계로 옮긴다.
+
+- 코드·테스트·문서가 독립 리뷰를 통과한 clean engine commit으로 고정됨
+- 전체 decision ledger에 대한 사용자 승인과 byte-exact staging에 대한 live 적용 승인이
+  각각 명시적으로 기록됨
+- 승인된 경로만 담은 BB2 Task 17 commit이 만들어짐
+- 그 commit을 포함한 final full snapshot 검증과, snapshot 바깥의 final binding receipt가
+  BB2 HEAD·engine SHA·corpus/index/stale fingerprint·사용자 변경 receipt를 고정함
+
+설계와 실행 순서는 [Task 17 canonical ID 복구 설계](docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md)와
+[구현 계획](docs/superpowers/plans/2026-07-31-task17-canonical-id-recovery.md)에 있다.
+
+---
+
 ## 완료 단계
 
 ### 1차 마일스톤 — 검색층 + 라우터 통합

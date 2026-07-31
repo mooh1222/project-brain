@@ -2670,6 +2670,131 @@ class TestCliShow(unittest.TestCase):
         self.assertFalse(store.has(old["id"]))
         self.assertTrue(store.has("code.neutral.legacy"))
 
+    def test_canonical_repair_cli_plan_is_read_only_and_apply_is_receipt_bound(self):
+        from project_brain.snapshot import (
+            SnapshotRequest,
+            create_snapshot,
+        )
+        from tests.test_canonical_repair import _canonical_plan_fixture
+
+        fixture = _canonical_plan_fixture(self.root / "canonical-cli")
+        input_dir = self.root / "canonical-cli-inputs"
+        input_dir.mkdir()
+        decisions_file = input_dir / "canonicalization-decisions.json"
+        classification_file = input_dir / "phase-a-classification.json"
+        manifest_file = input_dir / "canonical-repair.manifest.json"
+        decisions_file.write_bytes(fixture.ledger_bytes)
+        classification_file.write_bytes(fixture.classification_bytes)
+        snapshot_result = create_snapshot(SnapshotRequest(
+            brain_root=fixture.brain_root,
+            repo_root=fixture.repo_root,
+            engine_root=fixture.engine_root,
+            output_root=(self.root / "snapshots").resolve(),
+            snapshot_id="canonical-cli-before",
+        ))
+        common_args = [
+            "--brain-root", str(fixture.brain_root),
+            "--repo-root", str(fixture.repo_root),
+            "--engine-root", str(fixture.engine_root),
+            "--snapshot-root", str(snapshot_result.snapshot_root),
+            "--expected-snapshot-manifest-sha256",
+            snapshot_result.manifest_sha256,
+            "--decisions-file", str(decisions_file),
+            "--expected-decisions-sha256", fixture.ledger.sha256,
+            "--classification-file", str(classification_file),
+            "--expected-classification-sha256",
+            fixture.classification_sha256,
+            "--manifest", str(manifest_file),
+            "--engine-sha", fixture.engine_sha,
+        ]
+        success_keys = {
+            "ok",
+            "migration_kind",
+            "manifest",
+            "manifest_sha256",
+            "transaction_id",
+            "row_count",
+            "action_count",
+            "decision_ledger_sha256",
+            "phase_a_classification_sha256",
+            "snapshot_id",
+            "snapshot_manifest_sha256",
+        }
+        before = corpus_fingerprint(BrainStore.load(fixture.brain_root))
+
+        plan_out = io.StringIO()
+        plan_err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "plan", *common_args,
+        ]), redirect_stdout(plan_out), redirect_stderr(plan_err):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        self.assertEqual(set(planned), success_keys)
+        self.assertEqual(planned["migration_kind"], "canonical_repair")
+        self.assertEqual(planned["row_count"], 5)
+        self.assertEqual(
+            planned["decision_ledger_sha256"],
+            fixture.ledger.sha256,
+        )
+        self.assertEqual(
+            planned["phase_a_classification_sha256"],
+            fixture.classification_sha256,
+        )
+        self.assertEqual(
+            planned["snapshot_manifest_sha256"],
+            snapshot_result.manifest_sha256,
+        )
+        self.assertEqual(plan_err.getvalue(), "")
+        self.assertEqual(
+            corpus_fingerprint(BrainStore.load(fixture.brain_root)),
+            before,
+        )
+
+        wrong_out = io.StringIO()
+        wrong_err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "apply",
+            *common_args,
+            "--expected-manifest-sha256", "0" * 64,
+        ]), redirect_stdout(wrong_out), redirect_stderr(wrong_err):
+            self.assertEqual(cli.main(), 1)
+        wrong = json.loads(wrong_out.getvalue())
+        self.assertEqual(set(wrong), {"ok", "error_code", "error"})
+        self.assertIs(wrong["ok"], False)
+        self.assertEqual(wrong["error_code"], "manifest_sha256_mismatch")
+        self.assertEqual(wrong_err.getvalue(), "")
+        self.assertEqual(
+            corpus_fingerprint(BrainStore.load(fixture.brain_root)),
+            before,
+        )
+
+        apply_out = io.StringIO()
+        apply_err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "apply",
+            *common_args,
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+        ]), redirect_stdout(apply_out), redirect_stderr(apply_err):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        applied = json.loads(apply_out.getvalue())
+        self.assertEqual(set(applied), success_keys)
+        self.assertEqual(applied["migration_kind"], "canonical_repair")
+        self.assertEqual(applied["row_count"], 5)
+        self.assertEqual(
+            applied["action_count"],
+            planned["action_count"],
+        )
+        self.assertEqual(
+            applied["decision_ledger_sha256"],
+            fixture.ledger.sha256,
+        )
+        self.assertEqual(apply_err.getvalue(), "")
+        after = BrainStore.load(fixture.brain_root)
+        self.assertFalse(after.has("mapping.neutral.Legacy0"))
+        self.assertTrue(after.has("mapping.neutral.repair-0"))
+        self.assertFalse(after.has("review.bundle.Neutral.domain-mapping"))
+        self.assertTrue(after.has("review.bundle.neutral.domain-mapping"))
+
     def test_display_migration_cli_normalizes_only_locator_titles(self):
         from project_brain.snapshot import SnapshotVerification
         from tests.test_mutation import _code_locator

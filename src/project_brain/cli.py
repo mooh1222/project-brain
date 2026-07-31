@@ -1591,8 +1591,47 @@ def _run_migration(argv) -> int:
         apply.add_argument("--manifest", required=True)
         apply.add_argument("--expected-manifest-sha256", required=True)
         apply.add_argument("--engine-sha", required=True)
+    canonical = modes.add_parser("canonical-repair")
+    canonical_actions = canonical.add_subparsers(
+        dest="action",
+        required=True,
+    )
+    for action in ("plan", "apply"):
+        action_parser = canonical_actions.add_parser(action)
+        action_parser.add_argument("--brain-root", required=True)
+        action_parser.add_argument("--repo-root", required=True)
+        action_parser.add_argument("--engine-root", required=True)
+        action_parser.add_argument("--snapshot-root", required=True)
+        action_parser.add_argument(
+            "--expected-snapshot-manifest-sha256",
+            required=True,
+        )
+        action_parser.add_argument("--decisions-file", required=True)
+        action_parser.add_argument(
+            "--expected-decisions-sha256",
+            required=True,
+        )
+        action_parser.add_argument("--classification-file", required=True)
+        action_parser.add_argument(
+            "--expected-classification-sha256",
+            required=True,
+        )
+        action_parser.add_argument("--manifest", required=True)
+        action_parser.add_argument("--engine-sha", required=True)
+        if action == "apply":
+            action_parser.add_argument(
+                "--expected-manifest-sha256",
+                required=True,
+            )
     args = parser.parse_args(argv)
 
+    from project_brain.canonical_repair import (
+        CanonicalRepairError,
+        apply_canonical_repair_artifact,
+        create_canonical_repair_artifact,
+        parse_canonicalization_ledger,
+        plan_canonical_repair,
+    )
     from project_brain.migration import (
         MigrationError,
         apply_migration_artifact,
@@ -1613,6 +1652,62 @@ def _run_migration(argv) -> int:
                 ),
             )
             store = BrainStore.load(brain_root)
+            if args.mode == "canonical-repair":
+                decisions_bytes = Path(args.decisions_file).read_bytes()
+                classification_bytes = Path(
+                    args.classification_file
+                ).read_bytes()
+                ledger = parse_canonicalization_ledger(
+                    decisions_bytes,
+                    classification_bytes=classification_bytes,
+                    expected_classification_sha256=(
+                        args.expected_classification_sha256
+                    ),
+                    existing=store,
+                    engine_sha=args.engine_sha,
+                    repo_head=snapshot.repo_head,
+                )
+                if ledger.sha256 != args.expected_decisions_sha256:
+                    raise CanonicalRepairError(
+                        "decision_ledger_sha256_mismatch",
+                        "decision ledger bytes do not match the trusted receipt",
+                    )
+                plan = plan_canonical_repair(
+                    existing=store,
+                    brain_root=brain_root,
+                    repo_root=Path(args.repo_root).absolute(),
+                    engine_root=Path(args.engine_root).absolute(),
+                    engine_sha=args.engine_sha,
+                    ledger=ledger,
+                    snapshot=snapshot,
+                )
+                artifact = create_canonical_repair_artifact(plan)
+                manifest_path = Path(args.manifest)
+                _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+                print(json.dumps({
+                    "ok": True,
+                    "migration_kind": "canonical_repair",
+                    "manifest": str(manifest_path),
+                    "manifest_sha256": artifact.manifest_sha256,
+                    "transaction_id": (
+                        plan.mutation_plan.manifest.transaction_id
+                    ),
+                    "row_count": len(plan.rows),
+                    "action_count": (
+                        len(plan.mutation_plan.manifest.creates)
+                        + len(plan.mutation_plan.manifest.updates)
+                        + len(plan.mutation_plan.manifest.deletes)
+                        + len(plan.mutation_plan.manifest.renames)
+                        + len(plan.mutation_plan.manifest.auxiliary_updates)
+                    ),
+                    "decision_ledger_sha256": ledger.sha256,
+                    "phase_a_classification_sha256": (
+                        ledger.phase_a_classification_sha256
+                    ),
+                    "snapshot_id": snapshot.snapshot_id,
+                    "snapshot_manifest_sha256": snapshot.manifest_sha256,
+                }, ensure_ascii=False, indent=2))
+                return 0
             if args.mode == "id":
                 renames = _read_json_argument(args.renames_file, {})
                 plan = plan_id_migration(
@@ -1656,6 +1751,47 @@ def _run_migration(argv) -> int:
             return 0
 
         manifest_bytes = Path(args.manifest).read_bytes()
+        if args.mode == "canonical-repair":
+            classification_bytes = Path(args.classification_file).read_bytes()
+            result = apply_canonical_repair_artifact(
+                manifest_bytes=manifest_bytes,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                decisions_bytes=Path(args.decisions_file).read_bytes(),
+                expected_decisions_sha256=args.expected_decisions_sha256,
+                classification_bytes=classification_bytes,
+                expected_classification_sha256=(
+                    args.expected_classification_sha256
+                ),
+                brain_root=brain_root,
+                repo_root=Path(args.repo_root).absolute(),
+                engine_root=Path(args.engine_root).absolute(),
+                engine_sha=args.engine_sha,
+                snapshot_root=Path(args.snapshot_root).absolute(),
+                expected_snapshot_manifest_sha256=(
+                    args.expected_snapshot_manifest_sha256
+                ),
+            )
+            manifest_payload = json.loads(manifest_bytes)
+            print(json.dumps({
+                "ok": True,
+                "migration_kind": "canonical_repair",
+                "manifest": str(Path(args.manifest)),
+                "manifest_sha256": args.expected_manifest_sha256,
+                "transaction_id": result.transaction_id,
+                "row_count": len(manifest_payload["rows"]),
+                "action_count": result.action_count,
+                "decision_ledger_sha256": (
+                    result.decision_ledger_sha256
+                ),
+                "phase_a_classification_sha256": (
+                    args.expected_classification_sha256
+                ),
+                "snapshot_id": result.snapshot_id,
+                "snapshot_manifest_sha256": (
+                    args.expected_snapshot_manifest_sha256
+                ),
+            }, ensure_ascii=False, indent=2))
+            return 0
         result = apply_migration_artifact(
             manifest_bytes=manifest_bytes,
             expected_manifest_sha256=args.expected_manifest_sha256,
@@ -1676,6 +1812,7 @@ def _run_migration(argv) -> int:
         }, ensure_ascii=False, indent=2))
         return 0
     except (
+        CanonicalRepairError,
         MigrationError,
         SnapshotError,
         OSError,

@@ -149,6 +149,38 @@ L4 적재 경로       (1)개발 중 (2)완성 스펙 소급 (3)세션 중 "저�
 [대량 적재 강화 설계](specs/2026-07-21-bulk-ingest-hardening-design.md)와
 [완료 보고서](reports/2026-07-23-bulk-ingest-hardening-completion.md)에 있다.
 
+### 3.3 Canonical ID 복구 경계 (2026-07-31)
+
+ID 복구는 payload를 그대로 둔 **ID-only migration**과, ID에서 투영된 필드까지
+최소한으로 바로잡는 **canonical repair**를 분리한다. strict ID grammar는 완화하지 않는다.
+ID-only는 self ID와 등록 참조의 일대일 치환만 맡고, canonical repair는 승인된
+DomainMapping의 `/mapping_key`와 bundle ReviewRecord의 `/target_object_ids` 두 pointer만
+추가로 바꿀 수 있다. 기존 target 덮어쓰기, merge, delete-only와 그 밖의 payload 변경은
+모두 닫힌 쪽으로 실패한다.
+
+엔진은 canonical ID를 추론하지 않는다. 데이터 레포가 Phase A 분류의 모든 행을 정확히
+한 번 덮는 **canonicalization decision ledger**를 보존하고, 사람이 ID·허용 field diff·근거를
+검토한다. 엔진은 그 원장 bytes와 classification bytes의 SHA, source object SHA, engine SHA,
+repo HEAD, snapshot manifest SHA, corpus fingerprint가 모두 맞는지만 검증한 뒤 계획하고
+적용한다.
+
+canonical repair와 ID-only 사이에는 검증된 **intermediate snapshot**을 둔다. 앞 단계의
+manifest와 expected-after fingerprint가 이 snapshot의 corpus와 정확히 맞아야만 원장에서
+순수 ID rename map을 꺼낼 수 있다. 따라서 두 mutation은 같은 복구 작업에 속하지만 서로
+다른 manifest와 snapshot 경계로 다시 계획·검증된다.
+
+실코퍼스 적용에는 사용자 승인이 두 번 필요하다.
+
+- **승인 게이트 1**: 읽기 전용 분류, 전체 decision ledger, 충돌 비교와 허용 field diff를
+  검토·승인한다. 승인 전에는 canonical repair staging도 만들지 않는다.
+- **승인 게이트 2**: byte-exact staging, 두 manifest와 SHA, intermediate snapshot,
+  ID/dangling/payload 가드 및 전체 실코퍼스 회귀 결과를 검토·승인한다. 승인 전에는 live lock이나
+  live corpus/index/stale-set을 바꾸지 않는다.
+
+세부 계약과 Task 17 완료 조건은
+[canonical ID 복구 설계](superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md)에
+있다.
+
 ## 4. 미결 사항 — 이름 박고 미룸
 
 - **팀 확장 시 reviewed 승격 권한**(미결 5): 각자 promote vs 검수자 지정 (추후 논의 항목 — 팀 공개 시점에).
