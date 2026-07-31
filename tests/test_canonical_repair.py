@@ -22,13 +22,19 @@ from project_brain.canonical_repair import (
     validate_canonicalization_ledger,
 )
 from project_brain.mutation import (
+    CanonicalFieldChange,
     CanonicalRepairIntent,
     MutationManifest,
     MutationOperation,
     MutationService,
     corpus_fingerprint,
 )
-from project_brain.snapshot import SnapshotError, SnapshotVerification
+from project_brain.snapshot import (
+    SnapshotRequest,
+    SnapshotVerification,
+    create_snapshot,
+    verify_snapshot,
+)
 from project_brain.store import BrainStore
 from tests.test_ingest import candidate_mapping, candidate_term, context, review_record_for
 from tests.test_mutation import _write_raw
@@ -728,6 +734,75 @@ def test_plan_repairs_only_five_non_id_only_sources(canonical_fixture):
     assert plan.request.operation is MutationOperation.CANONICAL_REPAIR
 
 
+def _ledger_with_repair_count_drift(
+    ledger: CanonicalizationLedger,
+    drift: str,
+) -> CanonicalizationLedger:
+    decisions = list(ledger.decisions)
+    projected_index = next(
+        index
+        for index, decision in enumerate(decisions)
+        if decision.action is CanonicalAction.PROJECTED_FIELD_REPAIR
+    )
+    id_only_index = next(
+        index
+        for index, decision in enumerate(decisions)
+        if decision.action is CanonicalAction.ID_ONLY_RENAME
+    )
+    if drift == "extra":
+        decisions[id_only_index] = replace(
+            decisions[id_only_index],
+            action=CanonicalAction.PROJECTED_FIELD_REPAIR,
+            field_changes=(CanonicalFieldChange(
+                pointer="/mapping_key",
+                before="Legacy-extra",
+                after="canonical-extra",
+            ),),
+        )
+    elif drift == "missing":
+        decisions[projected_index] = replace(
+            decisions[projected_index],
+            action=CanonicalAction.ID_ONLY_RENAME,
+            field_changes=(),
+        )
+    else:
+        decisions[projected_index] = replace(
+            decisions[projected_index],
+            action=CanonicalAction.REVIEW_SHAPE_REPAIR,
+            field_changes=(CanonicalFieldChange(
+                pointer="/target_object_ids",
+                before=["mapping.neutral.before"],
+                after=["mapping.neutral.after"],
+            ),),
+        )
+    return replace(ledger, decisions=tuple(decisions))
+
+
+@pytest.mark.parametrize("drift", ["extra", "missing", "altered_distribution"])
+def test_plan_rejects_repair_action_count_drift_before_mutation_planning(
+    canonical_fixture,
+    monkeypatch,
+    drift,
+):
+    def forbidden_plan(*args, **kwargs):
+        raise AssertionError("MutationService.plan must not run for repair count drift")
+
+    monkeypatch.setattr(MutationService, "plan", forbidden_plan)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        plan_canonical_repair(
+            **{
+                **canonical_fixture.plan_args,
+                "ledger": _ledger_with_repair_count_drift(
+                    canonical_fixture.ledger,
+                    drift,
+                ),
+            }
+        )
+
+    assert exc.value.code == "canonical_repair_action_count_invalid"
+
+
 def test_plan_includes_reference_only_affected_object(canonical_fixture):
     plan = plan_canonical_repair(**canonical_fixture.plan_args)
     request_by_id = {obj["id"]: obj for obj in plan.request.objects}
@@ -924,30 +999,36 @@ def test_apply_rejects_snapshot_manifest_bytes_drift_before_mutation(
     canonical_fixture,
     monkeypatch,
 ):
-    _, artifact = _artifact_for(canonical_fixture)
-    monkeypatch.setattr(MutationService, "apply", _forbid_apply)
-
-    def reject_snapshot(*args, **kwargs):
-        raise SnapshotError(
-            "snapshot_manifest_sha256_mismatch",
-            "snapshot manifest bytes changed",
-        )
-
-    monkeypatch.setattr(
-        "project_brain.canonical_repair.verify_snapshot",
-        reject_snapshot,
+    output_root = canonical_fixture.repo_root.parent / "snapshots"
+    snapshot_result = create_snapshot(SnapshotRequest(
+        brain_root=canonical_fixture.brain_root,
+        repo_root=canonical_fixture.repo_root,
+        engine_root=canonical_fixture.engine_root,
+        output_root=output_root,
+        snapshot_id="real-canonical-repair-before",
+    ))
+    snapshot = verify_snapshot(
+        snapshot_result.snapshot_root,
+        expected_manifest_sha256=snapshot_result.manifest_sha256,
     )
+    real_fixture = replace(canonical_fixture, snapshot=snapshot)
+    _, artifact = _artifact_for(real_fixture)
+    snapshot_result.manifest_path.write_bytes(
+        snapshot_result.manifest_path.read_bytes() + b"\n"
+    )
+    monkeypatch.setattr(MutationService, "apply", _forbid_apply)
 
     with pytest.raises(CanonicalRepairError) as exc:
         apply_canonical_repair_artifact(
             **_apply_args(
-                canonical_fixture,
+                real_fixture,
                 manifest_bytes=artifact.manifest_bytes,
                 expected_manifest_sha256=artifact.manifest_sha256,
+                snapshot_root=snapshot_result.snapshot_root,
             ),
         )
 
-    assert exc.value.code == "snapshot_manifest_sha256_mismatch"
+    assert exc.value.code == "manifest_sha256_mismatch"
 
 
 def test_apply_rejects_engine_status_drift_before_mutation(
@@ -1120,10 +1201,10 @@ def test_apply_fresh_replans_then_calls_mutation_apply_exactly_once(
     assert after.has("mapping.neutral.repair-0")
 
 
-def test_trusted_intermediate_receipt_returns_only_pure_id_renames(
+def _trusted_intermediate_args(
     canonical_fixture,
     monkeypatch,
-):
+) -> dict:
     _, artifact = _artifact_for(canonical_fixture)
     monkeypatch.setattr(
         "project_brain.canonical_repair.verify_snapshot",
@@ -1146,16 +1227,99 @@ def test_trusted_intermediate_receipt_returns_only_pure_id_renames(
         engine_head=canonical_fixture.snapshot.engine_head,
         corpus_fingerprint=corpus_fingerprint(intermediate),
     )
+    return {
+        "decisions_bytes": canonical_fixture.ledger_bytes,
+        "expected_decisions_sha256": canonical_fixture.ledger.sha256,
+        "classification_bytes": canonical_fixture.classification_bytes,
+        "expected_classification_sha256": canonical_fixture.classification_sha256,
+        "canonical_manifest_bytes": artifact.manifest_bytes,
+        "expected_canonical_manifest_sha256": artifact.manifest_sha256,
+        "existing": intermediate,
+        "intermediate_snapshot": intermediate_snapshot,
+    }
+
+
+def test_trusted_intermediate_receipt_returns_only_pure_id_renames(
+    canonical_fixture,
+    monkeypatch,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
 
     renames = id_renames_from_trusted_repair_receipt(
-        decisions_bytes=canonical_fixture.ledger_bytes,
-        expected_decisions_sha256=canonical_fixture.ledger.sha256,
-        classification_bytes=canonical_fixture.classification_bytes,
-        expected_classification_sha256=canonical_fixture.classification_sha256,
-        canonical_manifest_bytes=artifact.manifest_bytes,
-        expected_canonical_manifest_sha256=artifact.manifest_sha256,
-        existing=intermediate,
-        intermediate_snapshot=intermediate_snapshot,
+        **args,
     )
 
     assert renames == id_renames_from_ledger(canonical_fixture.ledger)
+
+
+def _tamper_trusted_manifest(args: dict, axis: str) -> None:
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    if axis == "expected_after_fingerprint":
+        manifest["expected_after_fingerprint"] = "0" * 64
+    elif axis == "source_before_receipt":
+        manifest["renames"][0]["before_sha256"] = "0" * 64
+    else:
+        manifest["renames"][0]["after_sha256"] = "0" * 64
+    manifest_bytes = _json_bytes(manifest)
+    args["canonical_manifest_bytes"] = manifest_bytes
+    args["expected_canonical_manifest_sha256"] = hashlib.sha256(
+        manifest_bytes
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("axis", "error_code"),
+    [
+        ("decisions_bytes", "decision_ledger_sha256_mismatch"),
+        ("decisions_sha", "decision_ledger_sha256_mismatch"),
+        ("classification_bytes", "classification_sha256_mismatch"),
+        ("classification_sha", "classification_sha256_mismatch"),
+        ("canonical_manifest_bytes", "manifest_sha256_mismatch"),
+        ("canonical_manifest_sha", "manifest_sha256_mismatch"),
+        ("expected_after_fingerprint", "intermediate_receipt_mismatch"),
+        ("intermediate_fingerprint", "snapshot_corpus_fingerprint_mismatch"),
+        ("intermediate_binding", "intermediate_receipt_mismatch"),
+        ("source_before_receipt", "intermediate_source_receipt_mismatch"),
+        ("source_after_receipt", "intermediate_source_receipt_mismatch"),
+    ],
+)
+def test_trusted_intermediate_receipt_rejects_each_drifted_trust_axis(
+    canonical_fixture,
+    monkeypatch,
+    axis,
+    error_code,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    if axis == "decisions_bytes":
+        args["decisions_bytes"] += b"\n"
+    elif axis == "decisions_sha":
+        args["expected_decisions_sha256"] = "0" * 64
+    elif axis == "classification_bytes":
+        args["classification_bytes"] += b"\n"
+    elif axis == "classification_sha":
+        args["expected_classification_sha256"] = "0" * 64
+    elif axis == "canonical_manifest_bytes":
+        args["canonical_manifest_bytes"] += b"\n"
+    elif axis == "canonical_manifest_sha":
+        args["expected_canonical_manifest_sha256"] = "0" * 64
+    elif axis in {
+        "expected_after_fingerprint",
+        "source_before_receipt",
+        "source_after_receipt",
+    }:
+        _tamper_trusted_manifest(args, axis)
+    elif axis == "intermediate_fingerprint":
+        args["intermediate_snapshot"] = replace(
+            args["intermediate_snapshot"],
+            corpus_fingerprint="0" * 64,
+        )
+    else:
+        args["intermediate_snapshot"] = replace(
+            args["intermediate_snapshot"],
+            engine_head="d" * 40,
+        )
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == error_code

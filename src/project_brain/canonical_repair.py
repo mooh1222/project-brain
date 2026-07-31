@@ -615,6 +615,31 @@ def _replace_approved_field(obj: dict, change: CanonicalFieldChange) -> None:
     obj[key] = deepcopy(change.after)
 
 
+def _validate_repair_action_counts(ledger: CanonicalizationLedger) -> None:
+    actual = {
+        action: sum(
+            decision.action is action
+            for decision in ledger.decisions
+        )
+        for action in (
+            CanonicalAction.PROJECTED_FIELD_REPAIR,
+            CanonicalAction.REVIEW_SHAPE_REPAIR,
+        )
+    }
+    expected = {
+        CanonicalAction.PROJECTED_FIELD_REPAIR: 4,
+        CanonicalAction.REVIEW_SHAPE_REPAIR: 1,
+    }
+    if actual != expected:
+        _fail(
+            "canonical_repair_action_count_invalid",
+            (
+                "canonical repair ledger requires exactly "
+                "4 projected_field_repair and 1 review_shape_repair rows"
+            ),
+        )
+
+
 def plan_canonical_repair(
     *,
     existing: BrainStore,
@@ -644,6 +669,7 @@ def plan_canonical_repair(
         engine_sha=engine_sha,
         snapshot=snapshot,
     )
+    _validate_repair_action_counts(ledger)
     try:
         engine_receipt = verify_git_root_clean(
             engine_root,
