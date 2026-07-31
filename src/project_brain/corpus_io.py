@@ -105,6 +105,23 @@ _MUTATION_OPERATIONS = {
     "display_migration",
     "canonical_repair",
 }
+_MUTATION_MANIFEST_FIELDS = frozenset({
+    "transaction_id",
+    "operation",
+    "engine_sha",
+    "creates",
+    "updates",
+    "deletes",
+    "renames",
+    "reference_rewrites",
+    "auxiliary_updates",
+    "before_fingerprint",
+    "expected_after_fingerprint",
+    "grandfathered_problems_before",
+    "grandfathered_problems_after",
+    "batch_binding",
+    "canonical_repair_binding",
+})
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1314,10 @@ def _read_journal_at(
         payload["manifest"] = dict(manifest)
         payload["batch_binding"] = None
         payload["manifest"]["batch_binding"] = None
+    payload = _with_historical_terminal_manifest_compatibility(
+        payload,
+        transaction_id,
+    )
     try:
         _validate_journal_model(payload, transaction_id)
     except (TypeError, ValueError) as exc:
@@ -1305,6 +1326,35 @@ def _read_journal_at(
             transaction_ids=(transaction_id,),
         ) from exc
     return payload
+
+
+def _with_historical_terminal_manifest_compatibility(
+    payload: dict[str, Any],
+    transaction_id: str,
+) -> dict[str, Any]:
+    if (
+        payload.get("version") != 1
+        or _SHA256.fullmatch(transaction_id) is None
+        or payload.get("transaction_id") != transaction_id
+        or payload.get("state") not in _TERMINAL_STATES
+    ):
+        return payload
+    manifest = payload.get("manifest")
+    if not isinstance(manifest, dict):
+        return payload
+    if manifest.get("operation") not in (
+        _MUTATION_OPERATIONS - {"canonical_repair"}
+    ):
+        return payload
+    historical_fields = _MUTATION_MANIFEST_FIELDS - {
+        "canonical_repair_binding"
+    }
+    if set(manifest) != historical_fields:
+        return payload
+    compatible = dict(payload)
+    compatible["manifest"] = dict(manifest)
+    compatible["manifest"]["canonical_repair_binding"] = None
+    return compatible
 
 
 def _remove_tree_at(parent_fd: int, name: str, *, expected_device: int) -> None:
@@ -3275,24 +3325,7 @@ def _validate_manifest_model(
     manifest: Mapping[str, object],
     transaction_id: str,
 ) -> list[dict[str, object]]:
-    required = {
-        "transaction_id",
-        "operation",
-        "engine_sha",
-        "creates",
-        "updates",
-        "deletes",
-        "renames",
-        "reference_rewrites",
-        "auxiliary_updates",
-        "before_fingerprint",
-        "expected_after_fingerprint",
-        "grandfathered_problems_before",
-        "grandfathered_problems_after",
-        "batch_binding",
-        "canonical_repair_binding",
-    }
-    if set(manifest) != required:
+    if set(manifest) != _MUTATION_MANIFEST_FIELDS:
         raise ValueError("manifest keys do not match the contract")
     if manifest.get("transaction_id") != transaction_id:
         raise ValueError("manifest transaction_id mismatch")

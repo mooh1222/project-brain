@@ -21,6 +21,7 @@ from project_brain.corpus_io import (
     JournalState,
     RecoveryRequiredError,
     apply_transaction,
+    assert_corpus_readable,
     batch_intent_relative_path,
     corpus_lock,
     fsync_directory,
@@ -876,6 +877,164 @@ def test_legacy_nonbatch_committed_journal_without_binding_remains_readable(
     )
     assert followup.ok and followup.manifest is not None
     assert followup.manifest.batch_binding is None
+
+
+def _historical_context_replace_journal(
+    tmp_path: Path,
+    *,
+    state: str,
+) -> tuple[Path, Path, dict]:
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    request = replace(
+        _request(brain_root, (after,)),
+        operation=MutationOperation.CONTEXT_REPLACE,
+    )
+    result = MutationService().apply((after,), request=request)
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["state"] = state
+    assert journal["manifest"].pop("canonical_repair_binding") is None
+    if state == JournalState.ROLLED_BACK.value:
+        _write_object(brain_root, before)
+        expected = before
+    else:
+        expected = after
+    journal_path.write_bytes(
+        (
+            json.dumps(
+                journal,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    return brain_root, journal_path, expected
+
+
+@pytest.mark.parametrize(
+    "state",
+    (JournalState.COMMITTED.value, JournalState.ROLLED_BACK.value),
+)
+def test_historical_terminal_manifest_without_canonical_binding_is_read_only_compatible(
+    tmp_path,
+    state,
+):
+    brain_root, journal_path, expected = _historical_context_replace_journal(
+        tmp_path,
+        state=state,
+    )
+    before_bytes = journal_path.read_bytes()
+
+    assert_corpus_readable(brain_root)
+    assert BrainStore.load(brain_root).get(expected["id"]) == expected
+    recovered = recover_unfinished_transaction(brain_root)
+
+    assert recovered.recovered_transaction_ids == ()
+    assert journal_path.read_bytes() == before_bytes
+
+
+@pytest.mark.parametrize(
+    "state",
+    (JournalState.PREPARED.value, JournalState.COMMITTING.value),
+)
+def test_historical_nonterminal_manifest_without_canonical_binding_is_rejected(
+    tmp_path,
+    state,
+):
+    brain_root, journal_path, _ = _historical_context_replace_journal(
+        tmp_path,
+        state=state,
+    )
+    before_bytes = journal_path.read_bytes()
+
+    with pytest.raises(RecoveryRequiredError, match="journal structure is invalid"):
+        assert_corpus_readable(brain_root)
+
+    assert journal_path.read_bytes() == before_bytes
+
+
+def test_terminal_canonical_repair_manifest_missing_binding_is_rejected(tmp_path):
+    request = _mapping_repair_request(tmp_path)
+    result = MutationService().apply(request.objects, request=request)
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        request.brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["manifest"].pop("canonical_repair_binding")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(RecoveryRequiredError, match="journal structure is invalid"):
+        BrainStore.load(request.brain_root)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("missing_other", "extra", "malformed", "invalid_nonnull_binding"),
+)
+def test_historical_terminal_manifest_compatibility_remains_fail_closed(
+    tmp_path,
+    tamper,
+):
+    brain_root, journal_path, _ = _historical_context_replace_journal(
+        tmp_path,
+        state=JournalState.COMMITTED.value,
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    manifest = journal["manifest"]
+    if tamper == "missing_other":
+        manifest.pop("engine_sha")
+    elif tamper == "extra":
+        manifest["unexpected"] = None
+    elif tamper == "malformed":
+        manifest["engine_sha"] = "invalid"
+    else:
+        manifest["canonical_repair_binding"] = {"unexpected": "a" * 64}
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(RecoveryRequiredError, match="journal structure is invalid"):
+        BrainStore.load(brain_root)
+
+
+def test_current_noncanonical_journal_writes_explicit_null_canonical_binding(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    request = replace(
+        _request(brain_root, (after,)),
+        operation=MutationOperation.CONTEXT_REPLACE,
+    )
+
+    result = MutationService().apply((after,), request=request)
+
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert "canonical_repair_binding" in journal["manifest"]
+    assert journal["manifest"]["canonical_repair_binding"] is None
 
 
 @pytest.mark.parametrize(
