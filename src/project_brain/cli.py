@@ -1632,6 +1632,7 @@ def _run_migration(argv) -> int:
         parse_canonicalization_ledger,
         plan_canonical_repair,
     )
+    from project_brain.corpus_io import CorpusIOError
     from project_brain.migration import (
         MigrationError,
         apply_migration_artifact,
@@ -1641,6 +1642,7 @@ def _run_migration(argv) -> int:
         verify_snapshot,
     )
     from project_brain.snapshot import SnapshotError
+    from project_brain.store import StoreLoadError
 
     brain_root = resolve_brain_root(args.brain_root).resolve()
     try:
@@ -1811,6 +1813,15 @@ def _run_migration(argv) -> int:
             "snapshot_id": result.snapshot_id,
         }, ensure_ascii=False, indent=2))
         return 0
+    except (StoreLoadError, CorpusIOError) as exc:
+        if args.mode != "canonical-repair":
+            raise
+        print(json.dumps({
+            "ok": False,
+            "error_code": exc.code,
+            "error": exc.detail,
+        }, ensure_ascii=False, indent=2))
+        return 1
     except (
         CanonicalRepairError,
         MigrationError,

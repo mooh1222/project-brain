@@ -2670,15 +2670,15 @@ class TestCliShow(unittest.TestCase):
         self.assertFalse(store.has(old["id"]))
         self.assertTrue(store.has("code.neutral.legacy"))
 
-    def test_canonical_repair_cli_plan_is_read_only_and_apply_is_receipt_bound(self):
+    def _canonical_cli_fixture(self, name):
         from project_brain.snapshot import (
             SnapshotRequest,
             create_snapshot,
         )
         from tests.test_canonical_repair import _canonical_plan_fixture
 
-        fixture = _canonical_plan_fixture(self.root / "canonical-cli")
-        input_dir = self.root / "canonical-cli-inputs"
+        fixture = _canonical_plan_fixture(self.root / name)
+        input_dir = self.root / f"{name}-inputs"
         input_dir.mkdir()
         decisions_file = input_dir / "canonicalization-decisions.json"
         classification_file = input_dir / "phase-a-classification.json"
@@ -2689,8 +2689,8 @@ class TestCliShow(unittest.TestCase):
             brain_root=fixture.brain_root,
             repo_root=fixture.repo_root,
             engine_root=fixture.engine_root,
-            output_root=(self.root / "snapshots").resolve(),
-            snapshot_id="canonical-cli-before",
+            output_root=(self.root / f"{name}-snapshots").resolve(),
+            snapshot_id=f"{name}-before",
         ))
         common_args = [
             "--brain-root", str(fixture.brain_root),
@@ -2707,6 +2707,12 @@ class TestCliShow(unittest.TestCase):
             "--manifest", str(manifest_file),
             "--engine-sha", fixture.engine_sha,
         ]
+        return fixture, common_args, manifest_file, snapshot_result
+
+    def test_canonical_repair_cli_plan_is_read_only_and_apply_is_receipt_bound(self):
+        fixture, common_args, manifest_file, snapshot_result = (
+            self._canonical_cli_fixture("canonical-cli")
+        )
         success_keys = {
             "ok",
             "migration_kind",
@@ -2794,6 +2800,75 @@ class TestCliShow(unittest.TestCase):
         self.assertTrue(after.has("mapping.neutral.repair-0"))
         self.assertFalse(after.has("review.bundle.Neutral.domain-mapping"))
         self.assertTrue(after.has("review.bundle.neutral.domain-mapping"))
+
+    def test_canonical_repair_cli_plan_reports_corrupt_object_as_json(self):
+        fixture, common_args, _, _ = self._canonical_cli_fixture(
+            "canonical-plan-corrupt",
+        )
+        corrupt_path = BrainStore.object_path(
+            fixture.brain_root,
+            fixture.existing.get("mapping.neutral.Legacy0"),
+        )
+        corrupt_path.write_bytes(b"{")
+        out = io.StringIO()
+        err = io.StringIO()
+
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "plan", *common_args,
+        ]), redirect_stdout(out), redirect_stderr(err):
+            result = cli.main()
+
+        self.assertEqual(result, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {"ok", "error_code", "error"})
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["error_code"], "object_json_invalid")
+        self.assertEqual(
+            payload["error"],
+            (
+                f"tracked object JSON is invalid at {corrupt_path}: "
+                "Expecting property name enclosed in double quotes: "
+                "line 1 column 2 (char 1)"
+            ),
+        )
+        self.assertEqual(err.getvalue(), "")
+
+    def test_canonical_repair_cli_apply_reports_corpus_io_error_as_json(self):
+        fixture, common_args, _, _ = self._canonical_cli_fixture(
+            "canonical-apply-corrupt",
+        )
+        plan_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "plan", *common_args,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        lock_path = fixture.brain_root / ".brain-local" / "corpus.lock"
+        lock_path.unlink()
+        lock_path.mkdir()
+        out = io.StringIO()
+        err = io.StringIO()
+
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "apply",
+            *common_args,
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+        ]), redirect_stdout(out), redirect_stderr(err):
+            result = cli.main()
+
+        self.assertEqual(result, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {"ok", "error_code", "error"})
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["error_code"], "anchored_io_failed")
+        self.assertEqual(
+            payload["error"],
+            (
+                f"anchored path operation failed for {lock_path}: "
+                "[Errno 21] Is a directory: 'corpus.lock'"
+            ),
+        )
+        self.assertEqual(err.getvalue(), "")
 
     def test_display_migration_cli_normalizes_only_locator_titles(self):
         from project_brain.snapshot import SnapshotVerification
