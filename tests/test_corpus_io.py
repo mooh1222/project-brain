@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
+import stat
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -59,6 +63,54 @@ PREPARATION_FAILURE_POINTS = (
 
 class InjectedCrash(RuntimeError):
     pass
+
+
+def _hold_stable_lock_in_child(brain_root, ready, release) -> None:
+    with corpus_io.stable_corpus_lock(
+        Path(brain_root),
+        exclusive=True,
+    ):
+        ready.set()
+        if not release.wait(timeout=5):
+            raise AssertionError("stable lock release was not signaled")
+
+
+@contextmanager
+def _other_process_holding_stable_lock(brain_root: Path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_stable_lock_in_child,
+        args=(str(brain_root), ready, release),
+    )
+    process.start()
+    if not ready.wait(timeout=3):
+        process.terminate()
+        process.join(timeout=1)
+        raise AssertionError("child did not acquire the stable lock")
+    try:
+        yield release
+    finally:
+        release.set()
+        process.join(timeout=3)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1)
+            raise AssertionError("stable lock child did not exit")
+        assert process.exitcode == 0
+
+
+def _real_directory(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
+def _replace_directory_binding(path: Path) -> Path:
+    detached = path.with_name(f"{path.name}-detached")
+    path.rename(detached)
+    path.mkdir()
+    return detached
 
 
 def _write_object(brain_root: Path, obj: dict) -> Path:
@@ -282,6 +334,219 @@ def test_low_level_api_exposes_exact_journal_states_and_fsyncs(tmp_path):
     fsync_directory(brain_root)
     with corpus_lock(brain_root, exclusive=False):
         assert (brain_root / ".brain-local" / "corpus.lock").is_file()
+
+
+def test_stable_corpus_lock_nonblocking_reports_busy(tmp_path):
+    brain_root = tmp_path / "brain"
+    with _other_process_holding_stable_lock(brain_root) as release:
+        watchdog = threading.Timer(1, release.set)
+        watchdog.start()
+        try:
+            started = time.monotonic()
+            with pytest.raises(CorpusIOError) as exc:
+                with corpus_io.stable_corpus_lock(
+                    brain_root,
+                    exclusive=True,
+                    blocking=False,
+                ):
+                    raise AssertionError("lock body must not run")
+        finally:
+            watchdog.cancel()
+    assert exc.value.code == "corpus_lock_busy"
+    assert time.monotonic() - started < 0.5
+
+
+def test_stable_corpus_lock_default_still_blocks_until_release(tmp_path):
+    brain_root = tmp_path / "brain"
+    acquired = threading.Event()
+    errors: list[BaseException] = []
+
+    def acquire_default_lock() -> None:
+        try:
+            with corpus_io.stable_corpus_lock(
+                brain_root,
+                exclusive=True,
+            ):
+                acquired.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    with _other_process_holding_stable_lock(brain_root):
+        waiter = threading.Thread(target=acquire_default_lock)
+        waiter.start()
+        assert not acquired.wait(timeout=0.1)
+
+    assert acquired.wait(timeout=1)
+    waiter.join(timeout=1)
+    assert not waiter.is_alive()
+    assert errors == []
+
+
+def test_stable_corpus_lock_same_process_nesting_remains_reentrant(tmp_path):
+    brain_root = tmp_path / "brain"
+
+    with corpus_io.stable_corpus_lock(brain_root, exclusive=True):
+        with corpus_io.stable_corpus_lock(
+            brain_root,
+            exclusive=False,
+            blocking=False,
+        ):
+            pass
+
+
+def test_anchored_staging_creates_bound_direct_children(tmp_path):
+    parent = _real_directory(tmp_path / "snapshots")
+
+    temporary = corpus_io.create_anchored_temp_directory(
+        parent,
+        prefix=".task17-",
+    )
+    named = corpus_io.create_anchored_directory(
+        temporary,
+        name="payload",
+        mode=0o750,
+    )
+
+    parent_stat = os.lstat(parent)
+    temporary_stat = os.lstat(temporary.path)
+    named_stat = os.lstat(named.path)
+    assert temporary.path.parent == parent
+    assert temporary.path.name.startswith(".task17-")
+    assert stat.S_ISDIR(temporary_stat.st_mode)
+    assert stat.S_IMODE(temporary_stat.st_mode) == 0o700
+    assert (
+        temporary.parent_device,
+        temporary.parent_inode,
+        temporary.device,
+        temporary.inode,
+    ) == (
+        parent_stat.st_dev,
+        parent_stat.st_ino,
+        temporary_stat.st_dev,
+        temporary_stat.st_ino,
+    )
+    assert named.path == temporary.path / "payload"
+    assert stat.S_ISDIR(named_stat.st_mode)
+    assert stat.S_IMODE(named_stat.st_mode) == 0o750
+    assert (named.parent_device, named.parent_inode) == (
+        temporary.device,
+        temporary.inode,
+    )
+    corpus_io.verify_directory_binding(temporary)
+    corpus_io.verify_directory_binding(named)
+
+
+def test_anchored_staging_rejects_symlink_parent(tmp_path):
+    target = _real_directory(tmp_path / "real-snapshots")
+    parent = tmp_path / "snapshots"
+    parent.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.create_anchored_temp_directory(
+            parent,
+            prefix=".task17-",
+        )
+
+    assert exc.value.code == "symlink_forbidden"
+    assert tuple(target.iterdir()) == ()
+
+
+def test_anchored_staging_rejects_existing_child(tmp_path):
+    root = _real_directory(tmp_path / "snapshots")
+    parent = corpus_io.create_anchored_temp_directory(
+        root,
+        prefix=".task17-",
+    )
+    (parent.path / "existing").mkdir()
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.create_anchored_directory(parent, name="existing")
+
+    assert exc.value.code == "path_already_exists"
+
+
+def test_anchored_staging_rejects_fifo_child(tmp_path):
+    root = _real_directory(tmp_path / "snapshots")
+    parent = corpus_io.create_anchored_temp_directory(
+        root,
+        prefix=".task17-",
+    )
+    os.mkfifo(parent.path / "payload")
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.create_anchored_directory(parent, name="payload")
+
+    assert exc.value.code == "file_type_invalid"
+
+
+def test_anchored_staging_detects_parent_replacement(tmp_path):
+    parent = _real_directory(tmp_path / "snapshots")
+    child = corpus_io.create_anchored_temp_directory(
+        parent,
+        prefix=".task17-",
+    )
+    _replace_directory_binding(parent)
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.verify_directory_binding(child)
+
+    assert exc.value.code == "path_binding_changed"
+
+
+def test_anchored_staging_detects_child_replacement(tmp_path):
+    parent = _real_directory(tmp_path / "snapshots")
+    child = corpus_io.create_anchored_temp_directory(
+        parent,
+        prefix=".task17-",
+    )
+    _replace_directory_binding(child.path)
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.verify_directory_binding(child)
+
+    assert exc.value.code == "path_binding_changed"
+
+
+def test_anchored_staging_rejects_cross_filesystem_child(
+    tmp_path,
+    monkeypatch,
+):
+    parent = _real_directory(tmp_path / "snapshots")
+    real_observed_device = corpus_io._observed_device
+
+    def observe_other_filesystem(path: str, actual_device: int) -> int:
+        if Path(path).parent == parent:
+            return actual_device + 1
+        return real_observed_device(path, actual_device)
+
+    monkeypatch.setattr(
+        corpus_io,
+        "_observed_device",
+        observe_other_filesystem,
+    )
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.create_anchored_temp_directory(
+            parent,
+            prefix=".cross-device-",
+        )
+
+    assert exc.value.code == "filesystem_mismatch"
+    assert all(not tuple(path.iterdir()) for path in parent.iterdir())
+
+
+@pytest.mark.parametrize("name", ("", ".", "..", "nested/payload"))
+def test_anchored_staging_rejects_non_child_name(tmp_path, name):
+    root = _real_directory(tmp_path / "snapshots")
+    parent = corpus_io.create_anchored_temp_directory(
+        root,
+        prefix=".task17-",
+    )
+
+    with pytest.raises(ValueError, match="direct child"):
+        corpus_io.create_anchored_directory(parent, name=name)
+
+    assert tuple(parent.path.iterdir()) == ()
 
 
 def test_manifest_always_contains_canonical_repair_binding(tmp_path):

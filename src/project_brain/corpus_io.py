@@ -71,6 +71,15 @@ class CorpusIOError(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
+@dataclass(frozen=True)
+class DirectoryBinding:
+    path: Path
+    parent_device: int
+    parent_inode: int
+    device: int
+    inode: int
+
+
 _TERMINAL_STATES = {
     JournalState.COMMITTED.value,
     JournalState.ROLLED_BACK.value,
@@ -476,6 +485,7 @@ def stable_corpus_lock(
     brain_root: Path,
     *,
     exclusive: bool,
+    blocking: bool = True,
 ) -> Iterator[None]:
     """Lock a path outside the swappable corpus-root inode."""
     identity = _brain_root_identity(brain_root)
@@ -534,7 +544,18 @@ def stable_corpus_lock(
                 paths=(parent / _stable_lock_name(root),),
             )
         lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(lock_fd, lock_mode)
+        if not blocking:
+            lock_mode |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(lock_fd, lock_mode)
+        except OSError as exc:
+            if not blocking and exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise CorpusIOError(
+                    "corpus_lock_busy",
+                    "stable corpus lock is already held",
+                    paths=(parent / _stable_lock_name(root),),
+                ) from exc
+            raise
         token = _STABLE_CORPUS_LOCK_SCOPE.set(
             _StableCorpusLockScope(identity, exclusive)
         )
@@ -547,6 +568,269 @@ def stable_corpus_lock(
         if lock_fd >= 0:
             os.close(lock_fd)
         os.close(parent_fd)
+
+
+def _validated_direct_child_name(name: str) -> str:
+    if (
+        not isinstance(name, str)
+        or name in ("", ".", "..")
+        or "/" in name
+        or "\0" in name
+    ):
+        raise ValueError("directory name must identify one direct child")
+    return name
+
+
+def _validated_directory_prefix(prefix: str) -> str:
+    if not isinstance(prefix, str) or "/" in prefix or "\0" in prefix:
+        raise ValueError("directory prefix must stay within one direct child")
+    return prefix
+
+
+def _validated_directory_mode(mode: int) -> int:
+    if (
+        not isinstance(mode, int)
+        or isinstance(mode, bool)
+        or mode < 0
+        or mode & ~0o777
+    ):
+        raise ValueError("directory mode must contain permission bits only")
+    return mode
+
+
+def _open_directory_path(path: Path) -> tuple[int, os.stat_result]:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise _anchored_path_error(path, exc) from exc
+    return descriptor, os.fstat(descriptor)
+
+
+def _path_binding_changed(binding: DirectoryBinding, detail: str) -> CorpusIOError:
+    return CorpusIOError(
+        "path_binding_changed",
+        detail,
+        paths=(binding.path,),
+    )
+
+
+def _open_bound_directory(binding: DirectoryBinding) -> int:
+    parent_fd = -1
+    child_fd = -1
+    try:
+        try:
+            parent_fd = os.open(
+                binding.path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except OSError as exc:
+            raise _path_binding_changed(
+                binding,
+                "bound directory parent is no longer directly reachable",
+            ) from exc
+        parent_stat = os.fstat(parent_fd)
+        if (parent_stat.st_dev, parent_stat.st_ino) != (
+            binding.parent_device,
+            binding.parent_inode,
+        ):
+            raise _path_binding_changed(
+                binding,
+                "bound directory parent was replaced",
+            )
+        try:
+            child_fd = os.open(
+                _validated_direct_child_name(binding.path.name),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except (OSError, ValueError) as exc:
+            raise _path_binding_changed(
+                binding,
+                "bound directory is no longer a direct directory child",
+            ) from exc
+        child_stat = os.fstat(child_fd)
+        if (child_stat.st_dev, child_stat.st_ino) != (
+            binding.device,
+            binding.inode,
+        ):
+            raise _path_binding_changed(
+                binding,
+                "bound directory was replaced",
+            )
+        result = child_fd
+        child_fd = -1
+        return result
+    finally:
+        if child_fd >= 0:
+            os.close(child_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _existing_child_error(
+    parent_fd: int,
+    *,
+    name: str,
+    path: Path,
+) -> CorpusIOError:
+    try:
+        child_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        return CorpusIOError(
+            "anchored_io_failed",
+            f"existing directory entry disappeared during creation: {path}",
+            paths=(path,),
+        )
+    if stat.S_ISLNK(child_stat.st_mode):
+        return CorpusIOError(
+            "symlink_forbidden",
+            f"directory child is a symlink: {path}",
+            paths=(path,),
+        )
+    if not stat.S_ISDIR(child_stat.st_mode):
+        return CorpusIOError(
+            "file_type_invalid",
+            f"directory child is not a directory: {path}",
+            paths=(path,),
+        )
+    return CorpusIOError(
+        "path_already_exists",
+        f"directory child already exists: {path}",
+        paths=(path,),
+    )
+
+
+def _create_directory_at(
+    parent_path: Path,
+    parent_fd: int,
+    parent_stat: os.stat_result,
+    *,
+    name: str,
+    mode: int,
+) -> DirectoryBinding:
+    name = _validated_direct_child_name(name)
+    mode = _validated_directory_mode(mode)
+    path = parent_path / name
+    try:
+        os.mkdir(name, mode, dir_fd=parent_fd)
+    except FileExistsError as exc:
+        raise _existing_child_error(
+            parent_fd,
+            name=name,
+            path=path,
+        ) from exc
+    except OSError as exc:
+        raise _anchored_path_error(path, exc) from exc
+
+    child_fd = -1
+    try:
+        try:
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise _anchored_path_error(path, exc) from exc
+        child_stat = os.fstat(child_fd)
+        child_device = _observed_device(os.fspath(path), child_stat.st_dev)
+        if child_device != parent_stat.st_dev:
+            raise CorpusIOError(
+                "filesystem_mismatch",
+                f"directory child is on another filesystem: {path}",
+                paths=(path,),
+            )
+        os.fchmod(child_fd, mode)
+        child_stat = os.fstat(child_fd)
+        if (
+            not stat.S_ISDIR(child_stat.st_mode)
+            or stat.S_IMODE(child_stat.st_mode) != mode
+        ):
+            raise CorpusIOError(
+                "file_type_invalid",
+                f"directory child mode or type is invalid: {path}",
+                paths=(path,),
+            )
+        os.fsync(child_fd)
+        os.fsync(parent_fd)
+        binding = DirectoryBinding(
+            path=path,
+            parent_device=parent_stat.st_dev,
+            parent_inode=parent_stat.st_ino,
+            device=child_stat.st_dev,
+            inode=child_stat.st_ino,
+        )
+    finally:
+        if child_fd >= 0:
+            os.close(child_fd)
+    verify_directory_binding(binding)
+    return binding
+
+
+def create_anchored_temp_directory(
+    parent: Path,
+    *,
+    prefix: str,
+    mode: int = 0o700,
+) -> DirectoryBinding:
+    """Create a unique direct child from one pinned parent directory."""
+    parent = Path(parent)
+    prefix = _validated_directory_prefix(prefix)
+    mode = _validated_directory_mode(mode)
+    parent_fd, parent_stat = _open_directory_path(parent)
+    try:
+        for _attempt in range(100):
+            name = f"{prefix}{os.urandom(8).hex()}"
+            try:
+                return _create_directory_at(
+                    parent,
+                    parent_fd,
+                    parent_stat,
+                    name=name,
+                    mode=mode,
+                )
+            except CorpusIOError as exc:
+                if exc.code != "path_already_exists":
+                    raise
+        raise CorpusIOError(
+            "temporary_directory_unavailable",
+            f"could not allocate a unique directory below {parent}",
+            paths=(parent,),
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def create_anchored_directory(
+    parent: DirectoryBinding,
+    *,
+    name: str,
+    mode: int = 0o700,
+) -> DirectoryBinding:
+    """Create a named direct child from a verified, pinned parent."""
+    name = _validated_direct_child_name(name)
+    mode = _validated_directory_mode(mode)
+    parent_fd = _open_bound_directory(parent)
+    try:
+        parent_stat = os.fstat(parent_fd)
+        return _create_directory_at(
+            parent.path,
+            parent_fd,
+            parent_stat,
+            name=name,
+            mode=mode,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def verify_directory_binding(binding: DirectoryBinding) -> None:
+    """Reject a directory whose direct parent or own inode was replaced."""
+    descriptor = _open_bound_directory(binding)
+    os.close(descriptor)
 
 
 def _current_lock_scope(
