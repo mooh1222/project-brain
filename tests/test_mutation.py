@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import project_brain.mutation as mutation
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
     MutationManifest,
@@ -997,6 +998,62 @@ def test_id_only_migration_allows_only_id_and_registered_reference_changes(tmp_p
             new_locator["id"],
         ),
     }
+
+
+@pytest.mark.parametrize("review_scope", ["absent", "single_object"])
+def test_target_derived_single_review_rename_accepts_current_valid_single_scope(
+    review_scope,
+):
+    before = review_record_for("review.g.neutral.x", "g.neutral.x")
+    after = review_record_for("review.g.other.x", "g.other.x")
+    if review_scope == "single_object":
+        before["review_scope"] = review_scope
+        after["review_scope"] = review_scope
+
+    assert mutation.is_target_derived_single_review_rename(
+        before,
+        after,
+        {
+            "g.neutral.x": "g.other.x",
+            "review.g.neutral.x": "review.g.other.x",
+        },
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["scope", "independent_self_id", "target_not_renamed", "payload", "bundle"],
+)
+def test_target_derived_single_review_rename_rejects_non_exact_closure(tamper):
+    before = review_record_for("review.g.neutral.x", "g.neutral.x")
+    after = review_record_for("review.g.other.x", "g.other.x")
+    replacements = {
+        "g.neutral.x": "g.other.x",
+        "review.g.neutral.x": "review.g.other.x",
+    }
+    if tamper == "scope":
+        before["review_scope"] = None
+    elif tamper == "independent_self_id":
+        after["id"] = "review.g.neutral.other"
+    elif tamper == "target_not_renamed":
+        del replacements["g.neutral.x"]
+    elif tamper == "payload":
+        after["title"] = "changed"
+    elif tamper == "bundle":
+        after["id"] = "review.bundle.other.review"
+        after.pop("target_object_id")
+        after.update({
+            "review_scope": "mapping_bundle",
+            "bundle_key": "bundle.other.review",
+            "confirmation_key": "bundle.other.review",
+            "target_object_ids": ["mapping.other.review"],
+        })
+
+    assert mutation.is_target_derived_single_review_rename(
+        before,
+        after,
+        replacements,
+    ) is False
 
 
 def test_id_only_migration_rejects_non_identity_payload_change(tmp_path):

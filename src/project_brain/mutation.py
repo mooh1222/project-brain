@@ -22,6 +22,7 @@ from project_brain.corpus_io import (
     recover_unfinished_transaction_unlocked,
 )
 from project_brain.hash_utils import stable_json
+from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.lint import LintProblem, lint_store_report
 from project_brain.objbase import now_kst
 from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
@@ -1061,6 +1062,55 @@ def _validate_explicit_renames(
     return pairs, None
 
 
+def is_target_derived_single_review_rename(
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    replacements: Mapping[str, str],
+) -> bool:
+    """대상 ID rename에 딸린 current-valid single ReviewRecord인지 확인한다."""
+    if (
+        before.get("kind") != "ReviewRecord"
+        or after.get("kind") != "ReviewRecord"
+    ):
+        return False
+    before_id = before.get("id")
+    after_id = after.get("id")
+    before_target = before.get("target_object_id")
+    after_target = after.get("target_object_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (before_id, after_id, before_target, after_target)
+    ):
+        return False
+    if (
+        ("review_scope" in before and before["review_scope"] != "single_object")
+        or ("review_scope" in after and after["review_scope"] != "single_object")
+    ):
+        return False
+    try:
+        before_parsed = parse_id(before_id, "ReviewRecord")
+        after_parsed = parse_id(after_id, "ReviewRecord")
+    except IdGrammarError:
+        return False
+    if (
+        before_parsed.variant != "single"
+        or after_parsed.variant != "single"
+        or validate_object_id(dict(before))
+        or before_parsed.target_object_id != before_target
+        or after_parsed.target_object_id != after_target
+        or before_id != f"review.{before_target}"
+        or after_id != f"review.{after_target}"
+        or replacements.get(before_id) != after_id
+        or replacements.get(before_target) != after_target
+        or sum(value == after_id for value in replacements.values()) != 1
+        or sum(value == after_target for value in replacements.values()) != 1
+    ):
+        return False
+    expected, _ = rewrite_object_refs(before, replacements)
+    expected["id"] = after_id
+    return expected == after
+
+
 def _infer_id_only_renames(
     operation: MutationOperation,
     existing_by_id: Mapping[str, dict],
@@ -1110,8 +1160,17 @@ def _infer_id_only_renames(
         if problem.code in _STRUCTURED_ID_LINT_CODES
         for object_id in problem.object_ids
     }
+    replacements = dict(pairs)
     for old_id, new_id in pairs:
-        if old_id not in structured_id_problem_ids:
+        is_allowed_source = (
+            old_id in structured_id_problem_ids
+            or is_target_derived_single_review_rename(
+                existing_by_id[old_id],
+                input_by_id[new_id],
+                replacements,
+            )
+        )
+        if not is_allowed_source:
             return (), _failure(
                 "id_only_legacy_source_not_invalid",
                 (
@@ -1126,7 +1185,6 @@ def _infer_id_only_renames(
                 f"{new_id}: replacement ID is not canonical",
             )
 
-    replacements = dict(pairs)
     for old_id, new_id in pairs:
         expected, _ = rewrite_object_refs(
             existing_by_id[old_id],

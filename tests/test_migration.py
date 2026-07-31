@@ -21,7 +21,13 @@ from project_brain.migration import (
 from project_brain.mutation import corpus_fingerprint
 from project_brain.store import BrainStore
 from project_brain.snapshot import SnapshotVerification
-from tests.test_ingest import context, evidence_ref, manifest, review_record_for
+from tests.test_ingest import (
+    candidate_term,
+    context,
+    evidence_ref,
+    manifest,
+    review_record_for,
+)
 from tests.test_mutation import _code_locator, _write_raw
 
 
@@ -168,6 +174,63 @@ def _id_plan(brain_root: Path, renames: dict[str, str]):
         renames=renames,
         snapshot=snapshot,
     )
+
+
+def _target_derived_review_plan_args(
+    tmp_path: Path,
+    *,
+    review_scope: str | None = "absent",
+    tamper: str | None = None,
+) -> dict:
+    brain_root = tmp_path / "brain"
+    target = candidate_term("g.neutral.x")
+    target["context_id"] = "context.other"
+    other_context = context("context.other")
+    other_context["context_key"] = "other"
+    review = review_record_for("review.g.neutral.x", target["id"])
+    if review_scope != "absent":
+        review["review_scope"] = review_scope
+
+    renames = {
+        target["id"]: "g.other.x",
+        review["id"]: "review.g.other.x",
+    }
+    if tamper == "independent_self_id":
+        renames[review["id"]] = "review.g.neutral.other"
+    elif tamper == "target_not_renamed":
+        del renames[target["id"]]
+    elif tamper == "payload":
+        target["context_id"] = "context.third"
+        renames[target["id"]] = "g.other.x"
+    elif tamper == "bundle":
+        review["id"] = "review.bundle.neutral.review"
+        review.pop("target_object_id")
+        review.update({
+            "review_scope": "mapping_bundle",
+            "bundle_key": "bundle.neutral.review",
+            "confirmation_key": "bundle.neutral.review",
+            "target_object_ids": ["mapping.neutral.review"],
+        })
+        renames = {
+            target["id"]: "g.other.x",
+            review["id"]: "review.bundle.neutral.renamed",
+        }
+
+    _write_raw(brain_root, target)
+    _write_raw(brain_root, other_context)
+    _write_raw(brain_root, review)
+    snapshot, repo_root, engine_root, engine_head = _trusted_snapshot_for(
+        brain_root,
+    )
+    return {
+        "existing": BrainStore.load(brain_root),
+        "brain_root": brain_root,
+        "repo_root": repo_root,
+        "engine_root": engine_root,
+        "engine_sha": engine_head,
+        "renames": renames,
+        "snapshot": snapshot,
+    }
 
 
 def test_plan_binds_explicit_git_roots_heads_and_snapshot_corpus(tmp_path):
@@ -600,6 +663,44 @@ def test_id_plan_unknown_grammar_rename_still_requires_zero_structured_debt(
         })
 
     assert caught.value.code == "grandfathered_problems_remaining"
+
+
+def test_id_plan_allows_target_derived_review_without_scope(tmp_path):
+    args = _target_derived_review_plan_args(tmp_path, review_scope="absent")
+
+    plan = plan_id_migration(**args)
+
+    assert [row.kind for row in plan.rows] == ["GlossaryTerm", "ReviewRecord"]
+
+
+def test_id_plan_allows_target_derived_review_with_single_scope(tmp_path):
+    args = _target_derived_review_plan_args(
+        tmp_path,
+        review_scope="single_object",
+    )
+
+    assert plan_id_migration(**args).migration_kind == "id_only"
+
+
+@pytest.mark.parametrize("scope", [None, "mapping_bundle", "other"])
+def test_id_plan_rejects_target_derived_review_with_bad_scope(tmp_path, scope):
+    args = _target_derived_review_plan_args(tmp_path, review_scope=scope)
+
+    with pytest.raises(MigrationError) as exc:
+        plan_id_migration(**args)
+
+    assert exc.value.code == "id_only_legacy_source_not_invalid"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["independent_self_id", "target_not_renamed", "payload", "bundle"],
+)
+def test_id_plan_rejects_non_exact_review_closure(tmp_path, tamper):
+    args = _target_derived_review_plan_args(tmp_path, tamper=tamper)
+
+    with pytest.raises(MigrationError):
+        plan_id_migration(**args)
 
 
 def test_canonical_payload_rejects_every_non_registry_semantic_change():

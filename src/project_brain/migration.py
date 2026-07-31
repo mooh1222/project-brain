@@ -17,6 +17,7 @@ from project_brain.corpus_io import (
 )
 from project_brain.eval_harness import ASSERTION_KEYS
 from project_brain.hash_utils import stable_json
+from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
     MutationManifest,
@@ -25,6 +26,7 @@ from project_brain.mutation import (
     MutationRequest,
     MutationService,
     corpus_fingerprint,
+    is_target_derived_single_review_rename,
 )
 from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
 from project_brain.repo_context import RepoContext
@@ -675,6 +677,27 @@ def plan_id_migration(
             rewritten["id"] = new_id
         if new_id != object_id or changed_refs:
             request_objects.append(rewritten)
+    request_by_id = {obj["id"]: obj for obj in request_objects}
+    for old_id, new_id in pairs.items():
+        before = existing_by_id[old_id]
+        after = request_by_id[new_id]
+        try:
+            parsed = parse_id(old_id, "ReviewRecord")
+        except IdGrammarError:
+            continue
+        if (
+            parsed.variant == "single"
+            and before.get("target_object_id") == parsed.target_object_id
+            and not is_target_derived_single_review_rename(
+                before,
+                after,
+                pairs,
+            )
+        ):
+            _fail(
+                "id_only_legacy_source_not_invalid",
+                f"{old_id}: ID-only rename source has no structured ID problem",
+            )
     auxiliary_updates, eval_rewrites = _eval_update(brain_root, pairs)
     preconditions = {
         old_id: _object_hash(existing_by_id[old_id])
