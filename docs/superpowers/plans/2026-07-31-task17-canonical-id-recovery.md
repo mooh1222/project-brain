@@ -25,10 +25,10 @@ byte-exact staging 승인, stable-lock live 적용의 네 경계로 나뉜다.
   `docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md`,
   SHA-256
   `b58d5d382cf0064130abe9ea04e73740f199d58d833161d95ddba2fda01b45a4`다.
-- 이 계획을 담은 commit의 parent는 설계 commit
-  `c7bacd6d7dd5a93f2657dac2f11058250abcc742`여야 한다. 구현 시작 시 현재 HEAD를
-  `ENGINE_BASELINE_SHA`로 기록하고, 두 commit 사이의 변경이 이 계획 문서 한
-  파일뿐인지 확인한다.
+- 설계 commit `c7bacd6d7dd5a93f2657dac2f11058250abcc742` 이후 구현 시작 전까지 허용되는
+  변경은 이 계획 문서뿐이다. 구현 시작 시 현재 HEAD를 `ENGINE_BASELINE_SHA`로
+  기록하고 `c7bacd6..ENGINE_BASELINE_SHA`의 changed path가 이 계획 한 파일뿐인지
+  확인한다.
 - BB2 시작 HEAD는
   `53671bce5e94edf38a7afa11706963581065fb0f`다. Task 17 commit 전까지 HEAD가
   달라지면 중단한다.
@@ -36,8 +36,13 @@ byte-exact staging 승인, stable-lock live 적용의 네 경계로 나뉜다.
   `e4093569753a26ea3f49adc6568c2942a52499e3dda695fe12fa95c4ff0feaa9`, file count
   `11134`다. 이 snapshot은 이전 engine SHA에 묶였으므로 새 migration apply
   receipt로 재사용하지 않는다.
-- BB2 기존 사용자 dirt 기준은 NUL status `31 records / 2161 bytes /
-  e0379113a5333fa65795944aa4b027ecfb11cebb78efc4fdcf844250495c6df9`, staged `0`이다.
+- 2026-07-31 계획 완료 시점의 BB2 사용자 dirt 기준은 NUL status
+  `32 records / 2209 bytes /
+  4c227b67a7e040498003d9beeed5be73366981f33fe3bc8639dd055ab2cd0c23`, staged `0`이다.
+  기존 기준 뒤 추가된 한 건은
+  `.agents/skills/guardrails/agents/openai.yaml`, file SHA-256
+  `55fafc73379acca7769e7a7d2f02409238f661ecede5a7b5c6154eac21454fcf`다. Task 17
+  소유가 아닌 사용자 dirt로 보존한다.
 - engine 원본 checkout 기준은 NUL status `17 records / 751 bytes /
   72d1449a578815cc57d86ad8c2022506b520c48e1ab3baca3350e7a5f418f93f`, staged `0`이다.
   두 dirty tree는 raw status뿐 아니라 각 path의 no-follow content receipt까지
@@ -1083,9 +1088,13 @@ for label, root, stem in (("bb2", sys.argv[1], "bb2"), ("source", sys.argv[2], "
 ```
 
 Expected: BB2 status tuple
-`31/2161/e0379113a5333fa65795944aa4b027ecfb11cebb78efc4fdcf844250495c6df9`, source tuple
+`32/2209/4c227b67a7e040498003d9beeed5be73366981f33fe3bc8639dd055ab2cd0c23`, source tuple
 `17/751/72d1449a578815cc57d86ad8c2022506b520c48e1ab3baca3350e7a5f418f93f`, staged path 0. content SHA는 이 시점에 새로 발급하고 이후 모든
 gate에서 exact 재사용한다.
+
+이 tuple이 실행 전에 다시 달라졌다면 새 변화를 Task 17 소유로 간주하지 않는다.
+어떤 path가 달라졌는지 보고하고 사용자에게 새 baseline 포함 여부를 확인받기 전에는
+scanner/test/recovery 파일도 만들지 않는다.
 
 - [ ] **Step 2: post-ingame snapshot과 현재 live를 대조한다**
 
@@ -1190,7 +1199,7 @@ Expected exact semantic baseline:
 - [ ] **Step 7: live 불변과 recovery allowlist만 늘었는지 확인한다**
 
 `corpus_fingerprint`, eval/index/stale SHA, BB2 HEAD, staged path는 시작과 exact여야
-한다. 새 status entry는 scanner/test/Phase A JSON 다섯 path만 허용하며 기존 31개
+한다. 새 status entry는 scanner/test/Phase A JSON 다섯 path만 허용하며 기존 32개
 status/content receipt는 그대로여야 한다.
 
 ---
@@ -1735,7 +1744,7 @@ final corpus/index/stale fingerprints, checks/eval receipts와
 
 canonical/id live manifest의 creates, updates, deletes, renames 양쪽과 recovery bundle
 14 files를 정렬·중복 제거한다. 모든 path는 lexical BB2-relative이고 symlink가 아니며
-기존 31개 dirt path와 disjoint여야 한다.
+실행 시 캡처한 기존 dirt path와 disjoint여야 한다.
 
 ```bash
 TASK17_STAGE_PATHS="$TASK17_RECEIPTS/task17-stage-paths.zlist"
