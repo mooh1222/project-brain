@@ -1022,7 +1022,14 @@ def test_target_derived_single_review_rename_accepts_current_valid_single_scope(
 
 @pytest.mark.parametrize(
     "tamper",
-    ["scope", "independent_self_id", "target_not_renamed", "payload", "bundle"],
+    [
+        "scope",
+        "identity",
+        "independent_self_id",
+        "target_not_renamed",
+        "payload",
+        "bundle",
+    ],
 )
 def test_target_derived_single_review_rename_rejects_non_exact_closure(tamper):
     before = review_record_for("review.g.neutral.x", "g.neutral.x")
@@ -1033,6 +1040,12 @@ def test_target_derived_single_review_rename_rejects_non_exact_closure(tamper):
     }
     if tamper == "scope":
         before["review_scope"] = None
+    elif tamper == "identity":
+        after = dict(before)
+        replacements = {
+            "g.neutral.x": "g.neutral.x",
+            "review.g.neutral.x": "review.g.neutral.x",
+        }
     elif tamper == "independent_self_id":
         after["id"] = "review.g.neutral.other"
     elif tamper == "target_not_renamed":

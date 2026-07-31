@@ -1096,6 +1096,8 @@ def is_target_derived_single_review_rename(
         before_parsed.variant != "single"
         or after_parsed.variant != "single"
         or validate_object_id(dict(before))
+        or before_id == after_id
+        or before_target == after_target
         or before_parsed.target_object_id != before_target
         or after_parsed.target_object_id != after_target
         or before_id != f"review.{before_target}"
