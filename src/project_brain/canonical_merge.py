@@ -11,6 +11,7 @@ from project_brain.reference_fields import (
     SCALAR_REFERENCE_FIELDS,
     _set_value_at_pointer,
     _value_at_pointer,
+    iter_object_refs,
 )
 
 
@@ -75,6 +76,13 @@ def _json_exact(left: object, right: object) -> bool:
             for left_item, right_item in zip(left, right, strict=True)
         )
     return left == right
+
+
+def _same_bytes(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> bool:
+    return list(left) == list(right) and _json_exact(left, right)
 
 
 def _validated_string_list(value: object, *, field: str) -> list[str]:
@@ -217,6 +225,68 @@ def _validate_reference_lists(
                     )
 
 
+def _validate_merge_reference_constraints(
+    existing_by_id: Mapping[str, Mapping[str, object]],
+    pairs: tuple[tuple[str, str], ...],
+) -> None:
+    pair_by_endpoint = {
+        endpoint: pair_index
+        for pair_index, pair in enumerate(pairs)
+        for endpoint in pair
+    }
+    source_ids = frozenset(source_id for source_id, _ in pairs)
+    for object_id in sorted(existing_by_id):
+        obj = existing_by_id[object_id]
+        for field in sorted(LIST_REFERENCE_FIELDS):
+            value = obj.get(field)
+            if not isinstance(value, list):
+                continue
+            pair_indexes = {
+                pair_by_endpoint[item]
+                for item in value
+                if isinstance(item, str) and item in pair_by_endpoint
+            }
+            if len(pair_indexes) > 1:
+                _fail(
+                    "merge_reference_multi_pair",
+                    f"{object_id} field {field!r} references multiple merge pairs",
+                )
+            if object_id not in source_ids:
+                continue
+            for source_id, target_id in pairs:
+                if (
+                    source_id != object_id
+                    and source_id in value
+                    and target_id in value
+                ):
+                    _fail(
+                        "merge_reference_source_referrer",
+                        (
+                            f"merge source {object_id} field {field!r} "
+                            "would record another pair's collapse"
+                        ),
+                    )
+
+
+def _validate_projection_merge_source_refs(
+    existing_by_id: Mapping[str, Mapping[str, object]],
+    source_ids: frozenset[str],
+) -> None:
+    for object_id in sorted(existing_by_id):
+        obj = existing_by_id[object_id]
+        if obj.get("kind") != "ContextProjection":
+            continue
+        for ref in iter_object_refs(obj):
+            if ref.object_id in source_ids:
+                _fail(
+                    "merge_context_projection_reference",
+                    (
+                        f"{object_id} registered reference {ref.pointer} "
+                        f"points to merge source {ref.object_id}"
+                    ),
+                )
+
+
 def _validate_provenance_references(
     after_by_id: Mapping[str, Mapping[str, object]],
     source_ids: frozenset[str],
@@ -249,6 +319,8 @@ def _rewrite_registered_references(
 
     for object_id in sorted(after_by_id):
         before = after_by_id[object_id]
+        if before.get("kind") == "ContextProjection":
+            continue
         rewritten = deepcopy(before)
 
         for field in sorted(SCALAR_REFERENCE_FIELDS - {"source_object_id"}):
@@ -287,7 +359,7 @@ def _rewrite_registered_references(
             if isinstance(value, str) and value in replacements:
                 _set_value_at_pointer(rewritten, pointer, replacements[value])
 
-        if not _json_exact(before, rewritten):
+        if not _same_bytes(before, rewritten):
             after_by_id[object_id] = rewritten
             changed_ids.add(object_id)
 
@@ -295,11 +367,11 @@ def _rewrite_registered_references(
 
 
 def _validate_context_projection_dependencies(
-    after_by_id: Mapping[str, Mapping[str, object]],
+    existing_by_id: Mapping[str, Mapping[str, object]],
     protected_ids: frozenset[str],
 ) -> None:
-    for object_id in sorted(after_by_id):
-        obj = after_by_id[object_id]
+    for object_id in sorted(existing_by_id):
+        obj = existing_by_id[object_id]
         if obj.get("kind") != "ContextProjection":
             continue
         source_object_ids = obj.get("source_object_ids", [])
@@ -318,23 +390,29 @@ def project_collision_merges(
     """Collision merge 결과를 입력 변경 없이 전체 logical store로 계산한다."""
     pairs = tuple(sorted(merge_pairs.items()))
     _validate_endpoints(existing_by_id, pairs)
+    source_ids = frozenset(source_id for source_id, _ in pairs)
+    _validate_projection_merge_source_refs(existing_by_id, source_ids)
+    _validate_merge_reference_constraints(existing_by_id, pairs)
     after_by_id = {
         object_id: deepcopy(dict(obj)) for object_id, obj in existing_by_id.items()
     }
-    changed_ids = {target_id for _, target_id in pairs}
     for source_id, target_id in pairs:
         after_by_id[target_id] = _merge_payload(
             existing_by_id[source_id], existing_by_id[target_id]
         )
         del after_by_id[source_id]
 
-    source_ids = frozenset(source_id for source_id, _ in pairs)
+    changed_ids = {
+        target_id
+        for _, target_id in pairs
+        if not _same_bytes(existing_by_id[target_id], after_by_id[target_id])
+    }
     _validate_reference_lists(after_by_id, pairs)
     _validate_provenance_references(after_by_id, source_ids)
     referrer_ids, collapses = _rewrite_registered_references(after_by_id, pairs)
     changed_ids.update(referrer_ids)
     _validate_context_projection_dependencies(
-        after_by_id,
+        existing_by_id,
         source_ids | frozenset(changed_ids),
     )
 

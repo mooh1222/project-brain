@@ -4,11 +4,13 @@ from copy import deepcopy
 
 import pytest
 
+from project_brain import canonical_merge
 from project_brain.canonical_merge import (
     CollisionMergeError,
     ReferenceCollapse,
     project_collision_merges,
 )
+from project_brain.store import BrainStore
 
 
 def _mapping(object_id: str, *, title: str, meaning: str) -> dict:
@@ -276,7 +278,7 @@ def test_project_collision_merges_rejects_context_projection_scalar_provenance()
     with pytest.raises(CollisionMergeError) as caught:
         _project(source, target, projection)
 
-    assert caught.value.code == "merge_provenance_reference"
+    assert caught.value.code == "merge_context_projection_reference"
 
 
 def _projection(*source_object_ids: str) -> dict:
@@ -290,6 +292,8 @@ def _projection(*source_object_ids: str) -> dict:
 @pytest.mark.parametrize("dependency", ["source", "survivor", "referrer"])
 def test_project_collision_merges_rejects_context_projection_dependency(dependency):
     source, target = merge_pair()
+    if dependency == "survivor":
+        source["decision_record_ids"] = ["decision.ctx.source"]
     referrer = {
         "id": "decision.ctx.referrer",
         "kind": "DecisionRecord",
@@ -303,6 +307,157 @@ def test_project_collision_merges_rejects_context_projection_dependency(dependen
     with pytest.raises(CollisionMergeError) as caught:
         _project(source, target, referrer, _projection(dependency_id))
     assert caught.value.code == "merge_context_projection_reference"
+
+
+@pytest.mark.parametrize(
+    "registered_reference",
+    [
+        {"evidence_refs": ["mapping.ctx.collision"]},
+        {"related_objects": ["mapping.ctx.collision"]},
+        {"context_id": "mapping.ctx.collision"},
+        {"locator": {"code_locator_id": "mapping.ctx.collision"}},
+    ],
+    ids=["evidence_refs", "related_objects", "context_id", "nested_pointer"],
+)
+def test_project_collision_merges_prescans_every_context_projection_reference(
+    registered_reference,
+):
+    source, target = merge_pair()
+    context_projection = _projection()
+    context_projection.update(deepcopy(registered_reference))
+    original_bytes = BrainStore.object_bytes(context_projection)
+
+    with pytest.raises(CollisionMergeError) as caught:
+        _project(source, target, context_projection)
+
+    assert caught.value.code == "merge_context_projection_reference"
+    assert BrainStore.object_bytes(context_projection) == original_bytes
+
+
+def test_registered_reference_rewrite_never_mutates_context_projection():
+    source, target = merge_pair()
+    context_projection = _projection()
+    context_projection["evidence_refs"] = [source["id"]]
+    after_by_id = {context_projection["id"]: deepcopy(context_projection)}
+
+    changed_ids, collapses = canonical_merge._rewrite_registered_references(
+        after_by_id,
+        ((source["id"], target["id"]),),
+    )
+
+    assert BrainStore.object_bytes(after_by_id[context_projection["id"]]) == (
+        BrainStore.object_bytes(context_projection)
+    )
+    assert changed_ids == set()
+    assert collapses == []
+
+
+def test_same_bytes_matches_brain_store_object_serialization():
+    left = {"id": "g.ctx.term", "nested": {"enabled": True, "count": 1}}
+    reordered = {
+        "nested": {"enabled": True, "count": 1},
+        "id": "g.ctx.term",
+    }
+    comparisons = (
+        deepcopy(left),
+        reordered,
+        {"id": "g.ctx.term", "nested": {"enabled": 1, "count": 1}},
+    )
+    same_bytes = getattr(canonical_merge, "_same_bytes", None)
+
+    assert callable(same_bytes)
+    assert canonical_merge._json_exact(left, reordered)
+    assert not same_bytes(left, reordered)
+    for right in comparisons:
+        assert same_bytes(left, right) is (
+            BrainStore.object_bytes(left) == BrainStore.object_bytes(right)
+        )
+
+
+@pytest.mark.parametrize("survivor_changes", [False, True])
+def test_changed_object_ids_are_exactly_the_byte_changed_live_objects(
+    survivor_changes,
+):
+    source, target = merge_pair()
+    if survivor_changes:
+        source["decision_record_ids"] = ["decision.ctx.source"]
+    existing_by_id = {source["id"]: source, target["id"]: target}
+
+    projection = project_collision_merges(
+        existing_by_id,
+        {source["id"]: target["id"]},
+    )
+
+    expected_changed_ids = tuple(sorted(
+        object_id
+        for object_id, obj in projection.after_by_id.items()
+        if (
+            object_id in existing_by_id
+            and BrainStore.object_bytes(existing_by_id[object_id])
+            != BrainStore.object_bytes(obj)
+        )
+    ))
+    assert projection.changed_object_ids == expected_changed_ids
+    assert (target["id"] in projection.changed_object_ids) is survivor_changes
+
+
+def test_project_collision_merges_rejects_registered_list_with_multiple_pairs():
+    (drone_source, drone_target), (hedgehog_source, hedgehog_target) = (
+        _real_collision_pairs()
+    )
+    referrer = {
+        "id": "decision.ctx.multi-pair",
+        "kind": "DecisionRecord",
+        "related_objects": [drone_source["id"], hedgehog_target["id"]],
+    }
+
+    with pytest.raises(CollisionMergeError) as caught:
+        project_collision_merges(
+            {
+                obj["id"]: obj
+                for obj in (
+                    drone_source,
+                    drone_target,
+                    hedgehog_source,
+                    hedgehog_target,
+                    referrer,
+                )
+            },
+            {
+                drone_source["id"]: drone_target["id"],
+                hedgehog_source["id"]: hedgehog_target["id"],
+            },
+        )
+
+    assert caught.value.code == "merge_reference_multi_pair"
+
+
+def test_project_collision_merges_rejects_merge_source_collapse_referrer():
+    (drone_source, drone_target), (hedgehog_source, hedgehog_target) = (
+        _real_collision_pairs()
+    )
+    other_pair = [hedgehog_source["id"], hedgehog_target["id"]]
+    drone_source["related_objects"] = list(other_pair)
+    drone_target["related_objects"] = list(other_pair)
+
+    with pytest.raises(CollisionMergeError) as caught:
+        project_collision_merges(
+            {
+                obj["id"]: obj
+                for obj in (
+                    drone_source,
+                    drone_target,
+                    hedgehog_source,
+                    hedgehog_target,
+                )
+            },
+            {
+                drone_source["id"]: drone_target["id"],
+                hedgehog_source["id"]: hedgehog_target["id"],
+            },
+        )
+
+    assert caught.value.code == "merge_reference_source_referrer"
 
 
 @pytest.mark.parametrize(
@@ -337,6 +492,7 @@ def test_project_collision_merges_rejects_duplicate_merge_reference(duplicate_en
 
 def test_project_collision_merges_rewrites_registered_references_and_collapses_list():
     source, target = merge_pair()
+    source["decision_record_ids"] = ["decision.ctx.source"]
     scalar_referrer = {
         "id": "decision.ctx.scalar",
         "kind": "DecisionRecord",
