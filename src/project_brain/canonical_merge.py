@@ -223,13 +223,16 @@ def _validate_provenance_references(
 ) -> None:
     for object_id in sorted(after_by_id):
         obj = after_by_id[object_id]
+        scalar = obj.get("source_object_id")
+        if isinstance(scalar, str) and scalar in source_ids:
+            _fail(
+                "merge_provenance_reference",
+                f"{object_id} has provenance reference to merge source",
+            )
         if obj.get("kind") == "ContextProjection":
             continue
-        scalar = obj.get("source_object_id")
         values = obj.get("source_object_ids", [])
-        if (isinstance(scalar, str) and scalar in source_ids) or any(
-            item in source_ids for item in values if isinstance(item, str)
-        ):
+        if any(item in source_ids for item in values if isinstance(item, str)):
             _fail(
                 "merge_provenance_reference",
                 f"{object_id} has provenance reference to merge source",

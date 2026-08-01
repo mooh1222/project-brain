@@ -264,6 +264,21 @@ def test_project_collision_merges_rejects_provenance_reference(field):
     assert caught.value.code == "merge_provenance_reference"
 
 
+def test_project_collision_merges_rejects_context_projection_scalar_provenance():
+    source, target = merge_pair()
+    projection = {
+        "id": "projection.ctx.requirement.reuse",
+        "kind": "ContextProjection",
+        "source_object_id": source["id"],
+        "source_object_ids": [],
+    }
+
+    with pytest.raises(CollisionMergeError) as caught:
+        _project(source, target, projection)
+
+    assert caught.value.code == "merge_provenance_reference"
+
+
 def _projection(*source_object_ids: str) -> dict:
     return {
         "id": "projection.ctx.requirement.reuse",
