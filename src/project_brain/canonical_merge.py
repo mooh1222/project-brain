@@ -78,11 +78,21 @@ def _json_exact(left: object, right: object) -> bool:
     return left == right
 
 
-def _same_bytes(
-    left: Mapping[str, object],
-    right: Mapping[str, object],
-) -> bool:
-    return list(left) == list(right) and _json_exact(left, right)
+def _same_bytes(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        assert isinstance(right, dict)
+        return list(left) == list(right) and all(
+            _same_bytes(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        assert isinstance(right, list)
+        return len(left) == len(right) and all(
+            _same_bytes(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return left == right
 
 
 def _validated_string_list(value: object, *, field: str) -> list[str]:
