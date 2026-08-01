@@ -11,6 +11,10 @@ from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
 from pathlib import Path
 
+from project_brain.canonical_merge import (
+    CollisionMergeError,
+    project_collision_merges,
+)
 from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.migration import (
     MigrationError,
@@ -86,6 +90,7 @@ class CanonicalAction(StrEnum):
     PROJECTED_FIELD_REPAIR = "projected_field_repair"
     REVIEW_SHAPE_REPAIR = "review_shape_repair"
     COLLISION_DISTINCT_RENAME = "collision_distinct_rename"
+    COLLISION_MERGE_INTO_EXISTING = "collision_merge_into_existing"
 
 
 @dataclass(frozen=True)
@@ -420,7 +425,55 @@ def validate_canonicalization_ledger(
             "classification_source_mismatch",
             "classification and decision source IDs differ",
         )
-    targets: set[str] = set()
+    merge_decisions = tuple(
+        decision
+        for decision in ledger.decisions
+        if decision.action is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
+    )
+    if merge_decisions and len(merge_decisions) != 2:
+        _fail(
+            "canonical_repair_action_count_invalid",
+            "canonical repair ledger requires exactly 2 collision merge rows",
+        )
+
+    targets: dict[str, CanonicalAction] = {}
+    merge_targets: set[str] = set()
+    rename_targets: set[str] = set()
+    for decision in ledger.decisions:
+        if decision.action is CanonicalAction.REFERENCE_ONLY:
+            continue
+        assert decision.new_id is not None
+        previous_action = targets.get(decision.new_id)
+        if previous_action is not None:
+            if (
+                decision.action
+                is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
+                or previous_action
+                is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
+            ):
+                _fail(
+                    "decision_merge_endpoint_overlap",
+                    f"merge target overlaps another target: {decision.new_id}",
+                )
+            _fail(
+                "decision_target_duplicate",
+                f"duplicate decision target: {decision.new_id}",
+            )
+        targets[decision.new_id] = decision.action
+        if (
+            decision.action
+            is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
+        ):
+            merge_targets.add(decision.new_id)
+        else:
+            rename_targets.add(decision.new_id)
+    overlap = merge_targets & (set(decision_by_source) | rename_targets)
+    if overlap:
+        _fail(
+            "decision_merge_endpoint_overlap",
+            f"merge endpoints overlap ledger sources or targets: {sorted(overlap)!r}",
+        )
+
     for source_id, decision in decision_by_source.items():
         if classification[source_id] != (
             decision.source_kind,
@@ -448,24 +501,32 @@ def validate_canonicalization_ledger(
         if decision.action is CanonicalAction.REFERENCE_ONLY:
             continue
         assert decision.new_id is not None
-        if decision.new_id in targets:
-            _fail(
-                "decision_target_duplicate",
-                f"duplicate decision target: {decision.new_id}",
-            )
-        targets.add(decision.new_id)
-        if existing.has(decision.new_id):
-            _fail(
-                "decision_target_exists",
-                f"decision target already exists: {decision.new_id}",
-            )
-        try:
-            parse_id(decision.new_id, decision.source_kind)
-        except IdGrammarError as exc:
-            _fail(
-                "decision_target_invalid",
-                f"{decision.source_id}: new ID is not canonical: {exc}",
-            )
+        if (
+            decision.action
+            is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
+        ):
+            if (
+                decision.source_kind != "DomainMapping"
+                or not existing.has(decision.new_id)
+            ):
+                _fail("decision_merge_target_invalid", decision.source_id)
+            try:
+                parse_id(decision.new_id, "DomainMapping")
+            except IdGrammarError as exc:
+                _fail("decision_merge_target_invalid", str(exc))
+        else:
+            if existing.has(decision.new_id):
+                _fail(
+                    "decision_target_exists",
+                    f"decision target already exists: {decision.new_id}",
+                )
+            try:
+                parse_id(decision.new_id, decision.source_kind)
+            except IdGrammarError as exc:
+                _fail(
+                    "decision_target_invalid",
+                    f"{decision.source_id}: new ID is not canonical: {exc}",
+                )
         if decision.action is CanonicalAction.PROJECTED_FIELD_REPAIR:
             change = decision.field_changes[0]
             try:
@@ -490,6 +551,15 @@ def validate_canonicalization_ledger(
                 "decision_field_change_invalid",
                 f"{source_id}: review shape repair kind is invalid",
             )
+    merge_pairs = collision_merges_from_ledger(ledger)
+    if merge_pairs:
+        try:
+            project_collision_merges(
+                {str(obj["id"]): obj for obj in existing.all()},
+                merge_pairs,
+            )
+        except CollisionMergeError as exc:
+            _fail(exc.code, exc.detail)
     return ledger
 
 
@@ -523,6 +593,20 @@ def canonical_repair_renames_from_ledger(
         decision.source_id: decision.new_id
         for decision in ledger.decisions
         if decision.action in actions and decision.new_id is not None
+    }
+
+
+def collision_merges_from_ledger(
+    ledger: CanonicalizationLedger,
+) -> dict[str, str]:
+    return {
+        decision.source_id: decision.new_id
+        for decision in ledger.decisions
+        if (
+            decision.action
+            is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
+            and decision.new_id is not None
+        )
     }
 
 

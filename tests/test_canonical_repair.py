@@ -3,16 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 import pytest
 
+from project_brain import canonical_repair
 from project_brain.canonical_repair import (
     CanonicalAction,
     CanonicalRepairError,
     CanonicalizationLedger,
     apply_canonical_repair_artifact,
+    canonical_repair_renames_from_ledger,
     create_canonical_repair_artifact,
     decode_canonicalization_ledger,
     id_renames_from_ledger,
@@ -36,12 +39,19 @@ from project_brain.snapshot import (
     verify_snapshot,
 )
 from project_brain.store import BrainStore
+from tests.test_canonical_merge import _real_collision_pairs
 from tests.test_ingest import candidate_mapping, candidate_term, context, review_record_for
 from tests.test_mutation import _write_raw
 
 
 ENGINE_SHA = "e" * 40
 REPO_HEAD = "b" * 40
+DRONE_MERGE_SOURCE = "mapping.disturb-drone.cloud-reskin-identity"
+DRONE_MERGE_TARGET = "mapping.disturb-drone.drone-cloud-reskin-identity"
+HEDGEHOG_MERGE_SOURCE = "mapping.disturb-hedgehog.angry-shoot-block"
+HEDGEHOG_MERGE_TARGET = (
+    "mapping.disturb-hedgehog.angry-shoot-bubble-removal"
+)
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -81,6 +91,7 @@ def _ledger_fixture(
     first_action: str = "id_only_rename",
     first_target: str = "g.neutral.canonical-000",
     existing_target: bool = False,
+    merge_count: int = 2,
 ) -> LedgerFixture:
     objects: dict[str, dict] = {}
     source_receipts: dict[str, str] = {}
@@ -119,6 +130,48 @@ def _ledger_fixture(
             "decision_reason": f"approved canonical identity {index}",
             "decision_evidence": [f"classification#/rows/{index}"],
         })
+    collision_pairs = list(_real_collision_pairs())
+    if merge_count == 3:
+        synthetic_source = deepcopy(collision_pairs[0][0])
+        synthetic_target = deepcopy(collision_pairs[0][1])
+        for obj, object_id in (
+            (synthetic_source, "mapping.synthetic.collision-source"),
+            (synthetic_target, "mapping.synthetic.canonical-target"),
+        ):
+            obj.update({
+                "id": object_id,
+                "context_id": "context.synthetic",
+                "mapping_key": "canonical-target",
+                "review_record_id": "review.bundle.synthetic.domain-mapping",
+                "tags": ["synthetic"],
+            })
+        collision_pairs.append((synthetic_source, synthetic_target))
+    for offset, (source, target) in enumerate(collision_pairs[:merge_count]):
+        index = 156 - merge_count + offset
+        replaced_source_id = decisions[index]["source_id"]
+        objects.pop(replaced_source_id)
+        source_receipts.pop(replaced_source_id)
+        source_sha256 = hashlib.sha256(
+            f"source:{source['id']}".encode("utf-8")
+        ).hexdigest()
+        objects[source["id"]] = deepcopy(source)
+        objects[target["id"]] = deepcopy(target)
+        source_receipts[source["id"]] = source_sha256
+        rows[index] = {
+            "old_id": source["id"],
+            "kind": source["kind"],
+            "source_sha256": source_sha256,
+        }
+        decisions[index] = {
+            "source_id": source["id"],
+            "source_kind": source["kind"],
+            "source_sha256": source_sha256,
+            "action": "collision_merge_into_existing",
+            "new_id": target["id"],
+            "field_changes": [],
+            "decision_reason": "approved collision merge into canonical target",
+            "decision_evidence": [f"classification#/rows/{index}"],
+        }
     if existing_target:
         objects[first_target] = {
             "id": first_target,
@@ -165,6 +218,58 @@ def _ledger_fixture(
     )
 
 
+def _rebind_ledger_fixture(
+    fixture: LedgerFixture,
+    *,
+    change_objects=None,
+    change_decisions=None,
+    receipt_overrides: dict[str, str] | None = None,
+) -> LedgerFixture:
+    objects = {
+        str(obj["id"]): deepcopy(obj)
+        for obj in fixture.store.all()
+    }
+    decisions = deepcopy(fixture.ledger_payload["decisions"])
+    if change_objects is not None:
+        change_objects(objects)
+    if change_decisions is not None:
+        change_decisions(decisions)
+    receipts = {
+        row["source_id"]: row["source_sha256"]
+        for row in decisions
+    }
+    receipts.update(receipt_overrides or {})
+    store = BrainStore(objects, source_sha256_by_id=receipts)
+    fingerprint = corpus_fingerprint(store)
+    classification = deepcopy(fixture.classification_payload)
+    classification["binding"]["corpus_fingerprint"] = fingerprint
+    classification["rows"] = [
+        {
+            "old_id": row["source_id"],
+            "kind": row["source_kind"],
+            "source_sha256": row["source_sha256"],
+        }
+        for row in decisions
+    ]
+    classification_bytes = _json_bytes(classification)
+    classification_sha256 = hashlib.sha256(classification_bytes).hexdigest()
+    ledger_payload = deepcopy(fixture.ledger_payload)
+    ledger_payload.update({
+        "phase_a_classification_sha256": classification_sha256,
+        "corpus_fingerprint": fingerprint,
+        "decisions": decisions,
+    })
+    ledger_bytes = _json_bytes(ledger_payload)
+    return LedgerFixture(
+        store=store,
+        ledger_payload=ledger_payload,
+        ledger_bytes=ledger_bytes,
+        classification_payload=classification,
+        classification_bytes=classification_bytes,
+        classification_sha256=classification_sha256,
+    )
+
+
 def _decode_changed(fixture: LedgerFixture, change) -> CanonicalizationLedger:
     payload = json.loads(fixture.ledger_bytes)
     change(payload)
@@ -180,6 +285,95 @@ def test_decode_ledger_accepts_exact_156_row_payload():
     assert len(ledger.decisions) == 156
     assert ledger.decisions[0].action is CanonicalAction.ID_ONLY_RENAME
     assert ledger.sha256 == hashlib.sha256(fixture.ledger_bytes).hexdigest()
+
+
+def test_merge_ledger_decodes_exact_collision_map_and_excludes_id_renames():
+    fixture = _ledger_fixture()
+
+    ledger = parse_canonicalization_ledger(
+        fixture.ledger_bytes,
+        **fixture.validation_args,
+    )
+
+    assert canonical_repair.collision_merges_from_ledger(ledger) == {
+        DRONE_MERGE_SOURCE: DRONE_MERGE_TARGET,
+        HEDGEHOG_MERGE_SOURCE: HEDGEHOG_MERGE_TARGET,
+    }
+    assert not (
+        set(canonical_repair.collision_merges_from_ledger(ledger))
+        & set(id_renames_from_ledger(ledger))
+    )
+    assert not (
+        set(canonical_repair.collision_merges_from_ledger(ledger))
+        & set(canonical_repair_renames_from_ledger(ledger))
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("new_id", None),
+        (
+            "field_changes",
+            [{"pointer": "/mapping_key", "before": "old", "after": "new"}],
+        ),
+    ],
+)
+def test_merge_ledger_decoder_rejects_missing_target_or_field_changes(
+    field,
+    value,
+):
+    fixture = _ledger_fixture()
+
+    def change(payload):
+        row = next(
+            item
+            for item in payload["decisions"]
+            if item["source_id"] == DRONE_MERGE_SOURCE
+        )
+        row[field] = value
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        _decode_changed(fixture, change)
+
+    assert exc.value.code == "decision_ledger_invalid"
+
+
+@pytest.mark.parametrize("merge_count", [1, 3])
+def test_merge_ledger_rejects_action_count_other_than_two(merge_count):
+    fixture = _ledger_fixture(merge_count=merge_count)
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "canonical_repair_action_count_invalid"
+
+
+def test_merge_ledger_rejects_non_mapping_source_kind():
+    fixture = _ledger_fixture()
+
+    def change_objects(objects):
+        objects[DRONE_MERGE_SOURCE]["kind"] = "GlossaryTerm"
+
+    def change_decisions(decisions):
+        row = next(
+            item for item in decisions
+            if item["source_id"] == DRONE_MERGE_SOURCE
+        )
+        row["source_kind"] = "GlossaryTerm"
+
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        change_objects=change_objects,
+        change_decisions=change_decisions,
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "decision_merge_target_invalid"
 
 
 def test_decode_ledger_rejects_duplicate_json_key():
@@ -460,6 +654,180 @@ def test_ledger_rejects_current_store_target_collision():
         validate_canonicalization_ledger(ledger, **fixture.validation_args)
 
     assert exc.value.code == "decision_target_exists"
+
+
+@pytest.mark.parametrize("drift", ["missing", "noncanonical"])
+def test_merge_ledger_rejects_missing_or_noncanonical_existing_target(drift):
+    fixture = _ledger_fixture()
+    invalid_target = "mapping.disturb-drone.not_canonical"
+
+    def change_objects(objects):
+        target = objects.pop(DRONE_MERGE_TARGET)
+        if drift == "noncanonical":
+            target["id"] = invalid_target
+            target["mapping_key"] = "not_canonical"
+            objects[invalid_target] = target
+
+    def change_decisions(decisions):
+        if drift == "noncanonical":
+            row = next(
+                item for item in decisions
+                if item["source_id"] == DRONE_MERGE_SOURCE
+            )
+            row["new_id"] = invalid_target
+
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        change_objects=change_objects,
+        change_decisions=change_decisions,
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "decision_merge_target_invalid"
+
+
+@pytest.mark.parametrize(
+    "overlap",
+    ["decision_source", "merge_target", "rename_target"],
+)
+def test_merge_ledger_rejects_endpoint_overlap(overlap):
+    fixture = _ledger_fixture()
+
+    def change_decisions(decisions):
+        drone = next(
+            item for item in decisions
+            if item["source_id"] == DRONE_MERGE_SOURCE
+        )
+        hedgehog = next(
+            item for item in decisions
+            if item["source_id"] == HEDGEHOG_MERGE_SOURCE
+        )
+        if overlap == "decision_source":
+            drone["new_id"] = decisions[0]["source_id"]
+        elif overlap == "merge_target":
+            hedgehog["new_id"] = drone["new_id"]
+        else:
+            decisions[0]["new_id"] = drone["new_id"]
+
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        change_decisions=change_decisions,
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "decision_merge_endpoint_overlap"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_code"),
+    [
+        ("kind", "DecisionRecord", "merge_target_kind_invalid"),
+        ("context_id", "context.other", "merge_target_id_invalid"),
+        ("mapping_key", "other", "merge_target_id_invalid"),
+        (
+            "review_record_id",
+            "review.bundle.other.domain-mapping",
+            "merge_exact_field_mismatch",
+        ),
+    ],
+)
+def test_merge_ledger_rejects_endpoint_payload_drift(
+    field,
+    value,
+    error_code,
+):
+    fixture = _ledger_fixture()
+
+    def change_objects(objects):
+        objects[DRONE_MERGE_TARGET][field] = value
+
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        change_objects=change_objects,
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == error_code
+
+
+def test_merge_ledger_rejects_source_sha_drift():
+    fixture = _ledger_fixture()
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        receipt_overrides={DRONE_MERGE_SOURCE: "0" * 64},
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "decision_source_sha256_mismatch"
+
+
+def test_merge_ledger_rejects_provenance_reference():
+    fixture = _ledger_fixture()
+
+    def change_objects(objects):
+        objects["insight.neutral.merge-provenance"] = {
+            "id": "insight.neutral.merge-provenance",
+            "kind": "Insight",
+            "source_object_id": DRONE_MERGE_SOURCE,
+        }
+
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        change_objects=change_objects,
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "merge_provenance_reference"
+
+
+@pytest.mark.parametrize("dependency", ["source", "survivor", "referrer"])
+def test_merge_ledger_rejects_context_projection_dependency(dependency):
+    fixture = _ledger_fixture()
+
+    def change_objects(objects):
+        referrer_id = "decision.neutral.merge-referrer"
+        if dependency == "referrer":
+            objects[referrer_id] = {
+                "id": referrer_id,
+                "kind": "DecisionRecord",
+                "target_object_id": DRONE_MERGE_SOURCE,
+            }
+        dependency_id = {
+            "source": DRONE_MERGE_SOURCE,
+            "survivor": DRONE_MERGE_TARGET,
+            "referrer": referrer_id,
+        }[dependency]
+        objects["projection.neutral.requirement.reuse"] = {
+            "id": "projection.neutral.requirement.reuse",
+            "kind": "ContextProjection",
+            "source_object_ids": [dependency_id],
+        }
+
+    fixture = _rebind_ledger_fixture(
+        fixture,
+        change_objects=change_objects,
+    )
+    ledger = decode_canonicalization_ledger(fixture.ledger_bytes)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        validate_canonicalization_ledger(ledger, **fixture.validation_args)
+
+    assert exc.value.code == "merge_context_projection_reference"
 
 
 def test_collision_distinct_rename_allows_an_empty_selected_target():
