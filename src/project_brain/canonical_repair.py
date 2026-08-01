@@ -748,6 +748,18 @@ def _validate_repair_action_counts(ledger: CanonicalizationLedger) -> None:
         )
 
 
+def _validate_merge_endpoint_canonical_bytes(
+    existing: BrainStore,
+    merge_pairs: Mapping[str, str],
+) -> None:
+    for source_id, target_id in sorted(merge_pairs.items()):
+        for object_id in (source_id, target_id):
+            if existing.source_sha256(object_id) != _object_hash(
+                existing.get(object_id)
+            ):
+                _fail("merge_endpoint_bytes_not_canonical", object_id)
+
+
 def plan_canonical_repair(
     *,
     existing: BrainStore,
@@ -778,6 +790,8 @@ def plan_canonical_repair(
         snapshot=snapshot,
     )
     _validate_repair_action_counts(ledger)
+    merge_pairs = collision_merges_from_ledger(ledger)
+    _validate_merge_endpoint_canonical_bytes(existing, merge_pairs)
     try:
         engine_receipt = verify_git_root_clean(
             engine_root,
@@ -792,7 +806,6 @@ def plan_canonical_repair(
         )
 
     repair_pairs = canonical_repair_renames_from_ledger(ledger)
-    merge_pairs = collision_merges_from_ledger(ledger)
     if not repair_pairs:
         _fail("canonical_repair_empty", "ledger has no canonical repair rows")
     repair_decisions = tuple(

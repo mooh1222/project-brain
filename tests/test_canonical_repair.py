@@ -1452,6 +1452,94 @@ def test_plan_requires_zero_collision_distinct_renames(
     assert "0 collision_distinct_rename" in exc.value.detail
 
 
+def _plan_args_with_raw_merge_endpoint_drift(
+    canonical_fixture: CanonicalPlanFixture,
+    object_id: str,
+) -> dict:
+    obj = canonical_fixture.existing.get(object_id)
+    raw_bytes = (
+        json.dumps(obj, ensure_ascii=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    assert raw_bytes != BrainStore.object_bytes(obj)
+    BrainStore.object_path(canonical_fixture.brain_root, obj).write_bytes(raw_bytes)
+    existing = BrainStore.load(canonical_fixture.brain_root)
+
+    classification = json.loads(canonical_fixture.classification_bytes)
+    ledger_payload = json.loads(canonical_fixture.ledger_bytes)
+    source_sha256 = existing.source_sha256(object_id)
+    source_row = next(
+        (
+            row
+            for row in ledger_payload["decisions"]
+            if row["source_id"] == object_id
+        ),
+        None,
+    )
+    if source_row is not None:
+        source_row["source_sha256"] = source_sha256
+        classification_row = next(
+            row
+            for row in classification["rows"]
+            if row["old_id"] == object_id
+        )
+        classification_row["source_sha256"] = source_sha256
+
+    classification_bytes = _json_bytes(classification)
+    classification_sha256 = hashlib.sha256(classification_bytes).hexdigest()
+    ledger_payload["phase_a_classification_sha256"] = classification_sha256
+    ledger_bytes = _json_bytes(ledger_payload)
+    ledger = parse_canonicalization_ledger(
+        ledger_bytes,
+        classification_bytes=classification_bytes,
+        expected_classification_sha256=classification_sha256,
+        existing=existing,
+        engine_sha=canonical_fixture.engine_sha,
+        repo_head=canonical_fixture.snapshot.repo_head,
+    )
+    return {
+        **canonical_fixture.plan_args,
+        "existing": existing,
+        "ledger": ledger,
+    }
+
+
+@pytest.mark.parametrize(
+    "object_id",
+    [
+        DRONE_MERGE_SOURCE,
+        DRONE_MERGE_TARGET,
+        HEDGEHOG_MERGE_SOURCE,
+        HEDGEHOG_MERGE_TARGET,
+    ],
+)
+def test_plan_rejects_raw_byte_drift_at_every_merge_endpoint_before_projection(
+    canonical_fixture,
+    monkeypatch,
+    object_id,
+):
+    plan_args = _plan_args_with_raw_merge_endpoint_drift(
+        canonical_fixture,
+        object_id,
+    )
+
+    def forbidden_projection(*args, **kwargs):
+        raise AssertionError(
+            "project_collision_merges must not run for a raw-drifted endpoint"
+        )
+
+    monkeypatch.setattr(
+        canonical_repair,
+        "project_collision_merges",
+        forbidden_projection,
+    )
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        plan_canonical_repair(**plan_args)
+
+    assert exc.value.code == "merge_endpoint_bytes_not_canonical"
+    assert exc.value.detail == object_id
+
+
 def test_plan_includes_reference_only_affected_object(canonical_fixture):
     plan = plan_canonical_repair(**canonical_fixture.plan_args)
     request_by_id = {obj["id"]: obj for obj in plan.request.objects}
