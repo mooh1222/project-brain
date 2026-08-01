@@ -85,8 +85,8 @@ merge decision row는 기존 row exact keys를 그대로 쓴다.
 - `decision_evidence`: workbook source row와 `collision_target` pointer를 모두 포함
 
 검증기는 merge action에만 existing target을 허용한다. 다른 rename action은 계속 target
-부재를 요구한다. Task 17 ledger는 merge action이 정확히 두 행이어야 하고
-`collision_distinct_rename`은 0행이어야 한다.
+부재를 요구한다. Task 17 plan 게이트는 merge action이 정확히 두 행이고
+`collision_distinct_rename`이 정확히 0행인지 엔진에서 함께 검증한다.
 
 ## Merge endpoint 검증
 
@@ -99,9 +99,13 @@ merge decision row는 기존 row exact keys를 그대로 쓴다.
 - merge target은 156행 ledger의 다른 `source_id`가 아니다.
 - source와 target의 `kind`, `context_id`, `mapping_key`, `review_record_id`가 같다.
 - source는 `source_object_id` 또는 `source_object_ids` provenance 위치에서 참조되지 않는다.
-- source를 참조하는 `ContextProjection`이 있으면 중단한다.
+- 원본 `ContextProjection`의 등록된 scalar/list/nested reference 어디에서든 source를
+  참조하면 중단한다. `ContextProjection` payload는 merge projection에서 절대 다시 쓰지 않는다.
 - source는 delete 대상이지만 explicit rename 대상은 아니다.
 - target은 update 대상이며 create/delete 대상이 아니다.
+
+두 source와 두 target의 raw file bytes는 plan 시점의 canonical serialization bytes와
+일치해야 한다. 하나라도 다르면 적용 전에 `merge_endpoint_bytes_not_canonical`로 중단한다.
 
 corpus fingerprint, pre-snapshot, repo HEAD, engine SHA가 target의 before bytes까지 묶는다.
 merge artifact는 target의 raw before SHA와 canonical after SHA를 추가로 기록한다.
@@ -218,6 +222,13 @@ merge receipt exact shape:
 `before_ids[removed_index] == source_id`, `after_ids == before_ids`에서 그 항목만 제거한
 결과, target이 before/after에 정확히 한 번 존재함을 검증한다.
 
+`reference_collapses.object_id`, `before_ids`, `removed_index`는 transaction 이전 원본
+좌표이고 `after_ids`는 모든 merge가 끝났지만 field-repair rename은 적용되기 전 좌표다.
+한 등록 list field에는 서로 다른 merge pair의 끝점이 둘 이상 있을 수 없고, merge source는
+다른 pair의 collapse referrer가 될 수 없다. intermediate 검증은 승인된 field-repair rename
+map으로 `object_id`와 `after_ids`를 최종 좌표에 투영한 뒤 live store와 대조한다. merge target은
+endpoint overlap 게이트로 transaction 전후 ID가 같으므로 투영하지 않는다.
+
 Mutation manifest top-level schema와 transaction journal schema는 바꾸지 않는다.
 source는 `deletes`, survivor와 referrer는 `updates`, 길이가 변하지 않는 치환은
 `reference_rewrites`에 기록된다. file transition recovery는 기존 before/after SHA로
@@ -271,7 +282,8 @@ after store는 다음을 만족해야 한다.
 - dangling reference 0
 - 새 non-ID lint 0
 - structured ID grandfather 문제는 원래 허용 집합의 부분집합
-- ContextProjection source hash를 바꿔야 하는 상황은 사전 gate에서 중단
+- ContextProjection이 merge source를 등록 참조로 가리키거나, byte-exact 변경 객체를
+  `source_object_ids`로 가리키면 사전 gate에서 중단
 
 ## Intermediate receipt와 pure ID 단계
 
@@ -286,7 +298,8 @@ after store는 다음을 만족해야 한다.
    같아야 한다.
 5. update 행이 있는 경우 update `after_sha256`, 그리고 모든 경우 live survivor SHA,
    merge receipt target after SHA, row canonical payload hash가 모두 같아야 한다.
-6. reference collapse receipt와 intermediate live referrer 배열이 exact해야 한다.
+6. reference collapse의 원본 `object_id`와 merge-stage `after_ids`를 승인된 field-repair
+   rename map으로 투영한 결과가 intermediate live referrer 배열과 exact해야 한다.
 7. merge source는 later `id_renames`에 포함하지 않는다.
 
 이 검증 뒤 trusted receipt는 남은 pure ID rename map만 반환한다. merge source가 이미
@@ -309,19 +322,21 @@ merge는 기존 `MutationOperation.CANONICAL_REPAIR` transaction 하나에 포�
 Task 8A 엔진 코드가 review PASS되고 새 ENGINE_SHA가 확정되면 기존 Task 7 산출물은 stale다.
 실코퍼스 object를 바꾸기 전에 다음을 수행한다.
 
-1. 기존 pre-snapshot, Phase A JSON 3개, workbook, 관련 receipts를 Git 밖 receipts 아래에
+1. 새 엔진의 read-only preflight에서 ContextProjection의 merge-source 등록 참조 0건,
+   merge 끝점 canonical bytes 4/4, multi-pair list/source-referrer 위반 0건을 확인한다.
+2. 기존 pre-snapshot, Phase A JSON 3개, workbook, 관련 receipts를 Git 밖 receipts 아래에
    raw bytes와 manifest SHA를 보존해 archive한다.
-2. scanner/test bytes가 review된 값과 같은지 확인하고 scanner 합성 회귀를 다시 돌린다.
-3. 새 ENGINE_SHA로 exact-path pre-snapshot을 다시 만들고 전체 11,134개 파일을 검증한다.
-4. 기존 live Phase A JSON 3개를 recoverable archive한 뒤 exact scanner로 다시 생성한다.
-5. 새 classification SHA, engine SHA, repo HEAD, corpus fingerprint binding을 검증한다.
-6. 기존 workbook을 archive하고 exact `--review-workbook` CLI로 새 workbook을 만든다.
-7. object/eval/index/stale/journal과 사용자 dirt가 기존 baseline과 exact인지 확인한다.
-8. 새 workbook으로 156행 ledger를 작성한다. collision 두 행은
+3. scanner/test bytes가 review된 값과 같은지 확인하고 scanner 합성 회귀를 다시 돌린다.
+4. 새 ENGINE_SHA로 exact-path pre-snapshot을 다시 만들고 전체 11,134개 파일을 검증한다.
+5. 기존 live Phase A JSON 3개를 recoverable archive한 뒤 exact scanner로 다시 생성한다.
+6. 새 classification SHA, engine SHA, repo HEAD, corpus fingerprint binding을 검증한다.
+7. 기존 workbook을 archive하고 exact `--review-workbook` CLI로 새 workbook을 만든다.
+8. object/eval/index/stale/journal과 사용자 dirt가 기존 baseline과 exact인지 확인한다.
+9. 새 workbook으로 156행 ledger를 작성한다. collision 두 행은
    `collision_merge_into_existing`을 쓴다.
-9. strict parser와 read-only plan으로 merge 2, repair 5, later pure ID map, eval closure를
+10. strict parser와 read-only plan으로 merge 2, repair 5, later pure ID map, eval closure를
    검증한다.
-10. 독립 semantic/code review 뒤 exact ledger bytes를 사용자 승인 게이트 1에 제시한다.
+11. 독립 semantic/code review 뒤 exact ledger bytes를 사용자 승인 게이트 1에 제시한다.
 
 사용자 승인 전에는 Task 9 apply를 시작하지 않는다. ledger bytes가 바뀌면 승인은 무효다.
 

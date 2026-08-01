@@ -15,7 +15,9 @@
 - `caveats`의 `history_coverage`는 `unsearched < partial < complete` 중 더 보수적인 값을 하나만 남기며, 같은 key의 다른 충돌은 중단한다.
 - source와 target의 unknown key set 또는 unknown value가 다르면 중단한다.
 - `source_object_id` 또는 `source_object_ids`에서 merge source가 발견되면 중단한다.
-- `ContextProjection.source_object_ids`가 merge source뿐 아니라 merge로 내용이 바뀌는 survivor 또는 referrer를 가리켜도 source-content hash가 낡으므로 중단한다.
+- 원본 `ContextProjection`의 등록된 모든 reference에서 merge source를 사전 스캔해 중단하고, `ContextProjection` payload는 절대 다시 쓰지 않는다. 실제 bytes가 바뀐 survivor/referrer를 `source_object_ids`로 의존해도 중단한다.
+- merge 끝점 4개의 raw file bytes는 canonical serialization과 같아야 한다.
+- 한 등록 list field에는 한 merge pair의 끝점만 올 수 있고, merge source는 다른 pair의 collapse referrer가 될 수 없다.
 - source delete, survivor update, referrer update는 기존 canonical repair transaction 하나에 들어간다.
 - `request.renames`에는 기존 field-repair 5쌍만 들어가며 merge 2쌍은 들어가지 않는다.
 - 배열 축약은 `reference_rewrites`에 가짜 index diff를 만들지 않고 canonical row의 `merge_receipt`에 기록한다.
@@ -923,13 +925,32 @@ No source evidence loss
 No fabricated pointer rewrite
 No unapproved existing-target merge
 No delete-only bypass
-No provenance or ContextProjection rewrite
+No ContextProjection rewrite or stale projection hash
 Whole-before/whole-after recovery
 Merge source excluded from later pure ID map
 No MutationManifest or journal top-level schema drift
+Zero collision_distinct_rename enforced by the engine
+Merge endpoints stored in canonical bytes before plan
+Collapse receipts projected through approved repair renames
 ```
 
 CHANGES_REQUIRED이면 같은 Task의 fresh implementer가 RED→GREEN으로 수정하고 새 diff를 같은 reviewer에게 재제출한다. 최대 다섯 번 뒤에도 Major가 남으면 구현을 멈추고 Orca의 Claude Opus 5 high와 blocker를 협의한다.
+
+- [ ] **Step 8A: 통합 리뷰 Major 4건 수정 라운드 1/5를 수행한다**
+
+Opus 5 high 확정 계약에 따라 한 수정 라운드 안에서 다음 순서로 RED→GREEN을 고정한다.
+
+1. `_validate_repair_action_counts()`가 `collision_distinct_rename=0`을 강제한다.
+2. 원본 ContextProjection 전 참조 사전 게이트, projection 재작성 금지, byte-exact
+   `changed_object_ids`, list multi-pair/source-referrer 게이트를 구현한다.
+3. merge source/target 네 끝점의 raw SHA와 canonical object hash를 plan 전에 대조한다.
+4. collapse receipt의 원본/merge-stage 좌표를 승인된 field-repair rename map으로 투영해
+   intermediate live store와 대조한다.
+5. focused tests, canonical repair/mutation/corpus/CLI 회귀, 전체 pytest와 ingest runtime
+   unittest를 통과한 뒤 exact fix diff를 Step 8 reviewer에게 scoped 재제출한다.
+
+`src/project_brain/mutation.py`, `src/project_brain/corpus_io.py`, MutationManifest와 journal
+schema는 바꾸지 않는다.
 
 - [ ] **Step 9: 최종 engine SHA와 clean receipt를 고정한다**
 
@@ -990,6 +1011,16 @@ stale SHA 8061ed9ba99d2f574bfc6e90bf8c042b300510d258dff78f23c8018646ead594
 ```
 
 하나라도 다르면 regeneration을 시작하지 않고 변경된 축을 보고한다. Terminal 권한은 검사 대상에서 제외한다.
+
+같은 read-only preflight에서 다음 세 축도 exact 확인한다.
+
+```text
+ContextProjection registered references to the two merge sources = 0
+Raw SHA equals canonical object hash for all four merge endpoints = 4/4
+Registered list multi-pair violations and merge-source collapse referrers = 0
+```
+
+하나라도 어긋나면 Task 7 산출물 archive나 regeneration을 시작하지 않고 중단한다.
 
 - [ ] **Step 2: 이전 산출물을 보존형 archive한다**
 

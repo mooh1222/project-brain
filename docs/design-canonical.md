@@ -185,19 +185,25 @@ survivor에 합치는 canonical repair action이다. 원장에서 뽑은 pair는
 정본으로 유지한다. `code_locator_ids`, `decision_record_ids`, `evidence_refs`,
 `glossary_term_ids`, `tags`는 target 순서를 먼저 보존하고 source에만 있는 근거를 source
 순서대로 붙인다. `history_coverage`는 `unsearched < partial < complete` 순서에서 두 입력 중
-더 보수적인 값을 택한다. source를 provenance의 `source_object_id(s)`로 가리키거나, 변경
-대상을 `ContextProjection`이 의존하면 조용히 다시 쓰지 않고 중단한다.
+더 보수적인 값을 택한다. merge source와 target의 raw file bytes는 plan 전에 canonical
+serialization과 일치해야 한다. 원본 `ContextProjection`이 merge source를 등록 참조 어디로든
+가리키거나 byte-exact 변경 대상을 `source_object_ids`로 의존하면 중단하며,
+`ContextProjection` 자체는 절대 다시 쓰지 않는다.
 
 참조 감사 기록은 역할을 나눈다. `reference_rewrites`는 scalar 치환과 길이가 변하지 않는
 list 치환의 정확한 before/after ID와 pointer를 기록한다. source와 target이 같은 list에
 있어 source 항목을 제거하는 축약은 뒤 인덱스 이동을 pointer 치환으로 꾸미지 않고
 `CanonicalRepairRow.merge_receipt.reference_collapses`에 before/after 배열과 제거 위치를
-기록한다. intermediate trusted receipt 검증은 source가 live store에서 사라졌는지와 artifact
-delete의 before SHA를 원장·`merge_receipt`에 함께 대조한다. survivor bytes가 달라졌으면
-artifact update의 before/after SHA를 요구하고, 같으면 update 행을 금지한다. 두 경우 모두
-live survivor SHA, row `canonical_payload_hash`, `merge_receipt.target_after_sha256`를 같은
-값으로 묶고, collapse 뒤 live referrer 배열도 receipt와 정확히 대조한다. 이 검증을 통과한
-뒤 merge source는 이후 순수 ID rename map에서 제외된다.
+기록한다. `object_id`·`before_ids`·`removed_index`는 transaction 이전 좌표이고,
+`after_ids`는 merge 단계 종료 뒤 field-repair 적용 전 좌표다. 한 list field에는 최대 한
+merge pair만 올 수 있고 merge source는 collapse referrer가 될 수 없다. intermediate trusted
+receipt 검증은 source가 live store에서 사라졌는지와 artifact delete의 before SHA를
+원장·`merge_receipt`에 함께 대조한다. survivor bytes가 달라졌으면 artifact update의
+before/after SHA를 요구하고, 같으면 update 행을 금지한다. 두 경우 모두 live survivor SHA,
+row `canonical_payload_hash`, `merge_receipt.target_after_sha256`를 같은 값으로 묶는다.
+collapse의 `object_id`와 `after_ids`는 승인된 field-repair rename map으로 최종 좌표에 투영한
+뒤 live referrer 배열과 대조한다. merge target ID는 endpoint overlap 게이트로 불변이다.
+이 검증을 통과한 뒤 merge source는 이후 순수 ID rename map에서 제외된다.
 
 실코퍼스 적용에는 사용자 승인이 두 번 필요하다.
 
