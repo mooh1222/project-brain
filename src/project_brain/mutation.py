@@ -62,6 +62,23 @@ _LOGICAL_KEY_FIELDS = (
 _STRUCTURED_ID_LINT_CODES = frozenset({"invalid_id", "unknown_grammar"})
 
 
+def _json_exact(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        assert isinstance(right, dict)
+        return left.keys() == right.keys() and all(
+            _json_exact(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        assert isinstance(right, list)
+        return len(left) == len(right) and all(
+            _json_exact(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return left == right
+
+
 class MutationOperation(StrEnum):
     INGEST = "ingest"
     PROMOTE = "promote"
@@ -1456,7 +1473,7 @@ def _validate_canonical_repair_request(
                 "canonical_repair_payload_changed",
                 intent.source_id,
             )
-        if expected != after:
+        if not _json_exact(expected, after):
             return failed(
                 "canonical_repair_payload_changed",
                 intent.source_id,
@@ -1468,7 +1485,7 @@ def _validate_canonical_repair_request(
     expected_input_ids.update(
         object_id
         for object_id in set(existing_by_id) & set(final_by_id)
-        if final_by_id[object_id] != existing_by_id[object_id]
+        if not _json_exact(final_by_id[object_id], existing_by_id[object_id])
     )
     if set(input_by_id) != expected_input_ids:
         return failed(
@@ -1476,7 +1493,7 @@ def _validate_canonical_repair_request(
             "canonical repair input objects differ from final projection",
         )
     for object_id in sorted(expected_input_ids):
-        if final_by_id.get(object_id) != input_by_id[object_id]:
+        if not _json_exact(final_by_id.get(object_id), input_by_id[object_id]):
             return failed(
                 "canonical_repair_payload_changed",
                 object_id,
@@ -1846,12 +1863,14 @@ def _canonical_repair_objects_equivalent(
     *,
     comparison_by_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> bool:
-    object_id = before.get("id")
-    if comparison_by_id is not None and isinstance(object_id, str):
-        projected = comparison_by_id.get(object_id)
-        if projected is not None:
-            return dict(projected) == dict(after)
-    return _canonical_repair_comparison_shape(before, replacements) == dict(after)
+    return _json_exact(
+        _canonical_repair_comparison_shape(
+            before,
+            replacements,
+            comparison_by_id=comparison_by_id,
+        ),
+        dict(after),
+    )
 
 
 def _grandfather_key(problem: Mapping[str, object]) -> tuple[object, ...]:

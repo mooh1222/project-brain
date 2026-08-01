@@ -1226,6 +1226,41 @@ def test_canonical_repair_rejects_tampered_merge_request(tmp_path, tamper):
     assert result.manifest is None
 
 
+@pytest.mark.parametrize(
+    ("stored_value", "request_value"),
+    [(1, True), (1, 1.0)],
+    ids=("int-to-bool", "int-to-float"),
+)
+def test_canonical_repair_rejects_merge_survivor_json_type_drift(
+    tmp_path,
+    stored_value,
+    request_value,
+):
+    request = _collision_merge_request(tmp_path)
+    merge_intent = request.canonical_repair_intents[0]
+    existing = BrainStore.load(request.brain_root)
+    for object_id in (merge_intent.source_id, merge_intent.new_id):
+        obj = dict(existing.get(object_id))
+        obj["legacy_unknown"] = stored_value
+        _write_raw(request.brain_root, obj)
+
+    objects = list(request.objects)
+    survivor_index = next(
+        index
+        for index, obj in enumerate(objects)
+        if obj["id"] == merge_intent.new_id
+    )
+    survivor = dict(objects[survivor_index])
+    survivor["legacy_unknown"] = request_value
+    objects[survivor_index] = survivor
+    request = replace(request, objects=tuple(objects))
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+    assert result.manifest is None
+
+
 def test_canonical_repair_malformed_merge_endpoint_fails_closed(tmp_path):
     request = _collision_merge_request(tmp_path)
     merge_intent = request.canonical_repair_intents[0]
