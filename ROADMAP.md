@@ -38,9 +38,24 @@
 ### Task 17 canonical ID 복구 (2026-07-31~)
 
 strict ID grammar를 유지한 채 ID-only migration과 제한된 canonical repair를 분리하고,
-decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 구현을
-진행 중이다. canonical repair와 다음 ID-only migration 사이에는 검증된 intermediate
-snapshot을 두며, 실제 BB2 corpus의 canonical ID 판단과 증거는 데이터 레포가 소유한다.
+decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 지원을
+구현했다. 승인된 collision source를 기존 canonical target에 합치는
+`collision_merge_into_existing`도 source delete, survivor/referrer update, 보수적 근거 병합,
+참조 축약 receipt, intermediate 검증, 전체 before/after recovery까지 엔진에서 지원한다.
+survivor는 요청에 항상 포함하되 bytes가 실제로 바뀔 때만 manifest update로 기록한다.
+canonical repair와 다음 ID-only migration 사이에는 검증된 intermediate snapshot을 두며,
+실제 BB2 corpus의 canonical ID 판단과 증거는 데이터 레포가 소유한다.
+
+엔진 지원 완료와 실코퍼스 적용 완료는 별개다. 현재 남은 경계는 다음과 같다.
+
+- Task 6 독립 통합 검토를 거쳐 clean `ENGINE_SHA`를 최종 고정해야 한다.
+- 새 engine SHA에 다시 묶은 exact 156행 live decision ledger bytes는 아직 사용자 승인을
+  받지 않았다.
+- Task 9 apply는 시작하지 않았다. 이번 엔진 작업에서는 BB2 object·eval·index·stale-set을
+  건드리거나 검증하지 않았으며, 승인 뒤 실제 mutation과 BB2 checks/eval, 필요한 index
+  검증을 별도 영수증으로 고정해야 한다.
+
+따라서 이 상태는 검색 품질 회귀 완료나 실코퍼스 migration 완료를 뜻하지 않는다.
 
 Task 17 전체는 아직 완료가 아니다. 다음 조건을 모두 만족해야 완료 단계로 옮긴다.
 
@@ -51,8 +66,9 @@ Task 17 전체는 아직 완료가 아니다. 다음 조건을 모두 만족해�
 - 그 commit을 포함한 final full snapshot 검증과, snapshot 바깥의 final binding receipt가
   BB2 HEAD·engine SHA·corpus/index/stale fingerprint·사용자 변경 receipt를 고정함
 
-설계와 실행 순서는 [Task 17 canonical ID 복구 설계](docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md)와
-[구현 계획](docs/superpowers/plans/2026-07-31-task17-canonical-id-recovery.md)에 있다.
+설계와 실행 순서는 [Task 17 canonical ID 복구 설계](docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md),
+[collision merge 설계](docs/superpowers/specs/2026-08-02-task17-collision-merge-design.md),
+[collision merge 구현 계획](docs/superpowers/plans/2026-08-02-task17-collision-merge.md)에 있다.
 
 ---
 

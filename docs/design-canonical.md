@@ -155,8 +155,10 @@ ID 복구는 payload를 그대로 둔 **ID-only migration**과, ID에서 투영�
 최소한으로 바로잡는 **canonical repair**를 분리한다. strict ID grammar는 완화하지 않는다.
 ID-only는 self ID와 등록 참조의 일대일 치환만 맡고, canonical repair는 승인된
 DomainMapping의 `/mapping_key`와 bundle ReviewRecord의 `/target_object_ids` 두 pointer만
-추가로 바꿀 수 있다. 기존 target 덮어쓰기, merge, delete-only와 그 밖의 payload 변경은
-모두 닫힌 쪽으로 실패한다.
+추가로 바꿀 수 있다. 그 밖의 payload 변경과 일반 delete-only는 모두 닫힌 쪽으로
+실패한다. 이미 존재하는 target으로 합치는 경우도 아래의 검증된
+`collision_merge_into_existing` 경로만 허용하며, 임의 덮어쓰기나 일반 목적 merge는
+허용하지 않는다.
 
 엔진은 canonical ID를 추론하지 않는다. 데이터 레포가 Phase A 분류의 모든 행을 정확히
 한 번 덮는 **canonicalization decision ledger**를 보존하고, 사람이 ID·허용 field diff·근거를
@@ -169,6 +171,34 @@ manifest와 expected-after fingerprint가 이 snapshot의 corpus와 정확히 �
 순수 ID rename map을 꺼낼 수 있다. 따라서 두 mutation은 같은 복구 작업에 속하지만 서로
 다른 manifest와 snapshot 경계로 다시 계획·검증된다.
 
+#### 기존 canonical target으로 합치는 충돌 복구
+
+`collision_merge_into_existing`은 승인된 collision source를 이미 존재하는 canonical
+survivor에 합치는 canonical repair action이다. 원장에서 뽑은 pair는
+`project_collision_merges()`가 planner와 mutation validator 양쪽에서 같은 방식으로 다시
+계산한다. source는 삭제하고 existing target은 update 입력으로 항상 `MutationRequest.objects`에
+포함한다. 다만 `MutationManifest.updates`는 survivor의 before/after bytes가 실제로 달라질
+때만 생긴다. 따라서 no-op survivor도 요청·live SHA·`CanonicalRepairRow`의
+`canonical_payload_hash`·`merge_receipt`에는 계속 묶이지만 update 행은 없어야 한다.
+
+병합 결과는 target의 `title`, `canonical_summary`, `meaning`, `boundary`, `poc_priority`를
+정본으로 유지한다. `code_locator_ids`, `decision_record_ids`, `evidence_refs`,
+`glossary_term_ids`, `tags`는 target 순서를 먼저 보존하고 source에만 있는 근거를 source
+순서대로 붙인다. `history_coverage`는 `unsearched < partial < complete` 순서에서 두 입력 중
+더 보수적인 값을 택한다. source를 provenance의 `source_object_id(s)`로 가리키거나, 변경
+대상을 `ContextProjection`이 의존하면 조용히 다시 쓰지 않고 중단한다.
+
+참조 감사 기록은 역할을 나눈다. `reference_rewrites`는 scalar 치환과 길이가 변하지 않는
+list 치환의 정확한 before/after ID와 pointer를 기록한다. source와 target이 같은 list에
+있어 source 항목을 제거하는 축약은 뒤 인덱스 이동을 pointer 치환으로 꾸미지 않고
+`CanonicalRepairRow.merge_receipt.reference_collapses`에 before/after 배열과 제거 위치를
+기록한다. intermediate trusted receipt 검증은 source가 live store에서 사라졌는지와 artifact
+delete의 before SHA를 원장·`merge_receipt`에 함께 대조한다. survivor bytes가 달라졌으면
+artifact update의 before/after SHA를 요구하고, 같으면 update 행을 금지한다. 두 경우 모두
+live survivor SHA, row `canonical_payload_hash`, `merge_receipt.target_after_sha256`를 같은
+값으로 묶고, collapse 뒤 live referrer 배열도 receipt와 정확히 대조한다. 이 검증을 통과한
+뒤 merge source는 이후 순수 ID rename map에서 제외된다.
+
 실코퍼스 적용에는 사용자 승인이 두 번 필요하다.
 
 - **승인 게이트 1**: 읽기 전용 분류, 전체 decision ledger, 충돌 비교와 허용 field diff를
@@ -178,8 +208,8 @@ manifest와 expected-after fingerprint가 이 snapshot의 corpus와 정확히 �
   live corpus/index/stale-set을 바꾸지 않는다.
 
 세부 계약과 Task 17 완료 조건은
-[canonical ID 복구 설계](superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md)에
-있다.
+[canonical ID 복구 설계](superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md)와
+[collision merge 설계](superpowers/specs/2026-08-02-task17-collision-merge-design.md)에 있다.
 
 ## 4. 미결 사항 — 이름 박고 미룸
 
