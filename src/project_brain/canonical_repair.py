@@ -13,6 +13,7 @@ from pathlib import Path
 
 from project_brain.canonical_merge import (
     CollisionMergeError,
+    ReferenceCollapse,
     project_collision_merges,
 )
 from project_brain.id_grammar import IdGrammarError, parse_id
@@ -117,6 +118,15 @@ class CanonicalizationLedger:
 
 
 @dataclass(frozen=True)
+class CanonicalMergeReceipt:
+    source_delete_before_sha256: str
+    target_id: str
+    target_before_sha256: str
+    target_after_sha256: str
+    reference_collapses: tuple[ReferenceCollapse, ...]
+
+
+@dataclass(frozen=True)
 class CanonicalRepairRow:
     source_id: str
     new_id: str
@@ -126,6 +136,7 @@ class CanonicalRepairRow:
     canonical_payload_hash: str
     reference_rewrites: tuple[dict, ...]
     snapshot_id: str
+    merge_receipt: CanonicalMergeReceipt | None
 
 
 @dataclass(frozen=True)
@@ -905,6 +916,43 @@ def plan_canonical_repair(
             canonical_payload_hash=_object_hash(after),
             reference_rewrites=row_rewrites,
             snapshot_id=snapshot.snapshot_id,
+            merge_receipt=None,
+        ))
+    for decision in merge_decisions:
+        target_id = merge_pairs[decision.source_id]
+        after = after_by_id[target_id]
+        row_rewrites = tuple(
+            dict(rewrite)
+            for rewrite in mutation_plan.manifest.reference_rewrites
+            if (
+                rewrite["before_id"] == decision.source_id
+                and rewrite["after_id"] == target_id
+            )
+        )
+        target_after_sha256 = _object_hash(after)
+        rows.append(CanonicalRepairRow(
+            source_id=decision.source_id,
+            new_id=target_id,
+            kind=decision.source_kind,
+            reason_code=decision.action.value,
+            field_changes=decision.field_changes,
+            canonical_payload_hash=target_after_sha256,
+            reference_rewrites=row_rewrites,
+            snapshot_id=snapshot.snapshot_id,
+            merge_receipt=CanonicalMergeReceipt(
+                source_delete_before_sha256=existing.source_sha256(
+                    decision.source_id
+                ),
+                target_id=target_id,
+                target_before_sha256=existing.source_sha256(target_id),
+                target_after_sha256=target_after_sha256,
+                reference_collapses=tuple(
+                    collapse
+                    for collapse in merge_projection.reference_collapses
+                    if collapse.before_ids[collapse.removed_index]
+                    == decision.source_id
+                ),
+            ),
         ))
     return CanonicalRepairPlan(
         request=request,
@@ -965,6 +1013,37 @@ _CANONICAL_ARTIFACT_EXTRA_KEYS = {
     "snapshot_manifest_sha256",
     "engine_receipt",
 }
+_CANONICAL_ROW_KEYS = {
+    "source_id",
+    "new_id",
+    "kind",
+    "reason_code",
+    "field_changes",
+    "canonical_payload_hash",
+    "reference_rewrites",
+    "snapshot_id",
+    "merge_receipt",
+}
+_REFERENCE_REWRITE_KEYS = {
+    "object_id",
+    "pointer",
+    "before_id",
+    "after_id",
+}
+_MERGE_RECEIPT_KEYS = {
+    "source_delete_before_sha256",
+    "target_id",
+    "target_before_sha256",
+    "target_after_sha256",
+    "reference_collapses",
+}
+_REFERENCE_COLLAPSE_KEYS = {
+    "object_id",
+    "pointer",
+    "before_ids",
+    "after_ids",
+    "removed_index",
+}
 
 
 def _validate_sha_receipt(
@@ -981,6 +1060,186 @@ def _validate_sha_receipt(
         or hashlib.sha256(payload).hexdigest() != expected_sha256
     ):
         _fail(code, f"{label} bytes do not match the trusted receipt")
+
+
+def _json_exact(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        assert isinstance(right, dict)
+        return left.keys() == right.keys() and all(
+            _json_exact(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        assert isinstance(right, list)
+        return len(left) == len(right) and all(
+            _json_exact(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return left == right
+
+
+def _valid_artifact_pointer(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("/")
+        and value != "/"
+    )
+
+
+def _validate_artifact_field_changes(
+    value: object,
+    *,
+    reason_code: str,
+) -> None:
+    if not isinstance(value, list):
+        _fail("manifest_invalid", "artifact row field_changes are invalid")
+    expected_pointers = {
+        CanonicalAction.PROJECTED_FIELD_REPAIR.value: ("/mapping_key",),
+        CanonicalAction.REVIEW_SHAPE_REPAIR.value: (
+            "/target_object_ids",
+        ),
+        CanonicalAction.COLLISION_MERGE_INTO_EXISTING.value: (),
+    }.get(reason_code)
+    if expected_pointers is None:
+        _fail("manifest_invalid", "artifact row reason_code is invalid")
+    pointers: list[str] = []
+    for raw in value:
+        if not isinstance(raw, dict) or set(raw) != _FIELD_CHANGE_KEYS:
+            _fail("manifest_invalid", "artifact field change keys are invalid")
+        pointer = raw["pointer"]
+        if (
+            not _valid_artifact_pointer(pointer)
+            or _json_exact(raw["before"], raw["after"])
+        ):
+            _fail("manifest_invalid", "artifact field change is invalid")
+        assert isinstance(pointer, str)
+        pointers.append(pointer)
+    if tuple(pointers) != expected_pointers:
+        _fail("manifest_invalid", "artifact row field changes do not match action")
+
+
+def _validate_artifact_reference_rewrites(
+    value: object,
+    *,
+    source_id: str,
+    new_id: str,
+) -> None:
+    if not isinstance(value, list):
+        _fail("manifest_invalid", "artifact row reference_rewrites are invalid")
+    for raw in value:
+        if not isinstance(raw, dict) or set(raw) != _REFERENCE_REWRITE_KEYS:
+            _fail("manifest_invalid", "artifact reference rewrite keys are invalid")
+        if (
+            not _exact_nonempty_string(raw["object_id"])
+            or not _valid_artifact_pointer(raw["pointer"])
+            or raw["before_id"] != source_id
+            or raw["after_id"] != new_id
+        ):
+            _fail("manifest_invalid", "artifact reference rewrite is invalid")
+
+
+def _validate_artifact_merge_receipt(
+    value: object,
+    *,
+    source_id: str,
+    new_id: str,
+    canonical_payload_hash: str,
+) -> None:
+    if not isinstance(value, dict) or set(value) != _MERGE_RECEIPT_KEYS:
+        _fail("manifest_invalid", "artifact merge receipt keys are invalid")
+    if (
+        not isinstance(value["source_delete_before_sha256"], str)
+        or _SHA256.fullmatch(value["source_delete_before_sha256"]) is None
+        or value["target_id"] != new_id
+        or not isinstance(value["target_before_sha256"], str)
+        or _SHA256.fullmatch(value["target_before_sha256"]) is None
+        or value["target_after_sha256"] != canonical_payload_hash
+        or not isinstance(value["target_after_sha256"], str)
+        or _SHA256.fullmatch(value["target_after_sha256"]) is None
+        or not isinstance(value["reference_collapses"], list)
+    ):
+        _fail("manifest_invalid", "artifact merge receipt is invalid")
+    for raw in value["reference_collapses"]:
+        if not isinstance(raw, dict) or set(raw) != _REFERENCE_COLLAPSE_KEYS:
+            _fail("manifest_invalid", "artifact reference collapse keys are invalid")
+        before_ids = raw["before_ids"]
+        after_ids = raw["after_ids"]
+        removed_index = raw["removed_index"]
+        if (
+            not _exact_nonempty_string(raw["object_id"])
+            or not _valid_artifact_pointer(raw["pointer"])
+            or not isinstance(before_ids, list)
+            or not all(_exact_nonempty_string(item) for item in before_ids)
+            or not isinstance(after_ids, list)
+            or not all(_exact_nonempty_string(item) for item in after_ids)
+            or type(removed_index) is not int
+            or not 0 <= removed_index < len(before_ids)
+        ):
+            _fail("manifest_invalid", "artifact reference collapse is invalid")
+        if (
+            before_ids[removed_index] != source_id
+            or after_ids
+            != before_ids[:removed_index] + before_ids[removed_index + 1:]
+            or before_ids.count(source_id) != 1
+            or before_ids.count(new_id) != 1
+            or after_ids.count(new_id) != 1
+        ):
+            _fail(
+                "manifest_invalid",
+                "artifact reference collapse does not match its merge row",
+            )
+
+
+def _validate_artifact_rows(value: object, *, snapshot_id: str) -> None:
+    if not isinstance(value, list):
+        _fail("manifest_invalid", "artifact rows are invalid")
+    seen_sources: set[str] = set()
+    for row in value:
+        if not isinstance(row, dict) or set(row) != _CANONICAL_ROW_KEYS:
+            _fail("manifest_invalid", "artifact row keys are invalid")
+        source_id = row["source_id"]
+        new_id = row["new_id"]
+        reason_code = row["reason_code"]
+        canonical_payload_hash = row["canonical_payload_hash"]
+        if (
+            not _exact_nonempty_string(source_id)
+            or not _exact_nonempty_string(new_id)
+            or source_id == new_id
+            or not _exact_nonempty_string(row["kind"])
+            or not _exact_nonempty_string(reason_code)
+            or not isinstance(canonical_payload_hash, str)
+            or _SHA256.fullmatch(canonical_payload_hash) is None
+            or row["snapshot_id"] != snapshot_id
+            or source_id in seen_sources
+        ):
+            _fail("manifest_invalid", "artifact row values are invalid")
+        assert isinstance(source_id, str)
+        assert isinstance(new_id, str)
+        assert isinstance(reason_code, str)
+        assert isinstance(canonical_payload_hash, str)
+        seen_sources.add(source_id)
+        _validate_artifact_field_changes(
+            row["field_changes"],
+            reason_code=reason_code,
+        )
+        _validate_artifact_reference_rewrites(
+            row["reference_rewrites"],
+            source_id=source_id,
+            new_id=new_id,
+        )
+        if reason_code == CanonicalAction.COLLISION_MERGE_INTO_EXISTING.value:
+            _validate_artifact_merge_receipt(
+                row["merge_receipt"],
+                source_id=source_id,
+                new_id=new_id,
+                canonical_payload_hash=canonical_payload_hash,
+            )
+        elif row["merge_receipt"] is not None:
+            _fail(
+                "manifest_invalid",
+                "non-merge artifact row must have a null merge receipt",
+            )
 
 
 def _parse_canonical_artifact(
@@ -1002,7 +1261,8 @@ def _parse_canonical_artifact(
         _fail("manifest_invalid", "canonical repair artifact keys are invalid")
     engine_receipt = artifact["engine_receipt"]
     if (
-        artifact["canonical_repair_version"] != 1
+        type(artifact["canonical_repair_version"]) is not int
+        or artifact["canonical_repair_version"] != 1
         or artifact["migration_kind"] != "canonical_repair"
         or not isinstance(artifact["rows"], list)
         or not isinstance(artifact["objects"], list)
@@ -1019,6 +1279,7 @@ def _parse_canonical_artifact(
         or _SHA256.fullmatch(artifact["phase_a_classification_sha256"]) is None
         or not isinstance(artifact["snapshot_manifest_sha256"], str)
         or _SHA256.fullmatch(artifact["snapshot_manifest_sha256"]) is None
+        or not _exact_nonempty_string(artifact["snapshot_id"])
     ):
         _fail("manifest_invalid", "canonical repair artifact values are invalid")
     if not all(
@@ -1027,6 +1288,10 @@ def _parse_canonical_artifact(
         for old_id, new_id in artifact["id_renames"].items()
     ):
         _fail("manifest_invalid", "artifact id_renames are invalid")
+    _validate_artifact_rows(
+        artifact["rows"],
+        snapshot_id=artifact["snapshot_id"],
+    )
     return artifact
 
 
@@ -1323,18 +1588,18 @@ def id_renames_from_trusted_repair_receipt(
             "artifact pure ID rename map differs from the decision ledger",
         )
     repair_renames = canonical_repair_renames_from_ledger(ledger)
+    merge_pairs = collision_merges_from_ledger(ledger)
     rows = artifact["rows"]
     if not isinstance(rows, list) or {
         row.get("source_id")
         for row in rows
         if isinstance(row, dict)
-    } != set(repair_renames):
+    } != set(repair_renames) | set(merge_pairs):
         _fail(
             "intermediate_receipt_mismatch",
             "artifact rows do not exactly cover canonical repairs",
         )
     transitions, deletes = _artifact_transition_receipts(artifact)
-    merge_pairs = collision_merges_from_ledger(ledger)
     for decision in ledger.decisions:
         if decision.source_id in merge_pairs:
             if existing.has(decision.source_id):

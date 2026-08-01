@@ -1168,12 +1168,13 @@ def canonical_fixture(tmp_path) -> CanonicalPlanFixture:
     return _canonical_plan_fixture(tmp_path)
 
 
-def test_plan_keeps_five_repair_rows_and_adds_two_merge_intents(
+def test_plan_keeps_five_repair_rows_and_adds_two_merge_rows_and_intents(
     canonical_fixture,
 ):
     plan = plan_canonical_repair(**canonical_fixture.plan_args)
 
-    assert len(plan.rows) == 5
+    assert len(plan.rows) == 7
+    assert sum(row.merge_receipt is None for row in plan.rows) == 5
     assert {old_id for old_id, _ in plan.id_renames} == set(
         canonical_fixture.expected_id_only_sources
     )
@@ -1183,6 +1184,57 @@ def test_plan_keeps_five_repair_rows_and_adds_two_merge_intents(
         for intent in plan.request.canonical_repair_intents
     )
     assert plan.request.operation is MutationOperation.CANONICAL_REPAIR
+
+
+def test_plan_merge_rows_have_exact_artifact_receipts(canonical_fixture):
+    plan = plan_canonical_repair(**canonical_fixture.plan_args)
+
+    merge_rows = [
+        row for row in plan.rows if row.merge_receipt is not None
+    ]
+
+    assert len(merge_rows) == 2
+    expected_collapses = {
+        DRONE_MERGE_SOURCE: (
+            (
+                "review.bundle.disturb-drone.domain-mapping",
+                "/target_object_ids",
+                (DRONE_MERGE_SOURCE, DRONE_MERGE_TARGET),
+                (DRONE_MERGE_TARGET,),
+                0,
+            ),
+        ),
+        HEDGEHOG_MERGE_SOURCE: (
+            (
+                "review.bundle.disturb-hedgehog.domain-mapping",
+                "/target_object_ids",
+                (HEDGEHOG_MERGE_SOURCE, HEDGEHOG_MERGE_TARGET),
+                (HEDGEHOG_MERGE_TARGET,),
+                0,
+            ),
+        ),
+    }
+    for row in merge_rows:
+        receipt = row.merge_receipt
+        assert receipt is not None
+        assert receipt.target_id == row.new_id
+        assert receipt.target_after_sha256 == row.canonical_payload_hash
+        assert receipt.source_delete_before_sha256 == (
+            canonical_fixture.existing.source_sha256(row.source_id)
+        )
+        assert receipt.target_before_sha256 == (
+            canonical_fixture.existing.source_sha256(row.new_id)
+        )
+        assert tuple(
+            (
+                collapse.object_id,
+                collapse.pointer,
+                collapse.before_ids,
+                collapse.after_ids,
+                collapse.removed_index,
+            )
+            for collapse in receipt.reference_collapses
+        ) == expected_collapses[row.source_id]
 
 
 def test_plan_merge_uses_delete_update_and_exact_reference_projection(
@@ -1420,6 +1472,9 @@ def test_artifact_has_exact_outer_keys_and_receipt_bindings(canonical_fixture):
         "head": canonical_fixture.engine_sha,
         "status_sha256": hashlib.sha256(b"").hexdigest(),
     }
+    serialized_rows = json.loads(artifact.manifest_bytes)["rows"]
+    assert all("merge_receipt" in row for row in serialized_rows)
+    assert sum(row["merge_receipt"] is None for row in serialized_rows) == 5
     assert "status_bytes" not in artifact.manifest["engine_receipt"]
     assert artifact.manifest_bytes == _json_bytes(artifact.manifest)
     assert artifact.manifest_sha256 == hashlib.sha256(
@@ -1466,6 +1521,182 @@ def _apply_args(
 
 def _forbid_apply(*args, **kwargs):
     raise AssertionError("MutationService.apply must not run before drift rejection")
+
+
+def _tamper_artifact_row(manifest: dict, axis: str) -> None:
+    merge_row = next(
+        row
+        for row in manifest["rows"]
+        if row["reason_code"] == "collision_merge_into_existing"
+    )
+    non_merge_row = next(
+        row
+        for row in manifest["rows"]
+        if row["reason_code"] != "collision_merge_into_existing"
+    )
+    field_change_row = next(
+        row for row in manifest["rows"] if row["field_changes"]
+    )
+    rewrite_row = next(
+        row for row in manifest["rows"] if row["reference_rewrites"]
+    )
+    receipt = merge_row["merge_receipt"]
+    assert isinstance(receipt, dict)
+    collapse = receipt["reference_collapses"][0]
+
+    if axis == "artifact_version_bool":
+        manifest["canonical_repair_version"] = True
+    elif axis == "row_unknown_key":
+        merge_row["unknown"] = None
+    elif axis == "row_source_id_bool":
+        merge_row["source_id"] = True
+    elif axis == "row_hash_shape":
+        merge_row["canonical_payload_hash"] = "0" * 63
+    elif axis == "field_change_unknown_key":
+        field_change_row["field_changes"][0]["unknown"] = None
+    elif axis == "field_change_pointer_bool":
+        field_change_row["field_changes"][0]["pointer"] = True
+    elif axis == "rewrite_unknown_key":
+        rewrite_row["reference_rewrites"][0]["unknown"] = None
+    elif axis == "rewrite_before_id_bool":
+        rewrite_row["reference_rewrites"][0]["before_id"] = True
+    elif axis == "rewrite_before_id_mismatch":
+        rewrite_row["reference_rewrites"][0]["before_id"] = (
+            "mapping.neutral.other"
+        )
+    elif axis == "receipt_unknown_key":
+        receipt["unknown"] = None
+    elif axis == "receipt_source_sha_type":
+        receipt["source_delete_before_sha256"] = True
+    elif axis == "receipt_target_before_sha_shape":
+        receipt["target_before_sha256"] = "0" * 63
+    elif axis == "receipt_collapses_type":
+        receipt["reference_collapses"] = {}
+    elif axis == "receipt_target_id_mismatch":
+        receipt["target_id"] = "mapping.neutral.other"
+    elif axis == "receipt_target_after_mismatch":
+        receipt["target_after_sha256"] = "0" * 64
+    elif axis == "row_canonical_hash_mismatch":
+        merge_row["canonical_payload_hash"] = "0" * 64
+    elif axis == "collapse_unknown_key":
+        collapse["unknown"] = None
+    elif axis == "collapse_object_id_bool":
+        collapse["object_id"] = True
+    elif axis == "collapse_pointer_bool":
+        collapse["pointer"] = True
+    elif axis == "collapse_index_bool":
+        collapse["removed_index"] = True
+    elif axis == "collapse_index_mismatch":
+        collapse["removed_index"] = 1
+    elif axis == "collapse_before_ids_type":
+        collapse["before_ids"] = DRONE_MERGE_SOURCE
+    elif axis == "collapse_before_ids_mismatch":
+        collapse["before_ids"] = [
+            *collapse["before_ids"],
+            "mapping.neutral.other",
+        ]
+    elif axis == "collapse_after_ids_mismatch":
+        collapse["after_ids"] = []
+    elif axis == "non_merge_non_null_receipt":
+        non_merge_row["merge_receipt"] = deepcopy(receipt)
+    elif axis == "merge_null_receipt":
+        merge_row["merge_receipt"] = None
+    elif axis == "source_delete_sha":
+        receipt["source_delete_before_sha256"] = "0" * 64
+    elif axis == "target_before_sha":
+        receipt["target_before_sha256"] = "0" * 64
+    elif axis == "collapse_object_id":
+        collapse["object_id"] = "review.bundle.neutral.reference-only"
+    elif axis == "collapse_pointer":
+        collapse["pointer"] = "/affected_mapping_ids"
+    else:
+        raise AssertionError(f"unknown tamper axis: {axis}")
+
+
+def test_artifact_row_parser_rejects_unknown_keys_types_and_mismatches(
+    canonical_fixture,
+    subtests,
+):
+    _, artifact = _artifact_for(canonical_fixture)
+    axes = (
+        "artifact_version_bool",
+        "row_unknown_key",
+        "row_source_id_bool",
+        "row_hash_shape",
+        "field_change_unknown_key",
+        "field_change_pointer_bool",
+        "rewrite_unknown_key",
+        "rewrite_before_id_bool",
+        "rewrite_before_id_mismatch",
+        "receipt_unknown_key",
+        "receipt_source_sha_type",
+        "receipt_target_before_sha_shape",
+        "receipt_collapses_type",
+        "receipt_target_id_mismatch",
+        "receipt_target_after_mismatch",
+        "row_canonical_hash_mismatch",
+        "collapse_unknown_key",
+        "collapse_object_id_bool",
+        "collapse_pointer_bool",
+        "collapse_index_bool",
+        "collapse_index_mismatch",
+        "collapse_before_ids_type",
+        "collapse_before_ids_mismatch",
+        "collapse_after_ids_mismatch",
+        "non_merge_non_null_receipt",
+        "merge_null_receipt",
+    )
+
+    for axis in axes:
+        with subtests.test(axis=axis):
+            manifest = deepcopy(artifact.manifest)
+            _tamper_artifact_row(manifest, axis)
+            manifest_bytes = _json_bytes(manifest)
+
+            with pytest.raises(CanonicalRepairError) as exc:
+                canonical_repair._parse_canonical_artifact(
+                    manifest_bytes,
+                    hashlib.sha256(manifest_bytes).hexdigest(),
+                )
+
+            assert exc.value.code == "manifest_invalid"
+
+
+def test_apply_rejects_structurally_valid_merge_artifact_tamper_on_revalidation(
+    canonical_fixture,
+    monkeypatch,
+    subtests,
+):
+    _, artifact = _artifact_for(canonical_fixture)
+    monkeypatch.setattr(MutationService, "apply", _forbid_apply)
+    monkeypatch.setattr(
+        "project_brain.canonical_repair.verify_snapshot",
+        lambda *args, **kwargs: canonical_fixture.snapshot,
+    )
+
+    for axis in (
+        "source_delete_sha",
+        "target_before_sha",
+        "collapse_object_id",
+        "collapse_pointer",
+    ):
+        with subtests.test(axis=axis):
+            manifest = deepcopy(artifact.manifest)
+            _tamper_artifact_row(manifest, axis)
+            manifest_bytes = _json_bytes(manifest)
+
+            with pytest.raises(CanonicalRepairError) as exc:
+                apply_canonical_repair_artifact(
+                    **_apply_args(
+                        canonical_fixture,
+                        manifest_bytes=manifest_bytes,
+                        expected_manifest_sha256=hashlib.sha256(
+                            manifest_bytes
+                        ).hexdigest(),
+                    ),
+                )
+
+            assert exc.value.code == "manifest_revalidation_failed"
 
 
 def test_apply_rejects_ledger_drift_before_mutation(
@@ -1691,6 +1922,45 @@ def test_apply_rejects_corpus_drift_before_mutation(
         )
 
     assert exc.value.code == "decision_corpus_fingerprint_mismatch"
+
+
+@pytest.mark.parametrize(
+    "object_id",
+    [
+        DRONE_MERGE_TARGET,
+        "review.bundle.disturb-drone.domain-mapping",
+    ],
+    ids=["merge_survivor", "collapse_referrer"],
+)
+def test_apply_rejects_live_merge_survivor_or_referrer_drift_before_mutation(
+    canonical_fixture,
+    monkeypatch,
+    object_id,
+):
+    _, artifact = _artifact_for(canonical_fixture)
+    changed = deepcopy(canonical_fixture.existing.get(object_id))
+    changed["title"] = f"drifted {object_id}"
+    _write_raw(canonical_fixture.brain_root, changed)
+    monkeypatch.setattr(MutationService, "apply", _forbid_apply)
+    monkeypatch.setattr(
+        "project_brain.canonical_repair.verify_snapshot",
+        lambda *args, **kwargs: canonical_fixture.snapshot,
+    )
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        apply_canonical_repair_artifact(
+            **_apply_args(
+                canonical_fixture,
+                manifest_bytes=artifact.manifest_bytes,
+                expected_manifest_sha256=artifact.manifest_sha256,
+            ),
+        )
+
+    assert exc.value.code in {
+        "decision_corpus_fingerprint_mismatch",
+        "manifest_revalidation_failed",
+        "snapshot_corpus_fingerprint_mismatch",
+    }
 
 
 def test_apply_rejects_fresh_replan_byte_mismatch_before_mutation(

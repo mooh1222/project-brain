@@ -2737,7 +2737,7 @@ class TestCliShow(unittest.TestCase):
         planned = json.loads(plan_out.getvalue())
         self.assertEqual(set(planned), success_keys)
         self.assertEqual(planned["migration_kind"], "canonical_repair")
-        self.assertEqual(planned["row_count"], 5)
+        self.assertEqual(planned["row_count"], 7)
         self.assertEqual(
             planned["decision_ledger_sha256"],
             fixture.ledger.sha256,
@@ -2785,7 +2785,7 @@ class TestCliShow(unittest.TestCase):
         applied = json.loads(apply_out.getvalue())
         self.assertEqual(set(applied), success_keys)
         self.assertEqual(applied["migration_kind"], "canonical_repair")
-        self.assertEqual(applied["row_count"], 5)
+        self.assertEqual(applied["row_count"], 7)
         self.assertEqual(
             applied["action_count"],
             planned["action_count"],
