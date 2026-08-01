@@ -10,6 +10,10 @@ from pathlib import Path
 import pytest
 
 import project_brain.mutation as mutation
+from project_brain.canonical_merge import (
+    ReferenceCollapse,
+    project_collision_merges,
+)
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
     MutationManifest,
@@ -22,6 +26,7 @@ from project_brain.objbase import base
 from project_brain.hash_utils import stable_json
 from project_brain.hash_utils import source_content_hash
 from project_brain.repo_context import resolve_repo_context
+from project_brain.reference_fields import rewrite_object_refs
 from project_brain.schema import validate_object_id
 from project_brain.store import BrainStore
 from project_brain.transaction_receipt import BatchBinding
@@ -33,6 +38,7 @@ from tests.test_ingest import (
     manifest,
     review_record_for,
 )
+from tests.test_canonical_merge import merge_pair
 
 
 T = "2026-07-28T00:00:00+09:00"
@@ -59,6 +65,7 @@ def _request(
     auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = (),
     batch_binding: BatchBinding | None = None,
     canonical_repair_intents: tuple[object, ...] = (),
+    canonical_repair_reference_collapses: tuple[ReferenceCollapse, ...] = (),
     canonical_repair_binding: dict[str, str] | None = None,
 ) -> MutationRequest:
     return MutationRequest(
@@ -74,6 +81,9 @@ def _request(
         auxiliary_updates=auxiliary_updates,
         batch_binding=batch_binding,
         canonical_repair_intents=canonical_repair_intents,
+        canonical_repair_reference_collapses=(
+            canonical_repair_reference_collapses
+        ),
         canonical_repair_binding=canonical_repair_binding,
     )
 
@@ -254,6 +264,176 @@ def _mixed_review_repair_request(
     )
 
 
+def _collision_merge_request(
+    tmp_path: Path,
+    *,
+    invalid_referrer: bool = False,
+    field_repair: bool = False,
+) -> MutationRequest:
+    brain_root = tmp_path / "brain"
+    source, target = merge_pair()
+    decision_ids = (
+        "decision.ctx.merge-source-one",
+        "decision.ctx.merge-source-two",
+    )
+    source["decision_record_ids"] = list(decision_ids)
+    target["decision_record_ids"] = []
+    evidence_manifest = manifest("manifest.ctx.merge-source")
+    evidence = evidence_ref("evref.ctx.merge-source", evidence_manifest["id"])
+    for obj in (source, target):
+        obj["glossary_term_ids"] = []
+        obj["code_locator_ids"] = []
+        obj["evidence_refs"] = [evidence["id"]]
+
+    merge_context = context("context.ctx")
+    merge_context["context_key"] = "ctx"
+    bundle_review = review_record_for(
+        source["review_record_id"],
+        source["id"],
+    )
+    bundle_review.pop("target_object_id")
+    bundle_key = source["review_record_id"].removeprefix("review.")
+    bundle_review.update({
+        "review_scope": "mapping_bundle",
+        "review_type": "meaning_review",
+        "bundle_key": bundle_key,
+        "confirmation_key": bundle_key,
+        "target_object_ids": [source["id"], target["id"]],
+    })
+    decision_records = []
+    for decision_id in decision_ids:
+        decision_records.append(base(
+            {
+                "id": decision_id,
+                "kind": "DecisionRecord",
+                "status": "reviewed",
+                "truth_role": "event",
+                "title": f"Decision: {decision_id}",
+                "context_id": merge_context["id"],
+                "decision_type": "naming_decision",
+                "summary": "merge source reference",
+                "decision": "merge source reference",
+                "source_object_ids": [],
+                "affected_context_ids": [merge_context["id"]],
+                "affected_mapping_ids": [source["id"]],
+                "spec_reflected": "yes",
+                "evidence_refs": [evidence["id"]],
+            },
+            tags=["ctx"],
+            created_at=T,
+            updated_at=T,
+        ))
+    repair_pairs: dict[str, str] = {}
+    repair_intents: tuple[mutation.CanonicalRepairIntent, ...] = ()
+    repair_objects: tuple[dict, ...] = ()
+    if field_repair:
+        repair_old = candidate_mapping(
+            "mapping.neutral.Legacy",
+            glossary_term_ids=["g.neutral.term"],
+            mapping_key="Legacy",
+        )
+        repair_new_id = "mapping.neutral.legacy"
+        repair_pairs[repair_old["id"]] = repair_new_id
+        decision_records[0]["affected_mapping_ids"].append(
+            repair_old["id"]
+        )
+        repair_intents = (mutation.CanonicalRepairIntent(
+            source_id=repair_old["id"],
+            new_id=repair_new_id,
+            reason_code="projected_field_repair",
+            field_changes=(mutation.CanonicalFieldChange(
+                pointer="/mapping_key",
+                before="Legacy",
+                after="legacy",
+            ),),
+        ),)
+        repair_objects = (
+            context(),
+            candidate_term("g.neutral.term"),
+            repair_old,
+        )
+    if invalid_referrer:
+        invalid = dict(decision_records[0])
+        invalid["id"] = "decision.ctx.Legacy"
+        invalid["affected_mapping_ids"] = [
+            source["id"],
+            target["id"],
+            *repair_pairs,
+        ]
+        source["decision_record_ids"].append(invalid["id"])
+        decision_records.append(invalid)
+
+    for obj in (
+        merge_context,
+        evidence_manifest,
+        evidence,
+        source,
+        target,
+        bundle_review,
+        *decision_records,
+        *repair_objects,
+    ):
+        _write_raw(brain_root, obj)
+    existing_by_id = {
+        str(obj["id"]): obj
+        for obj in BrainStore.load(brain_root).all()
+    }
+    merge_pairs = {source["id"]: target["id"]}
+    projection = project_collision_merges(existing_by_id, merge_pairs)
+    final_by_id: dict[str, dict] = {}
+    for object_id in sorted(projection.after_by_id):
+        expected, _ = rewrite_object_refs(
+            projection.after_by_id[object_id],
+            repair_pairs,
+        )
+        final_id = repair_pairs.get(object_id, object_id)
+        if object_id in repair_pairs:
+            expected["id"] = final_id
+            expected["mapping_key"] = "legacy"
+        final_by_id[final_id] = expected
+    objects = tuple(
+        final_by_id[object_id]
+        for object_id in sorted(final_by_id)
+        if (
+            object_id == target["id"]
+            or object_id not in existing_by_id
+            or final_by_id[object_id] != existing_by_id[object_id]
+        )
+    )
+    intent = mutation.CanonicalRepairIntent(
+        source_id=source["id"],
+        new_id=target["id"],
+        reason_code="collision_merge_into_existing",
+        field_changes=(),
+    )
+    return _request(
+        brain_root,
+        objects,
+        operation=MutationOperation.CANONICAL_REPAIR,
+        delete_ids=tuple(sorted((source["id"], *repair_pairs))),
+        renames=repair_pairs,
+        canonical_repair_intents=(*repair_intents, intent),
+        canonical_repair_reference_collapses=(
+            projection.reference_collapses
+        ),
+        canonical_repair_binding=_canonical_repair_binding(),
+    )
+
+
+def _unapproved_request(tmp_path: Path, case: str) -> MutationRequest:
+    request = _mapping_repair_request(tmp_path)
+    if case == "unapproved_existing_target":
+        _write_raw(request.brain_root, request.objects[0])
+    else:
+        extra = candidate_term("g.neutral.extra")
+        _write_raw(request.brain_root, extra)
+        request = replace(
+            request,
+            delete_ids=request.delete_ids + (extra["id"],),
+        )
+    return request
+
+
 def _legacy_invalid_context(*, title: str = "legacy") -> dict:
     obj = context("context.Legacy")
     obj["context_key"] = "Legacy"
@@ -389,6 +569,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "auxiliary_updates",
         "batch_binding",
         "canonical_repair_intents",
+        "canonical_repair_reference_collapses",
         "canonical_repair_binding",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
@@ -438,6 +619,29 @@ def test_canonical_intent_is_rejected_for_ingest(tmp_path):
     result = MutationService().plan(request.objects, request=request)
 
     assert result.error_code == "canonical_repair_intent_operation_invalid"
+
+
+def test_canonical_reference_collapse_is_rejected_for_ingest(tmp_path):
+    brain_root = tmp_path / "brain"
+    collapse = ReferenceCollapse(
+        object_id="review.bundle.ctx.domain-mapping",
+        pointer="/target_object_ids",
+        before_ids=("mapping.ctx.source", "mapping.ctx.target"),
+        after_ids=("mapping.ctx.target",),
+        removed_index=0,
+    )
+    request = _request(
+        brain_root,
+        (),
+        canonical_repair_reference_collapses=(collapse,),
+    )
+
+    result = MutationService().plan((), request=request)
+
+    assert (
+        result.error_code
+        == "canonical_repair_reference_collapse_operation_invalid"
+    )
 
 
 def test_canonical_repair_requires_intent_and_binding_before_store_load(tmp_path):
@@ -753,6 +957,8 @@ def test_second_promotion_apply_cannot_overwrite_reviewed_target_or_record(tmp_p
         "canonical_intent_source",
         "canonical_field_changes_type",
         "canonical_change_pointer",
+        "canonical_collapses_type",
+        "canonical_collapse_item",
         "canonical_binding_shape",
     ],
 )
@@ -816,6 +1022,16 @@ def test_malformed_request_is_rejected_before_store_load(tmp_path, case):
             "old", "new", "reason", (change,)
         )
         request = replace(request, canonical_repair_intents=(intent,))
+    elif case == "canonical_collapses_type":
+        request = replace(
+            request,
+            canonical_repair_reference_collapses=[],
+        )
+    elif case == "canonical_collapse_item":
+        request = replace(
+            request,
+            canonical_repair_reference_collapses=("not-a-collapse",),
+        )
     elif case == "canonical_binding_shape":
         request = replace(
             request,
@@ -929,18 +1145,270 @@ def test_canonical_repair_rejects_duplicate_intent_endpoint(tmp_path, duplicate)
     assert result.error_code == "canonical_repair_intent_duplicate"
 
 
-@pytest.mark.parametrize("case", ["existing_target", "delete_only"])
-def test_canonical_repair_rejects_merge_or_delete_only(tmp_path, case):
-    request = _mapping_repair_request(tmp_path)
-    if case == "existing_target":
-        _write_raw(request.brain_root, request.objects[0])
-    else:
-        extra = candidate_term("g.neutral.extra")
-        _write_raw(request.brain_root, extra)
+def test_canonical_repair_allows_explicit_existing_target_merge(tmp_path):
+    request = _collision_merge_request(tmp_path)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "survivor_union",
+        "target_authoritative",
+        "reference_collapse",
+        "merge_source_input",
+        "target_create",
+        "merge_pair_rename",
+        "delete_missing",
+    ],
+)
+def test_canonical_repair_rejects_tampered_merge_request(tmp_path, tamper):
+    request = _collision_merge_request(tmp_path)
+    merge_intent = request.canonical_repair_intents[0]
+    objects = list(request.objects)
+
+    if tamper in {"survivor_union", "target_authoritative"}:
+        survivor_index = next(
+            index
+            for index, obj in enumerate(objects)
+            if obj["id"] == merge_intent.new_id
+        )
+        survivor = dict(objects[survivor_index])
+        if tamper == "survivor_union":
+            survivor["decision_record_ids"] = survivor[
+                "decision_record_ids"
+            ][1:]
+        else:
+            survivor["meaning"] = "tampered target-authoritative meaning"
+        objects[survivor_index] = survivor
+        request = replace(request, objects=tuple(objects))
+    elif tamper == "reference_collapse":
         request = replace(
             request,
-            delete_ids=request.delete_ids + (extra["id"],),
+            canonical_repair_reference_collapses=(),
         )
+    elif tamper == "merge_source_input":
+        source = BrainStore.load(request.brain_root).get(
+            merge_intent.source_id
+        )
+        request = replace(request, objects=(*request.objects, source))
+    elif tamper == "target_create":
+        fake_target_id = "mapping.ctx.created-target"
+        survivor_index = next(
+            index
+            for index, obj in enumerate(objects)
+            if obj["id"] == merge_intent.new_id
+        )
+        survivor = dict(objects[survivor_index])
+        survivor["id"] = fake_target_id
+        objects[survivor_index] = survivor
+        request = replace(
+            request,
+            objects=tuple(objects),
+            canonical_repair_intents=(
+                replace(merge_intent, new_id=fake_target_id),
+            ),
+        )
+    elif tamper == "merge_pair_rename":
+        request = replace(
+            request,
+            renames={merge_intent.source_id: merge_intent.new_id},
+        )
+    else:
+        request = replace(request, delete_ids=())
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is False
+    assert result.manifest is None
+
+
+def test_canonical_repair_malformed_merge_endpoint_fails_closed(tmp_path):
+    request = _collision_merge_request(tmp_path)
+    merge_intent = request.canonical_repair_intents[0]
+    existing = BrainStore.load(request.brain_root)
+    for object_id in (merge_intent.source_id, merge_intent.new_id):
+        malformed = dict(existing.get(object_id))
+        malformed.pop("caveats")
+        _write_raw(request.brain_root, malformed)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+    assert result.manifest is None
+
+
+@pytest.mark.parametrize("tamper", ["subclass", "bool_index"])
+def test_canonical_repair_requires_exact_reference_collapse_types(
+    tmp_path,
+    tamper,
+):
+    request = _collision_merge_request(tmp_path)
+    collapse = request.canonical_repair_reference_collapses[0]
+    if tamper == "subclass":
+        class ForgedReferenceCollapse(ReferenceCollapse):
+            def __eq__(self, other):
+                return True
+
+        forged = ForgedReferenceCollapse(
+            object_id=collapse.object_id,
+            pointer="/affected_mapping_ids",
+            before_ids=collapse.before_ids,
+            after_ids=collapse.after_ids,
+            removed_index=collapse.removed_index,
+        )
+    else:
+        forged = replace(collapse, removed_index=False)
+    request = replace(
+        request,
+        canonical_repair_reference_collapses=(forged,),
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "request_invalid"
+    assert result.manifest is None
+
+
+def test_canonical_repair_merge_and_field_repair_share_final_referrer(
+    tmp_path,
+):
+    request = _collision_merge_request(tmp_path, field_repair=True)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    referrer = next(
+        obj
+        for obj in result.after_objects
+        if obj["id"] == "decision.ctx.merge-source-one"
+    )
+    assert referrer["affected_mapping_ids"] == [
+        "mapping.ctx.canonical",
+        "mapping.neutral.legacy",
+    ]
+
+
+def test_canonical_merge_grandfather_shape_collapses_duplicate_logical_ref(
+    tmp_path,
+):
+    request = _collision_merge_request(tmp_path, invalid_referrer=True)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    assert {
+        row["problem"]
+        for row in result.manifest.grandfathered_problems_after
+    } <= {
+        row["problem"]
+        for row in result.manifest.grandfathered_problems_before
+    }
+
+
+def test_canonical_merge_grandfather_shape_includes_field_repair_rewrite(
+    tmp_path,
+):
+    request = _collision_merge_request(
+        tmp_path,
+        invalid_referrer=True,
+        field_repair=True,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    invalid_referrer = next(
+        obj
+        for obj in result.after_objects
+        if obj["id"] == "decision.ctx.Legacy"
+    )
+    assert invalid_referrer["affected_mapping_ids"] == [
+        "mapping.ctx.canonical",
+        "mapping.neutral.legacy",
+    ]
+
+
+def test_canonical_merge_suppresses_only_validated_collapse_field_rewrites(
+    tmp_path,
+):
+    request = _collision_merge_request(tmp_path)
+    merge_intent = request.canonical_repair_intents[0]
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    bundle_id = "review.bundle.ctx.domain-mapping"
+    assert not any(
+        rewrite["object_id"] == bundle_id
+        and rewrite["pointer"].startswith("/target_object_ids/")
+        for rewrite in result.manifest.reference_rewrites
+    )
+    assert {
+        (
+            rewrite["object_id"],
+            rewrite["pointer"],
+            rewrite["before_id"],
+            rewrite["after_id"],
+        )
+        for rewrite in result.manifest.reference_rewrites
+        if rewrite["object_id"].startswith("decision.ctx.merge-source-")
+    } == {
+        (
+            "decision.ctx.merge-source-one",
+            "/affected_mapping_ids/0",
+            merge_intent.source_id,
+            merge_intent.new_id,
+        ),
+        (
+            "decision.ctx.merge-source-two",
+            "/affected_mapping_ids/0",
+            merge_intent.source_id,
+            merge_intent.new_id,
+        ),
+    }
+
+
+def test_canonical_repair_mixed_review_list_shrink_keeps_rewrite_rows(
+    tmp_path,
+):
+    request = _mixed_review_repair_request(tmp_path)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True
+    review_intent = request.canonical_repair_intents[1]
+    assert {
+        (
+            rewrite["object_id"],
+            rewrite["pointer"],
+            rewrite["before_id"],
+            rewrite["after_id"],
+        )
+        for rewrite in result.manifest.reference_rewrites
+        if rewrite["object_id"] == review_intent.new_id
+    } == {
+        (
+            review_intent.new_id,
+            "/target_object_ids/0",
+            request.canonical_repair_intents[0].source_id,
+            request.canonical_repair_intents[0].new_id,
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unapproved_existing_target", "delete_only"],
+)
+def test_canonical_repair_rejects_unapproved_merge_or_delete_only(
+    tmp_path,
+    case,
+):
+    request = _unapproved_request(tmp_path, case)
 
     result = MutationService().plan(request.objects, request=request)
 

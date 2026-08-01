@@ -16,6 +16,7 @@ from project_brain.canonical_repair import (
     CanonicalizationLedger,
     apply_canonical_repair_artifact,
     canonical_repair_renames_from_ledger,
+    collision_merges_from_ledger,
     create_canonical_repair_artifact,
     decode_canonicalization_ledger,
     id_renames_from_ledger,
@@ -24,6 +25,7 @@ from project_brain.canonical_repair import (
     plan_canonical_repair,
     validate_canonicalization_ledger,
 )
+from project_brain.canonical_merge import project_collision_merges
 from project_brain.mutation import (
     CanonicalFieldChange,
     CanonicalRepairIntent,
@@ -32,6 +34,7 @@ from project_brain.mutation import (
     MutationService,
     corpus_fingerprint,
 )
+from project_brain.objbase import base
 from project_brain.snapshot import (
     SnapshotRequest,
     SnapshotVerification,
@@ -986,12 +989,36 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
         for obj in (source, target):
             for field in (
                 "code_locator_ids",
-                "decision_record_ids",
                 "glossary_term_ids",
             ):
                 obj[field] = []
             obj["evidence_refs"] = [merge_evidence["id"]]
             _write_raw(brain_root, obj)
+        for decision_id in source["decision_record_ids"]:
+            _write_raw(
+                brain_root,
+                base(
+                    {
+                        "id": decision_id,
+                        "kind": "DecisionRecord",
+                        "status": "reviewed",
+                        "truth_role": "event",
+                        "title": f"Decision: {decision_id}",
+                        "context_id": context_id,
+                        "decision_type": "naming_decision",
+                        "summary": "merge source reference",
+                        "decision": "merge source reference",
+                        "source_object_ids": [],
+                        "affected_context_ids": [context_id],
+                        "affected_mapping_ids": [source["id"]],
+                        "spec_reflected": "yes",
+                        "evidence_refs": [merge_evidence["id"]],
+                    },
+                    tags=[context_id.removeprefix("context.")],
+                    created_at=source["created_at"],
+                    updated_at=source["updated_at"],
+                ),
+            )
         bundle_review = review_record_for(
             source["review_record_id"],
             source["id"],
@@ -1141,19 +1168,130 @@ def canonical_fixture(tmp_path) -> CanonicalPlanFixture:
     return _canonical_plan_fixture(tmp_path)
 
 
-def test_plan_repairs_only_five_non_id_only_sources(canonical_fixture):
+def test_plan_keeps_five_repair_rows_and_adds_two_merge_intents(
+    canonical_fixture,
+):
     plan = plan_canonical_repair(**canonical_fixture.plan_args)
 
     assert len(plan.rows) == 5
     assert {old_id for old_id, _ in plan.id_renames} == set(
         canonical_fixture.expected_id_only_sources
     )
-    assert len(plan.request.canonical_repair_intents) == 5
+    assert len(plan.request.canonical_repair_intents) == 7
     assert all(
         isinstance(intent, CanonicalRepairIntent)
         for intent in plan.request.canonical_repair_intents
     )
     assert plan.request.operation is MutationOperation.CANONICAL_REPAIR
+
+
+def test_plan_merge_uses_delete_update_and_exact_reference_projection(
+    canonical_fixture,
+):
+    repair_pairs = canonical_repair_renames_from_ledger(
+        canonical_fixture.ledger
+    )
+    merge_pairs = collision_merges_from_ledger(canonical_fixture.ledger)
+    merge_projection = project_collision_merges(
+        {
+            str(obj["id"]): obj
+            for obj in canonical_fixture.existing.all()
+        },
+        merge_pairs,
+    )
+
+    request = plan_canonical_repair(**canonical_fixture.plan_args).request
+    object_by_id = {str(obj["id"]): obj for obj in request.objects}
+
+    merge_sources = set(merge_pairs)
+    merge_targets = set(merge_pairs.values())
+    merge_bundle_ids = {
+        str(canonical_fixture.existing.get(source)["review_record_id"])
+        for source in merge_sources
+    }
+    drone_decision_ids = set(
+        canonical_fixture.existing.get(DRONE_MERGE_SOURCE)[
+            "decision_record_ids"
+        ]
+    )
+    expected_existing_updates = {
+        canonical_fixture.reference_only_id,
+        *merge_targets,
+        *merge_bundle_ids,
+        *drone_decision_ids,
+    }
+
+    assert set(request.delete_ids) == set(repair_pairs) | merge_sources
+    assert dict(request.renames) == repair_pairs
+    assert set(repair_pairs.values()).isdisjoint(merge_targets)
+    assert set(object_by_id) == (
+        set(repair_pairs.values()) | expected_existing_updates
+    )
+    assert merge_sources.isdisjoint(object_by_id)
+    assert set(request.preconditions) == (
+        set(repair_pairs) | merge_sources | expected_existing_updates
+    )
+    assert {
+        (intent.source_id, intent.new_id)
+        for intent in request.canonical_repair_intents
+        if intent.reason_code == "collision_merge_into_existing"
+        and intent.field_changes == ()
+    } == set(merge_pairs.items())
+    assert (
+        request.canonical_repair_reference_collapses
+        == merge_projection.reference_collapses
+    )
+
+    for source_id, target_id in merge_pairs.items():
+        bundle_id = str(
+            canonical_fixture.existing.get(source_id)["review_record_id"]
+        )
+        assert object_by_id[bundle_id]["target_object_ids"] == [target_id]
+    for decision_id in drone_decision_ids:
+        assert object_by_id[decision_id]["affected_mapping_ids"] == [
+            DRONE_MERGE_TARGET
+        ]
+
+    reference_rewrites = plan_canonical_repair(
+        **canonical_fixture.plan_args
+    ).mutation_plan.manifest.reference_rewrites
+    assert not any(
+        rewrite["object_id"] in merge_bundle_ids
+        and rewrite["pointer"].startswith("/target_object_ids/")
+        for rewrite in reference_rewrites
+    )
+    assert {
+        (
+            rewrite["object_id"],
+            rewrite["pointer"],
+            rewrite["before_id"],
+            rewrite["after_id"],
+        )
+        for rewrite in reference_rewrites
+        if rewrite["object_id"] in drone_decision_ids
+    } == {
+        (
+            decision_id,
+            "/affected_mapping_ids/0",
+            DRONE_MERGE_SOURCE,
+            DRONE_MERGE_TARGET,
+        )
+        for decision_id in drone_decision_ids
+    }
+    mixed_review_source = "review.bundle.Neutral.domain-mapping"
+    mixed_review_target = repair_pairs[mixed_review_source]
+    assert {
+        (rewrite["pointer"], rewrite["before_id"], rewrite["after_id"])
+        for rewrite in reference_rewrites
+        if rewrite["object_id"] == mixed_review_target
+    } == {
+        (
+            f"/target_object_ids/{index}",
+            f"mapping.neutral.Legacy{index}",
+            f"mapping.neutral.repair-{index}",
+        )
+        for index in range(4)
+    }
 
 
 def _ledger_with_repair_count_drift(
@@ -1672,6 +1810,81 @@ def test_trusted_intermediate_receipt_returns_only_pure_id_renames(
     )
 
     assert renames == id_renames_from_ledger(canonical_fixture.ledger)
+    merge_sources = set(collision_merges_from_ledger(canonical_fixture.ledger))
+    assert merge_sources.isdisjoint(renames)
+    assert all(
+        not args["existing"].has(source_id)
+        for source_id in merge_sources
+    )
+
+
+def _replace_trusted_manifest(args: dict, manifest: dict) -> None:
+    manifest_bytes = _json_bytes(manifest)
+    args["canonical_manifest_bytes"] = manifest_bytes
+    args["expected_canonical_manifest_sha256"] = hashlib.sha256(
+        manifest_bytes
+    ).hexdigest()
+
+
+@pytest.mark.parametrize("tamper", ["delete_missing", "delete_sha"])
+def test_trusted_intermediate_receipt_rejects_merge_delete_drift(
+    canonical_fixture,
+    monkeypatch,
+    tamper,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    merge_source = DRONE_MERGE_SOURCE
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    delete_row = next(
+        row
+        for row in manifest["deletes"]
+        if row["object_id"] == merge_source
+    )
+    if tamper == "delete_missing":
+        manifest["deletes"].remove(delete_row)
+        expected_detail = f"{merge_source}: merge delete receipt is missing"
+    else:
+        delete_row["before_sha256"] = "0" * 64
+        expected_detail = f"{merge_source}: merge delete receipt is invalid"
+    _replace_trusted_manifest(args, manifest)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == "intermediate_source_receipt_mismatch"
+    assert exc.value.detail == expected_detail
+
+
+def test_trusted_intermediate_receipt_rejects_retained_merge_source(
+    canonical_fixture,
+    monkeypatch,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    merge_source = DRONE_MERGE_SOURCE
+    for source_id in collision_merges_from_ledger(canonical_fixture.ledger):
+        _write_raw(
+            canonical_fixture.brain_root,
+            canonical_fixture.existing.get(source_id),
+        )
+    retained = BrainStore.load(canonical_fixture.brain_root)
+    retained_fingerprint = corpus_fingerprint(retained)
+    args["existing"] = retained
+    args["intermediate_snapshot"] = replace(
+        args["intermediate_snapshot"],
+        file_count=len(retained.all()),
+        corpus_fingerprint=retained_fingerprint,
+    )
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    manifest["expected_after_fingerprint"] = retained_fingerprint
+    _replace_trusted_manifest(args, manifest)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == "intermediate_source_receipt_mismatch"
+    assert exc.value.detail == (
+        f"{merge_source}: merge source remains in intermediate store"
+    )
 
 
 def _tamper_trusted_manifest(args: dict, axis: str) -> None:

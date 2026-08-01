@@ -10,6 +10,11 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
+from project_brain.canonical_merge import (
+    CollisionMergeError,
+    ReferenceCollapse,
+    project_collision_merges,
+)
 from project_brain.code_verify import (
     CodeVerificationError,
     verify_locator_for_write,
@@ -107,6 +112,7 @@ class MutationRequest:
     auxiliary_updates: tuple[AuxiliaryFileUpdate, ...] = ()
     batch_binding: BatchBinding | None = None
     canonical_repair_intents: tuple[CanonicalRepairIntent, ...] = ()
+    canonical_repair_reference_collapses: tuple[ReferenceCollapse, ...] = ()
     canonical_repair_binding: Mapping[str, str] | None = None
 
 
@@ -140,6 +146,13 @@ class MutationPlanResult:
     manifest_bytes: bytes = b""
     manifest_sha256: str = ""
     auxiliary_after_files: Mapping[str, bytes] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _CanonicalRepairValidation:
+    error: MutationPlanResult | None
+    comparison_by_id: dict[str, dict]
+    suppressed_reference_fields: frozenset[tuple[str, str]]
 
 
 class MutationService:
@@ -276,15 +289,20 @@ class MutationService:
         if auxiliary_error is not None:
             return auxiliary_error
 
+        canonical_validation = _CanonicalRepairValidation(
+            error=None,
+            comparison_by_id={},
+            suppressed_reference_fields=frozenset(),
+        )
         if request.operation is MutationOperation.CANONICAL_REPAIR:
-            canonical_error = _validate_canonical_repair_request(
+            canonical_validation = _validate_canonical_repair_request(
                 request,
                 existing_by_id=existing_by_id,
                 input_by_id=input_by_id,
                 rename_pairs=tuple(sorted(request.renames.items())),
             )
-            if canonical_error is not None:
-                return canonical_error
+            if canonical_validation.error is not None:
+                return canonical_validation.error
 
         # 3) schema와 enum.
         for obj in inputs:
@@ -317,6 +335,9 @@ class MutationService:
                                 previous,
                                 obj,
                                 request.renames,
+                                comparison_by_id=(
+                                    canonical_validation.comparison_by_id
+                                ),
                             )
                         )
                     )
@@ -565,6 +586,11 @@ class MutationService:
                 if request.operation is MutationOperation.CANONICAL_REPAIR
                 else None
             ),
+            comparison_by_id=(
+                canonical_validation.comparison_by_id
+                if request.operation is MutationOperation.CANONICAL_REPAIR
+                else None
+            ),
         )
         before_keys = {_grandfather_key(item) for item in before_grandfathered}
         after_report = lint_store_report(merged_store)
@@ -640,6 +666,9 @@ class MutationService:
             expected_after_fingerprint=expected_after_fingerprint,
             before_grandfathered=before_grandfathered,
             after_grandfathered=after_grandfathered,
+            suppressed_reference_fields=(
+                canonical_validation.suppressed_reference_fields
+            ),
         )
         manifest_bytes = _manifest_bytes(manifest)
         after = planned_inputs[0] if len(planned_inputs) == 1 else None
@@ -960,6 +989,35 @@ def _validate_request_shape(
                 "tuple[CanonicalRepairIntent, ...]"
             )
         if (
+            not isinstance(
+                request.canonical_repair_reference_collapses,
+                tuple,
+            )
+            or not all(
+                type(collapse) is ReferenceCollapse
+                and type(collapse.object_id) is str
+                and type(collapse.pointer) is str
+                and type(collapse.before_ids) is tuple
+                and all(
+                    type(object_id) is str
+                    for object_id in collapse.before_ids
+                )
+                and type(collapse.after_ids) is tuple
+                and all(
+                    type(object_id) is str
+                    for object_id in collapse.after_ids
+                )
+                and type(collapse.removed_index) is int
+                for collapse in (
+                    request.canonical_repair_reference_collapses
+                )
+            )
+        ):
+            raise ValueError(
+                "canonical_repair_reference_collapses must be "
+                "tuple[ReferenceCollapse, ...]"
+            )
+        if (
             request.canonical_repair_binding is not None
             and (
                 not isinstance(request.canonical_repair_binding, Mapping)
@@ -982,6 +1040,15 @@ def _validate_request_shape(
             return None, _failure(
                 "canonical_repair_intent_operation_invalid",
                 "canonical repair intents require canonical_repair operation",
+            )
+        if (
+            request.canonical_repair_reference_collapses
+            and request.operation is not MutationOperation.CANONICAL_REPAIR
+        ):
+            return None, _failure(
+                "canonical_repair_reference_collapse_operation_invalid",
+                "canonical repair reference collapses require "
+                "canonical_repair operation",
             )
         if (
             request.operation is MutationOperation.CANONICAL_REPAIR
@@ -1204,55 +1271,137 @@ def _validate_canonical_repair_request(
     existing_by_id: Mapping[str, dict],
     input_by_id: Mapping[str, dict],
     rename_pairs: tuple[tuple[str, str], ...],
-) -> MutationPlanResult | None:
+) -> _CanonicalRepairValidation:
+    def failed(code: str, detail: str) -> _CanonicalRepairValidation:
+        return _CanonicalRepairValidation(
+            error=_failure(code, detail),
+            comparison_by_id={},
+            suppressed_reference_fields=frozenset(),
+        )
+
     intents = request.canonical_repair_intents
     sources = [intent.source_id for intent in intents]
     targets = [intent.new_id for intent in intents]
     if len(set(sources)) != len(sources) or len(set(targets)) != len(targets):
-        return _failure(
+        return failed(
             "canonical_repair_intent_duplicate",
             "canonical repair intent source and target IDs must be one-to-one",
         )
 
-    intent_pairs = tuple(sorted(zip(sources, targets, strict=True)))
-    if rename_pairs != intent_pairs:
-        return _failure(
-            "canonical_repair_intent_mismatch",
-            "canonical repair intents must exactly cover explicit renames",
-        )
-    if set(request.delete_ids) != set(sources):
-        return _failure(
-            "canonical_repair_intent_mismatch",
-            "canonical repair deletes must exactly match intent sources",
-        )
-    created_ids = set(input_by_id) - set(existing_by_id)
-    if created_ids != set(targets):
-        return _failure(
-            "canonical_repair_intent_mismatch",
-            "canonical repair creates must exactly match intent targets",
-        )
-
-    replacements = dict(rename_pairs)
-    for intent in intents:
-        before = existing_by_id.get(intent.source_id)
-        after = input_by_id.get(intent.new_id)
-        if before is None or after is None or intent.new_id in existing_by_id:
-            return _failure(
-                "canonical_repair_intent_mismatch",
-                f"{intent.source_id}: repair requires source-delete/new-create",
-            )
-        if intent.source_id == intent.new_id:
-            return _failure(
-                "canonical_repair_intent_mismatch",
-                f"{intent.source_id}: repair source and target must differ",
-            )
+    merge_intents = tuple(
+        intent
+        for intent in intents
+        if intent.reason_code == "collision_merge_into_existing"
+    )
+    rename_intents = tuple(
+        intent for intent in intents if intent not in merge_intents
+    )
+    for intent in rename_intents:
         if intent.reason_code not in {
             "projected_field_repair",
             "review_shape_repair",
         }:
-            return _failure(
+            return failed(
                 "canonical_repair_reason_invalid",
                 f"{intent.source_id}: unsupported canonical repair reason",
+            )
+
+    rename_intent_pairs = tuple(sorted(
+        (intent.source_id, intent.new_id)
+        for intent in rename_intents
+    ))
+    if rename_pairs != rename_intent_pairs:
+        return failed(
+            "canonical_repair_intent_mismatch",
+            "canonical repair rename intents must exactly cover explicit renames",
+        )
+    merge_pairs = {
+        intent.source_id: intent.new_id for intent in merge_intents
+    }
+    expected_delete_ids = {
+        intent.source_id for intent in rename_intents
+    } | set(merge_pairs)
+    if set(request.delete_ids) != expected_delete_ids:
+        return failed(
+            "canonical_repair_intent_mismatch",
+            "canonical repair deletes must exactly match rename and merge sources",
+        )
+    created_ids = set(input_by_id) - set(existing_by_id)
+    rename_targets = {intent.new_id for intent in rename_intents}
+    if created_ids != rename_targets:
+        return failed(
+            "canonical_repair_intent_mismatch",
+            "canonical repair creates must exactly match rename intent targets",
+        )
+
+    replacements = dict(rename_pairs)
+    for intent in merge_intents:
+        if intent.field_changes:
+            return failed(
+                "canonical_repair_payload_changed",
+                intent.source_id,
+            )
+        if (
+            intent.source_id in input_by_id
+            or intent.new_id not in existing_by_id
+            or intent.new_id not in input_by_id
+        ):
+            return failed(
+                "canonical_repair_intent_mismatch",
+                (
+                    f"{intent.source_id}: merge requires source-delete and "
+                    "existing-target update"
+                ),
+            )
+
+    try:
+        merge_projection = project_collision_merges(
+            existing_by_id,
+            merge_pairs,
+        )
+    except CollisionMergeError as exc:
+        return failed(exc.code, exc.detail)
+    except (AssertionError, KeyError, TypeError) as exc:
+        return failed(
+            "canonical_repair_payload_changed",
+            (
+                "collision merge projection rejected malformed payload: "
+                f"{type(exc).__name__}"
+            ),
+        )
+    if (
+        request.canonical_repair_reference_collapses
+        != merge_projection.reference_collapses
+    ):
+        return failed(
+            "canonical_repair_payload_changed",
+            "canonical repair reference collapses differ from projection",
+        )
+
+    rename_by_source = {
+        intent.source_id: intent for intent in rename_intents
+    }
+    final_by_id: dict[str, dict] = {}
+    comparison_by_id: dict[str, dict] = {}
+    for object_id in sorted(merge_projection.after_by_id):
+        before = merge_projection.after_by_id[object_id]
+        intent = rename_by_source.get(object_id)
+        expected, _ = rewrite_object_refs(before, replacements)
+        if intent is None:
+            final_by_id[object_id] = expected
+            comparison_by_id[object_id] = expected
+            continue
+
+        after = input_by_id.get(intent.new_id)
+        if before is None or after is None or intent.new_id in existing_by_id:
+            return failed(
+                "canonical_repair_intent_mismatch",
+                f"{intent.source_id}: repair requires source-delete/new-create",
+            )
+        if intent.source_id == intent.new_id:
+            return failed(
+                "canonical_repair_intent_mismatch",
+                f"{intent.source_id}: repair source and target must differ",
             )
         if intent.reason_code == "projected_field_repair":
             if (
@@ -1261,19 +1410,19 @@ def _validate_canonical_repair_request(
                 or len(intent.field_changes) != 1
                 or intent.field_changes[0].pointer != "/mapping_key"
             ):
-                return _failure(
+                return failed(
                     "canonical_repair_payload_changed",
                     intent.source_id,
                 )
             try:
                 parsed_new = parse_id(intent.new_id, "DomainMapping")
             except IdGrammarError:
-                return _failure(
+                return failed(
                     "canonical_repair_payload_changed",
                     intent.source_id,
                 )
             if intent.field_changes[0].after != parsed_new.key:
-                return _failure(
+                return failed(
                     "canonical_repair_payload_changed",
                     intent.source_id,
                 )
@@ -1287,9 +1436,12 @@ def _validate_canonical_repair_request(
                 replacements=replacements,
             )
             if review_error is not None:
-                return review_error
+                return _CanonicalRepairValidation(
+                    error=review_error,
+                    comparison_by_id={},
+                    suppressed_reference_fields=frozenset(),
+                )
 
-        expected, _ = rewrite_object_refs(before, replacements)
         expected["id"] = intent.new_id
         try:
             for change in intent.field_changes:
@@ -1300,27 +1452,45 @@ def _validate_canonical_repair_request(
                     after=change.after,
                 )
         except ValueError:
-            return _failure(
+            return failed(
                 "canonical_repair_payload_changed",
                 intent.source_id,
             )
         if expected != after:
-            return _failure(
+            return failed(
                 "canonical_repair_payload_changed",
                 intent.source_id,
             )
+        final_by_id[intent.new_id] = expected
+        comparison_by_id[object_id] = expected
 
-    for object_id in sorted(set(existing_by_id) & set(input_by_id)):
-        expected, _ = rewrite_object_refs(
-            existing_by_id[object_id],
-            replacements,
+    expected_input_ids = set(rename_targets) | set(merge_pairs.values())
+    expected_input_ids.update(
+        object_id
+        for object_id in set(existing_by_id) & set(final_by_id)
+        if final_by_id[object_id] != existing_by_id[object_id]
+    )
+    if set(input_by_id) != expected_input_ids:
+        return failed(
+            "canonical_repair_payload_changed",
+            "canonical repair input objects differ from final projection",
         )
-        if expected != input_by_id[object_id]:
-            return _failure(
+    for object_id in sorted(expected_input_ids):
+        if final_by_id.get(object_id) != input_by_id[object_id]:
+            return failed(
                 "canonical_repair_payload_changed",
                 object_id,
             )
-    return None
+
+    suppressed_reference_fields = frozenset(
+        (collapse.object_id, collapse.pointer)
+        for collapse in request.canonical_repair_reference_collapses
+    )
+    return _CanonicalRepairValidation(
+        error=None,
+        comparison_by_id=comparison_by_id,
+        suppressed_reference_fields=suppressed_reference_fields,
+    )
 
 
 def _validate_canonical_review_shape(
@@ -1598,12 +1768,14 @@ def _problem_object_hash(
     objects: Mapping[str, Mapping[str, object]],
     *,
     replacements: Mapping[str, str] | None = None,
+    comparison_by_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> str:
     serialized = [
         stable_json(
             _canonical_repair_comparison_shape(
                 objects[object_id],
                 replacements,
+                comparison_by_id=comparison_by_id,
             )
         )
         for object_id in sorted(problem.object_ids)
@@ -1617,6 +1789,7 @@ def _grandfathered_problem(
     objects: Mapping[str, Mapping[str, object]],
     *,
     replacements: Mapping[str, str] | None = None,
+    comparison_by_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict:
     return {
         "object_id": problem.object_ids[0] if len(problem.object_ids) == 1 else None,
@@ -1625,6 +1798,7 @@ def _grandfathered_problem(
             problem,
             objects,
             replacements=replacements,
+            comparison_by_id=comparison_by_id,
         ),
     }
 
@@ -1634,12 +1808,14 @@ def _grandfathered_problems(
     objects: Mapping[str, Mapping[str, object]],
     *,
     replacements: Mapping[str, str] | None = None,
+    comparison_by_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[dict, ...]:
     return tuple(
         _grandfathered_problem(
             problem,
             objects,
             replacements=replacements,
+            comparison_by_id=comparison_by_id,
         )
         for problem in report
         if problem.code in _STRUCTURED_ID_LINT_CODES
@@ -1649,7 +1825,14 @@ def _grandfathered_problems(
 def _canonical_repair_comparison_shape(
     obj: Mapping[str, object],
     replacements: Mapping[str, str] | None,
+    *,
+    comparison_by_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict:
+    object_id = obj.get("id")
+    if comparison_by_id is not None and isinstance(object_id, str):
+        projected = comparison_by_id.get(object_id)
+        if projected is not None:
+            return dict(projected)
     if not replacements:
         return dict(obj)
     rewritten, _ = rewrite_object_refs(obj, replacements)
@@ -1660,11 +1843,15 @@ def _canonical_repair_objects_equivalent(
     before: Mapping[str, object],
     after: Mapping[str, object],
     replacements: Mapping[str, str],
+    *,
+    comparison_by_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> bool:
-    return (
-        _canonical_repair_comparison_shape(before, replacements)
-        == dict(after)
-    )
+    object_id = before.get("id")
+    if comparison_by_id is not None and isinstance(object_id, str):
+        projected = comparison_by_id.get(object_id)
+        if projected is not None:
+            return dict(projected) == dict(after)
+    return _canonical_repair_comparison_shape(before, replacements) == dict(after)
 
 
 def _grandfather_key(problem: Mapping[str, object]) -> tuple[object, ...]:
@@ -1686,6 +1873,8 @@ def _reference_rewrites(
     existing_by_id: Mapping[str, dict],
     planned_by_id: Mapping[str, dict],
     rename_pairs: tuple[tuple[str, str], ...],
+    *,
+    suppressed_fields: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[dict, ...]:
     rewrites: list[dict] = []
     comparisons = [
@@ -1706,6 +1895,16 @@ def _reference_rewrites(
             for ref in iter_object_refs(planned_by_id[after_id])
         }
         for pointer in sorted(set(before) & set(after)):
+            if any(
+                suppressed_object_id == before_id
+                and (
+                    pointer == suppressed_pointer
+                    or pointer.startswith(f"{suppressed_pointer}/")
+                )
+                for suppressed_object_id, suppressed_pointer
+                in suppressed_fields
+            ):
+                continue
             if before[pointer] == after[pointer]:
                 continue
             rewrites.append(
@@ -1757,6 +1956,7 @@ def _build_manifest(
     expected_after_fingerprint: str,
     before_grandfathered: tuple[dict, ...],
     after_grandfathered: tuple[dict, ...],
+    suppressed_reference_fields: frozenset[tuple[str, str]],
 ) -> MutationManifest:
     renamed_old_ids = {old_id for old_id, _ in rename_pairs}
     renamed_new_ids = {new_id for _, new_id in rename_pairs}
@@ -1818,6 +2018,7 @@ def _build_manifest(
         existing_by_id,
         planned_by_id,
         rename_pairs,
+        suppressed_fields=suppressed_reference_fields,
     )
     auxiliary_updates = tuple(
         {

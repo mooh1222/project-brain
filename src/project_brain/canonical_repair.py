@@ -771,6 +771,7 @@ def plan_canonical_repair(
         )
 
     repair_pairs = canonical_repair_renames_from_ledger(ledger)
+    merge_pairs = collision_merges_from_ledger(ledger)
     if not repair_pairs:
         _fail("canonical_repair_empty", "ledger has no canonical repair rows")
     repair_decisions = tuple(
@@ -778,11 +779,24 @@ def plan_canonical_repair(
         for decision in ledger.decisions
         if decision.source_id in repair_pairs
     )
+    merge_decisions = tuple(
+        decision
+        for decision in ledger.decisions
+        if decision.source_id in merge_pairs
+    )
     existing_by_id = {str(obj["id"]): obj for obj in existing.all()}
-    request_objects: list[dict] = []
-    for object_id in sorted(existing_by_id):
-        rewritten, changed_refs = rewrite_object_refs(
-            existing_by_id[object_id],
+    try:
+        merge_projection = project_collision_merges(
+            existing_by_id,
+            merge_pairs,
+        )
+    except CollisionMergeError as exc:
+        _fail(exc.code, exc.detail)
+
+    logical_by_id: dict[str, dict] = {}
+    for object_id in sorted(merge_projection.after_by_id):
+        rewritten, _ = rewrite_object_refs(
+            merge_projection.after_by_id[object_id],
             repair_pairs,
         )
         new_id = repair_pairs.get(object_id)
@@ -799,8 +813,17 @@ def plan_canonical_repair(
             assert decision is not None
             for change in decision.field_changes:
                 _replace_approved_field(rewritten, change)
-        if new_id is not None or changed_refs:
-            request_objects.append(rewritten)
+        logical_by_id[new_id or object_id] = rewritten
+
+    request_objects = [
+        logical_by_id[object_id]
+        for object_id in sorted(logical_by_id)
+        if (
+            object_id in set(merge_pairs.values())
+            or object_id not in existing_by_id
+            or logical_by_id[object_id] != existing_by_id[object_id]
+        )
+    ]
 
     request_by_id = {str(obj["id"]): obj for obj in request_objects}
     intents = tuple(
@@ -811,8 +834,17 @@ def plan_canonical_repair(
             field_changes=decision.field_changes,
         )
         for decision in repair_decisions
+    ) + tuple(
+        CanonicalRepairIntent(
+            source_id=decision.source_id,
+            new_id=merge_pairs[decision.source_id],
+            reason_code=decision.action.value,
+            field_changes=decision.field_changes,
+        )
+        for decision in merge_decisions
     )
-    precondition_ids = set(repair_pairs)
+    delete_ids = set(repair_pairs) | set(merge_pairs)
+    precondition_ids = set(delete_ids)
     precondition_ids.update(
         object_id
         for object_id in request_by_id
@@ -824,7 +856,7 @@ def plan_canonical_repair(
         repo_context=repo_context,
         engine_sha=engine_sha,
         objects=tuple(request_objects),
-        delete_ids=tuple(repair_pairs),
+        delete_ids=tuple(sorted(delete_ids)),
         renames=dict(repair_pairs),
         preconditions={
             object_id: _object_hash(existing_by_id[object_id])
@@ -832,6 +864,9 @@ def plan_canonical_repair(
         },
         expected_corpus_fingerprint=corpus_fingerprint(existing),
         canonical_repair_intents=intents,
+        canonical_repair_reference_collapses=(
+            merge_projection.reference_collapses
+        ),
         canonical_repair_binding={
             "decision_ledger_sha256": ledger.sha256,
             "phase_a_classification_sha256": (
@@ -1177,7 +1212,7 @@ def _validate_classification_receipt_for_ledger(
 
 def _artifact_transition_receipts(
     artifact: Mapping[str, object],
-) -> dict[str, tuple[str, str, str]]:
+) -> tuple[dict[str, tuple[str, str, str]], dict[str, str]]:
     transitions: dict[str, tuple[str, str, str]] = {}
     for field_name in ("updates", "renames"):
         actions = artifact[field_name]
@@ -1209,7 +1244,29 @@ def _artifact_transition_receipts(
                 before_sha256,
                 after_sha256,
             )
-    return transitions
+    deletes: dict[str, str] = {}
+    delete_actions = artifact["deletes"]
+    if not isinstance(delete_actions, list):
+        delete_actions = (
+            tuple(delete_actions)
+            if isinstance(delete_actions, tuple)
+            else ()
+        )
+    for action in delete_actions:
+        if not isinstance(action, dict):
+            _fail("manifest_invalid", "artifact deletes row is invalid")
+        source_id = action.get("object_id")
+        before_sha256 = action.get("before_sha256")
+        if (
+            not _exact_nonempty_string(source_id)
+            or not isinstance(before_sha256, str)
+            or _SHA256.fullmatch(before_sha256) is None
+            or action.get("after_sha256") is not None
+            or source_id in deletes
+        ):
+            _fail("manifest_invalid", "artifact deletes receipt is invalid")
+        deletes[source_id] = before_sha256
+    return transitions, deletes
 
 
 def id_renames_from_trusted_repair_receipt(
@@ -1276,8 +1333,30 @@ def id_renames_from_trusted_repair_receipt(
             "intermediate_receipt_mismatch",
             "artifact rows do not exactly cover canonical repairs",
         )
-    transitions = _artifact_transition_receipts(artifact)
+    transitions, deletes = _artifact_transition_receipts(artifact)
+    merge_pairs = collision_merges_from_ledger(ledger)
     for decision in ledger.decisions:
+        if decision.source_id in merge_pairs:
+            if existing.has(decision.source_id):
+                _fail(
+                    "intermediate_source_receipt_mismatch",
+                    (
+                        f"{decision.source_id}: merge source remains in "
+                        "intermediate store"
+                    ),
+                )
+            delete_sha256 = deletes.get(decision.source_id)
+            if delete_sha256 is None:
+                _fail(
+                    "intermediate_source_receipt_mismatch",
+                    f"{decision.source_id}: merge delete receipt is missing",
+                )
+            if delete_sha256 != decision.source_sha256:
+                _fail(
+                    "intermediate_source_receipt_mismatch",
+                    f"{decision.source_id}: merge delete receipt is invalid",
+                )
+            continue
         transition = transitions.get(decision.source_id)
         if transition is None:
             if existing.source_sha256(decision.source_id) != decision.source_sha256:
