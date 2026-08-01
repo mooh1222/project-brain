@@ -40,7 +40,14 @@ from project_brain.snapshot import (
 )
 from project_brain.store import BrainStore
 from tests.test_canonical_merge import _real_collision_pairs
-from tests.test_ingest import candidate_mapping, candidate_term, context, review_record_for
+from tests.test_ingest import (
+    candidate_mapping,
+    candidate_term,
+    context,
+    evidence_ref,
+    manifest,
+    review_record_for,
+)
 from tests.test_mutation import _write_raw
 
 
@@ -908,7 +915,7 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
     engine_root = (tmp_path / "engine").resolve()
     engine_sha = _git_repo(engine_root)
     bad_terms = []
-    for index in range(150):
+    for index in range(148):
         term = candidate_term(
             f"g.neutral.Legacy{index:03d}",
             term=f"합성 용어 {index}",
@@ -963,6 +970,42 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
         "target_object_ids": [old_mappings[0]["id"]],
     })
     _write_raw(brain_root, reference_only)
+    merge_manifest = manifest("manifest.neutral.collision-merge")
+    merge_evidence = evidence_ref(
+        "evref.neutral.collision-merge",
+        merge_manifest["id"],
+    )
+    _write_raw(brain_root, merge_manifest)
+    _write_raw(brain_root, merge_evidence)
+    collision_pairs = deepcopy(_real_collision_pairs())
+    for source, target in collision_pairs:
+        context_id = source["context_id"]
+        merge_context = context(context_id)
+        merge_context["context_key"] = context_id.removeprefix("context.")
+        _write_raw(brain_root, merge_context)
+        for obj in (source, target):
+            for field in (
+                "code_locator_ids",
+                "decision_record_ids",
+                "glossary_term_ids",
+            ):
+                obj[field] = []
+            obj["evidence_refs"] = [merge_evidence["id"]]
+            _write_raw(brain_root, obj)
+        bundle_review = review_record_for(
+            source["review_record_id"],
+            source["id"],
+        )
+        bundle_review.pop("target_object_id")
+        bundle_key = source["review_record_id"].removeprefix("review.")
+        bundle_review.update({
+            "review_scope": "mapping_bundle",
+            "review_type": "meaning_review",
+            "bundle_key": bundle_key,
+            "confirmation_key": bundle_key,
+            "target_object_ids": [source["id"], target["id"]],
+        })
+        _write_raw(brain_root, bundle_review)
     existing = BrainStore.load(brain_root)
     fingerprint = corpus_fingerprint(existing)
     decisions: list[dict] = []
@@ -1006,6 +1049,17 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
         "decision_reason": "registered reference follows mapping repair",
         "decision_evidence": ["fixture#reference-only"],
     })
+    for source, target in collision_pairs:
+        decisions.append({
+            "source_id": source["id"],
+            "source_kind": source["kind"],
+            "source_sha256": existing.source_sha256(source["id"]),
+            "action": "collision_merge_into_existing",
+            "new_id": target["id"],
+            "field_changes": [],
+            "decision_reason": "approved collision merge into canonical target",
+            "decision_evidence": [f"fixture#{source['id']}"],
+        })
     for index, term in enumerate(bad_terms):
         decisions.append({
             "source_id": term["id"],

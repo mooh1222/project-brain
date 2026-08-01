@@ -430,7 +430,7 @@ def validate_canonicalization_ledger(
         for decision in ledger.decisions
         if decision.action is CanonicalAction.COLLISION_MERGE_INTO_EXISTING
     )
-    if merge_decisions and len(merge_decisions) != 2:
+    if len(merge_decisions) != 2:
         _fail(
             "canonical_repair_action_count_invalid",
             "canonical repair ledger requires exactly 2 collision merge rows",
@@ -708,18 +708,21 @@ def _validate_repair_action_counts(ledger: CanonicalizationLedger) -> None:
         for action in (
             CanonicalAction.PROJECTED_FIELD_REPAIR,
             CanonicalAction.REVIEW_SHAPE_REPAIR,
+            CanonicalAction.COLLISION_MERGE_INTO_EXISTING,
         )
     }
     expected = {
         CanonicalAction.PROJECTED_FIELD_REPAIR: 4,
         CanonicalAction.REVIEW_SHAPE_REPAIR: 1,
+        CanonicalAction.COLLISION_MERGE_INTO_EXISTING: 2,
     }
     if actual != expected:
         _fail(
             "canonical_repair_action_count_invalid",
             (
                 "canonical repair ledger requires exactly "
-                "4 projected_field_repair and 1 review_shape_repair rows"
+                "4 projected_field_repair, 1 review_shape_repair, and "
+                "2 collision_merge_into_existing rows"
             ),
         )
 
