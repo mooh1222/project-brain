@@ -414,6 +414,34 @@ def test_same_bytes_matches_nested_brain_store_object_serialization(right):
     assert canonical_merge._same_bytes(left, right) is serialized_equal
 
 
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (
+            {"id": "g.ctx.term", "value": -0.0},
+            {"id": "g.ctx.term", "value": 0.0},
+        ),
+        (
+            {"id": "g.ctx.term", "nested": {"value": -0.0}},
+            {"id": "g.ctx.term", "nested": {"value": 0.0}},
+        ),
+        (
+            {"id": "g.ctx.term", "values": [-0.0]},
+            {"id": "g.ctx.term", "values": [0.0]},
+        ),
+        (
+            {"id": "g.ctx.term", "value": float("nan")},
+            {"id": "g.ctx.term", "value": float("nan")},
+        ),
+    ],
+    ids=["signed-zero-top", "signed-zero-nested-dict", "signed-zero-list", "nan"],
+)
+def test_same_bytes_matches_float_brain_store_object_serialization(left, right):
+    assert canonical_merge._same_bytes(left, right) is (
+        BrainStore.object_bytes(left) == BrainStore.object_bytes(right)
+    )
+
+
 @pytest.mark.parametrize("survivor_changes", [False, True])
 def test_changed_object_ids_are_exactly_the_byte_changed_live_objects(
     survivor_changes,

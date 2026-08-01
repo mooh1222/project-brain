@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from project_brain.id_grammar import validate_id_fields
+from project_brain.store import BrainStore
 from project_brain.reference_fields import (
     LIST_REFERENCE_FIELDS,
     NESTED_REFERENCE_POINTERS,
@@ -78,21 +79,10 @@ def _json_exact(left: object, right: object) -> bool:
     return left == right
 
 
-def _same_bytes(left: object, right: object) -> bool:
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict):
-        assert isinstance(right, dict)
-        return list(left) == list(right) and all(
-            _same_bytes(left[key], right[key]) for key in left
-        )
-    if isinstance(left, list):
-        assert isinstance(right, list)
-        return len(left) == len(right) and all(
-            _same_bytes(left_item, right_item)
-            for left_item, right_item in zip(left, right, strict=True)
-        )
-    return left == right
+def _same_bytes(
+    left: Mapping[str, object], right: Mapping[str, object]
+) -> bool:
+    return BrainStore.object_bytes(left) == BrainStore.object_bytes(right)
 
 
 def _validated_string_list(value: object, *, field: str) -> list[str]:
