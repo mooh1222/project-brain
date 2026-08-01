@@ -727,12 +727,14 @@ def _validate_repair_action_counts(ledger: CanonicalizationLedger) -> None:
             CanonicalAction.PROJECTED_FIELD_REPAIR,
             CanonicalAction.REVIEW_SHAPE_REPAIR,
             CanonicalAction.COLLISION_MERGE_INTO_EXISTING,
+            CanonicalAction.COLLISION_DISTINCT_RENAME,
         )
     }
     expected = {
         CanonicalAction.PROJECTED_FIELD_REPAIR: 4,
         CanonicalAction.REVIEW_SHAPE_REPAIR: 1,
         CanonicalAction.COLLISION_MERGE_INTO_EXISTING: 2,
+        CanonicalAction.COLLISION_DISTINCT_RENAME: 0,
     }
     if actual != expected:
         _fail(
@@ -740,7 +742,8 @@ def _validate_repair_action_counts(ledger: CanonicalizationLedger) -> None:
             (
                 "canonical repair ledger requires exactly "
                 "4 projected_field_repair, 1 review_shape_repair, and "
-                "2 collision_merge_into_existing rows"
+                "2 collision_merge_into_existing rows, with "
+                "0 collision_distinct_rename rows"
             ),
         )
 

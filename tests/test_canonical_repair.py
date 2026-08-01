@@ -1415,6 +1415,43 @@ def test_plan_rejects_repair_action_count_drift_before_mutation_planning(
     assert exc.value.code == "canonical_repair_action_count_invalid"
 
 
+def test_plan_requires_zero_collision_distinct_renames(
+    canonical_fixture,
+    monkeypatch,
+):
+    decisions = list(canonical_fixture.ledger.decisions)
+    rename_index = next(
+        index
+        for index, decision in enumerate(decisions)
+        if decision.action is CanonicalAction.ID_ONLY_RENAME
+    )
+    decisions[rename_index] = replace(
+        decisions[rename_index],
+        action=CanonicalAction.COLLISION_DISTINCT_RENAME,
+    )
+
+    def forbidden_plan(*args, **kwargs):
+        raise AssertionError(
+            "MutationService.plan must not run with a collision distinct rename"
+        )
+
+    monkeypatch.setattr(MutationService, "plan", forbidden_plan)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        plan_canonical_repair(
+            **{
+                **canonical_fixture.plan_args,
+                "ledger": replace(
+                    canonical_fixture.ledger,
+                    decisions=tuple(decisions),
+                ),
+            }
+        )
+
+    assert exc.value.code == "canonical_repair_action_count_invalid"
+    assert "0 collision_distinct_rename" in exc.value.detail
+
+
 def test_plan_includes_reference_only_affected_object(canonical_fixture):
     plan = plan_canonical_repair(**canonical_fixture.plan_args)
     request_by_id = {obj["id"]: obj for obj in plan.request.objects}
