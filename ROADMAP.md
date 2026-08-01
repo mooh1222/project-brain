@@ -39,19 +39,19 @@
 
 strict ID grammar를 유지한 채 ID-only migration과 제한된 canonical repair를 분리하고,
 decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 지원을
-구현 중이다. 승인된 collision source를 기존 canonical target에 합치는
-`collision_merge_into_existing`의 초기 구현은 source delete, survivor/referrer update,
+구현했다. 승인된 collision source를 기존 canonical target에 합치는
+`collision_merge_into_existing`은 source delete, survivor/referrer update,
 보수적 근거 병합, 참조 축약 receipt, intermediate 검증, 전체 before/after recovery까지
-갖췄다. 다만 Task 6 독립 통합 리뷰에서 ContextProjection 재작성, 원장 0행 게이트,
-merge 끝점 raw bytes, receipt 좌표 투영의 Major 4건이 확인돼 수정·재리뷰 전에는 엔진 지원
-완료로 보지 않는다.
+갖췄다. Task 6 독립 통합 리뷰에서 확인된 ContextProjection 재작성, 원장 0행 게이트,
+merge 끝점 raw bytes, receipt 좌표 투영의 Major 4건과 byte-exact 비교 보완을 세 차례
+fix round로 수정했고, 최종 scoped 재리뷰는 Blocker 0 / Major 0 / Minor 0으로 통과했다.
 canonical repair와 다음 ID-only migration 사이에는 검증된 intermediate snapshot을 두며,
 실제 BB2 corpus의 canonical ID 판단과 증거는 데이터 레포가 소유한다.
 
-엔진 구현과 실코퍼스 적용 완료는 별개다. 현재 남은 경계는 다음과 같다.
+엔진 지원 완료와 실코퍼스 적용 완료는 별개다. 현재 남은 경계는 다음과 같다.
 
-- Task 6 Major 4건을 수정하고 scoped 독립 재리뷰를 통과한 clean `ENGINE_SHA`를 최종
-  고정해야 한다.
+- Task 6 코드·테스트·문서는 독립 재리뷰를 통과해 clean `ENGINE_SHA` 고정 조건을
+  충족했다. Task 7 산출물은 이 최종 SHA에 다시 묶어야 한다.
 - 새 engine SHA에 다시 묶은 exact 156행 live decision ledger bytes는 아직 사용자 승인을
   받지 않았다.
 - Task 9 apply는 시작하지 않았다. 이번 엔진 작업에서는 BB2 object·eval·index·stale-set을
