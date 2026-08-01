@@ -1786,7 +1786,14 @@ def id_renames_from_trusted_repair_receipt(
             assert isinstance(reference_collapses, list)
             for collapse in reference_collapses:
                 assert isinstance(collapse, dict)
-                referrer_id = collapse["object_id"]
+                referrer_id = repair_renames.get(
+                    collapse["object_id"],
+                    collapse["object_id"],
+                )
+                expected_ids = [
+                    repair_renames.get(item, item)
+                    for item in collapse["after_ids"]
+                ]
                 pointer = collapse["pointer"]
                 try:
                     live_referrer = existing.get(referrer_id)
@@ -1795,14 +1802,17 @@ def id_renames_from_trusted_repair_receipt(
                     live_ids = None
                 if (
                     not isinstance(live_ids, list)
-                    or live_ids != collapse["after_ids"]
+                    or live_ids != expected_ids
                     or decision.source_id in live_ids
+                    or referrer_id in merge_pairs
                 ):
                     _fail(
                         "intermediate_source_receipt_mismatch",
                         (
                             f"{decision.source_id}: merge collapse live "
-                            "receipt is invalid"
+                            "receipt is invalid; "
+                            f"referrer_id={referrer_id!r}; "
+                            f"expected_ids={expected_ids!r}"
                         ),
                     )
             continue

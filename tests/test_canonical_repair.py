@@ -911,7 +911,12 @@ class CanonicalPlanFixture:
         }
 
 
-def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
+def _canonical_plan_fixture(
+    tmp_path: Path,
+    *,
+    repair_collapse_referrer: bool = False,
+    repair_collapse_after_id: bool = False,
+) -> CanonicalPlanFixture:
     repo_root = (tmp_path / "repo").resolve()
     repo_head = _git_repo(repo_root)
     brain_root = repo_root / "brain"
@@ -934,30 +939,55 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
     _write_raw(brain_root, stable_mapping)
     old_mappings: list[dict] = []
     new_mapping_ids: list[str] = []
+    repair_mapping_in_merge_context = (
+        repair_collapse_referrer or repair_collapse_after_id
+    )
     for index in range(4):
+        old_id = (
+            "mapping.disturb-drone.Legacy0"
+            if repair_mapping_in_merge_context and index == 0
+            else f"mapping.neutral.Legacy{index}"
+        )
         old = candidate_mapping(
-            f"mapping.neutral.Legacy{index}",
+            old_id,
             glossary_term_ids=[bad_terms[0]["id"]],
             mapping_key=f"Legacy{index}",
         )
+        if repair_mapping_in_merge_context and index == 0:
+            old["context_id"] = "context.disturb-drone"
+            old["glossary_term_ids"] = []
+            old["tags"] = ["disturb-drone"]
+            if repair_collapse_referrer:
+                old["related_objects"] = [
+                    DRONE_MERGE_SOURCE,
+                    DRONE_MERGE_TARGET,
+                ]
         old_mappings.append(old)
-        new_mapping_ids.append(f"mapping.neutral.repair-{index}")
+        new_mapping_ids.append(
+            "mapping.disturb-drone.repair-0"
+            if repair_mapping_in_merge_context and index == 0
+            else f"mapping.neutral.repair-{index}"
+        )
         _write_raw(brain_root, old)
     mixed_review = review_record_for(
         "review.bundle.Neutral.domain-mapping",
         old_mappings[0]["id"],
     )
     mixed_review.pop("target_object_id")
+    neutral_old_mappings = (
+        old_mappings[1:] if repair_mapping_in_merge_context else old_mappings
+    )
+    mixed_review_targets = [
+        *(item["id"] for item in neutral_old_mappings),
+        stable_mapping["id"],
+        bad_terms[0]["id"],
+    ]
     mixed_review.update({
         "review_scope": "mapping_bundle",
         "review_type": "meaning_review",
         "bundle_key": "bundle.neutral.domain-mapping",
         "confirmation_key": "bundle.neutral.domain-mapping",
-        "target_object_ids": [
-            *(item["id"] for item in old_mappings),
-            stable_mapping["id"],
-            bad_terms[0]["id"],
-        ],
+        "target_object_ids": mixed_review_targets,
     })
     _write_raw(brain_root, mixed_review)
     reference_only = review_record_for(
@@ -970,7 +1000,9 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
         "review_type": "meaning_review",
         "bundle_key": "bundle.neutral.reference-only",
         "confirmation_key": "bundle.neutral.reference-only",
-        "target_object_ids": [old_mappings[0]["id"]],
+        "target_object_ids": [
+            old_mappings[1 if repair_mapping_in_merge_context else 0]["id"]
+        ],
     })
     _write_raw(brain_root, reference_only)
     merge_manifest = manifest("manifest.neutral.collision-merge")
@@ -1025,12 +1057,15 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
         )
         bundle_review.pop("target_object_id")
         bundle_key = source["review_record_id"].removeprefix("review.")
+        bundle_targets = [source["id"], target["id"]]
+        if repair_collapse_after_id and source["id"] == DRONE_MERGE_SOURCE:
+            bundle_targets.append(old_mappings[0]["id"])
         bundle_review.update({
             "review_scope": "mapping_bundle",
             "review_type": "meaning_review",
             "bundle_key": bundle_key,
             "confirmation_key": bundle_key,
-            "target_object_ids": [source["id"], target["id"]],
+            "target_object_ids": bundle_targets,
         })
         _write_raw(brain_root, bundle_review)
     existing = BrainStore.load(brain_root)
@@ -1051,7 +1086,13 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
             "decision_reason": "approved mapping projection repair",
             "decision_evidence": [f"fixture#{old['id']}"],
         })
-    mixed_after_targets = [*new_mapping_ids, stable_mapping["id"]]
+    neutral_new_mapping_ids = (
+        new_mapping_ids[1:]
+        if repair_mapping_in_merge_context
+        else new_mapping_ids
+    )
+    mixed_after_targets = [*neutral_new_mapping_ids, stable_mapping["id"]]
+    mixed_before_targets = [*mixed_after_targets, bad_terms[0]["id"]]
     decisions.append({
         "source_id": mixed_review["id"],
         "source_kind": mixed_review["kind"],
@@ -1060,7 +1101,7 @@ def _canonical_plan_fixture(tmp_path: Path) -> CanonicalPlanFixture:
         "new_id": "review.bundle.neutral.domain-mapping",
         "field_changes": [{
             "pointer": "/target_object_ids",
-            "before": [*mixed_after_targets, bad_terms[0]["id"]],
+            "before": mixed_before_targets,
             "after": mixed_after_targets,
         }],
         "decision_reason": "approved mixed review target cleanup",
@@ -2238,6 +2279,106 @@ def _replace_trusted_manifest(args: dict, manifest: dict) -> None:
     args["expected_canonical_manifest_sha256"] = hashlib.sha256(
         manifest_bytes
     ).hexdigest()
+
+
+def test_trusted_intermediate_receipt_projects_renamed_collapse_referrer(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _canonical_plan_fixture(
+        tmp_path,
+        repair_collapse_referrer=True,
+    )
+    args = _trusted_intermediate_args(fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    original_referrer_id = "mapping.disturb-drone.Legacy0"
+    repair_renames = canonical_repair_renames_from_ledger(fixture.ledger)
+    projected_referrer_id = repair_renames[original_referrer_id]
+    collapse = next(
+        collapse
+        for row in manifest["rows"]
+        if row["merge_receipt"] is not None
+        for collapse in row["merge_receipt"]["reference_collapses"]
+        if collapse["object_id"] == original_referrer_id
+    )
+
+    assert collapse["after_ids"] == [DRONE_MERGE_TARGET]
+    assert not args["existing"].has(original_referrer_id)
+    assert args["existing"].has(projected_referrer_id)
+    assert id_renames_from_trusted_repair_receipt(**args) == (
+        id_renames_from_ledger(fixture.ledger)
+    )
+
+
+def test_trusted_intermediate_receipt_projects_repaired_ids_in_after_ids(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _canonical_plan_fixture(
+        tmp_path,
+        repair_collapse_after_id=True,
+    )
+    args = _trusted_intermediate_args(fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    repair_renames = canonical_repair_renames_from_ledger(fixture.ledger)
+    repaired_source_id = "mapping.disturb-drone.Legacy0"
+    repaired_target_id = repair_renames[repaired_source_id]
+    collapse = next(
+        collapse
+        for row in manifest["rows"]
+        if row["merge_receipt"] is not None
+        for collapse in row["merge_receipt"]["reference_collapses"]
+        if repaired_source_id in collapse["after_ids"]
+    )
+    live_referrer = args["existing"].get(collapse["object_id"])
+
+    assert repaired_source_id in collapse["after_ids"]
+    assert repaired_target_id in live_referrer["target_object_ids"]
+    assert repaired_source_id not in live_referrer["target_object_ids"]
+    assert id_renames_from_trusted_repair_receipt(**args) == (
+        id_renames_from_ledger(fixture.ledger)
+    )
+
+
+def test_trusted_intermediate_receipt_rejects_unprojected_live_after_ids(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _canonical_plan_fixture(
+        tmp_path,
+        repair_collapse_after_id=True,
+    )
+    args = _trusted_intermediate_args(fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    repaired_source_id = "mapping.disturb-drone.Legacy0"
+    collapse = next(
+        collapse
+        for row in manifest["rows"]
+        if row["merge_receipt"] is not None
+        for collapse in row["merge_receipt"]["reference_collapses"]
+        if repaired_source_id in collapse["after_ids"]
+    )
+    changed = deepcopy(args["existing"].get(collapse["object_id"]))
+    changed["target_object_ids"] = list(collapse["after_ids"])
+    _write_raw(fixture.brain_root, changed)
+    intermediate = BrainStore.load(fixture.brain_root)
+    fingerprint = corpus_fingerprint(intermediate)
+    args["existing"] = intermediate
+    args["intermediate_snapshot"] = replace(
+        args["intermediate_snapshot"],
+        file_count=len(intermediate.all()),
+        corpus_fingerprint=fingerprint,
+    )
+    manifest["expected_after_fingerprint"] = fingerprint
+    _replace_trusted_manifest(args, manifest)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == "intermediate_source_receipt_mismatch"
+    repair_renames = canonical_repair_renames_from_ledger(fixture.ledger)
+    assert collapse["object_id"] in exc.value.detail
+    assert repair_renames[repaired_source_id] in exc.value.detail
 
 
 def test_trusted_intermediate_receipt_accepts_noop_merge_survivor_without_update(
