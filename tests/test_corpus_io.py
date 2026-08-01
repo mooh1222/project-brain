@@ -41,6 +41,7 @@ from project_brain.transaction_receipt import BatchBinding, batch_intent_id
 from tests.test_ingest import candidate_term, context
 from tests.test_mutation import (
     _canonical_repair_binding,
+    _collision_merge_request,
     _code_locator,
     _mapping_repair_request,
 )
@@ -818,6 +819,103 @@ def test_canonical_repair_rolls_back_every_transaction_failure_point(
     store = BrainStore.load(request.brain_root)
     assert store.has(request.delete_ids[0])
     assert not store.has(request.objects[0]["id"])
+
+
+@pytest.mark.parametrize("failure_point", FAILURE_POINTS)
+def test_canonical_merge_rolls_back_every_transaction_failure_point(
+    tmp_path,
+    failure_point,
+):
+    request = _collision_merge_request(tmp_path)
+    brain_root = request.brain_root
+    _seed_derived_files(brain_root)
+    service = MutationService()
+    planned = service.plan(request.objects, request=request)
+    assert planned.ok and planned.manifest is not None
+    manifest = planned.manifest
+
+    merge_intent = next(
+        intent
+        for intent in request.canonical_repair_intents
+        if intent.reason_code == "collision_merge_into_existing"
+    )
+    (collapse,) = request.canonical_repair_reference_collapses
+    source_action = next(
+        action
+        for action in manifest.deletes
+        if action["object_id"] == merge_intent.source_id
+    )
+    survivor_action = next(
+        action
+        for action in manifest.updates
+        if action["object_id"] == merge_intent.new_id
+    )
+    referrer_action = next(
+        action
+        for action in manifest.updates
+        if action["object_id"] == collapse.object_id
+    )
+    actions = (*manifest.updates, *manifest.deletes)
+    action_paths = tuple(action["path"] for action in actions)
+    assert len(action_paths) == len(set(action_paths))
+
+    def file_sha_state() -> frozenset[tuple[str, str | None]]:
+        return frozenset(
+            (
+                relative_path,
+                (
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                    if path.is_file()
+                    else None
+                ),
+            )
+            for relative_path in action_paths
+            for path in (brain_root / relative_path,)
+        )
+
+    before_state = frozenset(
+        (action["path"], action["before_sha256"])
+        for action in actions
+    )
+    after_state = frozenset(
+        (action["path"], action["after_sha256"])
+        for action in actions
+    )
+    before_fingerprint = _state_fingerprint(brain_root)
+    assert file_sha_state() == before_state
+
+    with pytest.raises(InjectedCrash, match=failure_point):
+        service.apply(
+            request.objects,
+            request=request,
+            failure_injector=_crash_at(failure_point),
+        )
+
+    interrupted_state = dict(file_sha_state())
+    source_missing = interrupted_state[source_action["path"]] is None
+    survivor_before = (
+        interrupted_state[survivor_action["path"]]
+        == survivor_action["before_sha256"]
+    )
+    referrer_before = (
+        interrupted_state[referrer_action["path"]]
+        == referrer_action["before_sha256"]
+    )
+    assert not (
+        source_missing
+        and survivor_before
+        and referrer_before
+    )
+    with pytest.raises(RecoveryRequiredError):
+        assert_corpus_readable(brain_root)
+
+    recovered = recover_unfinished_transaction(brain_root)
+    observed_state = file_sha_state()
+
+    assert recovered.recovered_transaction_ids == (manifest.transaction_id,)
+    assert observed_state in {before_state, after_state}
+    assert observed_state == before_state
+    assert _state_fingerprint(brain_root) == before_fingerprint
 
 
 def test_batch_intent_identity_binds_key_even_when_input_bytes_match(tmp_path):

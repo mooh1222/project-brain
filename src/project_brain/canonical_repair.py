@@ -167,6 +167,13 @@ class CanonicalRepairApplyResult:
     decision_ledger_sha256: str
 
 
+@dataclass(frozen=True)
+class _ArtifactTransitions:
+    updates: dict[str, tuple[str, str]]
+    renames: dict[str, tuple[str, str, str]]
+    deletes: dict[str, str]
+
+
 class _DuplicateKey(ValueError):
     pass
 
@@ -1477,61 +1484,142 @@ def _validate_classification_receipt_for_ledger(
 
 def _artifact_transition_receipts(
     artifact: Mapping[str, object],
-) -> tuple[dict[str, tuple[str, str, str]], dict[str, str]]:
-    transitions: dict[str, tuple[str, str, str]] = {}
-    for field_name in ("updates", "renames"):
-        actions = artifact[field_name]
-        if not isinstance(actions, list):
-            actions = tuple(actions) if isinstance(actions, tuple) else ()
-        for action in actions:
-            if not isinstance(action, dict):
-                _fail("manifest_invalid", f"artifact {field_name} row is invalid")
-            if field_name == "renames":
-                source_id = action.get("old_id")
-                target_id = action.get("new_id")
-            else:
-                source_id = action.get("object_id")
-                target_id = source_id
-            before_sha256 = action.get("before_sha256")
-            after_sha256 = action.get("after_sha256")
-            if (
-                not _exact_nonempty_string(source_id)
-                or not _exact_nonempty_string(target_id)
-                or not isinstance(before_sha256, str)
-                or _SHA256.fullmatch(before_sha256) is None
-                or not isinstance(after_sha256, str)
-                or _SHA256.fullmatch(after_sha256) is None
-                or source_id in transitions
-            ):
-                _fail("manifest_invalid", f"artifact {field_name} receipt is invalid")
-            transitions[source_id] = (
-                target_id,
-                before_sha256,
-                after_sha256,
-            )
+) -> _ArtifactTransitions:
+    updates: dict[str, tuple[str, str]] = {}
+    update_actions = artifact["updates"]
+    if not isinstance(update_actions, list):
+        _fail("manifest_invalid", "artifact updates must be a list")
+    for action in update_actions:
+        if not isinstance(action, dict) or set(action) != {
+            "object_id",
+            "path",
+            "before_sha256",
+            "after_sha256",
+        }:
+            _fail("manifest_invalid", "artifact updates row is invalid")
+        object_id = action["object_id"]
+        before_sha256 = action["before_sha256"]
+        after_sha256 = action["after_sha256"]
+        if (
+            not _exact_nonempty_string(object_id)
+            or not _exact_nonempty_string(action["path"])
+            or not isinstance(before_sha256, str)
+            or _SHA256.fullmatch(before_sha256) is None
+            or not isinstance(after_sha256, str)
+            or _SHA256.fullmatch(after_sha256) is None
+            or object_id in updates
+        ):
+            _fail("manifest_invalid", "artifact updates receipt is invalid")
+        assert isinstance(object_id, str)
+        updates[object_id] = (before_sha256, after_sha256)
+
+    renames: dict[str, tuple[str, str, str]] = {}
+    rename_actions = artifact["renames"]
+    if not isinstance(rename_actions, list):
+        _fail("manifest_invalid", "artifact renames must be a list")
+    for action in rename_actions:
+        if not isinstance(action, dict) or set(action) != {
+            "old_id",
+            "new_id",
+            "old_path",
+            "new_path",
+            "before_sha256",
+            "after_sha256",
+        }:
+            _fail("manifest_invalid", "artifact renames row is invalid")
+        source_id = action["old_id"]
+        target_id = action["new_id"]
+        before_sha256 = action["before_sha256"]
+        after_sha256 = action["after_sha256"]
+        if (
+            not _exact_nonempty_string(source_id)
+            or not _exact_nonempty_string(target_id)
+            or source_id == target_id
+            or not _exact_nonempty_string(action["old_path"])
+            or not _exact_nonempty_string(action["new_path"])
+            or not isinstance(before_sha256, str)
+            or _SHA256.fullmatch(before_sha256) is None
+            or not isinstance(after_sha256, str)
+            or _SHA256.fullmatch(after_sha256) is None
+            or source_id in renames
+        ):
+            _fail("manifest_invalid", "artifact renames receipt is invalid")
+        assert isinstance(source_id, str)
+        assert isinstance(target_id, str)
+        renames[source_id] = (target_id, before_sha256, after_sha256)
+
     deletes: dict[str, str] = {}
     delete_actions = artifact["deletes"]
     if not isinstance(delete_actions, list):
-        delete_actions = (
-            tuple(delete_actions)
-            if isinstance(delete_actions, tuple)
-            else ()
-        )
+        _fail("manifest_invalid", "artifact deletes must be a list")
     for action in delete_actions:
-        if not isinstance(action, dict):
+        if not isinstance(action, dict) or set(action) != {
+            "object_id",
+            "path",
+            "before_sha256",
+            "after_sha256",
+        }:
             _fail("manifest_invalid", "artifact deletes row is invalid")
-        source_id = action.get("object_id")
-        before_sha256 = action.get("before_sha256")
+        source_id = action["object_id"]
+        before_sha256 = action["before_sha256"]
         if (
             not _exact_nonempty_string(source_id)
+            or not _exact_nonempty_string(action["path"])
             or not isinstance(before_sha256, str)
             or _SHA256.fullmatch(before_sha256) is None
-            or action.get("after_sha256") is not None
+            or action["after_sha256"] is not None
             or source_id in deletes
         ):
             _fail("manifest_invalid", "artifact deletes receipt is invalid")
+        assert isinstance(source_id, str)
         deletes[source_id] = before_sha256
-    return transitions, deletes
+    if (
+        set(updates) & set(renames)
+        or set(updates) & set(deletes)
+        or set(renames) & set(deletes)
+    ):
+        _fail("manifest_invalid", "artifact transition IDs overlap")
+    return _ArtifactTransitions(
+        updates=updates,
+        renames=renames,
+        deletes=deletes,
+    )
+
+
+def _artifact_pointer_value(obj: Mapping[str, object], pointer: str) -> object:
+    current: object = obj
+    for raw_token in pointer[1:].split("/"):
+        token_parts: list[str] = []
+        index = 0
+        while index < len(raw_token):
+            char = raw_token[index]
+            if char != "~":
+                token_parts.append(char)
+                index += 1
+                continue
+            if (
+                index + 1 >= len(raw_token)
+                or raw_token[index + 1] not in {"0", "1"}
+            ):
+                raise ValueError("invalid artifact JSON pointer escape")
+            token_parts.append("~" if raw_token[index + 1] == "0" else "/")
+            index += 2
+        token = "".join(token_parts)
+        if isinstance(current, Mapping):
+            if token not in current:
+                raise KeyError(token)
+            current = current[token]
+        elif isinstance(current, list):
+            if (
+                not token.isdigit()
+                or (len(token) > 1 and token.startswith("0"))
+                or int(token) >= len(current)
+            ):
+                raise KeyError(token)
+            current = current[int(token)]
+        else:
+            raise KeyError(token)
+    return current
 
 
 def id_renames_from_trusted_repair_receipt(
@@ -1599,9 +1687,28 @@ def id_renames_from_trusted_repair_receipt(
             "intermediate_receipt_mismatch",
             "artifact rows do not exactly cover canonical repairs",
         )
-    transitions, deletes = _artifact_transition_receipts(artifact)
+    transitions = _artifact_transition_receipts(artifact)
+    rows_by_source = {
+        row["source_id"]: row
+        for row in rows
+        if isinstance(row, dict)
+    }
     for decision in ledger.decisions:
         if decision.source_id in merge_pairs:
+            target_id = merge_pairs[decision.source_id]
+            row = rows_by_source[decision.source_id]
+            merge_receipt = row["merge_receipt"]
+            assert isinstance(merge_receipt, dict)
+            if (
+                row["new_id"] != target_id
+                or row["kind"] != decision.source_kind
+                or row["reason_code"] != decision.action.value
+                or merge_receipt["target_id"] != target_id
+            ):
+                _fail(
+                    "intermediate_source_receipt_mismatch",
+                    f"{decision.source_id}: merge row differs from ledger",
+                )
             if existing.has(decision.source_id):
                 _fail(
                     "intermediate_source_receipt_mismatch",
@@ -1610,19 +1717,90 @@ def id_renames_from_trusted_repair_receipt(
                         "intermediate store"
                     ),
                 )
-            delete_sha256 = deletes.get(decision.source_id)
+            delete_sha256 = transitions.deletes.get(decision.source_id)
             if delete_sha256 is None:
                 _fail(
                     "intermediate_source_receipt_mismatch",
                     f"{decision.source_id}: merge delete receipt is missing",
                 )
-            if delete_sha256 != decision.source_sha256:
+            if (
+                delete_sha256 != decision.source_sha256
+                or delete_sha256
+                != merge_receipt["source_delete_before_sha256"]
+            ):
                 _fail(
                     "intermediate_source_receipt_mismatch",
                     f"{decision.source_id}: merge delete receipt is invalid",
                 )
+            target_before_sha256 = merge_receipt["target_before_sha256"]
+            target_after_sha256 = merge_receipt["target_after_sha256"]
+            survivor_update = transitions.updates.get(target_id)
+            if target_before_sha256 != target_after_sha256:
+                if survivor_update is None:
+                    _fail(
+                        "intermediate_source_receipt_mismatch",
+                        (
+                            f"{decision.source_id}: merge survivor update "
+                            "is missing"
+                        ),
+                    )
+                target_before_sha256, target_after_sha256 = survivor_update
+            elif survivor_update is not None:
+                _fail(
+                    "intermediate_source_receipt_mismatch",
+                    (
+                        f"{decision.source_id}: no-op merge survivor has "
+                        "an update"
+                    ),
+                )
+            live_target_sha256 = existing.source_sha256(target_id)
+            if (
+                target_before_sha256
+                != merge_receipt["target_before_sha256"]
+                or target_after_sha256
+                != merge_receipt["target_after_sha256"]
+                or live_target_sha256 != target_after_sha256
+                or row["canonical_payload_hash"] != target_after_sha256
+            ):
+                _fail(
+                    "intermediate_source_receipt_mismatch",
+                    f"{decision.source_id}: merge survivor receipt is invalid",
+                )
+            reference_collapses = merge_receipt["reference_collapses"]
+            assert isinstance(reference_collapses, list)
+            for collapse in reference_collapses:
+                assert isinstance(collapse, dict)
+                referrer_id = collapse["object_id"]
+                pointer = collapse["pointer"]
+                try:
+                    live_referrer = existing.get(referrer_id)
+                    live_ids = _artifact_pointer_value(live_referrer, pointer)
+                except (KeyError, ValueError):
+                    live_ids = None
+                if (
+                    not isinstance(live_ids, list)
+                    or live_ids != collapse["after_ids"]
+                    or decision.source_id in live_ids
+                ):
+                    _fail(
+                        "intermediate_source_receipt_mismatch",
+                        (
+                            f"{decision.source_id}: merge collapse live "
+                            "receipt is invalid"
+                        ),
+                    )
             continue
-        transition = transitions.get(decision.source_id)
+        renamed = transitions.renames.get(decision.source_id)
+        updated = transitions.updates.get(decision.source_id)
+        transition = (
+            renamed
+            if renamed is not None
+            else (
+                (decision.source_id, *updated)
+                if updated is not None
+                else None
+            )
+        )
         if transition is None:
             if existing.source_sha256(decision.source_id) != decision.source_sha256:
                 _fail(

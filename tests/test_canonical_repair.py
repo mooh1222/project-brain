@@ -2088,12 +2088,170 @@ def test_trusted_intermediate_receipt_returns_only_pure_id_renames(
     )
 
 
+def test_trusted_intermediate_receipt_rejects_missing_merge_survivor_update(
+    canonical_fixture,
+    monkeypatch,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    manifest["updates"] = [
+        update
+        for update in manifest["updates"]
+        if update["object_id"] != DRONE_MERGE_TARGET
+    ]
+    _replace_trusted_manifest(args, manifest)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == "intermediate_source_receipt_mismatch"
+
+
 def _replace_trusted_manifest(args: dict, manifest: dict) -> None:
     manifest_bytes = _json_bytes(manifest)
     args["canonical_manifest_bytes"] = manifest_bytes
     args["expected_canonical_manifest_sha256"] = hashlib.sha256(
         manifest_bytes
     ).hexdigest()
+
+
+def test_trusted_intermediate_receipt_accepts_noop_merge_survivor_without_update(
+    canonical_fixture,
+    monkeypatch,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    merge_row = next(
+        row
+        for row in manifest["rows"]
+        if row["source_id"] == HEDGEHOG_MERGE_SOURCE
+    )
+    merge_receipt = merge_row["merge_receipt"]
+
+    assert merge_receipt["target_before_sha256"] == (
+        merge_receipt["target_after_sha256"]
+    )
+    assert all(
+        update["object_id"] != HEDGEHOG_MERGE_TARGET
+        for update in manifest["updates"]
+    )
+    assert id_renames_from_trusted_repair_receipt(**args) == (
+        id_renames_from_ledger(canonical_fixture.ledger)
+    )
+
+
+def test_trusted_intermediate_receipt_rejects_noop_merge_survivor_update(
+    canonical_fixture,
+    monkeypatch,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    merge_row = next(
+        row
+        for row in manifest["rows"]
+        if row["source_id"] == HEDGEHOG_MERGE_SOURCE
+    )
+    merge_receipt = merge_row["merge_receipt"]
+    target = args["existing"].get(HEDGEHOG_MERGE_TARGET)
+    target_path = BrainStore.object_path(
+        canonical_fixture.brain_root,
+        target,
+    ).relative_to(canonical_fixture.brain_root)
+    manifest["updates"].append({
+        "object_id": HEDGEHOG_MERGE_TARGET,
+        "path": target_path.as_posix(),
+        "before_sha256": merge_receipt["target_before_sha256"],
+        "after_sha256": merge_receipt["target_after_sha256"],
+    })
+    _replace_trusted_manifest(args, manifest)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == "intermediate_source_receipt_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("axis", "error_code"),
+    [
+        ("survivor_before_sha", "intermediate_source_receipt_mismatch"),
+        ("survivor_after_sha", "intermediate_source_receipt_mismatch"),
+        (
+            "row_canonical_payload_hash",
+            "intermediate_source_receipt_mismatch",
+        ),
+        ("merge_receipt_target_id", "manifest_invalid"),
+        ("collapse_before_ids", "manifest_invalid"),
+        ("collapse_after_ids", "manifest_invalid"),
+        ("collapse_removed_index", "manifest_invalid"),
+        ("live_survivor_bytes", "intermediate_source_receipt_mismatch"),
+        ("live_referrer_list", "intermediate_source_receipt_mismatch"),
+    ],
+)
+def test_trusted_intermediate_receipt_rejects_each_merge_tamper_axis(
+    canonical_fixture,
+    monkeypatch,
+    axis,
+    error_code,
+):
+    args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
+    manifest = json.loads(args["canonical_manifest_bytes"])
+    merge_row = next(
+        row
+        for row in manifest["rows"]
+        if row["source_id"] == DRONE_MERGE_SOURCE
+    )
+    merge_receipt = merge_row["merge_receipt"]
+    collapse = merge_receipt["reference_collapses"][0]
+    survivor_update = next(
+        update
+        for update in manifest["updates"]
+        if update["object_id"] == DRONE_MERGE_TARGET
+    )
+
+    if axis == "survivor_before_sha":
+        survivor_update["before_sha256"] = "0" * 64
+    elif axis == "survivor_after_sha":
+        survivor_update["after_sha256"] = "0" * 64
+    elif axis == "row_canonical_payload_hash":
+        merge_row["canonical_payload_hash"] = "0" * 64
+        merge_receipt["target_after_sha256"] = "0" * 64
+    elif axis == "merge_receipt_target_id":
+        merge_receipt["target_id"] = HEDGEHOG_MERGE_TARGET
+    elif axis == "collapse_before_ids":
+        collapse["before_ids"] = [DRONE_MERGE_TARGET, DRONE_MERGE_SOURCE]
+    elif axis == "collapse_after_ids":
+        collapse["after_ids"] = []
+    elif axis == "collapse_removed_index":
+        collapse["removed_index"] = 1
+    elif axis == "live_survivor_bytes":
+        changed = deepcopy(args["existing"].get(DRONE_MERGE_TARGET))
+        changed["title"] = f"{changed['title']} tampered"
+        _write_raw(canonical_fixture.brain_root, changed)
+    else:
+        changed = deepcopy(args["existing"].get(collapse["object_id"]))
+        changed["target_object_ids"] = [
+            DRONE_MERGE_SOURCE,
+            DRONE_MERGE_TARGET,
+        ]
+        _write_raw(canonical_fixture.brain_root, changed)
+
+    if axis in {"live_survivor_bytes", "live_referrer_list"}:
+        intermediate = BrainStore.load(canonical_fixture.brain_root)
+        fingerprint = corpus_fingerprint(intermediate)
+        args["existing"] = intermediate
+        args["intermediate_snapshot"] = replace(
+            args["intermediate_snapshot"],
+            file_count=len(intermediate.all()),
+            corpus_fingerprint=fingerprint,
+        )
+        manifest["expected_after_fingerprint"] = fingerprint
+    _replace_trusted_manifest(args, manifest)
+
+    with pytest.raises(CanonicalRepairError) as exc:
+        id_renames_from_trusted_repair_receipt(**args)
+
+    assert exc.value.code == error_code
 
 
 @pytest.mark.parametrize("tamper", ["delete_missing", "delete_sha"])
