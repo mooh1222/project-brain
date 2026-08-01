@@ -538,6 +538,28 @@ Run: `.venv/bin/python -m pytest tests/test_mutation.py tests/test_canonical_rep
 
 Expected: PASS.
 
+- [ ] **Step 9b: trusted intermediate receipt가 merge source delete를 최소 범위로 인식하게 한다**
+
+Task 3이 merge source를 `delete_ids`로 실제 삭제하므로, Task 5 전까지 기존 trusted
+intermediate 성공 회귀를 깨뜨리지 않는 최소 연결부를 함께 넣는다. 이 단계는 Task 4의
+`merge_receipt`를 소비하지 않는다.
+
+- `_artifact_transition_receipts()`가 artifact `deletes`를 별도 exact map
+  `{object_id: before_sha256}`으로 읽는다. 기존 update/rename 해석은 바꾸지 않는다.
+- `id_renames_from_trusted_repair_receipt()`가
+  `collision_merge_into_existing` decision이면 intermediate source가 없고 delete receipt의
+  `before_sha256`이 ledger `source_sha256`과 같은지 검사한다. non-merge decision은 기존
+  update/rename 검증을 유지한다.
+- 기존 `test_trusted_intermediate_receipt_returns_only_pure_id_renames`를 RED로 사용하고,
+  반환 rename에서 merge source가 빠지는지와 intermediate에 merge source가 남지 않는지를
+  함께 단언한다.
+- 이 최소 연결부가 직접 책임지는 변조 축 세 개만 Task 3에 둔다: delete row 누락,
+  delete before SHA 변경, intermediate에 merge source 잔존.
+
+Run: `.venv/bin/python -m pytest tests/test_canonical_repair.py -k 'intermediate' -q`
+
+Expected: PASS. Task 5의 merge receipt 교차검증과 transaction recovery는 아직 구현하지 않는다.
+
 - [ ] **Step 10: 커밋한다**
 
 ```bash
@@ -629,6 +651,11 @@ before_ids.count(row["new_id"]) == 1
 after_ids.count(row["new_id"]) == 1
 ```
 
+Task 4가 merge decision 두 개를 `rows`에 처음 추가하므로 trusted intermediate validator의
+row source coverage도 이 단계에서 `set(repair_renames) | set(collision_merges_from_ledger(ledger))`
+로 넓힌다. merge row가 생긴 뒤에도 trusted intermediate 성공 회귀가 green인지 확인하는
+테스트를 함께 둔다. Task 3 시점에는 merge row가 아직 없으므로 이 확장은 앞당기지 않는다.
+
 - [ ] **Step 5: tamper matrix를 추가한다**
 
 source delete SHA, target ID, target before SHA, target after SHA, row canonical hash, collapse object/pointer/index/before/after, non-merge non-null receipt, merge null receipt를 한 축씩 바꿔 `manifest_invalid` 또는 `manifest_revalidation_failed`를 기대한다.
@@ -668,9 +695,10 @@ git commit -m "feat(brain): receipt canonical merge collapses"
 - Consumes: canonical artifact `deletes`, `updates`, `rows[].merge_receipt`.
 - Produces: `id_renames_from_trusted_repair_receipt()` returns only remaining pure-ID map; merge sources are never returned.
 
-- [ ] **Step 1: trusted intermediate success RED 테스트를 작성한다**
+- [ ] **Step 1: Task 3의 delete-aware 최소 연결부가 green인지 확인한다**
 
-canonical repair artifact를 합성 store에 적용한 뒤 다음을 검사한다.
+Task 3에서 이미 추가한 trusted intermediate 성공 회귀를 다시 실행해 pure-ID rename만
+반환되고 merge source는 intermediate에 없음을 확인한다.
 
 ```python
 renames = id_renames_from_trusted_repair_receipt(**args)
@@ -680,15 +708,20 @@ assert all(not intermediate.has(source)
            for source in collision_merges_from_ledger(fixture.ledger))
 ```
 
-- [ ] **Step 2: RED를 확인한다**
+- [ ] **Step 2: merge receipt 교차검증 RED를 작성하고 확인한다**
 
-Run: `.venv/bin/python -m pytest tests/test_canonical_repair.py -k 'merge and intermediate' -q`
+survivor update receipt 누락 또는 before/after SHA 변경처럼 Task 3의 최소 연결부가 책임지지
+않는 한 축을 먼저 테스트로 추가한다.
 
-Expected: FAIL with `intermediate_source_receipt_mismatch` because the current code tries to read the deleted source.
+Run: `.venv/bin/python -m pytest tests/test_canonical_repair.py -k 'intermediate and merge_survivor' -q`
 
-- [ ] **Step 3: transition receipt parser를 delete-aware로 바꾼다**
+Expected: FAIL because the trusted intermediate validator does not yet bind survivor update receipt,
+row payload hash, and Task 4 `merge_receipt` together.
 
-`_artifact_transition_receipts()`가 `updates`, `renames`, `deletes`를 서로 분리한 strict maps로 반환한다.
+- [ ] **Step 3: transition receipt parser와 merge receipt 검증을 완전한 형태로 만든다**
+
+Task 3의 deletes 최소 map을 유지하면서 `_artifact_transition_receipts()`가 `updates`,
+`renames`, `deletes`를 서로 분리한 strict result로 반환하게 한다.
 
 ```python
 @dataclass(frozen=True)
@@ -714,8 +747,6 @@ non-merge decision은 기존 rename/update 검증을 유지한다.
 다음 축을 하나씩 바꿔 모두 fail-closed인지 검사한다.
 
 ```text
-delete row missing
-delete before SHA
 survivor update missing
 survivor before SHA
 survivor after SHA
@@ -727,6 +758,9 @@ collapse removed index
 live survivor bytes
 live referrer list
 ```
+
+delete row 누락, delete before SHA 변경, intermediate source 잔존 세 축은 Task 3 소유다.
+여기서는 Task 4 `merge_receipt`와 live survivor/referrer를 함께 묶는 나머지 축만 다룬다.
 
 Run: `.venv/bin/python -m pytest tests/test_canonical_repair.py -k 'intermediate' -q`
 
