@@ -35,6 +35,7 @@
 - Create `tests/test_canonical_merge.py`: payload 정책, endpoint, 출처 참조, projection, 배열 축약의 집중 회귀.
 - Modify `src/project_brain/canonical_repair.py`: 새 ledger action, merge map, planner, row receipt, artifact parser, intermediate receipt.
 - Modify `tests/test_canonical_repair.py`: 156행 ledger 계약, planner/artifact/apply/intermediate 통합 회귀.
+- Modify `tests/test_cli.py`: canonical repair CLI의 `row_count` 기대값을 merge row 2개를 포함한 7로 맞춘다.
 - Modify `src/project_brain/mutation.py`: merge intent 검증, expected payload 재계산, grandfather comparison, 축약 field의 pointer diff 억제.
 - Modify `tests/test_mutation.py`: 승인된 existing-target merge 허용과 승인 없는 merge/delete-only 거부.
 - Modify `tests/test_corpus_io.py`: canonical merge transaction의 모든 장애 지점 rollback/recovery 회귀.
@@ -263,6 +264,7 @@ git commit -m "feat(brain): add canonical collision merge projection"
 
 - Modify: `src/project_brain/canonical_repair.py`
 - Modify: `tests/test_canonical_repair.py`
+- Modify: `tests/test_cli.py`
 
 **Interfaces:**
 
@@ -672,10 +674,24 @@ Run: `.venv/bin/python -m pytest tests/test_canonical_repair.py -k 'apply or rev
 
 Expected: PASS.
 
+Task 4가 canonical artifact row 수를 5에서 7로 바꾸므로 CLI plan/apply 출력의
+`row_count` 기대값 두 곳도 7로 갱신한다. `tests/test_cli.py` 전체를 실행해 앞선 plan 단언이
+가리고 있던 apply 경로까지 확인하고, 커밋 전 전체 엔진 회귀를 한 번 실행한다.
+
+Run:
+
+```bash
+.venv/bin/python -m pytest tests/test_cli.py -q
+.venv/bin/python -m pytest -q
+```
+
+Expected: PASS.
+
 - [ ] **Step 7: 커밋한다**
 
 ```bash
-git add src/project_brain/canonical_repair.py tests/test_canonical_repair.py
+git add src/project_brain/canonical_repair.py tests/test_canonical_repair.py \
+  tests/test_cli.py
 git diff --cached --check
 git commit -m "feat(brain): receipt canonical merge collapses"
 ```
