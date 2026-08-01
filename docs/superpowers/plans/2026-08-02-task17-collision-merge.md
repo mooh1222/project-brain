@@ -726,8 +726,8 @@ assert all(not intermediate.has(source)
 
 - [ ] **Step 2: merge receipt 교차검증 RED를 작성하고 확인한다**
 
-survivor update receipt 누락 또는 before/after SHA 변경처럼 Task 3의 최소 연결부가 책임지지
-않는 한 축을 먼저 테스트로 추가한다.
+실제로 바뀌는 survivor의 update receipt 누락 또는 before/after SHA 변경처럼 Task 3의 최소
+연결부가 책임지지 않는 한 축을 먼저 테스트로 추가한다.
 
 Run: `.venv/bin/python -m pytest tests/test_canonical_repair.py -k 'intermediate and merge_survivor' -q`
 
@@ -751,8 +751,11 @@ merge decision은 아래를 모두 검증한다.
 
 - intermediate source absent.
 - delete receipt before SHA equals ledger source SHA and merge receipt source SHA.
-- survivor update before/after SHA equals merge receipt.
-- live survivor SHA equals update after SHA, row payload hash, target after SHA.
+- merge receipt target before/after SHA가 다르면 survivor update가 정확히 하나 있어야 하고,
+  update before/after SHA가 merge receipt와 같아야 한다.
+- merge receipt target before/after SHA가 같으면 survivor update는 없어야 한다.
+- live survivor SHA는 모든 경우 row payload hash, target after SHA와 같아야 하며, update가
+  있는 경우 update after SHA와도 같아야 한다.
 - collapse referrer live list equals `after_ids` and source is absent.
 - row의 source/new ID/reason과 ledger decision exact.
 
@@ -763,7 +766,8 @@ non-merge decision은 기존 rename/update 검증을 유지한다.
 다음 축을 하나씩 바꿔 모두 fail-closed인지 검사한다.
 
 ```text
-survivor update missing
+survivor update missing while target before != after
+survivor update present while target before == after
 survivor before SHA
 survivor after SHA
 row canonical payload hash
@@ -774,6 +778,10 @@ collapse removed index
 live survivor bytes
 live referrer list
 ```
+
+no-op survivor의 정상 artifact에 update 행이 없고 trusted intermediate 검증이 통과하는
+양성 회귀를 둔다. before==after인 위조 update 행을 추가하면
+`intermediate_source_receipt_mismatch`로 중단해야 한다.
 
 delete row 누락, delete before SHA 변경, intermediate source 잔존 세 축은 Task 3 소유다.
 여기서는 Task 4 `merge_receipt`와 live survivor/referrer를 함께 묶는 나머지 축만 다룬다.

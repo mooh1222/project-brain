@@ -247,7 +247,9 @@ canonical repair plan은 공통 replacement view를 쓰되 file operation은 분
 - explicit rename pairs는 rename intent하고만 exact match
 - delete IDs는 rename source와 merge source의 합집합
 - created IDs는 rename target하고만 exact match
-- merge target은 existing update여야 함
+- merge target은 request의 existing-object update 입력이어야 함. 이 말은 validator가
+  existing target object를 request에서 다시 받는다는 뜻이며, payload byte가 바뀌지 않는
+  no-op survivor까지 manifest `updates` 행을 만든다는 뜻은 아니다.
 - merge source는 input에 없어야 함
 - merge survivor와 referrer의 expected payload는 planner와 같은 pure helper로 재계산
 - 그 밖의 input 변화는 계속 `canonical_repair_payload_changed`로 거부
@@ -278,10 +280,12 @@ after store는 다음을 만족해야 한다.
 
 1. intermediate store에 source가 없어야 한다.
 2. artifact `deletes`의 source `before_sha256`가 ledger source SHA와 같아야 한다.
-3. artifact `updates`에 survivor가 정확히 하나 있어야 한다.
-4. update `before_sha256`가 merge receipt의 target before SHA와 같아야 한다.
-5. update `after_sha256`, live survivor SHA, merge receipt target after SHA,
-   row canonical payload hash가 모두 같아야 한다.
+3. merge receipt의 target before/after SHA가 다르면 artifact `updates`에 survivor가 정확히
+   하나 있어야 한다. 둘이 같으면 survivor update 행은 없어야 한다.
+4. update 행이 있는 경우에만 update `before_sha256`가 merge receipt의 target before SHA와
+   같아야 한다.
+5. update 행이 있는 경우 update `after_sha256`, 그리고 모든 경우 live survivor SHA,
+   merge receipt target after SHA, row canonical payload hash가 모두 같아야 한다.
 6. reference collapse receipt와 intermediate live referrer 배열이 exact해야 한다.
 7. merge source는 later `id_renames`에 포함하지 않는다.
 
@@ -392,4 +396,3 @@ Task 8A 엔진 코드가 review PASS되고 새 ENGINE_SHA가 확정되면 기존
   통과한다.
 - BB2 object/eval/index/stale는 사용자 승인 게이트 전까지 byte-exact 불변이다.
 - exact ledger bytes와 두 merge 결과를 사용자에게 제시하고 Task 9 전에 멈춘다.
-
