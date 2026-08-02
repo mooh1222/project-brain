@@ -139,19 +139,27 @@ def _mapping_repair_request(
     *,
     operation=None,
     tamper_field: str | None = None,
+    mapping_context: str = "neutral",
 ) -> MutationRequest:
     brain_root = tmp_path / "brain"
+    context_id = f"context.{mapping_context}"
+    term_id = f"g.{mapping_context}.term"
     old = candidate_mapping(
-        "mapping.neutral.Legacy",
-        glossary_term_ids=["g.neutral.term"],
+        f"mapping.{mapping_context}.Legacy",
+        glossary_term_ids=[term_id],
         mapping_key="Legacy",
     )
+    old["context_id"] = context_id
     new = dict(old)
-    new["id"] = "mapping.neutral.legacy"
+    new["id"] = f"mapping.{mapping_context}.legacy"
     new["mapping_key"] = "legacy"
     if tamper_field is not None:
         new[tamper_field] = f"changed-{tamper_field}"
-    for obj in (context(), candidate_term("g.neutral.term"), old):
+    mapping_context_obj = context(context_id)
+    mapping_context_obj["context_key"] = mapping_context
+    term = candidate_term(term_id)
+    term["context_id"] = context_id
+    for obj in (mapping_context_obj, term, old):
         _write_raw(brain_root, obj)
     change = mutation.CanonicalFieldChange(
         pointer="/mapping_key",
@@ -181,18 +189,26 @@ def _mixed_review_repair_request(
     tamper: str | None = None,
     source_review_id: str = "review.bundle.Neutral.domain-mapping",
     bundle_key: str = "bundle.neutral.domain-mapping",
-    cleanup_target_id: str = "g.neutral.term",
+    mapping_context: str = "neutral",
+    cleanup_target_id: str | None = None,
 ) -> MutationRequest:
-    request = _mapping_repair_request(tmp_path)
+    term_id = f"g.{mapping_context}.term"
+    if cleanup_target_id is None:
+        cleanup_target_id = term_id
+    request = _mapping_repair_request(
+        tmp_path,
+        mapping_context=mapping_context,
+    )
     old_mapping = BrainStore.load(request.brain_root).get(
         request.delete_ids[0]
     )
     new_mapping = request.objects[0]
     stable_mapping = candidate_mapping(
-        "mapping.neutral.stable",
-        glossary_term_ids=["g.neutral.term"],
+        f"mapping.{mapping_context}.stable",
+        glossary_term_ids=[term_id],
         mapping_key="stable",
     )
+    stable_mapping["context_id"] = f"context.{mapping_context}"
     _write_raw(request.brain_root, stable_mapping)
 
     old_review = review_record_for(
@@ -225,13 +241,14 @@ def _mixed_review_repair_request(
     elif tamper == "change_scope":
         new_review["review_scope"] = "single_object"
     elif tamper == "change_bundle_key":
-        new_review["bundle_key"] = "bundle.neutral.other"
+        new_review["bundle_key"] = f"bundle.{mapping_context}.other"
     elif tamper == "replace_target":
         replacement = candidate_mapping(
-            "mapping.neutral.replacement",
-            glossary_term_ids=["g.neutral.term"],
+            f"mapping.{mapping_context}.replacement",
+            glossary_term_ids=[term_id],
             mapping_key="replacement",
         )
+        replacement["context_id"] = f"context.{mapping_context}"
         _write_raw(request.brain_root, replacement)
         new_review["target_object_ids"][1] = replacement["id"]
     elif tamper == "reorder":
@@ -1529,17 +1546,19 @@ def test_canonical_repair_rejects_mismatched_source_bundle_identity(
     assert result.error_code == "canonical_repair_payload_changed"
 
 
-def test_canonical_repair_does_not_reinterpret_valid_single_review_source(
+def test_canonical_repair_rejects_ambiguous_valid_single_source_id(
     tmp_path,
 ):
     request = _mixed_review_repair_request(
         tmp_path,
         source_review_id="review.context.neutral",
         bundle_key="bundle.context.neutral",
+        mapping_context="context",
     )
 
     result = MutationService().plan(request.objects, request=request)
 
+    assert result.ok is False, result
     assert result.error_code == "canonical_repair_payload_changed"
 
 
