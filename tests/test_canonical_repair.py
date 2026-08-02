@@ -916,6 +916,7 @@ def _canonical_plan_fixture(
     *,
     repair_collapse_referrer: bool = False,
     repair_collapse_after_id: bool = False,
+    mixed_review_source_id: str = "review.bundle.Neutral.domain-mapping",
 ) -> CanonicalPlanFixture:
     repo_root = (tmp_path / "repo").resolve()
     repo_head = _git_repo(repo_root)
@@ -970,7 +971,7 @@ def _canonical_plan_fixture(
         )
         _write_raw(brain_root, old)
     mixed_review = review_record_for(
-        "review.bundle.Neutral.domain-mapping",
+        mixed_review_source_id,
         old_mappings[0]["id"],
     )
     mixed_review.pop("target_object_id")
@@ -1225,6 +1226,27 @@ def test_plan_keeps_five_repair_rows_and_adds_two_merge_rows_and_intents(
         for intent in plan.request.canonical_repair_intents
     )
     assert plan.request.operation is MutationOperation.CANONICAL_REPAIR
+
+
+@pytest.mark.parametrize(
+    "source_review_id",
+    [
+        "review.bundle.Neutral.domain-mapping",
+        "review.neutral.domain-mapping",
+    ],
+)
+def test_plan_accepts_both_legacy_bundle_review_source_spellings(
+    tmp_path,
+    source_review_id,
+):
+    fixture = _canonical_plan_fixture(
+        tmp_path,
+        mixed_review_source_id=source_review_id,
+    )
+
+    plan = plan_canonical_repair(**fixture.plan_args)
+
+    assert plan.mutation_plan.ok is True
 
 
 def test_plan_merge_rows_have_exact_artifact_receipts(canonical_fixture):

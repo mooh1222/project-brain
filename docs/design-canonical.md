@@ -160,6 +160,15 @@ DomainMapping의 `/mapping_key`와 bundle ReviewRecord의 `/target_object_ids` �
 `collision_merge_into_existing` 경로만 허용하며, 임의 덮어쓰기나 일반 목적 merge는
 허용하지 않는다.
 
+`review_shape_repair`의 bundle ReviewRecord source는 두 legacy 철자만 허용한다. 첫째는
+`review.bundle.Neutral.domain-mapping`처럼 소문자로 바꾸면 bundle ReviewRecord로 파싱되고
+그 `bundle_key`가 payload와 정확히 같은 대소문자 부채 형태다. 둘째는
+`review.neutral.domain-mapping`처럼 `bundle.` 표지만 빠진 byte-exact
+`review.{bundle_key.removeprefix('bundle.')}` 형태이며, 원래 source ID가 ReviewRecord로
+파싱되지 않고 `target_object_id`도 없을 때만 허용한다. 검증은 항상 문법 파싱을 먼저 하므로
+`review.context.neutral` 같은 유효한 single ReviewRecord를 bundle source로 다시 해석하지
+않는다. canonical target은 두 경우 모두 exact `review.{bundle_key}`다.
+
 엔진은 canonical ID를 추론하지 않는다. 데이터 레포가 Phase A 분류의 모든 행을 정확히
 한 번 덮는 **canonicalization decision ledger**를 보존하고, 사람이 ID·허용 field diff·근거를
 검토한다. 엔진은 그 원장 bytes와 classification bytes의 SHA, source object SHA, engine SHA,

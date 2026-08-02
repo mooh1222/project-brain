@@ -180,6 +180,7 @@ def _mixed_review_repair_request(
     *,
     tamper: str | None = None,
     source_review_id: str = "review.bundle.Neutral.domain-mapping",
+    bundle_key: str = "bundle.neutral.domain-mapping",
     cleanup_target_id: str = "g.neutral.term",
 ) -> MutationRequest:
     request = _mapping_repair_request(tmp_path)
@@ -202,8 +203,8 @@ def _mixed_review_repair_request(
     old_review.update({
         "review_scope": "mapping_bundle",
         "review_type": "meaning_review",
-        "bundle_key": "bundle.neutral.domain-mapping",
-        "confirmation_key": "bundle.neutral.domain-mapping",
+        "bundle_key": bundle_key,
+        "confirmation_key": bundle_key,
         "target_object_ids": [
             old_mapping["id"],
             stable_mapping["id"],
@@ -212,7 +213,7 @@ def _mixed_review_repair_request(
     })
     _write_raw(request.brain_root, old_review)
     new_review = dict(old_review)
-    new_review["id"] = "review.bundle.neutral.domain-mapping"
+    new_review["id"] = f"review.{bundle_key}"
     new_review["target_object_ids"] = [
         new_mapping["id"],
         stable_mapping["id"],
@@ -1459,6 +1460,19 @@ def test_canonical_repair_allows_review_target_cleanup_only(tmp_path):
     assert result.ok is True
 
 
+def test_canonical_repair_allows_legacy_omitted_bundle_prefix_source(
+    tmp_path,
+):
+    request = _mixed_review_repair_request(
+        tmp_path,
+        source_review_id="review.neutral.domain-mapping",
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.ok is True, result.error_code
+
+
 @pytest.mark.parametrize(
     "absent_target_id",
     [
@@ -1493,10 +1507,35 @@ def test_canonical_repair_rejects_mapping_shaped_non_mapping_cleanup(tmp_path):
     assert result.error_code == "canonical_repair_payload_changed"
 
 
-def test_canonical_repair_rejects_mismatched_source_bundle_identity(tmp_path):
+@pytest.mark.parametrize(
+    "source_review_id",
+    [
+        "review.bundle.other.wrong",
+        "review.other.wrong",
+        "review.Neutral.domain-mapping",
+    ],
+)
+def test_canonical_repair_rejects_mismatched_source_bundle_identity(
+    tmp_path,
+    source_review_id,
+):
     request = _mixed_review_repair_request(
         tmp_path,
-        source_review_id="review.bundle.other.wrong",
+        source_review_id=source_review_id,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert result.error_code == "canonical_repair_payload_changed"
+
+
+def test_canonical_repair_does_not_reinterpret_valid_single_review_source(
+    tmp_path,
+):
+    request = _mixed_review_repair_request(
+        tmp_path,
+        source_review_id="review.context.neutral",
+        bundle_key="bundle.context.neutral",
     )
 
     result = MutationService().plan(request.objects, request=request)
@@ -1540,8 +1579,23 @@ def test_canonical_repair_rejects_single_record_new_review_id(tmp_path):
         "reorder",
     ],
 )
-def test_canonical_repair_rejects_unapproved_review_shape(tmp_path, tamper):
-    request = _mixed_review_repair_request(tmp_path, tamper=tamper)
+@pytest.mark.parametrize(
+    "source_review_id",
+    [
+        "review.bundle.Neutral.domain-mapping",
+        "review.neutral.domain-mapping",
+    ],
+)
+def test_canonical_repair_rejects_unapproved_review_shape(
+    tmp_path,
+    tamper,
+    source_review_id,
+):
+    request = _mixed_review_repair_request(
+        tmp_path,
+        tamper=tamper,
+        source_review_id=source_review_id,
+    )
 
     result = MutationService().plan(request.objects, request=request)
 

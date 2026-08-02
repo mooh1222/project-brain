@@ -1510,6 +1510,28 @@ def _validate_canonical_repair_request(
     )
 
 
+def _is_canonical_review_source(
+    source_id: str,
+    bundle_key: str,
+    before: Mapping[str, object],
+) -> bool:
+    """canonical bundle review로 승격할 수 있는 source ID 철자만 허용한다."""
+    if not bundle_key.startswith("bundle."):
+        return False
+    try:
+        parsed = parse_id(source_id.lower(), "ReviewRecord")
+    except IdGrammarError:
+        parsed = None
+    if parsed is not None:
+        return (
+            parsed.variant == "bundle"
+            and parsed.bundle_key == bundle_key
+        )
+    if "target_object_id" in before:
+        return False
+    return source_id == f"review.{bundle_key.removeprefix('bundle.')}"
+
+
 def _validate_canonical_review_shape(
     intent: CanonicalRepairIntent,
     *,
@@ -1541,19 +1563,17 @@ def _validate_canonical_review_shape(
     if not isinstance(bundle_key, str):
         return _failure("canonical_repair_payload_changed", intent.source_id)
     try:
-        parsed_source_review = parse_id(
-            intent.source_id.lower(),
-            "ReviewRecord",
-        )
         parsed_review = parse_id(intent.new_id, "ReviewRecord")
     except IdGrammarError:
         return _failure("canonical_repair_payload_changed", intent.source_id)
+    if not _is_canonical_review_source(
+        intent.source_id,
+        bundle_key,
+        before,
+    ):
+        return _failure("canonical_repair_payload_changed", intent.source_id)
     if (
-        parsed_source_review.variant != "bundle"
-        or parsed_review.variant != "bundle"
-        or parsed_source_review.ctx != parsed_review.ctx
-        or parsed_source_review.key != parsed_review.key
-        or parsed_source_review.bundle_key != bundle_key
+        parsed_review.variant != "bundle"
         or parsed_review.bundle_key != bundle_key
         or intent.new_id != f"review.{bundle_key}"
         or before.get("review_scope") != "mapping_bundle"

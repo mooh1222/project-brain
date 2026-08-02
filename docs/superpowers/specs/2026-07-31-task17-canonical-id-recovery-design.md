@@ -275,6 +275,12 @@ DomainMapping의 after `mapping_key`는 parsed new ID key와 exact여야 한다.
 ReviewRecord repair는 다음을 추가로 보장한다.
 
 - `review_scope`, `bundle_key`, `confirmation_key`, `review_type` 불변
+- source ID는 소문자로 바꿔 같은 `bundle_key`의 bundle ReviewRecord로 파싱되는
+  대소문자 부채 철자이거나, 원래 ID가 ReviewRecord로 파싱되지 않고
+  `target_object_id`도 없는 byte-exact
+  `review.{bundle_key.removeprefix('bundle.')}` 철자
+- 문법 파싱을 먼저 적용해 `review.context.neutral` 같은 유효한 single ReviewRecord를
+  bundle ReviewRecord source로 다시 해석하지 않음
 - new self ID가 불변 `bundle_key`에서 계산한 bundle ReviewRecord ID와 exact
 - after target이 non-empty이고 모두 같은 context의 canonical DomainMapping
 - before에 실재하는 DomainMapping target은 승인된 rename으로 exact 보존
