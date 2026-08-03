@@ -332,6 +332,21 @@ class TestRouterRecallTopK(unittest.TestCase):
         # 무더기(12 전량)가 아니다.
         self.assertLess(len(loc_section["object_ids"]), 12)
 
+    def test_reviewed_implementation_section_carries_path_symbol(self):
+        """검수완료 구현위치도 후보 채널과 같이 path·symbol을 동반한다.
+
+        bare id만 내면 `code.ctx.mapping-key--8` 같은 라벨로는 어느 위치인지 구분이 안 된다.
+        같은 함수 안의 candidate_locators(:257-262)는 이미 이 모양을 낸다."""
+        self._rebuild([code_locator("code.beam", path="a/Shooter.cpp",
+                                    symbol="GameBubbleShooterLayer::throwBeam")])
+        answer = self._router().answer("GameBubbleShooterLayer::throwBeam 어디 구현?")
+        loc_section = next(s for s in answer["sections"]
+                           if s["intent"] == "implementation_location")
+        self.assertIn("code.beam", loc_section["object_ids"])
+        self.assertIn({"id": "code.beam", "path": "a/Shooter.cpp",
+                       "symbol": "GameBubbleShooterLayer::throwBeam"},
+                      loc_section["locators"])
+
     def test_implementation_location_pinpoints_via_mapping_graph(self):
         # §3.5·§8 주 경로: 매핑이 점수 상위로 적중하고, 그 매핑이 linked.code_locators로
         # 동반한 CodeLocator가 implementation_location source로 핀포인트된다(심볼 직접
@@ -502,6 +517,19 @@ class TestRouterRecallFallback(unittest.TestCase):
         router = QueryRouter(store, db_path=Path("/nonexistent/index.db"))
         answer = router.answer("갈고리 용어 무슨 뜻?")
         self.assertIn("g.r", answer["source_object_ids"])
+
+    def test_fallback_implementation_section_omits_locator_details(self):
+        """폴백은 reviewed CodeLocator를 전량 적재한다 — 거기에 path·symbol을 더하면
+        출력이 몇 배로 부푼다(실코퍼스 3634개 = 417KB → 1.1MB). 그래서 붙이지 않는다."""
+        store = store_of(context(), code_locator("code.a", path="a/A.cpp", symbol="A::a"))
+        answer = QueryRouter(store).answer("A::a 어디 구현?")
+        loc_section = next(s for s in answer["sections"]
+                           if s["intent"] == "implementation_location")
+        self.assertIn("code.a", loc_section["object_ids"])
+        self.assertNotIn("locators", loc_section)
+        # 무더기를 준 사실을 조용히 넘기지 않는다 — 받는 쪽이 --db 누락을 알 수 있어야 한다.
+        self.assertTrue(any("색인 없이" in w and "전량 적재" in w for w in answer["warnings"]),
+                        answer["warnings"])
 
 
 class TestRouterUnknownRecall(unittest.TestCase):

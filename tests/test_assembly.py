@@ -49,6 +49,37 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(ev["ref_type"], "code_locator")
         self.assertEqual(ev["locator"], {"code_locator_id": "code.ctx.hit-hook"})
 
+    def test_anchor_title_is_symbol_not_truncated_quote(self):
+        """title은 symbol이다 — 잘린 인용은 설명처럼 읽히지만 설명이 아니다.
+
+        symbol은 코드에서 파생돼 항상 참이고, 답변 라벨(search.py의 linked.code_locators)에
+        실리는 유일한 사람 읽을 값이다. 사람이 새로 쓴 문장은 넣지 않는다 — 읽는 쪽이
+        진위를 대조할 방법이 없다."""
+        long_quote = "if (pBubble->getBubbleType() == BUBBLE_TYPE::kSpecial_Kamehameha) { " + "x" * 200
+        notes = {
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
+            "code_anchors": [{"key": "beam-check", "path": "Foo.cpp",
+                              "symbol": "Foo::isKamehameha", "quote": long_quote,
+                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
+        }
+        kinds = {o["kind"]: o for o in build_code_evidence(notes, NOW)}
+        self.assertEqual(kinds["CodeLocator"]["title"], "Foo::isKamehameha")
+        self.assertEqual(kinds["EvidenceRef"]["title"], "Foo::isKamehameha")
+        # 인용 원문은 verified_quote와 evref.summary에 그대로 남는다
+        self.assertEqual(kinds["CodeLocator"]["verified_quote"], long_quote)
+        self.assertEqual(kinds["EvidenceRef"]["summary"], long_quote[:500])
+
+    def test_notes_cannot_inject_anchor_title(self):
+        """노트가 준 title은 무시한다 — 사람이 쓴 라벨을 넣는 입구를 만들지 않는다."""
+        notes = {
+            "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
+            "code_anchors": [{"key": "k", "path": "Foo.cpp", "symbol": "Foo::bar",
+                              "title": "사람이 쓴 그럴듯한 설명", "quote": "void bar();",
+                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
+        }
+        kinds = {o["kind"]: o for o in build_code_evidence(notes, NOW)}
+        self.assertEqual(kinds["CodeLocator"]["title"], "Foo::bar")
+
     def test_anchor_without_line_numbers(self):
         notes = {
             "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
@@ -281,6 +312,13 @@ class AssemblyClaimContractTest(unittest.TestCase):
         self.assertTrue(any("quote" in error and "비어" in error for error in errors))
         self.assertTrue(any("verified_at" in error and "비어" in error for error in errors))
 
+    def test_code_anchor_symbol_is_required_before_build(self):
+        """symbol이 비면 title도 비고 색인 표면이 path 하나로 쪼그라든다 — 입구에서 막는다."""
+        notes = self._notes()
+        notes["code_anchors"][0]["symbol"] = "  "
+        errors = validate_notes(notes)
+        self.assertTrue(any("symbol" in error and "비어" in error for error in errors))
+
     def test_locator_preserves_exact_multiline_tab_verified_quote(self):
         result = build(self._notes(), BrainStore({}), NOW)
         self.assertEqual(result["errors"], [])
@@ -318,6 +356,50 @@ class ApplyUpdatesTest(unittest.TestCase):
         self.assertEqual(m["title"], "새 제목")
         self.assertEqual(m["updated_at"], NOW)
         self.assertEqual(m["status"], "reviewed")  # 강등 없음
+
+    def test_anchor_title_set_update(self):
+        """앵커 title 백필의 유일한 안전 통로 — extra_objects는 낙관적 잠금이 없다.
+
+        title은 _CLAIM_FIELDS 밖이라 근거 동반이 강제되지 않는다(표시 라벨이고 의미 주장이 아니다)."""
+        locator = {"id": "code.ctx.hook", "kind": "CodeLocator", "status": "reviewed",
+                   "truth_role": "reference", "title": "\tif (x) { return NULL;",
+                   "repo": "demoapp", "path": "Foo.cpp", "symbol": "Foo::bar",
+                   "locator_source": "rg", "commit_sha": "abc123",
+                   "verified_quote": "\tif (x) { return NULL;", "verified_at": T0,
+                   "schema_version": "0.1", "poc_priority": "P2",
+                   "created_at": T0, "updated_at": T0, "tags": ["ctx"]}
+        evref = {"id": "evref.ctx.hook", "kind": "EvidenceRef", "status": "reviewed",
+                 "truth_role": "reference", "title": "\tif (x) { return NULL;",
+                 "evidence_manifest_id": "manifest.ctx.code", "ref_type": "code_locator",
+                 "locator": {"code_locator_id": "code.ctx.hook"},
+                 "summary": "\tif (x) { return NULL;",
+                 "schema_version": "0.1", "poc_priority": "P2",
+                 "created_at": T0, "updated_at": T0, "tags": ["ctx"]}
+        for obj in (locator, evref):
+            with self.subTest(kind=obj["kind"]):
+                store = _store(obj)
+                notes = {"updates": [{"id": obj["id"], "expected_updated_at": T0,
+                                      "set": {"title": "Foo::bar"}}]}
+                objs, _, errors = apply_updates(notes, store, NOW)
+                self.assertEqual(errors, [])
+                self.assertEqual(objs[0]["title"], "Foo::bar")
+                self.assertEqual(objs[0]["verified_quote" if obj["kind"] == "CodeLocator"
+                                          else "summary"], "\tif (x) { return NULL;")
+
+    def test_anchor_path_symbol_still_not_updatable(self):
+        """title만 열었다 — path·symbol·quote는 여전히 updates 밖(amend를 쓴다)."""
+        locator = {"id": "code.ctx.hook", "kind": "CodeLocator", "status": "reviewed",
+                   "truth_role": "reference", "title": "Foo::bar", "repo": "demoapp",
+                   "path": "Foo.cpp", "symbol": "Foo::bar", "locator_source": "rg",
+                   "commit_sha": "abc123", "verified_quote": "q", "verified_at": T0,
+                   "schema_version": "0.1", "poc_priority": "P2",
+                   "created_at": T0, "updated_at": T0, "tags": ["ctx"]}
+        for field in ("path", "symbol", "verified_quote", "commit_sha"):
+            with self.subTest(field=field):
+                notes = {"updates": [{"id": "code.ctx.hook", "expected_updated_at": T0,
+                                      "set": {field: "바뀐값"}}]}
+                _, _, errors = apply_updates(notes, _store(locator), NOW)
+                self.assertTrue(any("allowlist" in e.lower() for e in errors), errors)
 
     def test_claim_field_requires_evidence(self):
         # meaning(claim) 수정인데 evidence 변경도 evidence_unchanged도 없으면 실패
@@ -404,6 +486,43 @@ def _ref_objs(ctx="ctx"):
 
 
 class ValidateNotesTest(unittest.TestCase):
+    def test_duplicate_item_key_is_error(self):
+        """같은 key 2개는 같은 id 객체 2개를 만들고 뒤의 것만 저장된다 — 무신호 유실이다."""
+        base_items = {
+            "glossary": {"key": "dup", "term": "용어", "definition": "정의",
+                         "evidence_refs": ["evref.ctx.x"]},
+            "code_anchors": {"key": "dup", "path": "Foo.cpp", "symbol": "Foo::bar",
+                             "manifest": "manifest.ctx.code", "quote": "void bar();",
+                             "verified_at": NOW},
+            "mappings": {"key": "dup", "canonical_summary": "요약", "meaning": "의미",
+                         "boundary": "경계"},
+            "decisions": {"key": "dup", "decision_type": "spec_clarification",
+                          "title": "결정", "summary": "요약", "decision": "내용"},
+            "sources": {"id": "manifest.ctx.dup", "source_type": "session", "title": "제목",
+                        "locator": "session://x", "captured_at": NOW, "acl": ["team"]},
+        }
+        for section, item in base_items.items():
+            field = "id" if section == "sources" else "key"
+            with self.subTest(section=section):
+                notes = {"context": {"key": "ctx", "commit": "abc"},
+                         section: [dict(item), dict(item)]}
+                errors = validate_notes(notes)
+                self.assertTrue(
+                    any(f"{section}[1].{field}" in e and "중복" in e for e in errors),
+                    f"{section} 중복이 안 잡힘: {errors}")
+
+    def test_distinct_item_keys_pass(self):
+        notes = {
+            "context": {"key": "ctx", "commit": "abc"},
+            "code_anchors": [
+                {"key": "a", "path": "Foo.cpp", "symbol": "Foo::a", "manifest": "manifest.ctx.code",
+                 "quote": "void a();", "verified_at": NOW},
+                {"key": "b", "path": "Foo.cpp", "symbol": "Foo::b", "manifest": "manifest.ctx.code",
+                 "quote": "void b();", "verified_at": NOW},
+            ],
+        }
+        self.assertEqual([e for e in validate_notes(notes) if "중복" in e], [])
+
     def test_logical_key_reference_fields_require_lists(self):
         mapping = {
             "key": "bubble-attribution",

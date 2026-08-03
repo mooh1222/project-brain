@@ -31,7 +31,11 @@ def ingest(brain_root, objects, preconditions=None):
             if prev.get("status") == "reviewed" and obj.get("status") == "candidate":
                 raise IngestError(f"{obj['id']}: refuse reviewed→candidate demotion")
     for oid, expected in (preconditions or {}).items():
-        if existing.has(oid) and existing.get(oid).get("updated_at") != expected:
+        if not existing.has(oid):
+            raise IngestError(
+                f"{oid}: precondition 대상이 사라짐 — build 이후 store에서 삭제됨 "
+                f"(재build 필요). 건너뛰면 지워진 객체가 옛 id로 되살아난다")
+        if existing.get(oid).get("updated_at") != expected:
             raise IngestError(
                 f"{oid}: precondition 불일치 — build 기대 updated_at {expected!r} != "
                 f"현재 {existing.get(oid).get('updated_at')!r} (build 이후 store가 바뀜, 재build 필요)")

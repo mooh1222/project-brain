@@ -62,17 +62,21 @@ def build_code_evidence(notes, now):
     for a in notes.get("code_anchors", []):
         key = a["key"]
         quote = a["quote"]
+        # title은 symbol이다 — 잘린 인용은 설명처럼 읽히지만 설명이 아니고, 답변 라벨에
+        # 실리는 값이라(search.py linked.code_locators) 코드에서 파생돼 항상 참인 것만 쓴다.
+        # 노트가 준 title은 쓰지 않는다: 사람이 쓴 라벨은 읽는 쪽이 진위를 대조할 수 없다.
+        title = a["symbol"]
         loc = {
             "id": derive_id("CodeLocator", ctx, key),
             "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
-            "title": quote[:120], "repo": repo, "path": a["path"], "symbol": a["symbol"],
+            "title": title, "repo": repo, "path": a["path"], "symbol": a["symbol"],
             "locator_source": a.get("locator_source", "rg"),
             "commit_sha": commit, "verified_quote": quote, "verified_at": a["verified_at"],
         }
         ev = {
             "id": derive_id("EvidenceRef", ctx, key),
             "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
-            "title": quote[:120], "evidence_manifest_id": a["manifest"],
+            "title": title, "evidence_manifest_id": a["manifest"],
             "ref_type": "code_locator", "locator": {"code_locator_id": loc["id"]},
             "summary": quote[:500],
         }
@@ -237,6 +241,10 @@ _SET_ALLOWLIST = {
     "DomainMapping": {"meaning", "boundary", "canonical_summary", "title"},
     "GlossaryTerm": {"term", "definition", "title"},
     "DomainContext": {"display_name", "boundary_summary", "title"},
+    # 앵커는 title만 — 표시 라벨이라 백필 대상이다. path·symbol·verified_quote·commit_sha 같은
+    # 좌표·검증 필드는 여기 없으므로 자동 거부되고 amend(같은 id 통째 교체)를 써야 한다.
+    "CodeLocator": {"title"},
+    "EvidenceRef": {"title"},
 }
 _UNION_ALLOWLIST = {
     "DomainMapping": {"glossary_term_ids", "code_locator_ids", "decision_record_ids",
@@ -354,6 +362,10 @@ def validate_notes(notes):
         value = notes.get(section)
         if not isinstance(value, list):
             continue
+        # 식별 필드가 겹치면 같은 id 객체 2개가 만들어지고 저장 때 뒤의 것만 남는다.
+        # build가 merged store를 dict로 접으면서 하나가 사라져 lint 입력에도 안 들어간다.
+        id_field = "id" if section == "sources" else "key"
+        seen = {}
         for i, item in enumerate(value):
             if not isinstance(item, dict):
                 errors.append(f"노트: {section}[{i}]는 object여야 함")
@@ -361,6 +373,15 @@ def validate_notes(notes):
             for field in required:
                 if field not in item:
                     errors.append(f"노트: {section}[{i}] 필수 필드 {field!r} 누락")
+            ident = item.get(id_field)
+            if isinstance(ident, str):
+                if ident in seen:
+                    errors.append(
+                        f"노트: {section}[{i}].{id_field}={ident!r} 중복 — "
+                        f"{seen[ident]}번 항목과 같음 "
+                        "(같은 id 객체 2개가 만들어지고 뒤의 것만 저장된다)")
+                else:
+                    seen[ident] = i
             if (
                 section in {"glossary", "code_anchors", "mappings", "decisions"}
                 and "key" in item
@@ -418,6 +439,10 @@ def validate_notes(notes):
             continue
         if not isinstance(anchor.get("quote"), str) or anchor.get("quote") == "":
             errors.append(f"노트: code_anchors[{i}].quote는 비어 있지 않은 원문 필수")
+        symbol = anchor.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            # 빈 symbol은 title도 비우고 색인 표면을 path 하나로 줄인다 — 조용히 넘기지 않는다.
+            errors.append(f"노트: code_anchors[{i}].symbol은 비어 있지 않은 값 필수")
         verified_at = anchor.get("verified_at")
         if not isinstance(verified_at, str) or not verified_at.strip():
             errors.append(f"노트: code_anchors[{i}].verified_at은 비어 있지 않은 값 필수")

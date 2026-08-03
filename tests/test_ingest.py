@@ -329,6 +329,22 @@ class PreconditionsTest(unittest.TestCase):
             new = _mapping_obj("2026-06-16T00:00:00Z", boundary="새 경계")
             ingest(brain, [new], preconditions={"mapping.ctx.x": "2026-06-15T00:00:00Z"})  # 일치 → OK
 
+    def test_precondition_target_missing_is_error(self):
+        """대상이 사라졌으면 조용히 건너뛰지 않고 거부한다.
+
+        건너뛰면 build 이후 삭제된 객체가 옛 id 그대로 되살아난다 — 오류·경고 없이."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            (brain / "objects").mkdir(parents=True)
+            ingest(brain, _refs() + [_mapping_obj("2026-06-15T00:00:00Z")])
+            # build로 사전조건을 뜬 뒤 누가(다른 세션·정비 절차) 그 객체를 지웠다
+            for p in brain.rglob("mapping.ctx.x.json"):
+                p.unlink()
+            new = _mapping_obj("2026-06-16T00:00:00Z", boundary="새 경계")
+            with self.assertRaises(IngestError) as cm:
+                ingest(brain, [new], preconditions={"mapping.ctx.x": "2026-06-15T00:00:00Z"})
+            self.assertIn("사라짐", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -262,7 +262,26 @@ class QueryRouter:
                     })
                 if candidate_locator_details:
                     warnings.append("확인 필요한 후보 항목 포함 — 사용 시점에 확정(promote) 가능")
-                sections.append({"intent": intent, "object_ids": [locator["id"] for locator in locators], "candidate_locators": candidate_locator_details, "summary": "Code locators"})
+                # 검수완료 채널도 후보 채널(위 candidate_locators)과 같은 모양으로 path·symbol을
+                # 동반한다 — bare id만 내면 답을 받는 쪽이 위치를 구분할 수 없다(같은 함수 안의 비대칭).
+                # ★색인 없는 폴백 경로에서는 붙이지 않는다★: 그 경로는 reviewed CodeLocator를
+                # 전량 적재하므로(수천 개) 항목마다 필드를 더하면 출력이 몇 배로 부푼다.
+                section = {"intent": intent,
+                           "object_ids": [locator["id"] for locator in locators],
+                           "candidate_locators": candidate_locator_details,
+                           "summary": "Code locators"}
+                if getattr(self, "_locators_from_recall", False):
+                    section["locators"] = [{"id": locator["id"],
+                                            "path": locator.get("path"),
+                                            "symbol": locator.get("symbol")}
+                                           for locator in locators]
+                elif locators:
+                    # 폴백은 좁히지 않고 전량 적재한다 — 조용히 넘기면 받는 쪽은 자기가 색인을
+                    # 안 줘서 무더기를 받았다는 걸 알 방법이 없다(실코퍼스에서 3634개).
+                    warnings.append(
+                        f"색인 없이 회상이 꺼져 검수완료 CodeLocator {len(locators)}개를 "
+                        "전량 적재했다 — 구현위치를 좁히지 못했다(--db로 색인을 지정하면 좁혀진다)")
+                sections.append(section)
             elif intent == "glossary_meaning":
                 # spec §7: "내가 이 용어 말하면 무슨 뜻?" → reviewed DomainMapping 우선, GlossaryTerm은 alias.
                 matched_mappings = self._matched_mappings(canonical)
@@ -501,7 +520,9 @@ class QueryRouter:
         상위라 (1) 단독이면 0건이 흔하다, 실코퍼스 실측)."""
         recalled = self._recall(query)
         if recalled is None:
+            self._locators_from_recall = False
             return self._reviewed_by_kind("CodeLocator")
+        self._locators_from_recall = True
         locators: list[dict] = []
         seen: set[str] = set()
         for hit in recalled["results"]:
