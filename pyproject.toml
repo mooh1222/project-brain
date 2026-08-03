@@ -8,6 +8,8 @@ dependencies = [
     "sqlite-vec",
     "sentence-transformers",
     "kiwipiepy",
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-cpp==0.23.4",
 ]
 
 [project.optional-dependencies]

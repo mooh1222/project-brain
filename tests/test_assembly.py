@@ -21,6 +21,10 @@ class DeriveIdTest(unittest.TestCase):
         self.assertEqual(derive_id("CodeLocator", "ctx", "a"), "code.ctx.a")
         self.assertEqual(derive_id("EvidenceRef", "ctx", "a"), "evref.ctx.a")
 
+    def test_noncanonical_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            derive_id("DomainMapping", "ctx", "bad_key")
+
 
 class BuildCodeEvidenceTest(unittest.TestCase):
     def test_anchor_expands_to_locator_and_evref(self):
@@ -29,7 +33,6 @@ class BuildCodeEvidenceTest(unittest.TestCase):
             "code_anchors": [{"key": "hit-hook", "path": "TrapObject.h",
                               "symbol": "TrapObject::_doTrapOnPop", "line_start": 206,
                               "line_end": 206, "quote": "virtual void _doTrapOnPop(...){};",
-                              "verified_at": NOW,
                               "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
@@ -41,7 +44,9 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         self.assertEqual(loc["commit_sha"], "abc123")
         self.assertEqual(loc["repo"], "demoapp")
         self.assertEqual(loc["verified_quote"], "virtual void _doTrapOnPop(...){};")
-        self.assertEqual(loc["verified_at"], NOW)
+        self.assertNotIn("verified_at", loc)
+        self.assertEqual(loc["title"], "TrapObject::_doTrapOnPop")
+        self.assertEqual(ev["title"], "TrapObject::_doTrapOnPop")
         self.assertNotIn("line_start", loc)
         self.assertNotIn("line_end", loc)
         self.assertEqual(ev["id"], "evref.ctx.hit-hook")
@@ -84,7 +89,7 @@ class BuildCodeEvidenceTest(unittest.TestCase):
         notes = {
             "context": {"key": "ctx", "commit": "abc123", "now": NOW, "repo": "demoapp"},
             "code_anchors": [{"key": "no-line", "path": "Foo.cpp", "symbol": "Foo::bar",
-                              "quote": "void bar();", "verified_at": NOW,
+                              "quote": "void bar();",
                               "manifest": "manifest.ctx.code-v2"}],
         }
         objs = build_code_evidence(notes, NOW)
@@ -97,6 +102,20 @@ class BuildCodeEvidenceTest(unittest.TestCase):
 
 def _store(*objs):
     return BrainStore({o["id"]: o for o in objs})
+
+
+def _context(ctx="ctx"):
+    return build_context(
+        {
+            "context": {
+                "key": ctx,
+                "repo": "demoapp",
+                "display_name": "합성 컨텍스트",
+                "boundary_summary": "합성 테스트 경계",
+            },
+        },
+        NOW,
+    )[0]
 
 
 class ResolveRefsTest(unittest.TestCase):
@@ -139,6 +158,7 @@ class BuildMappingsTest(unittest.TestCase):
         self.assertEqual(m["id"], "mapping.ctx.hit-trigger")
         self.assertEqual(m["kind"], "DomainMapping")
         self.assertEqual(m["status"], "reviewed")
+        self.assertEqual(m["context_id"], "context.ctx")
         self.assertEqual(sorted(m["glossary_term_ids"]),
                          ["g.ctx.do-trap-on-near-bubble-pop", "g.ctx.hit"])
         self.assertEqual(m["code_locator_ids"], ["code.ctx.hit-hook"])
@@ -234,7 +254,7 @@ class AssemblyClaimContractTest(unittest.TestCase):
                          "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "anchor", "path": "a.cpp", "symbol": "run",
                               "manifest": "manifest.ctx.code", "quote": "\tfirst();\n\tsecond();",
-                              "verified_at": NOW}],
+                              }],
             "glossary": [{"key": "term", "term": "Term", "definition": "definition",
                           "evidence_refs": ["evref.ctx.anchor"]}],
             "mappings": [{"key": "mapping", "canonical_summary": "summary",
@@ -304,13 +324,11 @@ class AssemblyClaimContractTest(unittest.TestCase):
         self.assertTrue(any("acl" in error and "비어" in error for error in errors))
         self.assertTrue(any("captured_at" in error and "비어" in error for error in errors))
 
-    def test_code_anchor_quote_and_verification_time_are_required_before_build(self):
+    def test_code_anchor_quote_is_required_before_build(self):
         notes = self._notes()
         notes["code_anchors"][0]["quote"] = ""
-        notes["code_anchors"][0]["verified_at"] = ""
         errors = validate_notes(notes)
         self.assertTrue(any("quote" in error and "비어" in error for error in errors))
-        self.assertTrue(any("verified_at" in error and "비어" in error for error in errors))
 
     def test_code_anchor_symbol_is_required_before_build(self):
         """symbol이 비면 title도 비고 색인 표면이 path 하나로 쪼그라든다 — 입구에서 막는다."""
@@ -760,8 +778,8 @@ class ValidateNotesTest(unittest.TestCase):
         errors = validate_notes({"context": {"key": "c", "commit": "x", "now": NOW},
                                  "code_anchors": [{"key": "k", "path": "Foo.cpp",
                                                    "symbol": "Foo::bar",
-                                                   "manifest": "manifest.c.code", "quote": "void bar();",
-                                                   "verified_at": NOW}]})
+                                                   "manifest": "manifest.c.code",
+                                                   "quote": "void bar();"}]})
         self.assertEqual(errors, [])
 
 
@@ -774,11 +792,11 @@ class BuildIntegrationTest(unittest.TestCase):
                          "captured_at": NOW, "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
-                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
+                              "manifest": "manifest.ctx.code-v2"}],
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
-        result = build(notes, _store(), NOW)
+        result = build(notes, _store(_context()), NOW)
         self.assertEqual(result["errors"], [])
         ids = {o["id"] for o in result["objects"]}
         self.assertIn("g.ctx.hit", ids)
@@ -787,9 +805,10 @@ class BuildIntegrationTest(unittest.TestCase):
 
     def test_build_warns_isolated_new_leaf_non_blocking(self):
         # C8: 이번 묶음 신규 잎 중 인바운드 0(아무도 안 가리킴)을 비차단 warnings로 보고한다.
-        # 매핑 없이 적재된 GlossaryTerm·CodeLocator는 고립 잎 → 경고. evref는 term의
-        # evidence_refs가 가리키므로 경고 아님(묶음 내 참조). 차단 아님(errors 비어야 함 —
-        # candidate 일시 고립은 정상). 점검 잎 kind·역인덱스는 C1(graph.py)과 공유.
+        # 매핑 없이 적재된 GlossaryTerm은 고립 잎 → 경고. evref는 term의 evidence_refs가,
+        # locator는 evref.locator.code_locator_id가 가리키므로 둘 다 경고 아님(묶음 내 참조).
+        # 차단 아님(errors 비어야 함 — candidate 일시 고립은 정상). 점검 잎 kind·역인덱스는
+        # C1(graph.py)과 공유.
         notes = {
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},
             "sources": [{"id": "manifest.ctx.code-v2", "source_type": "code_search",
@@ -797,28 +816,31 @@ class BuildIntegrationTest(unittest.TestCase):
                          "captured_at": NOW, "acl": ["team"], "redaction_status": "approved"}],
             "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                               "line_start": 1, "line_end": 1, "quote": "q",
-                              "verified_at": NOW, "manifest": "manifest.ctx.code-v2"}],
+                              "manifest": "manifest.ctx.code-v2"}],
             "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                           "evidence_refs": ["evref.ctx.hit-hook"]}],
         }
-        result = build(notes, _store(), NOW)
+        result = build(notes, _store(_context()), NOW)
         self.assertEqual(result["errors"], [])  # 비차단
         warned = " ".join(result["warnings"])
         self.assertIn("g.ctx.hit", warned)             # 고립 GlossaryTerm → 경고
-        self.assertIn("code.ctx.hit-hook", warned)     # 고립 CodeLocator → 경고
         self.assertNotIn("evref.ctx.hit-hook", warned)  # term이 가리킴 → 고립 아님
+        self.assertNotIn("code.ctx.hit-hook", warned)   # evref locator가 가리킴 → 고립 아님
 
     def test_build_dangling_ref_caught(self):
         # glossary가 없는 evref를 가리키면 2층(dangling)이 잡는다
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "glossary": [{"key": "x", "term": "x", "definition": "d",
                                "evidence_refs": ["evref.ctx.nonexistent"]}]}
-        result = build(notes, _store(), NOW)
-        self.assertTrue(result["errors"])
+        result = build(notes, _store(_context()), NOW)
+        self.assertTrue(
+            any("dangling evidence_ref evref.ctx.nonexistent" in error
+                for error in result["errors"]),
+            result["errors"],
+        )
 
     def test_build_evref_dangling_manifest_caught(self):
-        # extra_objects로 들어온 EvidenceRef가 없는 manifest를 가리키면 build 2층이 잡는다
-        # (lint는 EvidenceRef→manifest를 안 보므로 build가 직접 검사)
+        # extra_objects로 들어온 EvidenceRef가 없는 manifest를 가리키면 build 2층이 잡는다.
         evref = {"id": "evref.ctx.x", "kind": "EvidenceRef", "status": "reviewed",
                  "truth_role": "reference", "title": "e",
                  "evidence_manifest_id": "manifest.ctx.missing", "ref_type": "session_turn",
@@ -827,17 +849,25 @@ class BuildIntegrationTest(unittest.TestCase):
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "extra_objects": [evref]}
         result = build(notes, _store(), NOW)
-        self.assertTrue(any("evidence_manifest_id" in e for e in result["errors"]))
+        self.assertEqual(
+            [error for error in result["errors"]
+             if "dangling evidence_manifest_id manifest.ctx.missing" in error],
+            ["evref.ctx.x: dangling evidence_manifest_id manifest.ctx.missing"],
+        )
 
     def test_build_union_target_missing_caught(self):
-        # DomainContext.glossary_term_ids union 대상이 store·묶음 어디에도 없으면 build가 잡는다
-        # (lint는 DomainMapping 링크만 봐서 DomainContext union은 사각지대)
+        # DomainContext.glossary_term_ids union 대상이 store·묶음 어디에도 없으면
+        # generic lint와 별도로 update 위치를 밝힌 진단을 보존한다.
         store = _store(*_ref_objs())  # context.ctx 포함
         notes = {"context": {"key": "ctx", "commit": "a", "now": NOW, "repo": "demoapp"},
                  "updates": [{"id": "context.ctx", "expected_updated_at": T0,
                               "union": {"glossary_term_ids": ["g.ctx.nonexistent"]}}]}
         result = build(notes, store, NOW)
-        self.assertTrue(any("g.ctx.nonexistent" in e for e in result["errors"]))
+        self.assertIn(
+            "updates context.ctx: union glossary_term_ids 대상 g.ctx.nonexistent 없음 "
+            "(store·이번 묶음 어디에도)",
+            result["errors"],
+        )
 
     def test_build_emits_preconditions_for_updates(self):
         # title(비-claim) set + 참조 닫힌 픽스처 → errors 없이 preconditions 방출
@@ -847,7 +877,56 @@ class BuildIntegrationTest(unittest.TestCase):
                               "set": {"title": "새 제목"}}]}
         result = build(notes, store, NOW)
         self.assertEqual(result["errors"], [])
-        self.assertEqual(result["preconditions"], {"mapping.ctx.hook": T0})
+        import hashlib
+
+        expected = hashlib.sha256(
+            BrainStore.object_bytes(store.get("mapping.ctx.hook"))
+        ).hexdigest()
+        self.assertEqual(
+            result["preconditions"],
+            {"mapping.ctx.hook": expected},
+        )
+
+
+class CodeAnchorMutationInputTest(unittest.TestCase):
+    def _notes(self):
+        return {
+            "context": {
+                "key": "ctx",
+                "commit": "a" * 40,
+                "repo": "demoapp",
+            },
+            "code_anchors": [
+                {
+                    "key": "foo",
+                    "path": "Foo.cpp",
+                    "symbol": "Foo::bar",
+                    "manifest": "manifest.ctx.code",
+                    "quote": "void Foo::bar() {}",
+                }
+            ],
+        }
+
+    def test_code_anchor_build_uses_symbol_titles_and_omits_verified_at(self):
+        loc, evref = build_code_evidence(self._notes(), NOW)
+
+        self.assertEqual(loc["title"], "Foo::bar")
+        self.assertNotIn("verified_at", loc)
+        self.assertEqual(evref["title"], "Foo::bar")
+
+    def test_code_anchor_rejects_external_title_and_verified_at(self):
+        for field, value in (
+            ("title", "외부 제목"),
+            ("verified_at", "1900-01-01T00:00:00Z"),
+        ):
+            notes = self._notes()
+            notes["code_anchors"][0][field] = value
+            with self.subTest(field=field):
+                errors = validate_notes(notes)
+                self.assertTrue(
+                    any(field in error and "허용" in error for error in errors),
+                    errors,
+                )
 
 
 class BuildDecisionsTest(unittest.TestCase):
@@ -939,11 +1018,11 @@ class BuildDecisionsTest(unittest.TestCase):
         self.assertEqual(validate_notes(notes), [])  # 1층 통과(하드코딩 튜플 아닌 dict 참조)
         objs = build_decisions(notes, NOW)
         evs = {o["id"]: o for o in objs if o["kind"] == "EvidenceRef"}
-        self.assertEqual(evs["evref.ctx.slack-C123-p456"]["ref_type"], "slack_thread")
+        self.assertEqual(evs["evref.ctx.slack-c123-p456"]["ref_type"], "slack_thread")
         self.assertEqual(evs["evref.ctx.spec-luckybox-v2"]["ref_type"], "spec_section")
         self.assertEqual(evs["evref.ctx.wiki-luckybox-page"]["ref_type"], "wiki_section")
         # 커밋 외 타입은 노트가 준 locator를 그대로 쓴다(인스턴스 URL은 엔진이 안 만듦)
-        self.assertEqual(evs["evref.ctx.slack-C123-p456"]["locator"],
+        self.assertEqual(evs["evref.ctx.slack-c123-p456"]["locator"],
                          "https://slack/archives/C123/p456")
 
     def test_decision_evidence_unsupported_type_still_rejected(self):
@@ -974,7 +1053,7 @@ class BuildWithDecisionsTest(unittest.TestCase):
             "code_anchors": [
                 {"key": "filter-fn", "path": "BallGenerator.cpp",
                  "symbol": "_getEnableGenerateType", "manifest": "manifest.ctx.code",
-                 "quote": "// 셀렉 후보 자격 판정", "verified_at": NOW},
+                 "quote": "// 셀렉 후보 자격 판정"},
             ],
             "mappings": [
                 {"key": "enable-filter", "canonical_summary": "셀렉 후보 필터",

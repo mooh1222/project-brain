@@ -1,5 +1,6 @@
 from project_brain.hash_utils import sha256_text as _sha256_text
 from project_brain.hash_utils import source_content_hash as _source_content_hash
+from project_brain.id_grammar import format_id
 from project_brain.store import BrainStore
 
 GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
@@ -113,7 +114,11 @@ def build_context_projection(
     source_content_hash = _source_content_hash(source_objects)
     content = render_context_markdown(store, context_id)
     projection_hash = _sha256_text(content)
-    projection_id = f"projection.{context.get('context_key', context_id)}.context-md"
+    projection_id = format_id(
+        "ContextProjection",
+        ctx=context.get("context_key", context_id),
+        format="context_md",
+    )
     projection = {
         "id": projection_id,
         "kind": "ContextProjection",
@@ -160,7 +165,12 @@ def build_reuse_projection(
     projection_hash = _sha256_text(reuse_payload)
     ckey = context.get("context_key", context_id)
     return {
-        "id": f"projection.{ckey}.{requirement_key}.reuse",
+        "id": format_id(
+            "ContextProjection",
+            ctx=ckey,
+            requirement_key=requirement_key,
+            format="prompt_payload",
+        ),
         "kind": "ContextProjection",
         "schema_version": SCHEMA_VERSION,
         "status": "candidate",

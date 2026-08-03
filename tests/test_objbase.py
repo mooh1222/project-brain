@@ -35,7 +35,9 @@ class TestBase(unittest.TestCase):
 class TestReviewRecord(unittest.TestCase):
     def test_review_record_assembles_required_fields(self):
         rr = review_record(
-            "review.g.x", target_object_id="g.x", reviewer="user-confirmed",
+            "review.g.neutral.x",
+            target_object_id="g.neutral.x",
+            reviewer="user-confirmed",
             reviewed_at=T, verdict="approved", tags=["t"], created_at=T, updated_at=T,
         )
         self.assertEqual(validate_object(rr), [])

@@ -6,11 +6,11 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from project_brain.ingest import IngestError, ingest
+from project_brain.ingest import IngestError
 from project_brain.objbase import base
 from project_brain.router import QueryRouter
 from project_brain.store import BrainStore
-from tests.test_ingest import context, evidence_ref, manifest
+from tests.test_ingest import context, evidence_ref, ingest, manifest
 
 T1 = "2026-07-01T00:00:00+09:00"
 T2 = "2026-07-02T00:00:00+09:00"
@@ -21,7 +21,9 @@ def mapping(mid, status, *, supersedes=None):
         "id": mid, "kind": "DomainMapping", "status": status, "truth_role": "domain",
         "title": mid, "context_id": "context.neutral", "mapping_key": mid.rsplit(".", 1)[-1],
         "canonical_summary": "현재 의미", "meaning": "현재 의미", "boundary": "경계",
-        "glossary_term_ids": [], "decision_record_ids": [], "evidence_refs": ["ev.ref"],
+        "glossary_term_ids": [],
+        "decision_record_ids": [],
+        "evidence_refs": ["evref.neutral.ref"],
     }, tags=["neutral"], created_at=T1, updated_at=T2)
     if supersedes:
         obj["supersedes_mapping_ids"] = supersedes
@@ -74,10 +76,10 @@ class UpdateRulesEngineTest(unittest.TestCase):
         self.assertEqual(store.get(new["id"])["status"], "reviewed")
 
     def test_temporal_change_closes_old_fact_and_keeps_current_history_boundary(self):
-        old_event = event("event.scale.old", T1)
+        old_event = event("ledger.scale.old", T1)
         old = fact("fact.scale.old", "0.82", event_id=old_event["id"], valid_from=T1)
         ingest(self.root, [old_event, old])
-        new_event = event("event.scale.new", T2)
+        new_event = event("ledger.scale.new", T2)
         new = fact("fact.scale.new", "0.85", event_id=new_event["id"],
                    valid_from=T2, supersedes=old["id"])
 

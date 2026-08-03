@@ -4,6 +4,7 @@
 spec: docs/superpowers/specs/2026-06-14-project-brain-stale-check-design.md
 """
 import io
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -13,7 +14,18 @@ from pathlib import Path
 from unittest import mock
 
 from project_brain import cli
+from project_brain.code_verify import VerifiedLocator
+from project_brain.id_grammar import format_id, parse_id
+from project_brain.mutation import (
+    MutationOperation,
+    MutationRequest,
+    MutationService,
+    corpus_fingerprint,
+)
+from project_brain.repo_context import RepoContext, resolve_repo_context
 from project_brain.store import BrainStore
+
+ENGINE_SHA = "e" * 40
 
 
 def fake_git_runner(target_head, changed, *, merge_base=None):
@@ -48,27 +60,96 @@ def fake_git_runner(target_head, changed, *, merge_base=None):
 
 def code_locator(cid, *, path, commit_sha, symbol="sym"):
     from project_brain.objbase import base
+    cid = format_id(
+        "CodeLocator",
+        ctx="x",
+        anchor_key=cid.rsplit(".", 1)[-1],
+    )
     return base({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
         "title": f"Code: {symbol}", "repo": "demoapp", "path": path, "symbol": symbol,
         "locator_source": "rg", "verified_at": "2026-06-12T00:00:00Z",
+        "verified_quote": f"synthetic quote for {symbol}",
         "commit_sha": commit_sha, "evidence_refs": [],
     }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
 
 
 def domain_mapping(mid, *, code_locator_ids, status="reviewed"):
     from project_brain.objbase import base
+    mid = format_id(
+        "DomainMapping",
+        ctx="x",
+        key=mid.rsplit(".", 1)[-1].replace("_", "-"),
+    )
+    canonical_locator_ids = []
+    for cid in code_locator_ids:
+        kind = "GlossaryTerm" if cid.startswith("g.") else "CodeLocator"
+        field = "key" if kind == "GlossaryTerm" else "anchor_key"
+        canonical_locator_ids.append(format_id(
+            kind,
+            ctx="x",
+            **{field: cid.rsplit(".", 1)[-1].replace("_", "-")},
+        ))
     obj = {
         "id": mid, "kind": "DomainMapping", "status": status, "truth_role": "domain",
-        "title": f"Mapping {mid}", "context_id": "context.x", "mapping_key": mid,
+        "title": f"Mapping {mid}", "context_id": "context.x",
+        "mapping_key": parse_id(mid, "DomainMapping").key,
         "canonical_summary": "요약", "meaning": "의미", "boundary": "경계",
         "glossary_term_ids": [], "decision_record_ids": [],
-        "code_locator_ids": code_locator_ids,
-        "evidence_refs": ["ev.x"] if status == "reviewed" else [],
+        "code_locator_ids": canonical_locator_ids,
+        "evidence_refs": ["evref.x.source"] if status == "reviewed" else [],
     }
     if status == "candidate":
         obj["candidate"] = {"candidate_state": "ready_for_review", "candidate_source": "spec"}
     return base(obj, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
+
+
+def lint_support_objects():
+    """MutationService의 merged-store lint를 만족하는 공통 근거·컨텍스트."""
+    from project_brain.objbase import base
+
+    timestamp = "2026-06-12T00:00:00Z"
+    manifest = base({
+        "id": "manifest.x.source",
+        "kind": "EvidenceManifest",
+        "status": "reviewed",
+        "truth_role": "source",
+        "title": "stale-check synthetic source",
+        "source_type": "spec",
+        "locator": "spec://stale-check",
+        "captured_at": timestamp,
+        "captured_by": "test",
+        "sensitivity": "internal",
+        "acl": ["team"],
+        "redaction_status": "approved",
+    }, tags=["x"], created_at=timestamp, updated_at=timestamp)
+    evidence_ref = base({
+        "id": "evref.x.source",
+        "kind": "EvidenceRef",
+        "status": "reviewed",
+        "truth_role": "reference",
+        "title": "stale-check synthetic evidence",
+        "evidence_manifest_id": manifest["id"],
+        "ref_type": "spec_section",
+        "locator": {"section": "synthetic"},
+        "summary": "stale-check synthetic evidence",
+    }, tags=["x"], created_at=timestamp, updated_at=timestamp)
+    context = base({
+        "id": "context.x",
+        "kind": "DomainContext",
+        "status": "reviewed",
+        "truth_role": "domain",
+        "title": "Stale-check context",
+        "context_key": "x",
+        "project_id": "demoapp",
+        "display_name": "Stale-check",
+        "boundary_summary": "stale-check synthetic boundary",
+        "in_scope": ["stale-check"],
+        "out_of_scope": ["other"],
+        "injection_profile": {"default_audience": "coding-agent"},
+        "glossary_term_ids": [],
+    }, tags=["x"], created_at=timestamp, updated_at=timestamp)
+    return manifest, evidence_ref, context
 
 
 def _store(*objs):
@@ -85,14 +166,14 @@ class ComputeClosureTest(unittest.TestCase):
             domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
             domain_mapping("m.sup", code_locator_ids=["code.shared"], status="superseded"),
         )
-        closure = compute_closure(store, "code.shared")
-        self.assertEqual(closure["blocking"], ["m.r1", "m.r2"])
-        self.assertEqual(closure["nonblocking"], ["m.cand", "m.sup"])
+        closure = compute_closure(store, "code.x.shared")
+        self.assertEqual(closure["blocking"], ["mapping.x.r1", "mapping.x.r2"])
+        self.assertEqual(closure["nonblocking"], ["mapping.x.cand", "mapping.x.sup"])
 
     def test_locator_with_no_referencing_mappings(self):
         from project_brain.stale_check import compute_closure
         store = _store(code_locator("code.lonely", path="a/Y.cpp", commit_sha="SHA1"))
-        self.assertEqual(compute_closure(store, "code.lonely"),
+        self.assertEqual(compute_closure(store, "code.x.lonely"),
                          {"blocking": [], "nonblocking": []})
 
 
@@ -102,13 +183,13 @@ class CoverageReportTest(unittest.TestCase):
         from project_brain.stale_check import coverage_report
         # code를 가리키는 EvidenceRef(ref_type=='code_locator')만 가진 uncovered 매핑.
         code_evref = base({
-            "id": "evref.code", "kind": "EvidenceRef", "status": "reviewed",
+            "id": "evref.x.code", "kind": "EvidenceRef", "status": "reviewed",
             "truth_role": "reference", "title": "code ref",
-            "evidence_manifest_id": "ev.m", "ref_type": "code_locator",
-            "locator": {"object_id": "code.z"}, "summary": "코드 근거",
+            "evidence_manifest_id": "manifest.x.source", "ref_type": "code_locator",
+            "locator": {"object_id": "code.x.z"}, "summary": "코드 근거",
         }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
         m_code_evref = domain_mapping("m.codeevref", code_locator_ids=[])
-        m_code_evref["evidence_refs"] = ["evref.code"]
+        m_code_evref["evidence_refs"] = ["evref.x.code"]
         store = _store(
             code_locator("code.a", path="a/X.cpp", commit_sha="SHA1"),
             domain_mapping("m.covered", code_locator_ids=["code.a"]),
@@ -116,28 +197,31 @@ class CoverageReportTest(unittest.TestCase):
             code_evref, m_code_evref,
         )
         report = coverage_report(store)
-        self.assertEqual(report["covered_mappings"], ["m.covered"])
+        self.assertEqual(report["covered_mappings"], ["mapping.x.covered"])
         unc = {u["mapping_id"]: u for u in report["uncovered_mappings"]}
-        self.assertEqual(set(unc), {"m.empty", "m.codeevref"})
-        self.assertEqual(unc["m.empty"]["skipped_reason"], "no_code_locator_ids")
-        self.assertFalse(unc["m.empty"]["has_code_evidence_ref"])
+        self.assertEqual(set(unc), {"mapping.x.empty", "mapping.x.codeevref"})
+        self.assertEqual(unc["mapping.x.empty"]["skipped_reason"], "no_code_locator_ids")
+        self.assertFalse(unc["mapping.x.empty"]["has_code_evidence_ref"])
         # m.codeevref는 code_locator_ids는 없지만 code EvidenceRef를 가짐 → subset 가시화.
-        self.assertTrue(unc["m.codeevref"]["has_code_evidence_ref"])
+        self.assertTrue(unc["mapping.x.codeevref"]["has_code_evidence_ref"])
 
     def test_missing_code_locator_ids_field_is_uncovered(self):
         from project_brain.objbase import base
         from project_brain.stale_check import coverage_report
         # code_locator_ids 키 자체가 없는 매핑도 uncovered(빈 것과 동급).
         m = base({
-            "id": "m.nofield", "kind": "DomainMapping", "status": "reviewed",
+            "id": "mapping.x.nofield", "kind": "DomainMapping", "status": "reviewed",
             "truth_role": "domain", "title": "t", "context_id": "context.x",
-            "mapping_key": "k", "canonical_summary": "s", "meaning": "m",
+            "mapping_key": "nofield", "canonical_summary": "s", "meaning": "m",
             "boundary": "b", "glossary_term_ids": [], "decision_record_ids": [],
-            "evidence_refs": ["ev.x"],
+            "evidence_refs": ["evref.x.source"],
         }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
         store = _store(m)
         report = coverage_report(store)
-        self.assertEqual([u["mapping_id"] for u in report["uncovered_mappings"]], ["m.nofield"])
+        self.assertEqual(
+            [u["mapping_id"] for u in report["uncovered_mappings"]],
+            ["mapping.x.nofield"],
+        )
         self.assertEqual(report["uncovered_mappings"][0]["skipped_reason"], "no_code_locator_ids")
 
 
@@ -303,7 +387,7 @@ class StaleCheckTest(unittest.TestCase):
         report = stale_check(self._corpus(), git_runner=runner, fetch=True)
         self.assertEqual(report["target_head"], "TARGET")
         cand_ids = [c["mapping_id"] for c in report["candidates"]]
-        self.assertEqual(cand_ids, ["m.on_changed"])  # 안 바뀐 code.same 매핑은 제외
+        self.assertEqual(cand_ids, ["mapping.x.on-changed"])  # 안 바뀐 code.same 매핑은 제외
 
     def test_locator_group_carries_closure_and_change_type(self):
         from project_brain.stale_check import stale_check
@@ -311,11 +395,11 @@ class StaleCheckTest(unittest.TestCase):
         report = stale_check(self._corpus(), git_runner=runner, fetch=True)
         self.assertEqual(len(report["locator_group"]), 1)
         g = report["locator_group"][0]
-        self.assertEqual(g["locator_id"], "code.changed")
+        self.assertEqual(g["locator_id"], "code.x.changed")
         self.assertEqual(g["change_type"], "M")
         self.assertEqual(g["from_commit"], "SHA1")
         self.assertEqual(g["target_head"], "TARGET")
-        self.assertEqual(g["blocking_affected_mapping_ids"], ["m.on_changed"])
+        self.assertEqual(g["blocking_affected_mapping_ids"], ["mapping.x.on-changed"])
         self.assertEqual(g["nonblocking_affected_mapping_ids"], [])
 
     def test_coverage_included(self):
@@ -323,7 +407,7 @@ class StaleCheckTest(unittest.TestCase):
         runner = fake_git_runner("TARGET", {})
         report = stale_check(self._corpus(), git_runner=runner, fetch=True)
         uncovered_ids = {u["mapping_id"] for u in report["coverage"]["uncovered_mappings"]}
-        self.assertIn("m.uncovered", uncovered_ids)
+        self.assertIn("mapping.x.uncovered", uncovered_ids)
         self.assertEqual(report["candidates"], [])  # 아무것도 안 바뀌면 후보 0
 
     def test_explicit_target_head_skips_resolve(self):
@@ -346,15 +430,17 @@ class StaleCheckTest(unittest.TestCase):
         runner = fake_git_runner("TARGET",
                                  {("SHA1", "a/A.cpp"): "M", ("SHA1", "a/B.cpp"): "M"})
         report = stale_check(store, git_runner=runner, target_head="TARGET")
-        cand = next(c for c in report["candidates"] if c["mapping_id"] == "m.multi")
+        cand = next(
+            c for c in report["candidates"] if c["mapping_id"] == "mapping.x.multi"
+        )
         locs = {sl["locator_id"] for sl in cand["stale_locators"]}
-        self.assertEqual(locs, {"code.a", "code.b"})
+        self.assertEqual(locs, {"code.x.a", "code.x.b"})
 
     def test_locator_without_commit_sha_skipped(self):
         from project_brain.stale_check import stale_check
         from project_brain.objbase import base
         loc_no_sha = base({
-            "id": "code.nosha", "kind": "CodeLocator", "status": "reviewed",
+            "id": "code.x.nosha", "kind": "CodeLocator", "status": "reviewed",
             "truth_role": "reference", "title": "t", "repo": "demoapp",
             "path": "a/NoSha.cpp", "symbol": "s", "locator_source": "rg",
             "verified_at": "2026-06-12T00:00:00Z", "evidence_refs": [],
@@ -377,9 +463,15 @@ class StaleCheckTest(unittest.TestCase):
             "TARGET", {("WORK", "a/Work.cpp"): "D"}, merge_base={"WORK": "OLDBASE"})
         report = stale_check(store, git_runner=runner, target_head="TARGET")
         self.assertEqual(report["candidates"], [])          # 미머지 → 후보 아님
-        self.assertEqual([u["locator_id"] for u in report["unmerged_anchors"]], ["code.work"])
+        self.assertEqual(
+            [u["locator_id"] for u in report["unmerged_anchors"]],
+            ["code.x.work"],
+        )
         self.assertEqual(report["unmerged_anchors"][0]["reason"], "not_ancestor")
-        self.assertEqual(report["unmerged_anchors"][0]["blocking_affected_mapping_ids"], ["m.work"])
+        self.assertEqual(
+            report["unmerged_anchors"][0]["blocking_affected_mapping_ids"],
+            ["mapping.x.work"],
+        )
 
     def test_stale_check_cache_keeps_code_and_branch_axes_independent(self):
         from project_brain.stale_check import advisories_by_mapping, build_stale_set, stale_check
@@ -400,12 +492,15 @@ class StaleCheckTest(unittest.TestCase):
             target_head="TARGET",
         )
         adv = advisories_by_mapping(build_stale_set(report, now="t"))
-        self.assertNotIn("m.same", adv)  # unchanged + merged
-        self.assertEqual((adv["m.changed"]["code_changed"], adv["m.changed"]["unmerged_anchor"]),
+        self.assertNotIn("mapping.x.same", adv)  # unchanged + merged
+        self.assertEqual((adv["mapping.x.changed"]["code_changed"],
+                          adv["mapping.x.changed"]["unmerged_anchor"]),
                          (True, False))  # changed + merged
-        self.assertEqual((adv["m.unmerged"]["code_changed"], adv["m.unmerged"]["unmerged_anchor"]),
+        self.assertEqual((adv["mapping.x.unmerged"]["code_changed"],
+                          adv["mapping.x.unmerged"]["unmerged_anchor"]),
                          (False, True))  # unchanged + unmerged
-        self.assertEqual((adv["m.both"]["code_changed"], adv["m.both"]["unmerged_anchor"]),
+        self.assertEqual((adv["mapping.x.both"]["code_changed"],
+                          adv["mapping.x.both"]["unmerged_anchor"]),
                          (True, True))  # changed + unmerged
 
     def test_abbreviated_anchor_sha_detected_as_merged(self):
@@ -420,7 +515,10 @@ class StaleCheckTest(unittest.TestCase):
             "TARGET", {("b27a23e385", "a/Ab.cpp"): "M"},
             merge_base={"b27a23e385": "b27a23e38598ffcaffee0011"})  # 전체 sha
         report = stale_check(store, git_runner=runner, target_head="TARGET")
-        self.assertEqual([c["mapping_id"] for c in report["candidates"]], ["m.ab"])
+        self.assertEqual(
+            [c["mapping_id"] for c in report["candidates"]],
+            ["mapping.x.ab"],
+        )
         self.assertEqual(report["unmerged_anchors"], [])
 
 
@@ -452,12 +550,18 @@ class CliStaleCheckTest(unittest.TestCase):
             ["stale-check", "--brain-root", str(self.root), "--no-fetch"], runner)
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
-        self.assertEqual([c["mapping_id"] for c in payload["candidates"]], ["m.on_changed"])
+        self.assertEqual(
+            [c["mapping_id"] for c in payload["candidates"]],
+            ["mapping.x.on-changed"],
+        )
         uncovered_ids = {u["mapping_id"] for u in payload["coverage"]["uncovered_mappings"]}
-        self.assertIn("m.uncovered", uncovered_ids)
+        self.assertIn("mapping.x.uncovered", uncovered_ids)
         self.assertEqual(payload["target_head"], "TARGET")
         # 읽기 전용: locator의 commit_sha가 그대로다(stale-check는 갱신 안 함).
-        self.assertEqual(BrainStore.load(self.root).get("code.changed")["commit_sha"], "SHA1")
+        self.assertEqual(
+            BrainStore.load(self.root).get("code.x.changed")["commit_sha"],
+            "SHA1",
+        )
 
     def test_stale_check_surfaces_unmerged_anchors(self):
         for obj in (
@@ -471,7 +575,10 @@ class CliStaleCheckTest(unittest.TestCase):
             ["stale-check", "--brain-root", str(self.root), "--no-fetch"], runner)
         self.assertEqual(rc, 0)
         self.assertEqual(payload["candidates"], [])
-        self.assertEqual([u["locator_id"] for u in payload["unmerged_anchors"]], ["code.work"])
+        self.assertEqual(
+            [u["locator_id"] for u in payload["unmerged_anchors"]],
+            ["code.x.work"],
+        )
 
     def test_stale_check_write_cache_persists_stale_set(self):
         from project_brain.stale_check import load_stale_set
@@ -487,7 +594,7 @@ class CliStaleCheckTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("cache_written", payload)
         ss = load_stale_set(self.root)
-        self.assertEqual(ss["stale_mapping_ids"], ["m.on_changed"])
+        self.assertEqual(ss["stale_mapping_ids"], ["mapping.x.on-changed"])
         self.assertEqual(ss["target_head"], "TARGET")
 
     def test_stale_check_git_error_returns_rc1(self):
@@ -519,19 +626,19 @@ class StaleSetCacheTest(unittest.TestCase):
         report = {
             "target_head": "TARGET",
             "candidates": [{
-                "mapping_id": "m.a", "mapping_key": "m.a",
+                "mapping_id": "mapping.x.a", "mapping_key": "a",
                 "stale_locators": [
-                    {"locator_id": "code.x", "path": "a/X.cpp",
+                    {"locator_id": "code.x.x", "path": "a/X.cpp",
                      "change_type": "M", "from_commit": "SHA1"}],
             }],
         }
         ss = build_stale_set(report, now="2026-06-25T12:00:00+09:00")
         self.assertEqual(ss["target_head"], "TARGET")
         self.assertEqual(ss["computed_at"], "2026-06-25T12:00:00+09:00")
-        self.assertEqual(ss["stale_mapping_ids"], ["m.a"])
-        self.assertEqual(ss["detail"]["m.a"], {
+        self.assertEqual(ss["stale_mapping_ids"], ["mapping.x.a"])
+        self.assertEqual(ss["detail"]["mapping.x.a"], {
             "code_changed": True, "unmerged_anchor": False, "unmerged_reasons": [],
-            "locator_ids": ["code.x"], "from_commits": ["SHA1"],
+            "locator_ids": ["code.x.x"], "from_commits": ["SHA1"],
             "change_types": ["M"], "paths": ["a/X.cpp"],
         })
 
@@ -540,42 +647,54 @@ class StaleSetCacheTest(unittest.TestCase):
         report = {
             "target_head": "TARGET",
             "candidates": [
-                {"mapping_id": "m.changed", "stale_locators": [
-                    {"locator_id": "code.changed", "path": "a/Changed.cpp",
+                {"mapping_id": "mapping.x.changed", "stale_locators": [
+                    {"locator_id": "code.x.changed", "path": "a/Changed.cpp",
                      "change_type": "M", "from_commit": "SHA1"}]},
-                {"mapping_id": "m.both", "stale_locators": [
-                    {"locator_id": "code.b", "path": "z/B.cpp",
+                {"mapping_id": "mapping.x.both", "stale_locators": [
+                    {"locator_id": "code.x.b", "path": "z/B.cpp",
                      "change_type": "D", "from_commit": "SHA2"},
-                    {"locator_id": "code.a", "path": "a/A.cpp",
+                    {"locator_id": "code.x.a", "path": "a/A.cpp",
                      "change_type": "M", "from_commit": "SHA1"}]},
             ],
             "unmerged_anchors": [
-                {"locator_id": "code.unmerged", "path": "u/Only.cpp", "from_commit": "WORK",
-                 "reason": "not_ancestor", "blocking_affected_mapping_ids": ["m.unmerged"]},
-                {"locator_id": "code.c", "path": "c/C.cpp", "from_commit": "SHA3",
-                 "reason": "anchor_unverifiable", "blocking_affected_mapping_ids": ["m.both"]},
-                {"locator_id": "code.a", "path": "a/A.cpp", "from_commit": "SHA1",
-                 "reason": "not_ancestor", "blocking_affected_mapping_ids": ["m.both"]},
+                {"locator_id": "code.x.unmerged", "path": "u/Only.cpp",
+                 "from_commit": "WORK", "reason": "not_ancestor",
+                 "blocking_affected_mapping_ids": ["mapping.x.unmerged"]},
+                {"locator_id": "code.x.c", "path": "c/C.cpp", "from_commit": "SHA3",
+                 "reason": "anchor_unverifiable",
+                 "blocking_affected_mapping_ids": ["mapping.x.both"]},
+                {"locator_id": "code.x.a", "path": "a/A.cpp", "from_commit": "SHA1",
+                 "reason": "not_ancestor",
+                 "blocking_affected_mapping_ids": ["mapping.x.both"]},
             ],
         }
         stale_set = build_stale_set(report, now="2026-07-23T12:00:00+09:00")
         adv = advisories_by_mapping(stale_set)
 
-        self.assertEqual(stale_set["stale_mapping_ids"], ["m.both", "m.changed"])
-        self.assertNotIn("m.unchanged_merged", adv)
-        self.assertEqual(adv["m.changed"]["code_changed"], True)
-        self.assertEqual(adv["m.changed"]["unmerged_anchor"], False)
-        self.assertEqual(adv["m.unmerged"]["code_changed"], False)
-        self.assertEqual(adv["m.unmerged"]["unmerged_anchor"], True)
-        self.assertEqual(adv["m.both"]["code_changed"], True)
-        self.assertEqual(adv["m.both"]["unmerged_anchor"], True)
-        self.assertEqual(adv["m.both"]["unmerged_reasons"],
+        self.assertEqual(
+            stale_set["stale_mapping_ids"],
+            ["mapping.x.both", "mapping.x.changed"],
+        )
+        self.assertNotIn("mapping.x.unchanged-merged", adv)
+        self.assertEqual(adv["mapping.x.changed"]["code_changed"], True)
+        self.assertEqual(adv["mapping.x.changed"]["unmerged_anchor"], False)
+        self.assertEqual(adv["mapping.x.unmerged"]["code_changed"], False)
+        self.assertEqual(adv["mapping.x.unmerged"]["unmerged_anchor"], True)
+        self.assertEqual(adv["mapping.x.both"]["code_changed"], True)
+        self.assertEqual(adv["mapping.x.both"]["unmerged_anchor"], True)
+        self.assertEqual(adv["mapping.x.both"]["unmerged_reasons"],
                          ["anchor_unverifiable", "not_ancestor"])
-        self.assertEqual(adv["m.both"]["locator_ids"], ["code.a", "code.b", "code.c"])
-        self.assertEqual(adv["m.both"]["from_commits"], ["SHA1", "SHA2", "SHA3"])
-        self.assertEqual(adv["m.both"]["paths"], ["a/A.cpp", "c/C.cpp", "z/B.cpp"])
-        self.assertEqual(adv["m.both"]["target_head"], "TARGET")
-        self.assertEqual(adv["m.both"]["computed_at"], "2026-07-23T12:00:00+09:00")
+        self.assertEqual(
+            adv["mapping.x.both"]["locator_ids"],
+            ["code.x.a", "code.x.b", "code.x.c"],
+        )
+        self.assertEqual(adv["mapping.x.both"]["from_commits"], ["SHA1", "SHA2", "SHA3"])
+        self.assertEqual(adv["mapping.x.both"]["paths"], ["a/A.cpp", "c/C.cpp", "z/B.cpp"])
+        self.assertEqual(adv["mapping.x.both"]["target_head"], "TARGET")
+        self.assertEqual(
+            adv["mapping.x.both"]["computed_at"],
+            "2026-07-23T12:00:00+09:00",
+        )
 
     def test_build_stale_set_keeps_nonblocking_unmerged_mapping_advisory(self):
         from project_brain.stale_check import advisories_by_mapping, build_stale_set
@@ -583,16 +702,16 @@ class StaleSetCacheTest(unittest.TestCase):
             "target_head": "TARGET",
             "candidates": [],
             "unmerged_anchors": [{
-                "locator_id": "code.candidate", "path": "a/Candidate.cpp",
+                "locator_id": "code.x.candidate", "path": "a/Candidate.cpp",
                 "from_commit": "WORK", "reason": "not_ancestor",
-                "nonblocking_affected_mapping_ids": ["m.candidate"],
+                "nonblocking_affected_mapping_ids": ["mapping.x.candidate"],
             }],
         }
         stale_set = build_stale_set(report, now="t")
         self.assertEqual(stale_set["stale_mapping_ids"], [])
-        self.assertEqual(advisories_by_mapping(stale_set)["m.candidate"], {
+        self.assertEqual(advisories_by_mapping(stale_set)["mapping.x.candidate"], {
             "code_changed": False, "unmerged_anchor": True,
-            "unmerged_reasons": ["not_ancestor"], "locator_ids": ["code.candidate"],
+            "unmerged_reasons": ["not_ancestor"], "locator_ids": ["code.x.candidate"],
             "from_commits": ["WORK"], "change_types": [], "paths": ["a/Candidate.cpp"],
             "target_head": "TARGET", "computed_at": "t",
         })
@@ -608,19 +727,26 @@ class StaleSetCacheTest(unittest.TestCase):
     def test_advisories_by_mapping(self):
         from project_brain.stale_check import advisories_by_mapping
         ss = {"target_head": "T", "computed_at": "t2",
-              "stale_mapping_ids": ["m.a"],
-              "detail": {"m.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}}}
+              "stale_mapping_ids": ["mapping.x.a"],
+              "detail": {
+                  "mapping.x.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}
+              }}
         adv = advisories_by_mapping(ss)
-        self.assertEqual(adv["m.a"], {
+        self.assertEqual(adv["mapping.x.a"], {
             "code_changed": True, "unmerged_anchor": False, "unmerged_reasons": [],
             "locator_ids": [], "from_commits": [], "change_types": ["M"],
             "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t2"})
 
     def test_advisories_by_mapping_accepts_legacy_cache_without_branch_fields(self):
         from project_brain.stale_check import advisories_by_mapping
-        legacy = {"target_head": "T", "computed_at": "t2", "stale_mapping_ids": ["m.a"],
-                  "detail": {"m.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}}}
-        self.assertEqual(advisories_by_mapping(legacy)["m.a"], {
+        legacy = {
+            "target_head": "T", "computed_at": "t2",
+            "stale_mapping_ids": ["mapping.x.a"],
+            "detail": {
+                "mapping.x.a": {"change_types": ["M"], "paths": ["a/X.cpp"]}
+            },
+        }
+        self.assertEqual(advisories_by_mapping(legacy)["mapping.x.a"], {
             "code_changed": True, "unmerged_anchor": False, "unmerged_reasons": [],
             "locator_ids": [], "from_commits": [], "change_types": ["M"],
             "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t2"})
@@ -632,87 +758,281 @@ class StaleSetCacheTest(unittest.TestCase):
 
 
 class MarkCheckedTest(unittest.TestCase):
-    def _shared(self):
-        # code.shared를 reviewed 매핑 둘이 공유 + candidate 1 + superseded 1이 가리킴.
+    def _repo(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        repo = Path(td.name).resolve()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=repo,
+            check=True,
+        )
+        source = repo / "Foo.cpp"
+        source.write_text("void Foo::bar() {}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "Foo.cpp"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "old"], cwd=repo, check=True)
+        old = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        source.write_text(
+            "void Foo::bar() {}\n// reviewed target\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "Foo.cpp"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "target"], cwd=repo, check=True)
+        checked = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        context = resolve_repo_context(
+            repo,
+            expected_repo_id="demoapp",
+            configured_repo_id="demoapp",
+            expected_revision_ref=checked,
+        )
+        return context, old, checked
+
+    def _shared(self, old):
+        locator = code_locator(
+            "code.shared",
+            path="Foo.cpp",
+            commit_sha=old,
+            symbol="Foo::bar",
+        )
+        locator["verified_quote"] = "void Foo::bar() {}"
         return _store(
-            code_locator("code.shared", path="a/X.cpp", commit_sha="OLD"),
+            locator,
             domain_mapping("m.r1", code_locator_ids=["code.shared"]),
             domain_mapping("m.r2", code_locator_ids=["code.shared"]),
-            domain_mapping("m.cand", code_locator_ids=["code.shared"], status="candidate"),
-            domain_mapping("m.sup", code_locator_ids=["code.shared"], status="superseded"),
+            domain_mapping(
+                "m.cand",
+                code_locator_ids=["code.shared"],
+                status="candidate",
+            ),
+            domain_mapping(
+                "m.sup",
+                code_locator_ids=["code.shared"],
+                status="superseded",
+            ),
         )
 
-    def test_full_closure_updates_keeps_lines_warns_candidate_only(self):
-        from project_brain.stale_check import mark_checked
-        store = self._shared()
-        result = mark_checked(store, mapping_ids=["m.r1", "m.r2"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertTrue(result["ok"])
-        self.assertEqual([l["id"] for l in result["updated"]], ["code.shared"])
-        loc = result["updated"][0]
-        self.assertEqual(loc["commit_sha"], "NEW")
-        self.assertEqual(loc["verified_at"], "2026-06-14T12:00:00Z")
-        self.assertEqual(loc["updated_at"], "2026-06-14T12:00:00Z")
-        # warning은 candidate만 — superseded(m.sup)는 현재 사실 아니라 제외(spec §4).
-        self.assertEqual(result["warnings"],
-                         [{"locator_id": "code.shared", "candidate_mapping_ids": ["m.cand"]}])
-        # store 불변(저장은 CLI 책임) — 핵심 갱신 경로에서 원본 commit_sha가 안 바뀜.
-        self.assertEqual(store.get("code.shared")["commit_sha"], "OLD")
+    def test_full_closure_reverifies_quote_and_symbol_with_one_event_time(self):
+        from project_brain.stale_check import plan_mark_checked
 
-    def test_partial_closure_blocks_and_does_not_update(self):
-        from project_brain.stale_check import mark_checked
-        result = mark_checked(self._shared(), mapping_ids=["m.r1"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["updated"], [])  # m.r2가 빠져 갱신 안 함
-        self.assertEqual(result["blocked"],
-                         [{"locator_id": "code.shared", "missing_mapping_ids": ["m.r2"]}])
+        repo_context, old, checked = self._repo()
+        store = self._shared(old)
+        plan = plan_mark_checked(
+            store,
+            mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+            checked_head=checked,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+        )
 
-    def test_head_moved_guard(self):
-        from project_brain.stale_check import mark_checked
-        result = mark_checked(self._shared(), mapping_ids=["m.r1", "m.r2"],
-                              checked_head="A", current_head="B",
-                              now="2026-06-14T12:00:00Z")
-        self.assertFalse(result["ok"])
-        self.assertIn("head moved", result["error"])
-        self.assertEqual(result["updated"], [])
+        self.assertEqual([loc["id"] for loc in plan.updated], ["code.x.shared"])
+        locator = plan.updated[0]
+        self.assertEqual(locator["commit_sha"], checked)
+        self.assertEqual(locator["verified_at"], locator["updated_at"])
+        self.assertNotEqual(
+            locator["verified_at"],
+            store.get("code.x.shared")["verified_at"],
+        )
+        self.assertEqual(plan.warnings, ({
+            "locator_id": "code.x.shared",
+            "candidate_mapping_ids": ["mapping.x.cand"],
+        },))
+        self.assertIn("code.x.shared", plan.preconditions)
+        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
 
-    def test_rejects_non_reviewed_inputs(self):
-        # blocker 방지(spec §4): 입력은 존재하는 reviewed DomainMapping만. candidate/
-        # superseded/unknown이 섞이면 ok:False로 거부 — candidate가 빈 reviewed closure를
-        # vacuous하게 통과시켜 commit_sha를 갱신하는 사각을 입력 단에서 막는다.
-        from project_brain.stale_check import mark_checked
-        result = mark_checked(self._shared(),
-                              mapping_ids=["m.r1", "m.cand", "m.sup", "m.nope"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertFalse(result["ok"])
-        reasons = {x["id"]: x["reason"] for x in result["invalid_inputs"]}
-        self.assertEqual(reasons["m.cand"], "status_candidate")
-        self.assertEqual(reasons["m.sup"], "status_superseded")
-        self.assertEqual(reasons["m.nope"], "unknown_id")
-        self.assertEqual(result["updated"], [])  # 거부 시 아무것도 안 건드림
+    def test_quote_missing_refuses_entire_bundle_before_any_plan_is_returned(self):
+        from project_brain.stale_check import (
+            MarkCheckedError,
+            plan_mark_checked,
+        )
 
-    def test_non_code_locator_id_in_code_locator_ids_skipped(self):
-        # future bad data 방어(재리뷰 major): code_locator_ids에 비-CodeLocator id가 섞여도
-        # commit_sha를 엉뚱한 kind 객체에 쓰지 않는다. reviewed 매핑이 GlossaryTerm을 잘못 가리킨 상황.
-        from project_brain.objbase import base
-        from project_brain.stale_check import mark_checked
-        not_a_loc = base({
-            "id": "g.notaloc", "kind": "GlossaryTerm", "status": "reviewed",
-            "truth_role": "domain", "title": "용어", "context_id": "context.x",
-            "term": "용어", "definition": "정의", "evidence_refs": ["ev.x"],
-        }, tags=["x"], created_at="2026-06-12T00:00:00Z", updated_at="2026-06-12T00:00:00Z")
-        store = _store(
-            domain_mapping("m.bad", code_locator_ids=["g.notaloc"]), not_a_loc)
-        result = mark_checked(store, mapping_ids=["m.bad"],
-                              checked_head="NEW", current_head="NEW",
-                              now="2026-06-14T12:00:00Z")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["updated"], [])  # 비-CodeLocator는 건너뜀
-        self.assertEqual(store.get("g.notaloc")["updated_at"], "2026-06-12T00:00:00Z")
+        repo_context, old, checked = self._repo()
+        store = self._shared(old)
+        store.get("code.x.shared").pop("verified_quote")
+
+        with self.assertRaises(MarkCheckedError) as raised:
+            plan_mark_checked(
+                store,
+                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+                checked_head=checked,
+                repo_context=repo_context,
+                engine_sha=ENGINE_SHA,
+            )
+
+        self.assertEqual(raised.exception.code, "refused_unverifiable")
+        self.assertEqual(
+            raised.exception.locator_ids,
+            ("code.x.shared",),
+        )
+        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
+
+    def test_symbol_mismatch_refuses_entire_bundle(self):
+        from project_brain.stale_check import (
+            MarkCheckedError,
+            plan_mark_checked,
+        )
+
+        repo_context, old, checked = self._repo()
+        store = self._shared(old)
+        store.get("code.x.shared")["symbol"] = "Other::bar"
+
+        with self.assertRaises(MarkCheckedError) as raised:
+            plan_mark_checked(
+                store,
+                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+                checked_head=checked,
+                repo_context=repo_context,
+                engine_sha=ENGINE_SHA,
+            )
+
+        self.assertEqual(raised.exception.code, "symbol_mismatch")
+        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
+
+    def test_partial_closure_is_blocked_without_verification(self):
+        from project_brain.stale_check import plan_mark_checked
+
+        repo_context, old, checked = self._repo()
+        plan = plan_mark_checked(
+            self._shared(old),
+            mapping_ids=["mapping.x.r1"],
+            checked_head=checked,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+        )
+
+        self.assertEqual(plan.updated, ())
+        self.assertEqual(plan.blocked, ({
+            "locator_id": "code.x.shared",
+            "missing_mapping_ids": ["mapping.x.r2"],
+        },))
+
+    def test_checked_head_must_equal_resolved_repository_target(self):
+        from project_brain.stale_check import (
+            MarkCheckedError,
+            plan_mark_checked,
+        )
+
+        repo_context, old, _checked = self._repo()
+        with self.assertRaises(MarkCheckedError) as raised:
+            plan_mark_checked(
+                self._shared(old),
+                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+                checked_head=old,
+                repo_context=repo_context,
+                engine_sha=ENGINE_SHA,
+            )
+
+        self.assertEqual(raised.exception.code, "head_moved")
+
+    def test_same_sha_apply_reverifies_and_stamps_one_new_event_time(self):
+        repo_context, _old, checked = self._repo()
+        brain_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(brain_tmp.cleanup)
+        brain_root = Path(brain_tmp.name).resolve()
+        locator = code_locator(
+            "code.same-sha",
+            path="Foo.cpp",
+            commit_sha=checked,
+            symbol="Foo::bar",
+        )
+        locator["verified_quote"] = "void Foo::bar() {}"
+        BrainStore.save_object(brain_root, locator)
+        store = BrainStore.load(brain_root)
+        objects = (dict(locator),)
+        request = MutationRequest(
+            operation=MutationOperation.MARK_CHECKED,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+            objects=objects,
+            preconditions={
+                locator["id"]: hashlib.sha256(
+                    BrainStore.object_bytes(locator)
+                ).hexdigest(),
+            },
+            expected_corpus_fingerprint=corpus_fingerprint(store),
+        )
+
+        result = MutationService().apply(objects, request=request)
+
+        self.assertTrue(result.ok)
+        persisted = BrainStore.load(brain_root).get(locator["id"])
+        self.assertEqual(persisted["commit_sha"], checked)
+        self.assertEqual(persisted["title"], locator["title"])
+        self.assertEqual(persisted["verified_at"], persisted["updated_at"])
+        self.assertNotEqual(
+            persisted["verified_at"],
+            locator["verified_at"],
+        )
+
+    def test_same_sha_symbol_failure_refuses_entire_apply_bundle(self):
+        repo_context, _old, checked = self._repo()
+        brain_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(brain_tmp.cleanup)
+        brain_root = Path(brain_tmp.name).resolve()
+        valid = code_locator(
+            "code.valid-same",
+            path="Foo.cpp",
+            commit_sha=checked,
+            symbol="Foo::bar",
+        )
+        valid["verified_quote"] = "void Foo::bar() {}"
+        invalid = code_locator(
+            "code.invalid-same",
+            path="Foo.cpp",
+            commit_sha=checked,
+            symbol="Other::bar",
+        )
+        invalid["verified_quote"] = "void Foo::bar() {}"
+        for locator in (valid, invalid):
+            BrainStore.save_object(brain_root, locator)
+        store = BrainStore.load(brain_root)
+        objects = (dict(valid), dict(invalid))
+        request = MutationRequest(
+            operation=MutationOperation.MARK_CHECKED,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+            objects=objects,
+            preconditions={
+                locator["id"]: hashlib.sha256(
+                    BrainStore.object_bytes(locator)
+                ).hexdigest()
+                for locator in (valid, invalid)
+            },
+            expected_corpus_fingerprint=corpus_fingerprint(store),
+        )
+
+        result = MutationService().apply(objects, request=request)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "symbol_mismatch")
+        persisted = BrainStore.load(brain_root)
+        self.assertEqual(
+            persisted.get(valid["id"])["verified_at"],
+            valid["verified_at"],
+        )
+        self.assertEqual(
+            persisted.get(invalid["id"])["verified_at"],
+            invalid["verified_at"],
+        )
 
 
 class CliMarkCheckedTest(unittest.TestCase):
@@ -720,6 +1040,7 @@ class CliMarkCheckedTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         for obj in (
+            *lint_support_objects(),
             code_locator("code.shared", path="a/X.cpp", commit_sha="OLD"),
             domain_mapping("m.r1", code_locator_ids=["code.shared"]),
             domain_mapping("m.r2", code_locator_ids=["code.shared"]),
@@ -731,9 +1052,49 @@ class CliMarkCheckedTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, argv, runner):
+        checked_head = argv[argv.index("--checked-head") + 1]
+
+        def verify_fixture_locator(
+            locator,
+            *,
+            repo,
+            manual_symbol_verification=None,
+        ):
+            verified_at = "2026-07-29T00:00:00+09:00"
+            verified = dict(locator)
+            verified["verified_at"] = verified_at
+            return VerifiedLocator(
+                locator=verified,
+                quote_sha256="f" * 64,
+                verified_at=verified_at,
+                symbol_status="verified",
+            )
+
         out = io.StringIO()
         with mock.patch("project_brain.stale_check.make_git_runner", return_value=runner), \
-             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+             mock.patch.object(
+                 cli,
+                 "_resolve_mutation_context",
+                 return_value=RepoContext(
+                     repo_root=self.root,
+                     expected_repo_id="demoapp",
+                     expected_revision_ref="origin/develop",
+                     target_revision_sha=checked_head,
+                 ),
+             ), \
+             mock.patch(
+                 "project_brain.code_verify.verify_locator_for_write",
+                 side_effect=verify_fixture_locator,
+             ), \
+             mock.patch(
+                 "project_brain.mutation.verify_locator_for_write",
+                 side_effect=verify_fixture_locator,
+             ), \
+             mock.patch(
+                 "sys.argv",
+                 ["cli"] + argv + ["--engine-sha", ENGINE_SHA],
+             ), \
+             redirect_stdout(out):
             rc = cli.main()
         return rc, json.loads(out.getvalue())
 
@@ -741,40 +1102,90 @@ class CliMarkCheckedTest(unittest.TestCase):
         runner = fake_git_runner("NEW", {})  # 현재 develop = NEW
         rc, payload = self._run(
             ["mark-checked", "--brain-root", str(self.root),
-             "--mappings", "m.r1", "m.r2", "--checked-head", "NEW", "--no-fetch"],
+             "--mappings", "mapping.x.r1", "mapping.x.r2",
+             "--checked-head", "NEW", "--no-fetch"],
             runner)
         self.assertEqual(rc, 0)
-        self.assertEqual(payload["updated"], ["code.shared"])
+        self.assertEqual(payload["updated"], ["code.x.shared"])
         # 디스크에 갱신 반영 — commit_sha=NEW.
-        loc = BrainStore.load(self.root).get("code.shared")
+        loc = BrainStore.load(self.root).get("code.x.shared")
         self.assertEqual(loc["commit_sha"], "NEW")
+        self.assertEqual(loc["verified_at"], loc["updated_at"])
         # candidate가 같은 locator를 가리키므로 CLI 출력 warnings에 전달된다.
         self.assertEqual(payload["warnings"],
-                         [{"locator_id": "code.shared", "candidate_mapping_ids": ["m.cand"]}])
+                         [{"locator_id": "code.x.shared",
+                           "candidate_mapping_ids": ["mapping.x.cand"]}])
 
     def test_partial_closure_blocked_rc0_disk_unchanged(self):
         runner = fake_git_runner("NEW", {})
         rc, payload = self._run(
             ["mark-checked", "--brain-root", str(self.root),
-             "--mappings", "m.r1", "--checked-head", "NEW", "--no-fetch"],
+             "--mappings", "mapping.x.r1", "--checked-head", "NEW", "--no-fetch"],
             runner)
         self.assertEqual(rc, 0)
         self.assertEqual(payload["updated"], [])
         self.assertEqual(payload["blocked"],
-                         [{"locator_id": "code.shared", "missing_mapping_ids": ["m.r2"]}])
+                         [{"locator_id": "code.x.shared",
+                           "missing_mapping_ids": ["mapping.x.r2"]}])
         # 갱신 안 됐으니 commit_sha 그대로.
-        self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")
+        self.assertEqual(
+            BrainStore.load(self.root).get("code.x.shared")["commit_sha"],
+            "OLD",
+        )
+
+    def test_quote_missing_refuses_whole_bundle_without_disk_changes(self):
+        missing = dict(BrainStore.load(self.root).get("code.x.shared"))
+        missing.pop("verified_quote")
+        BrainStore.save_object(self.root, missing)
+        for obj in (
+            code_locator(
+                "code.valid",
+                path="a/Valid.cpp",
+                commit_sha="OLD",
+            ),
+            domain_mapping(
+                "m.valid",
+                code_locator_ids=["code.valid"],
+            ),
+        ):
+            BrainStore.save_object(self.root, obj)
+
+        rc, payload = self._run(
+            [
+                "mark-checked",
+                "--brain-root",
+                str(self.root),
+                "--mappings",
+                "mapping.x.r1",
+                "mapping.x.r2",
+                "mapping.x.valid",
+                "--checked-head",
+                "NEW",
+                "--no-fetch",
+            ],
+            fake_git_runner("NEW", {}),
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["error_code"], "refused_unverifiable")
+        loaded = BrainStore.load(self.root)
+        self.assertEqual(loaded.get("code.x.shared")["commit_sha"], "OLD")
+        self.assertEqual(loaded.get("code.x.valid")["commit_sha"], "OLD")
 
     def test_head_moved_returns_rc1_disk_unchanged(self):
         runner = fake_git_runner("NEW", {})  # 현재 develop은 NEW인데
         rc, payload = self._run(
             ["mark-checked", "--brain-root", str(self.root),
-             "--mappings", "m.r1", "m.r2", "--checked-head", "STALE", "--no-fetch"],
+             "--mappings", "mapping.x.r1", "mapping.x.r2",
+             "--checked-head", "STALE", "--no-fetch"],
             runner)
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
         self.assertIn("head moved", payload["error"])
-        self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")
+        self.assertEqual(
+            BrainStore.load(self.root).get("code.x.shared")["commit_sha"],
+            "OLD",
+        )
 
     def test_mixed_update_and_block_in_one_call(self):
         # 한 호출에서 X는 closure 완전(갱신), Y는 부분(blocked) — 독립 처리 + 디스크 반영.
@@ -791,24 +1202,29 @@ class CliMarkCheckedTest(unittest.TestCase):
         # m.x1+m.x2로 code.x는 완전, m.y1만 줘 code.y는 m.y2가 빠져 blocked.
         rc, payload = self._run(
             ["mark-checked", "--brain-root", str(self.root),
-             "--mappings", "m.x1", "m.x2", "m.y1", "--checked-head", "NEW", "--no-fetch"],
+             "--mappings", "mapping.x.x1", "mapping.x.x2", "mapping.x.y1",
+             "--checked-head", "NEW", "--no-fetch"],
             runner)
         self.assertEqual(rc, 0)
-        self.assertEqual(payload["updated"], ["code.x"])
+        self.assertEqual(payload["updated"], ["code.x.x"])
         self.assertEqual(payload["blocked"],
-                         [{"locator_id": "code.y", "missing_mapping_ids": ["m.y2"]}])
+                         [{"locator_id": "code.x.y",
+                           "missing_mapping_ids": ["mapping.x.y2"]}])
         loaded = BrainStore.load(self.root)
-        self.assertEqual(loaded.get("code.x")["commit_sha"], "NEW")  # 완전 → 갱신
-        self.assertEqual(loaded.get("code.y")["commit_sha"], "OLD")  # blocked → 불변
+        self.assertEqual(loaded.get("code.x.x")["commit_sha"], "NEW")  # 완전 → 갱신
+        self.assertEqual(loaded.get("code.x.y")["commit_sha"], "OLD")  # blocked → 불변
 
     def test_candidate_input_rejected_rc1_disk_unchanged(self):
         # candidate 매핑을 --mappings로 주면 입력 검증에서 거부(rc=1), locator 불변(blocker 방지).
         runner = fake_git_runner("NEW", {})
         rc, payload = self._run(
             ["mark-checked", "--brain-root", str(self.root),
-             "--mappings", "m.cand", "--checked-head", "NEW", "--no-fetch"],
+             "--mappings", "mapping.x.cand", "--checked-head", "NEW", "--no-fetch"],
             runner)
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["invalid_inputs"][0]["reason"], "status_candidate")
-        self.assertEqual(BrainStore.load(self.root).get("code.shared")["commit_sha"], "OLD")
+        self.assertEqual(
+            BrainStore.load(self.root).get("code.x.shared")["commit_sha"],
+            "OLD",
+        )

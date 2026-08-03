@@ -1,10 +1,14 @@
 import argparse
+import hashlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from project_brain.config import (
     ConfigError,
+    load_config,
     resolve_brain_root,
     resolve_default_branch,
     resolve_scenarios_path,
@@ -27,6 +31,133 @@ from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
 from project_brain.search_index import rebuild as index_rebuild
 from project_brain.store import BrainStore
+from project_brain.mutation import MutationOperation, corpus_fingerprint
+from project_brain.repo_context import (
+    RepoContext,
+    RepoVerificationError,
+    resolve_repo_context,
+)
+
+
+def _add_mutation_context_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    engine_required: bool,
+) -> None:
+    parser.add_argument("--repo-root", help="검증할 Git worktree의 absolute root")
+    parser.add_argument("--expected-repo-id", help="canonical repository identity")
+    parser.add_argument("--expected-revision-ref", help="검증 대상 Git ref")
+    parser.add_argument(
+        "--engine-sha",
+        required=engine_required,
+        help="이 mutation을 수행하는 Project Brain exact commit SHA",
+    )
+
+
+def _resolve_mutation_context(
+    args,
+    brain_root: Path,
+    *,
+    required: bool,
+) -> RepoContext | None:
+    """명시 인자 또는 project config에서 mutation용 repo context를 해석한다."""
+    cfg = load_config(start=brain_root)
+    repo_root = (
+        Path(args.repo_root).resolve()
+        if args.repo_root
+        else cfg["root"].resolve() if cfg is not None else None
+    )
+    configured_repo_id = cfg.get("repo") if cfg is not None else None
+    expected_repo_id = args.expected_repo_id or configured_repo_id
+    expected_revision_ref = args.expected_revision_ref
+    if expected_revision_ref is None and cfg is not None:
+        expected_revision_ref = (
+            f"origin/{resolve_default_branch(start=brain_root)}"
+        )
+    if (
+        not required
+        and repo_root is None
+        and expected_repo_id is None
+        and expected_revision_ref is None
+    ):
+        return None
+    missing = [
+        name
+        for name, value in (
+            ("repo_root", repo_root),
+            ("expected_repo_id", expected_repo_id),
+            ("expected_revision_ref", expected_revision_ref),
+        )
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        raise ConfigError(
+            "mutation repository context를 알 수 없다: "
+            + ", ".join(missing)
+            + " — 명시 플래그나 .project-brain.json 설정을 제공하라."
+        )
+    return resolve_repo_context(
+        repo_root,
+        expected_repo_id=expected_repo_id,
+        configured_repo_id=configured_repo_id or expected_repo_id,
+        expected_revision_ref=expected_revision_ref,
+    )
+
+
+def _apply_mutation(
+    *,
+    operation: MutationOperation,
+    brain_root: Path,
+    repo_context: RepoContext | None,
+    engine_sha: str,
+    objects,
+    preconditions=None,
+    expected_corpus_fingerprint=None,
+    batch_binding=None,
+):
+    return ingest(
+        brain_root,
+        objects,
+        preconditions=preconditions,
+        engine_sha=engine_sha,
+        repo_context=repo_context,
+        operation=operation,
+        expected_corpus_fingerprint=expected_corpus_fingerprint,
+        batch_binding=batch_binding,
+    )
+
+
+def _object_preconditions(
+    store: BrainStore,
+    object_ids,
+) -> dict[str, str]:
+    return {
+        object_id: hashlib.sha256(
+            BrainStore.object_bytes(store.get(object_id))
+        ).hexdigest()
+        for object_id in object_ids
+    }
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _run_query(argv) -> int:
@@ -46,16 +177,17 @@ def _run_query(argv) -> int:
     )
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--current-head")
-    # 후속 c(2026-06-11): --db를 주면 라우터 recall(top-K·후보 채널)이 켜진다.
-    # 기본은 미지정=기존 폴백 동작 — cli search와 달리 자동 기본 경로를 쓰지 않는
-    # 이유는 색인이 있는 머신에서 기존 query 사용·테스트가 전부 실모델 로드를
-    # 타게 되는 동작 변경이라서(보존 우선). 표준 색인은 <brain_root>/.brain-local/index.db.
-    parser.add_argument("--db", help="색인 DB 경로 — 주면 recall이 켜진다 (예: brain/.brain-local/index.db)")
+    parser.add_argument("--db", help="색인 DB 경로 (기본: config에 있고 실제 존재하는 DB)")
     parser.add_argument("--stub-embedder", action="store_true",
                         help="실모델 대신 stub 임베더 사용(테스트·CI 결정론, §5)")
     parser.add_argument("query", nargs="?")
     args = parser.parse_args(argv)
 
+    cwd_config = (
+        None
+        if args.brain_root is not None and args.db is not None
+        else load_config()
+    )
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
     if not args.query:
@@ -66,9 +198,25 @@ def _run_query(argv) -> int:
     # 파일 IO는 CLI 책임 — router는 dict만 소비(git·파일 모름). 없으면 {}(동작 불변).
     from project_brain.stale_check import advisories_by_mapping, load_stale_set
     stale_advisories = advisories_by_mapping(load_stale_set(brain_root))
+    configured = None
+    if args.db is None:
+        configured = (
+            cwd_config
+            if cwd_config is not None and cwd_config["brain_root"] == brain_root
+            else load_config(start=brain_root)
+        )
+        if configured is not None and configured["brain_root"] != brain_root:
+            configured = None
+    db_path = (
+        Path(args.db)
+        if args.db
+        else configured["db"]
+        if configured is not None and configured["db"].exists()
+        else None
+    )
     router = QueryRouter(
         store, current_head=args.current_head,
-        db_path=Path(args.db) if args.db else None,
+        db_path=db_path,
         embedder=embedder, brain_root=brain_root,
         stale_advisories=stale_advisories,
     )
@@ -92,20 +240,172 @@ def _run_ingest(argv) -> int:
     parser.add_argument("--objects-file", required=True)
     parser.add_argument("--preconditions-file",
                         help="build 리포트 JSON (preconditions 키 — 저장 직전 낙관적 잠금 재검사)")
+    parser.add_argument("--batch-binding-file")
+    parser.add_argument("--verify-json")
+    parser.add_argument("--domain-spec-py")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
-    brain_root = resolve_brain_root(args.brain_root)
+    brain_root = resolve_brain_root(args.brain_root).resolve()
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
+    batch_binding = None
+    batch_paths = (
+        args.batch_binding_file,
+        args.verify_json,
+        args.domain_spec_py,
+    )
+    if any(value is not None for value in batch_paths):
+        if not all(value is not None for value in batch_paths):
+            parser.error(
+                "--batch-binding-file, --verify-json, --domain-spec-py는 "
+                "함께 필요합니다"
+            )
+        from project_brain.transaction_receipt import (
+            read_batch_binding,
+            verify_batch_input_files,
+        )
+        try:
+            batch_binding = read_batch_binding(
+                Path(args.batch_binding_file)
+            )
+            verify_batch_input_files(
+                batch_binding,
+                verify_json=Path(args.verify_json),
+                domain_spec_py=Path(args.domain_spec_py),
+            )
+        except (OSError, ValueError) as exc:
+            print(json.dumps(
+                {"ok": False, "error": f"batch binding invalid: {exc}"},
+                ensure_ascii=False,
+            ))
+            return 1
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=(
+            batch_binding is not None
+            or any(obj.get("kind") == "CodeLocator" for obj in objects)
+        ),
+    )
+    if batch_binding is not None:
+        from project_brain.config import load_config
+        from project_brain.repo_context import resolve_git_checkout
+
+        try:
+            if args.brain_root is None:
+                raise ValueError("batch ingest requires explicit --brain-root")
+            engine_state = resolve_git_checkout(Path(__file__))
+            if repo_context is None:
+                raise ValueError("batch ingest requires repo context")
+            configured = load_config(start=repo_context.repo_root)
+            if (
+                configured is None
+                or configured["root"].resolve() != repo_context.repo_root
+                or configured["brain_root"].resolve() != brain_root
+                or brain_root != Path(batch_binding.brain_root)
+            ):
+                raise ValueError("batch binding brain_root/config mismatch")
+            brain_stat = brain_root.stat()
+            expected_state = {
+                "repo_root": str(repo_context.repo_root),
+                "brain_root": str(brain_root),
+                "brain_root_device": brain_stat.st_dev,
+                "brain_root_inode": brain_stat.st_ino,
+                "expected_repo_id": repo_context.expected_repo_id,
+                "expected_revision_ref": repo_context.expected_revision_ref,
+                "target_revision_sha": repo_context.target_revision_sha,
+                "engine_root": str(engine_state.root),
+                "engine_sha": engine_state.head_sha,
+            }
+            for field_name, expected_value in expected_state.items():
+                if getattr(batch_binding, field_name) != expected_value:
+                    raise ValueError(
+                        f"batch binding {field_name} mismatch"
+                    )
+            if args.engine_sha != batch_binding.engine_sha:
+                raise ValueError("batch binding engine_sha mismatch")
+        except (RepoVerificationError, ValueError) as exc:
+            print(json.dumps(
+                {"ok": False, "error": str(exc)},
+                ensure_ascii=False,
+            ))
+            return 1
     preconditions = None
     if args.preconditions_file:
         report = json.loads(Path(args.preconditions_file).read_text(encoding="utf-8"))
         preconditions = report.get("preconditions", report)
     try:
-        ingest(brain_root, objects, preconditions=preconditions)
+        result = _apply_mutation(
+            operation=MutationOperation.INGEST,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=objects,
+            preconditions=preconditions,
+            batch_binding=batch_binding,
+        )
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
-    print(json.dumps({"ok": True, "ingested": len(objects)}, ensure_ascii=False, indent=2))
+    if batch_binding is not None:
+        from project_brain.corpus_io import (
+            CorpusIOError,
+            recover_committed_receipt,
+        )
+        from project_brain.transaction_receipt import (
+            verify_batch_input_files,
+        )
+
+        try:
+            verify_batch_input_files(
+                batch_binding,
+                verify_json=Path(args.verify_json),
+                domain_spec_py=Path(args.domain_spec_py),
+            )
+            payload = recover_committed_receipt(
+                brain_root,
+                batch_binding,
+            )
+        except (CorpusIOError, OSError, ValueError) as exc:
+            print(json.dumps(
+                {"ok": False, "error": str(exc), "committed": False},
+                ensure_ascii=False,
+            ))
+            return 1
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    manifest = result.manifest
+    if manifest is None:
+        print(json.dumps(
+            {
+                "ok": False,
+                "error": "mutation result is missing its manifest",
+                "committed": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+    actions = (
+        manifest.creates
+        + manifest.updates
+        + manifest.deletes
+        + manifest.renames
+        + manifest.auxiliary_updates
+    )
+    payload = {
+        "ok": True,
+        "transaction_id": manifest.transaction_id,
+        "operation": manifest.operation,
+        "committed": bool(actions),
+        "manifest_sha256": result.manifest_sha256,
+        "before_fingerprint": manifest.before_fingerprint,
+        "after_fingerprint": manifest.expected_after_fingerprint,
+        "ingested_ids": [obj["id"] for obj in result.after_objects],
+        "ingested_count": len(result.after_objects),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -120,10 +420,12 @@ def _run_promote(argv) -> int:
     parser.add_argument("--bundle-key")
     parser.add_argument("--conflict-resolution",
                         help="수동 conflict 용어 승격 시 정설 선택 근거(검수 기록에 기록, §4.4)")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
+    selection_fingerprint = corpus_fingerprint(store)
     missing = [i for i in args.ids if not store.has(i)]
     if missing:
         print(json.dumps({"ok": False, "error": f"unknown ids: {missing}"},
@@ -158,26 +460,29 @@ def _run_promote(argv) -> int:
     except (ValueError, KeyError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
-    # ★원자성(2026-06-08 사고 반영): 디스크에 쓰기 전 schema 검증 + 적용 후 store lint를 둘 다
-    #   save 전에 한다. schema는 필드/enum만 보고, legacy-only·dangling 같은 store 관계 위반은
-    #   lint가 잡으므로 lint를 save 뒤에 두면 부분 쓰기가 남는다. ingest.py처럼 merged store를
-    #   메모리에서 lint해 통과해야만 save한다.
     to_write = promoted + records
-    schema_errors = []
-    for obj in to_write:
-        schema_errors.extend(validate_object(obj))
-    if schema_errors:
-        print(json.dumps({"ok": False, "error": "; ".join(schema_errors)}, ensure_ascii=False, indent=2))
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=any(obj.get("kind") == "CodeLocator" for obj in to_write),
+    )
+    try:
+        _apply_mutation(
+            operation=MutationOperation.PROMOTE,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=to_write,
+            preconditions=_object_preconditions(store, args.ids),
+            expected_corpus_fingerprint=selection_fingerprint,
+        )
+    except IngestError as exc:
+        print(json.dumps(
+            {"ok": False, "error": str(exc)},
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 1
-    merged = {o["id"]: o for o in store.all()}
-    for obj in to_write:
-        merged[obj["id"]] = obj
-    problems = lint_store(BrainStore(merged))
-    if problems:
-        print(json.dumps({"ok": False, "lint": problems}, ensure_ascii=False, indent=2))
-        return 1
-    for obj in to_write:
-        BrainStore.save_object(brain_root, obj)
     print(json.dumps(
         {"ok": True, "promoted": [o["id"] for o in promoted], "reviews": [r["id"] for r in records]},
         ensure_ascii=False, indent=2))
@@ -190,10 +495,12 @@ def _run_promote_auto(argv) -> int:
     parser.add_argument("--ids", required=True, nargs="+",
                         help="배치 커버리지 검증 워크플로우가 산출한 pass 용어 id 목록(§4.2b)")
     parser.add_argument("--reviewed-at", help="생략 시 현재 KST를 엔진이 자동으로 박는다")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
+    selection_fingerprint = corpus_fingerprint(store)
     selection = select_vouched_candidates(store)  # {term_id: [보증 매핑 id]}
 
     # --ids를 1단계 기준으로 다시 가드 → 건너뛴 사유별 분류(조용한 누락 금지, §4.3).
@@ -242,24 +549,29 @@ def _run_promote_auto(argv) -> int:
         except (ValueError, KeyError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
             return 1
-        # 원자성(2026-06-08 사고 반영): 쓰기 전 schema + merged store lint를 둘 다 한다. lint를
-        # save 뒤에 두면 legacy-only 같은 위반이 부분 쓰기를 남긴다. 통과해야만 save한다.
         to_write = promoted + records
-        schema_errors = []
-        for obj in to_write:
-            schema_errors.extend(validate_object(obj))
-        if schema_errors:
-            print(json.dumps({"ok": False, "error": "; ".join(schema_errors)}, ensure_ascii=False, indent=2))
+        repo_context = _resolve_mutation_context(
+            args,
+            brain_root,
+            required=any(obj.get("kind") == "CodeLocator" for obj in to_write),
+        )
+        try:
+            _apply_mutation(
+                operation=MutationOperation.PROMOTE_AUTO,
+                brain_root=brain_root,
+                repo_context=repo_context,
+                engine_sha=args.engine_sha,
+                objects=to_write,
+                preconditions=_object_preconditions(store, eligible),
+                expected_corpus_fingerprint=selection_fingerprint,
+            )
+        except IngestError as exc:
+            print(json.dumps(
+                {"ok": False, "error": str(exc)},
+                ensure_ascii=False,
+                indent=2,
+            ))
             return 1
-        merged = {o["id"]: o for o in store.all()}
-        for obj in to_write:
-            merged[obj["id"]] = obj
-        problems = lint_store(BrainStore(merged))
-        if problems:
-            print(json.dumps({"ok": False, "lint": problems}, ensure_ascii=False, indent=2))
-            return 1
-        for obj in to_write:
-            BrainStore.save_object(brain_root, obj)
 
     # 승격 후 남은 보증 용어(보류된 커버리지 불통과분 등) 비차단 드리프트 신호(§4.6).
     from project_brain.lint import unpromoted_vouched_terms
@@ -439,11 +751,21 @@ def _run_show(argv) -> int:
                 continue
             seen.add(ref)
             n = store.get(ref)
-            neighbors.append({"edge": field, "object_id": ref,
-                              "kind": n.get("kind"), "title": n.get("title")})
+            neighbors.append({
+                "edge": field,
+                "object_id": ref,
+                "kind": n.get("kind"),
+                "title": n.get("title"),
+                "display_only": True,
+            })
     # stale-set 캐시에 이 객체가 들면 코드 변경·브랜치 범위 advisory를 최상위에 곁들인다(객체 본문 불변).
     from project_brain.stale_check import advisories_by_mapping, load_stale_set
-    payload = {"ok": True, "object": obj, "neighbors": neighbors}
+    payload = {
+        "ok": True,
+        "object": {**obj, "display_only": True},
+        "neighbors": neighbors,
+        "display_only": True,
+    }
     advisory = advisories_by_mapping(load_stale_set(brain_root)).get(args.id)
     if advisory:
         payload["stale_advisory"] = advisory
@@ -498,11 +820,7 @@ def _run_lint(argv) -> int:
 
 
 def _run_audit(argv) -> int:
-    """lint·고립 객체·코드 드리프트·opt-in 원문 인용구를 함께 감사한다.
-
-    ``--no-stale``만 Git 없이 실행하는 명시적 모드다. 그 외에는 도달성 검증 불가와
-    원문 인용구 검증 실패를 모두 차단 결과로 낸다. ``not_ancestor``는 안내만 한다.
-    """
+    """인자를 해석하고 독립 audit 서비스의 결과를 직렬화한다."""
     parser = argparse.ArgumentParser(prog="cli audit")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모)")
@@ -514,70 +832,21 @@ def _run_audit(argv) -> int:
     brain_root = resolve_brain_root(args.brain_root)
     default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
+    from project_brain.audit import run_audit
 
-    problems = lint_store(store)
-
-    from project_brain.graph import find_isolated
-    isolated = find_isolated(store)
-    by_kind: dict = {}
-    for oid in isolated:
-        k = store.get(oid).get("kind")
-        by_kind[k] = by_kind.get(k, 0) + 1
-
-    stale = None
-    stale_status = None
-    cache_written = None
-    code_quotes = None
-    if args.no_stale:
-        stale_status = {"ok": True, "skipped": True, "reason": "no_stale"}
-        code_quotes = {"ok": True, "checked": 0, "skipped": 0,
-                       "check_skipped": True, "failures": []}
-    else:
-        from project_brain.stale_check import (
-            GitError,
-            build_stale_set,
-            make_git_runner,
-            stale_check,
-            write_stale_set,
-        )
-        from project_brain.code_verify import make_git_blob_reader, verify_code_quotes
-        repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
-        git_runner = make_git_runner(repo_root)
-        try:
-            stale = stale_check(
-                store, git_runner=git_runner, default_branch=default_branch,
-                fetch=not args.no_fetch)
-            cache_written = str(write_stale_set(brain_root, build_stale_set(stale, now=now_kst())))
-        except GitError as exc:
-            stale = {"error": str(exc)}
-            stale_status = {"ok": False, "skipped": False}
-        else:
-            stale_status = {
-                "ok": not any(
-                    anchor.get("reason") == "anchor_unverifiable"
-                    for anchor in stale.get("unmerged_anchors") or []
-                ),
-                "skipped": False,
-            }
-        code_quotes = verify_code_quotes(
-            store.by_kind("CodeLocator"),
-            blob_reader=make_git_blob_reader(repo_root),
-        )
-
-    ok = not problems and stale_status["ok"] and code_quotes["ok"]
-
-    print(json.dumps(
-        {"ok": ok,
-         "lint": {"ok": not problems, "problems": problems},
-         "isolated": {"isolated_count": len(isolated),
-                      "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
-                      "isolated": isolated},
-         "stale": stale,
-         "stale_status": stale_status,
-         "code_quotes": code_quotes,
-         "cache_written": cache_written},
-        ensure_ascii=False, indent=2))
-    return 0 if ok else 1
+    report = run_audit(
+        store,
+        brain_root=brain_root,
+        repo_root=Path(args.repo_root) if args.repo_root else brain_root.parent,
+        default_branch=default_branch,
+        fetch=not args.no_fetch,
+        no_stale=args.no_stale,
+        principal=None,
+        acl_evaluator=None,
+        now=now_kst(),
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 1
 
 
 def _run_install(argv) -> int:
@@ -673,8 +942,8 @@ def _run_build(argv) -> int:
 
     brain_root = resolve_brain_root(args.brain_root)
     notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
-    # 객체 created_at/updated_at/verified_at 시점. 노트에 context.now를 적으면 그 값을
-    # 쓰고(소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
+    # 객체 created_at/updated_at 시점. 노트에 context.now를 적으면 그 값을 쓰고
+    # (소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
     now = notes.get("context", {}).get("now") or now_kst()
     store = BrainStore.load(brain_root)
     result = build(notes, store, now)
@@ -752,8 +1021,29 @@ def _run_projection_refresh(args) -> int:
         return 1
 
     if to_ingest:
+        repo_context = _resolve_mutation_context(
+            args,
+            brain_root,
+            required=any(
+                obj.get("kind") == "CodeLocator"
+                for obj in to_ingest
+            ),
+        )
         try:
-            ingest(brain_root, to_ingest)
+            preconditions = {
+                obj["id"]: hashlib.sha256(
+                    BrainStore.object_bytes(store.get(obj["id"]))
+                ).hexdigest()
+                for obj in to_ingest
+            }
+            _apply_mutation(
+                operation=MutationOperation.PROJECTION_REPAIR,
+                brain_root=brain_root,
+                repo_context=repo_context,
+                engine_sha=args.engine_sha,
+                objects=to_ingest,
+                preconditions=preconditions,
+            )
         except IngestError as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
             return 1
@@ -790,6 +1080,7 @@ def _run_projection(argv) -> int:
                          help="없으면 생성될 projection JSON 미리보기만(저장 안 함)")
     p_reuse.add_argument("--replace", action="store_true",
                          help="같은 projection id가 store에 이미 있을 때만 교체 허용")
+    _add_mutation_context_arguments(p_reuse, engine_required=False)
 
     p_refresh = sub.add_parser(
         "refresh",
@@ -797,10 +1088,13 @@ def _run_projection(argv) -> int:
     p_refresh.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     p_refresh.add_argument("--ids", nargs="+",
                            help="대상 projection id (생략 시 전체 ContextProjection)")
+    _add_mutation_context_arguments(p_refresh, engine_required=True)
     args = parser.parse_args(argv)
 
     if args.action == "refresh":
         return _run_projection_refresh(args)
+    if args.write and not args.engine_sha:
+        parser.error("--engine-sha is required with --write")
 
     from project_brain.context_projection import build_reuse_projection
 
@@ -836,6 +1130,11 @@ def _run_projection(argv) -> int:
         print(json.dumps({"ok": True, "preview": True, "projection": projection},
                          ensure_ascii=False, indent=2))
         return 0
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=projection.get("kind") == "CodeLocator",
+    )
 
     # 같은 id가 이미 있으면 기본 거부 — --replace 줄 때만 교체(codex 합의).
     if store.has(projection["id"]) and not args.replace:
@@ -858,7 +1157,13 @@ def _run_projection(argv) -> int:
         return 1
     # ingest() 경유 저장: schema + merged lint + reviewed→candidate 후퇴 가드를 탄다.
     try:
-        ingest(brain_root, [projection])
+        _apply_mutation(
+            operation=MutationOperation.PROJECTION,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+            objects=[projection],
+        )
     except IngestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
@@ -875,7 +1180,7 @@ def _run_graph(argv) -> int:
     발견 전용이라 차단하지 않는다 — 어디에 무엇을 연결할지는 사람·스킬 몫(C7).
 
     `graph export <out.html> [--brain-root <path>]` — 코퍼스를 vis-network 단일 HTML로
-    써서 브라우저로 탐색한다. 엣지는 isolated와 같은 정본 정의(INBOUND_REF_FIELDS)라
+    써서 브라우저로 탐색한다. 엣지는 isolated와 같은 정본 reference_fields registry라
     어떤 잎이 왜 고립인지 화면에서 그대로 보인다. vis-network는 CDN에서 받으므로 볼 때
     인터넷이 필요하다. 읽기 전용 — store는 불변, 출력 파일만 쓴다."""
     parser = argparse.ArgumentParser(prog="cli graph")
@@ -885,7 +1190,7 @@ def _run_graph(argv) -> int:
     p_iso.add_argument("--kind", nargs="+",
                        help="점검 대상 kind 한정 (기본: CodeLocator·GlossaryTerm·EvidenceRef 잎 kind). "
                             "주의: 기본 잎 밖 kind(예: SlideRef)는 인바운드 엣지(slide_refs 등)가 "
-                            "INBOUND_REF_FIELDS에 없어 거짓 고립이 날 수 있다")
+                            "reference_fields registry에 없어 거짓 고립이 날 수 있다")
     p_exp = sub.add_parser("export")
     p_exp.add_argument("out", help="출력 HTML 경로")
     p_exp.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
@@ -962,7 +1267,6 @@ def _run_mark_checked(argv) -> int:
     """검토 완료 매핑으로 locator closure를 mark (spec §4). 갱신 locator만 저장."""
     parser = argparse.ArgumentParser(prog="cli mark-checked")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config)")
-    parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모 — brain이 레포 루트 직하라 가정)")
     parser.add_argument("--mappings", required=True, nargs="+",
                         help="'의미 그대로'로 검토 완료한 매핑 id 목록")
     parser.add_argument("--checked-head", required=True,
@@ -970,20 +1274,22 @@ def _run_mark_checked(argv) -> int:
     parser.add_argument("--no-fetch", action="store_true",
                         help="git fetch 생략(오프라인·테스트). 주의: write 명령이라 "
                              "checked_head 경합 가드가 로컬 기본 브랜치 기준으로 약해진다")
+    _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
     from project_brain.stale_check import (
         GitError,
+        MarkCheckedError,
         make_git_runner,
-        mark_checked,
+        plan_mark_checked,
         resolve_target_head,
     )
 
     brain_root = resolve_brain_root(args.brain_root)
+    repo_context = _resolve_mutation_context(args, brain_root, required=True)
     default_branch = resolve_default_branch(start=brain_root)
     store = BrainStore.load(brain_root)
-    repo_root = Path(args.repo_root) if args.repo_root else brain_root.parent
-    git_runner = make_git_runner(repo_root)
+    git_runner = make_git_runner(repo_context.repo_root)
     if args.no_fetch:
         print(f"warning: --no-fetch는 checked_head 경합 가드를 로컬 origin/{default_branch} 기준으로 "
               f"약화시킨다(쓰기 명령 — 최신 {default_branch} 미반영 위험).", file=sys.stderr)
@@ -994,31 +1300,542 @@ def _run_mark_checked(argv) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
 
-    # 코퍼스 datetime 표준(KST +09:00, microsecond 없음)에 맞춘다.
-    now = now_kst()
-    result = mark_checked(store, mapping_ids=args.mappings,
-                          checked_head=args.checked_head, current_head=current_head, now=now)
-    if not result["ok"]:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+    checked_context = RepoContext(
+        repo_root=repo_context.repo_root,
+        expected_repo_id=repo_context.expected_repo_id,
+        expected_revision_ref=repo_context.expected_revision_ref,
+        target_revision_sha=current_head,
+    )
+    try:
+        plan = plan_mark_checked(
+            store,
+            mapping_ids=args.mappings,
+            checked_head=args.checked_head,
+            repo_context=checked_context,
+            engine_sha=args.engine_sha,
+        )
+    except MarkCheckedError as exc:
+        payload = {
+            "ok": False,
+            "error_code": exc.code,
+            "error": exc.detail,
+            "locator_ids": list(exc.locator_ids),
+            "updated": [],
+            "blocked": [],
+            "warnings": [],
+        }
+        if exc.invalid_inputs:
+            payload["invalid_inputs"] = list(exc.invalid_inputs)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 1
 
-    # 쓰기 전 schema 검증 후에만 save(promote의 '쓰기 전 검증' 원칙). CodeLocator의
-    # commit_sha/verified_at/updated_at만 갱신해 관계가 안 바뀌므로 store lint는 불필요
-    # (promote는 관계를 바꿔 merged lint까지 하지만 여긴 해당 없음).
-    schema_errors = []
-    for loc in result["updated"]:
-        schema_errors.extend(validate_object(loc))
-    if schema_errors:
-        print(json.dumps({"ok": False, "error": "; ".join(schema_errors)},
-                         ensure_ascii=False, indent=2))
+    try:
+        if plan.updated:
+            _apply_mutation(
+                operation=MutationOperation.MARK_CHECKED,
+                brain_root=brain_root,
+                repo_context=plan.repo_context,
+                engine_sha=plan.engine_sha,
+                objects=plan.updated,
+                preconditions=plan.preconditions,
+                expected_corpus_fingerprint=(
+                    plan.expected_corpus_fingerprint
+                ),
+            )
+    except IngestError as exc:
+        print(json.dumps(
+            {"ok": False, "error": str(exc)},
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 1
-    for loc in result["updated"]:
-        BrainStore.save_object(brain_root, loc)
     print(json.dumps(
-        {"ok": True, "updated": [loc["id"] for loc in result["updated"]],
-         "blocked": result["blocked"], "warnings": result["warnings"]},
+        {"ok": True, "updated": [loc["id"] for loc in plan.updated],
+         "blocked": list(plan.blocked), "warnings": list(plan.warnings)},
         ensure_ascii=False, indent=2))
     return 0
+
+
+def _run_snapshot(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli snapshot")
+    sub = parser.add_subparsers(dest="action", required=True)
+    create = sub.add_parser("create")
+    create.add_argument("--brain-root", required=True)
+    create.add_argument("--repo-root", required=True)
+    create.add_argument("--engine-root", required=True)
+    create.add_argument("--output-root", required=True)
+    create.add_argument("--snapshot-id", required=True)
+    verify = sub.add_parser("verify")
+    verify.add_argument("--snapshot-root", required=True)
+    verify.add_argument("--expected-manifest-sha256", required=True)
+    restore = sub.add_parser("restore")
+    restore.add_argument("--snapshot-root", required=True)
+    restore.add_argument("--brain-root", required=True)
+    restore.add_argument("--expected-manifest-sha256", required=True)
+    args = parser.parse_args(argv)
+
+    from project_brain.snapshot import (
+        SnapshotError,
+        SnapshotRequest,
+        create_snapshot,
+        restore_snapshot,
+        verify_snapshot,
+    )
+
+    try:
+        if args.action == "create":
+            result = create_snapshot(SnapshotRequest(
+                brain_root=Path(args.brain_root).absolute(),
+                repo_root=Path(args.repo_root).absolute(),
+                engine_root=Path(args.engine_root).absolute(),
+                output_root=Path(args.output_root).absolute(),
+                snapshot_id=args.snapshot_id,
+            ))
+            payload = {
+                "ok": True,
+                "snapshot_id": result.snapshot_id,
+                "snapshot_root": str(result.snapshot_root),
+                "manifest_path": str(result.manifest_path),
+                "manifest_sha256": result.manifest_sha256,
+                "file_count": result.file_count,
+                "restore_scope": "brain_only",
+            }
+        elif args.action == "verify":
+            result = verify_snapshot(
+                Path(args.snapshot_root).absolute(),
+                expected_manifest_sha256=args.expected_manifest_sha256,
+            )
+            payload = {
+                "ok": result.ok,
+                "snapshot_id": result.snapshot_id,
+                "manifest_sha256": result.manifest_sha256,
+                "file_count": result.file_count,
+            }
+        else:
+            result = restore_snapshot(
+                Path(args.snapshot_root).absolute(),
+                Path(args.brain_root).absolute(),
+                expected_manifest_sha256=args.expected_manifest_sha256,
+            )
+            payload = {
+                "ok": True,
+                "snapshot_id": result.snapshot_id,
+                "brain_root": str(result.brain_root),
+                "restored_files": list(result.restored_files),
+                "restore_scope": "brain_only",
+            }
+    except SnapshotError as exc:
+        print(json.dumps(
+            {"ok": False, "error_code": exc.code, "error": exc.detail},
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _read_json_argument(path: str | None, default):
+    if path is None:
+        return default
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _run_context_replace(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli context-replace")
+    sub = parser.add_subparsers(dest="action", required=True)
+    plan = sub.add_parser("plan")
+    plan.add_argument("--brain-root", required=True)
+    plan.add_argument("--context-id", required=True)
+    plan.add_argument("--desired-objects-file", required=True)
+    plan.add_argument("--expected-drop-ids-file")
+    plan.add_argument("--expected-moves-file")
+    plan.add_argument("--external-reference-rewrites-file")
+    plan.add_argument("--manifest", required=True)
+    _add_mutation_context_arguments(plan, engine_required=True)
+    apply = sub.add_parser("apply")
+    apply.add_argument("--brain-root", required=True)
+    apply.add_argument("--manifest", required=True)
+    apply.add_argument("--expected-manifest-sha256", required=True)
+    _add_mutation_context_arguments(apply, engine_required=True)
+    args = parser.parse_args(argv)
+
+    from project_brain.context_replace import (
+        ContextReplaceError,
+        apply_context_replace_artifact,
+        create_context_replace_artifact,
+        plan_context_replace,
+    )
+
+    brain_root = resolve_brain_root(args.brain_root).resolve()
+    try:
+        if args.action == "plan":
+            desired = _read_json_argument(args.desired_objects_file, [])
+            drops = _read_json_argument(args.expected_drop_ids_file, [])
+            moves = _read_json_argument(args.expected_moves_file, {})
+            rewrites = _read_json_argument(
+                args.external_reference_rewrites_file,
+                {},
+            )
+            repo_context = _resolve_mutation_context(
+                args,
+                brain_root,
+                required=(
+                    isinstance(desired, list)
+                    and any(
+                        isinstance(obj, dict)
+                        and obj.get("kind") == "CodeLocator"
+                        for obj in desired
+                    )
+                ),
+            )
+            request = plan_context_replace(
+                context_id=args.context_id,
+                existing=BrainStore.load(brain_root),
+                brain_root=brain_root,
+                repo_context=repo_context,
+                engine_sha=args.engine_sha,
+                desired_objects=desired,
+                expected_drop_ids=drops,
+                expected_moves=moves,
+                external_reference_rewrites=rewrites,
+            )
+            artifact = create_context_replace_artifact(request)
+            manifest_path = Path(args.manifest)
+            _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+            print(json.dumps({
+                "ok": True,
+                "manifest": str(manifest_path),
+                "manifest_sha256": artifact.manifest_sha256,
+                "transaction_id": artifact.manifest["transaction_id"],
+                "creates": len(artifact.manifest["creates"]),
+                "updates": len(artifact.manifest["updates"]),
+                "deletes": len(artifact.manifest["deletes"]),
+                "renames": len(artifact.manifest["renames"]),
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        manifest_path = Path(args.manifest)
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            preview = json.loads(manifest_bytes)
+        except (UnicodeError, json.JSONDecodeError):
+            preview = {}
+        objects = preview.get("objects", []) if isinstance(preview, dict) else []
+        repo_context = _resolve_mutation_context(
+            args,
+            brain_root,
+            required=(
+                isinstance(objects, list)
+                and any(
+                    isinstance(obj, dict)
+                    and obj.get("kind") == "CodeLocator"
+                    for obj in objects
+                )
+            ),
+        )
+        result = apply_context_replace_artifact(
+            manifest_bytes=manifest_bytes,
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=args.engine_sha,
+        )
+        print(json.dumps({
+            "ok": True,
+            "transaction_id": result.transaction_id,
+            "action_count": result.action_count,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    except (ContextReplaceError, OSError, json.JSONDecodeError) as exc:
+        print(json.dumps(
+            {
+                "ok": False,
+                "error_code": getattr(exc, "code", "context_replace_failed"),
+                "error": getattr(exc, "detail", str(exc)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+
+
+def _run_migration(argv) -> int:
+    parser = argparse.ArgumentParser(prog="cli migration")
+    modes = parser.add_subparsers(dest="mode", required=True)
+    for mode in ("id", "display"):
+        mode_parser = modes.add_parser(mode)
+        actions = mode_parser.add_subparsers(dest="action", required=True)
+        plan = actions.add_parser("plan")
+        plan.add_argument("--brain-root", required=True)
+        plan.add_argument("--repo-root", required=True)
+        plan.add_argument("--engine-root", required=True)
+        plan.add_argument("--snapshot-root", required=True)
+        plan.add_argument(
+            "--expected-snapshot-manifest-sha256",
+            required=True,
+        )
+        plan.add_argument("--manifest", required=True)
+        plan.add_argument("--engine-sha", required=True)
+        if mode == "id":
+            plan.add_argument("--renames-file", required=True)
+        apply = actions.add_parser("apply")
+        apply.add_argument("--brain-root", required=True)
+        apply.add_argument("--repo-root", required=True)
+        apply.add_argument("--engine-root", required=True)
+        apply.add_argument("--snapshot-root", required=True)
+        apply.add_argument(
+            "--expected-snapshot-manifest-sha256",
+            required=True,
+        )
+        apply.add_argument("--manifest", required=True)
+        apply.add_argument("--expected-manifest-sha256", required=True)
+        apply.add_argument("--engine-sha", required=True)
+    canonical = modes.add_parser("canonical-repair")
+    canonical_actions = canonical.add_subparsers(
+        dest="action",
+        required=True,
+    )
+    for action in ("plan", "apply"):
+        action_parser = canonical_actions.add_parser(action)
+        action_parser.add_argument("--brain-root", required=True)
+        action_parser.add_argument("--repo-root", required=True)
+        action_parser.add_argument("--engine-root", required=True)
+        action_parser.add_argument("--snapshot-root", required=True)
+        action_parser.add_argument(
+            "--expected-snapshot-manifest-sha256",
+            required=True,
+        )
+        action_parser.add_argument("--decisions-file", required=True)
+        action_parser.add_argument(
+            "--expected-decisions-sha256",
+            required=True,
+        )
+        action_parser.add_argument("--classification-file", required=True)
+        action_parser.add_argument(
+            "--expected-classification-sha256",
+            required=True,
+        )
+        action_parser.add_argument("--manifest", required=True)
+        action_parser.add_argument("--engine-sha", required=True)
+        if action == "apply":
+            action_parser.add_argument(
+                "--expected-manifest-sha256",
+                required=True,
+            )
+    args = parser.parse_args(argv)
+
+    from project_brain.canonical_repair import (
+        CanonicalRepairError,
+        apply_canonical_repair_artifact,
+        create_canonical_repair_artifact,
+        parse_canonicalization_ledger,
+        plan_canonical_repair,
+    )
+    from project_brain.corpus_io import CorpusIOError
+    from project_brain.migration import (
+        MigrationError,
+        apply_migration_artifact,
+        create_migration_artifact,
+        plan_display_migration,
+        plan_id_migration,
+        verify_snapshot,
+    )
+    from project_brain.snapshot import SnapshotError
+    from project_brain.store import StoreLoadError
+
+    brain_root = resolve_brain_root(args.brain_root).resolve()
+    try:
+        if args.action == "plan":
+            snapshot = verify_snapshot(
+                Path(args.snapshot_root).absolute(),
+                expected_manifest_sha256=(
+                    args.expected_snapshot_manifest_sha256
+                ),
+            )
+            store = BrainStore.load(brain_root)
+            if args.mode == "canonical-repair":
+                decisions_bytes = Path(args.decisions_file).read_bytes()
+                classification_bytes = Path(
+                    args.classification_file
+                ).read_bytes()
+                ledger = parse_canonicalization_ledger(
+                    decisions_bytes,
+                    classification_bytes=classification_bytes,
+                    expected_classification_sha256=(
+                        args.expected_classification_sha256
+                    ),
+                    existing=store,
+                    engine_sha=args.engine_sha,
+                    repo_head=snapshot.repo_head,
+                )
+                if ledger.sha256 != args.expected_decisions_sha256:
+                    raise CanonicalRepairError(
+                        "decision_ledger_sha256_mismatch",
+                        "decision ledger bytes do not match the trusted receipt",
+                    )
+                plan = plan_canonical_repair(
+                    existing=store,
+                    brain_root=brain_root,
+                    repo_root=Path(args.repo_root).absolute(),
+                    engine_root=Path(args.engine_root).absolute(),
+                    engine_sha=args.engine_sha,
+                    ledger=ledger,
+                    snapshot=snapshot,
+                )
+                artifact = create_canonical_repair_artifact(plan)
+                manifest_path = Path(args.manifest)
+                _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+                print(json.dumps({
+                    "ok": True,
+                    "migration_kind": "canonical_repair",
+                    "manifest": str(manifest_path),
+                    "manifest_sha256": artifact.manifest_sha256,
+                    "transaction_id": (
+                        plan.mutation_plan.manifest.transaction_id
+                    ),
+                    "row_count": len(plan.rows),
+                    "action_count": (
+                        len(plan.mutation_plan.manifest.creates)
+                        + len(plan.mutation_plan.manifest.updates)
+                        + len(plan.mutation_plan.manifest.deletes)
+                        + len(plan.mutation_plan.manifest.renames)
+                        + len(plan.mutation_plan.manifest.auxiliary_updates)
+                    ),
+                    "decision_ledger_sha256": ledger.sha256,
+                    "phase_a_classification_sha256": (
+                        ledger.phase_a_classification_sha256
+                    ),
+                    "snapshot_id": snapshot.snapshot_id,
+                    "snapshot_manifest_sha256": snapshot.manifest_sha256,
+                }, ensure_ascii=False, indent=2))
+                return 0
+            if args.mode == "id":
+                renames = _read_json_argument(args.renames_file, {})
+                plan = plan_id_migration(
+                    existing=store,
+                    brain_root=brain_root,
+                    repo_root=Path(args.repo_root).absolute(),
+                    engine_root=Path(args.engine_root).absolute(),
+                    engine_sha=args.engine_sha,
+                    renames=renames,
+                    snapshot=snapshot,
+                )
+            else:
+                plan = plan_display_migration(
+                    existing=store,
+                    brain_root=brain_root,
+                    repo_root=Path(args.repo_root).absolute(),
+                    engine_root=Path(args.engine_root).absolute(),
+                    engine_sha=args.engine_sha,
+                    snapshot=snapshot,
+                )
+            artifact = create_migration_artifact(plan)
+            manifest_path = Path(args.manifest)
+            _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+            print(json.dumps({
+                "ok": True,
+                "migration_kind": plan.migration_kind,
+                "manifest": str(manifest_path),
+                "manifest_sha256": artifact.manifest_sha256,
+                "transaction_id": plan.mutation_plan.manifest.transaction_id,
+                "row_count": len(plan.rows),
+                "action_count": (
+                    len(plan.mutation_plan.manifest.creates)
+                    + len(plan.mutation_plan.manifest.updates)
+                    + len(plan.mutation_plan.manifest.deletes)
+                    + len(plan.mutation_plan.manifest.renames)
+                    + len(plan.mutation_plan.manifest.auxiliary_updates)
+                ),
+                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_manifest_sha256": snapshot.manifest_sha256,
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        manifest_bytes = Path(args.manifest).read_bytes()
+        if args.mode == "canonical-repair":
+            classification_bytes = Path(args.classification_file).read_bytes()
+            result = apply_canonical_repair_artifact(
+                manifest_bytes=manifest_bytes,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                decisions_bytes=Path(args.decisions_file).read_bytes(),
+                expected_decisions_sha256=args.expected_decisions_sha256,
+                classification_bytes=classification_bytes,
+                expected_classification_sha256=(
+                    args.expected_classification_sha256
+                ),
+                brain_root=brain_root,
+                repo_root=Path(args.repo_root).absolute(),
+                engine_root=Path(args.engine_root).absolute(),
+                engine_sha=args.engine_sha,
+                snapshot_root=Path(args.snapshot_root).absolute(),
+                expected_snapshot_manifest_sha256=(
+                    args.expected_snapshot_manifest_sha256
+                ),
+            )
+            manifest_payload = json.loads(manifest_bytes)
+            print(json.dumps({
+                "ok": True,
+                "migration_kind": "canonical_repair",
+                "manifest": str(Path(args.manifest)),
+                "manifest_sha256": args.expected_manifest_sha256,
+                "transaction_id": result.transaction_id,
+                "row_count": len(manifest_payload["rows"]),
+                "action_count": result.action_count,
+                "decision_ledger_sha256": (
+                    result.decision_ledger_sha256
+                ),
+                "phase_a_classification_sha256": (
+                    args.expected_classification_sha256
+                ),
+                "snapshot_id": result.snapshot_id,
+                "snapshot_manifest_sha256": (
+                    args.expected_snapshot_manifest_sha256
+                ),
+            }, ensure_ascii=False, indent=2))
+            return 0
+        result = apply_migration_artifact(
+            manifest_bytes=manifest_bytes,
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            brain_root=brain_root,
+            repo_root=Path(args.repo_root).absolute(),
+            engine_root=Path(args.engine_root).absolute(),
+            engine_sha=args.engine_sha,
+            snapshot_root=Path(args.snapshot_root).absolute(),
+            expected_snapshot_manifest_sha256=(
+                args.expected_snapshot_manifest_sha256
+            ),
+        )
+        print(json.dumps({
+            "ok": True,
+            "transaction_id": result.transaction_id,
+            "action_count": result.action_count,
+            "snapshot_id": result.snapshot_id,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    except (StoreLoadError, CorpusIOError) as exc:
+        if args.mode != "canonical-repair":
+            raise
+        print(json.dumps({
+            "ok": False,
+            "error_code": exc.code,
+            "error": exc.detail,
+        }, ensure_ascii=False, indent=2))
+        return 1
+    except (
+        CanonicalRepairError,
+        MigrationError,
+        SnapshotError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        print(json.dumps({
+            "ok": False,
+            "error_code": getattr(exc, "code", "migration_failed"),
+            "error": getattr(exc, "detail", str(exc)),
+        }, ensure_ascii=False, indent=2))
+        return 1
 
 
 def main() -> int:
@@ -1063,8 +1880,14 @@ def main() -> int:
             return _run_stale_check(argv[1:])
         if argv and argv[0] == "mark-checked":
             return _run_mark_checked(argv[1:])
+        if argv and argv[0] == "snapshot":
+            return _run_snapshot(argv[1:])
+        if argv and argv[0] == "context-replace":
+            return _run_context_replace(argv[1:])
+        if argv and argv[0] == "migration":
+            return _run_migration(argv[1:])
         return _run_query(argv)
-    except ConfigError as exc:
+    except (ConfigError, RepoVerificationError) as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
               file=sys.stderr)

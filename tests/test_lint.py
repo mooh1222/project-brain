@@ -3,13 +3,23 @@ dangling evidence_ref는 1 problem. promote 사후 lint가 의존하는 동작�
 
 import unittest
 
-from project_brain.lint import lint_store, unpromoted_vouched_terms
+from project_brain.lint import (
+    LintProblem,
+    lint_mutation_input_store_report,
+    lint_store,
+    lint_store_report,
+    unpromoted_vouched_terms,
+)
 from project_brain.objbase import base
 from project_brain.store import BrainStore
 from tests.test_ingest import (
     candidate_term,
+    context,
     evidence_ref,
+    malformed_reference_cases,
     manifest,
+    reviewed_term,
+    review_record_for,
 )
 
 T = "2026-06-04T00:00:00Z"
@@ -19,9 +29,128 @@ def store_of(*objs):
     return BrainStore({o["id"]: o for o in objs})
 
 
+def _change_event():
+    return base(
+        {
+            "id": "ledger.neutral.change",
+            "kind": "EventLedgerRecord",
+            "status": "reviewed",
+            "truth_role": "event",
+            "title": "변경 사건",
+            "event_type": "rule_change",
+            "happened_at": T,
+            "summary": "합성 변경 사건",
+            "related_objects": [],
+            "evidence_refs": [],
+        },
+        tags=["neutral"],
+        created_at=T,
+        updated_at=T,
+    )
+
+
+def _temporal_fact(fid, *, value, supersedes=None, closed=False):
+    obj = {
+        "id": fid,
+        "kind": "TemporalFact",
+        "status": "reviewed",
+        "truth_role": "fact",
+        "title": "시간 사실",
+        "subject": "합성 규칙",
+        "predicate": "enabled",
+        "value": value,
+        "scope": {"release": "test"},
+        "valid_from": T,
+        "derived_from_event_id": "ledger.neutral.change",
+        "confidence": "high",
+        "evidence_refs": [],
+    }
+    if supersedes is not None:
+        obj["supersedes"] = supersedes
+    if closed:
+        obj["valid_until"] = T
+    return base(obj, tags=["neutral"], created_at=T, updated_at=T)
+
+
 class TestLintStore(unittest.TestCase):
+    def test_mutation_input_lint_opt_in_does_not_weaken_default_lint(self):
+        locator = base(
+            {
+                "id": "code.neutral.foo",
+                "kind": "CodeLocator",
+                "status": "reviewed",
+                "truth_role": "reference",
+                "title": "Foo::bar",
+                "repo": "demo",
+                "path": "Foo.cpp",
+                "symbol": "Foo::bar",
+                "commit_sha": "a" * 40,
+                "locator_source": "rg",
+                "verified_quote": "void Foo::bar() {}",
+            },
+            tags=["neutral"],
+            created_at=T,
+            updated_at=T,
+        )
+        store = store_of(locator)
+
+        self.assertTrue(
+            any("verified_at" in problem.message for problem in lint_store_report(store))
+        )
+        self.assertEqual(lint_mutation_input_store_report(store), ())
+
+    def test_structured_report_keeps_wrapper_messages_compatible(self):
+        term = candidate_term()
+        term["evidence_refs"] = ["evref.neutral.missing"]
+        store = store_of(context(), term)
+        report = lint_store_report(store)
+
+        self.assertEqual(
+            report,
+            (
+                LintProblem(
+                    code="dangling_reference",
+                    object_ids=("g.neutral.x",),
+                    message=(
+                        "g.neutral.x: dangling evidence_ref "
+                        "evref.neutral.missing"
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(lint_store(store), [problem.message for problem in report])
+
+    def test_invalid_id_and_unknown_grammar_have_distinct_codes(self):
+        invalid = context("context.Bad")
+        invalid["context_key"] = "Bad"
+        unknown = context("mystery.neutral")
+        unknown["context_key"] = "neutral"
+
+        invalid_report = lint_store_report(store_of(invalid))
+        unknown_report = lint_store_report(store_of(unknown))
+
+        self.assertTrue(invalid_report)
+        self.assertEqual({problem.code for problem in invalid_report}, {"invalid_id"})
+        self.assertTrue(unknown_report)
+        self.assertEqual({problem.code for problem in unknown_report}, {"unknown_grammar"})
+
+    def test_nested_review_target_with_unknown_prefix_is_unknown_grammar(self):
+        review = review_record_for(
+            "review.legacy.target",
+            "legacy.target",
+        )
+
+        report = lint_store_report(store_of(review))
+
+        id_codes = {
+            problem.code
+            for problem in report
+            if "invalid id" in problem.message
+        }
+        self.assertEqual(id_codes, {"unknown_grammar"})
+
     def test_clean_store_no_problems(self):
-        store = store_of(manifest(), evidence_ref(), candidate_term())
+        store = store_of(manifest(), evidence_ref(), context(), candidate_term())
         self.assertEqual(lint_store(store), [])
 
     def test_dangling_evidence_ref_reported(self):
@@ -30,6 +159,225 @@ class TestLintStore(unittest.TestCase):
         store = store_of(term)
         problems = lint_store(store)
         self.assertTrue(any("dangling evidence_ref ev.missing" in p for p in problems))
+
+    def test_nested_code_locator_dangling_reported(self):
+        ref = evidence_ref()
+        ref["locator"] = {"code_locator_id": "code.neutral.missing"}
+        problems = lint_store(store_of(manifest(), ref))
+        self.assertTrue(
+            any("dangling code_locator_id code.neutral.missing" in p for p in problems),
+            problems,
+        )
+
+    def test_external_ids_are_not_dangling_brain_references(self):
+        decision = base(
+            {
+                "id": "decision.neutral.external-ids",
+                "kind": "DecisionRecord",
+                "status": "candidate",
+                "truth_role": "event",
+                "title": "외부 ID",
+                "decision_type": "implementation_boundary",
+                "summary": "외부 시스템 ID는 Brain 참조가 아니다.",
+                "decision": "외부 ID를 그대로 둔다.",
+                "source_object_ids": [],
+                "affected_context_ids": [],
+                "spec_reflected": "not_applicable",
+                "jira_issue_ids": ["LGBBTWO-234"],
+                "channel_id": "C123",
+                "project_id": "bb2",
+                "evidence_refs": [],
+            },
+            tags=["neutral"],
+            created_at=T,
+            updated_at=T,
+        )
+
+        problems = lint_store(store_of(decision))
+
+        self.assertFalse([p for p in problems if "dangling" in p], problems)
+
+    def test_malformed_reference_types_are_rejected(self):
+        for label, obj, expected in malformed_reference_cases():
+            with self.subTest(label=label):
+                self.assertIn(expected, lint_store(store_of(obj)))
+
+    def test_schema_invalid_reference_items_do_not_escape_semantic_lint(self):
+        term = reviewed_term(evidence_refs=[{"bad": "id"}])
+
+        mapping = _drift_mapping("mapping.neutral.invalid-ref", term_ids=[])
+        mapping["mapping_key"] = "invalid-ref"
+        mapping["supersedes_mapping_ids"] = [{"bad": "id"}]
+
+        decision = base(
+            {
+                "id": "decision.neutral.invalid-ref",
+                "kind": "DecisionRecord",
+                "status": "candidate",
+                "truth_role": "event",
+                "title": "잘못된 참조 타입",
+                "decision_type": "implementation_boundary",
+                "summary": "합성 결정",
+                "decision": "참조 타입 검증",
+                "source_object_ids": [],
+                "affected_context_ids": [],
+                "affected_mapping_ids": [{"bad": "id"}],
+                "spec_reflected": "not_applicable",
+                "evidence_refs": [],
+            },
+            tags=["neutral"],
+            created_at=T,
+            updated_at=T,
+        )
+
+        projection = _projection(
+            source_object_ids=[{"bad": "id"}],
+            source_content_hash="invalid-object-is-not-semantically-linted",
+        )
+
+        cases = (
+            (
+                term,
+                "g.neutral.x",
+                "evidence_refs",
+            ),
+            (
+                mapping,
+                "mapping.neutral.invalid-ref",
+                "supersedes_mapping_ids",
+            ),
+            (
+                decision,
+                "decision.neutral.invalid-ref",
+                "affected_mapping_ids",
+            ),
+            (
+                projection,
+                "projection.x.req.reuse",
+                "source_object_ids",
+            ),
+        )
+        for obj, object_id, field in cases:
+            with self.subTest(field=field):
+                problems = lint_store(store_of(obj))
+                self.assertEqual(
+                    [problem for problem in problems if "reference field" in problem],
+                    [
+                        f"{object_id}: reference field {field!r} at /{field}/0 "
+                        "must be a string, got dict"
+                    ],
+                )
+
+    def test_valid_term_does_not_dereference_schema_invalid_evidence_ref(self):
+        bad_ref = evidence_ref()
+        bad_ref["evidence_manifest_id"] = {"bad": "id"}
+        term = reviewed_term(evidence_refs=["evref.neutral.ref"])
+
+        self.assertEqual(
+            lint_store(store_of(context(), bad_ref, term)),
+            [
+                "evref.neutral.ref: reference field 'evidence_manifest_id' at "
+                "/evidence_manifest_id must be a string, got dict"
+            ],
+        )
+
+    def test_valid_projection_does_not_hash_schema_invalid_source(self):
+        from project_brain.hash_utils import source_content_hash
+
+        bad_source = _drift_mapping(
+            "mapping.neutral.invalid-source",
+            term_ids=[],
+        )
+        bad_source["mapping_key"] = "invalid-source"
+        bad_source["evidence_refs"] = [{"bad": "id"}]
+
+        projection = _projection(
+            pid="projection.neutral.req.reuse",
+            source_object_ids=["mapping.neutral.invalid-source"],
+            source_content_hash=source_content_hash([]),
+        )
+        projection["context_id"] = "context.neutral"
+
+        self.assertEqual(
+            lint_store(
+                store_of(
+                    context(),
+                    manifest(),
+                    evidence_ref(),
+                    bad_source,
+                    projection,
+                )
+            ),
+            [
+                "mapping.neutral.invalid-source: reference field 'evidence_refs' at "
+                "/evidence_refs/0 must be a string, got dict"
+            ],
+        )
+
+    def test_valid_mapping_does_not_consume_schema_invalid_superseded_target(self):
+        bad_old = _drift_mapping("mapping.neutral.old", term_ids=[])
+        bad_old["mapping_key"] = "old"
+        bad_old["evidence_refs"] = [{"bad": "id"}]
+
+        current = _drift_mapping("mapping.neutral.current", term_ids=[])
+        current["mapping_key"] = "current"
+        current["evidence_refs"] = ["evref.neutral.ref"]
+        current["supersedes_mapping_ids"] = ["mapping.neutral.old"]
+
+        self.assertEqual(
+            lint_store(
+                store_of(
+                    context(),
+                    manifest(),
+                    evidence_ref(),
+                    bad_old,
+                    current,
+                )
+            ),
+            [
+                "mapping.neutral.old: reference field 'evidence_refs' at "
+                "/evidence_refs/0 must be a string, got dict"
+            ],
+        )
+
+    def test_schema_invalid_source_keeps_safe_dangling_reference_diagnostics(self):
+        term = candidate_term()
+        term["status"] = "bogus"
+        term["evidence_refs"] = ["ev.missing"]
+
+        self.assertEqual(
+            lint_store(store_of(context(), term)),
+            [
+                "g.neutral.x: invalid status 'bogus'",
+                "g.neutral.x: dangling evidence_ref ev.missing",
+            ],
+        )
+
+    def test_temporal_fact_supersedes_resolves_old_fact(self):
+        old = _temporal_fact("fact.neutral.old", value=False, closed=True)
+        new = _temporal_fact(
+            "fact.neutral.new",
+            value=True,
+            supersedes="fact.neutral.old",
+        )
+
+        problems = lint_store(store_of(_change_event(), old, new))
+
+        self.assertFalse([p for p in problems if "dangling" in p], problems)
+
+    def test_temporal_fact_dangling_supersedes_reported(self):
+        fact = _temporal_fact(
+            "fact.neutral.new",
+            value=True,
+            supersedes="fact.neutral.missing",
+        )
+
+        problems = lint_store(store_of(_change_event(), fact))
+
+        self.assertEqual(
+            [p for p in problems if "dangling supersedes" in p],
+            ["fact.neutral.new: dangling supersedes fact.neutral.missing"],
+        )
 
 
 def _drift_mapping(mid, *, term_ids, status="reviewed"):

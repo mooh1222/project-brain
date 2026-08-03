@@ -50,6 +50,17 @@ class TestFindIsolated(unittest.TestCase):
         )
         self.assertNotIn("evref.a", find_isolated(store, kinds=["EvidenceRef"]))
 
+    def test_code_locator_pointed_by_nested_locator_not_isolated(self):
+        store = _store(
+            _obj("code.linked", "CodeLocator"),
+            _obj(
+                "evref.a",
+                "EvidenceRef",
+                locator={"code_locator_id": "code.linked"},
+            ),
+        )
+        self.assertNotIn("code.linked", find_isolated(store))
+
     def test_glossary_term_pointed_only_by_singular_id_not_isolated(self):
         # 단수 brain-참조 _id(ReviewRecord.target_object_id)로만 가리켜져도 고립 아님.
         store = _store(
@@ -90,9 +101,20 @@ class TestFindIsolated(unittest.TestCase):
         refs = referenced_ids(store)
         self.assertEqual(refs, {"ctx", "c1", "c2"})
 
+    def test_temporal_fact_supersedes_is_inbound_reference(self):
+        store = _store(
+            _obj("fact.neutral.old", "TemporalFact"),
+            _obj(
+                "fact.neutral.new",
+                "TemporalFact",
+                supersedes="fact.neutral.old",
+            ),
+        )
+        self.assertEqual(referenced_ids(store), {"fact.neutral.old"})
+
 
 class TestEdges(unittest.TestCase):
-    """graph.edges — 정본 INBOUND_REF_FIELDS 기준 from→to 엣지 목록(시각화용).
+    """graph.edges — 정본 reference_fields registry 기준 from→to 엣지 목록(시각화용).
 
     referenced_ids와 같은 필드·self-ref 규칙을 공유하되, 양 끝이 store에 존재하는
     엣지만 만든다(끊긴 참조는 그릴 노드가 없다)."""
@@ -107,6 +129,17 @@ class TestEdges(unittest.TestCase):
         )
         self.assertEqual(edges(store), [("m", "c1"), ("m", "c2"), ("m", "ctx")])
 
+    def test_edges_include_nested_code_locator_reference(self):
+        store = _store(
+            _obj(
+                "evref.a",
+                "EvidenceRef",
+                locator={"code_locator_id": "code.x"},
+            ),
+            _obj("code.x", "CodeLocator"),
+        )
+        self.assertEqual(edges(store), [("evref.a", "code.x")])
+
     def test_edges_exclude_dangling_and_self_ref(self):
         # store에 없는 to(끊긴 참조)·자기 자신 참조는 엣지에서 뺀다.
         store = _store(
@@ -117,7 +150,7 @@ class TestEdges(unittest.TestCase):
         self.assertEqual(edges(store), [("m", "c1")])
 
     def test_edges_external_keys_not_edges(self):
-        # channel_id 등 외부 키는 INBOUND_REF_FIELDS 밖이라 엣지가 아니다(거짓 연결 방지).
+        # channel_id 등 외부 키는 공용 참조 registry 밖이라 엣지가 아니다(거짓 연결 방지).
         store = _store(
             _obj("slack.t", "SlackThread", channel_id="code.x"),
             _obj("code.x", "CodeLocator"),
@@ -141,6 +174,25 @@ class TestEdges(unittest.TestCase):
         )
         self.assertEqual(edges(store), [("m", "g")])
 
+    def test_edges_include_supersedes_but_exclude_self_reference(self):
+        store = _store(
+            _obj("fact.neutral.old", "TemporalFact"),
+            _obj(
+                "fact.neutral.new",
+                "TemporalFact",
+                supersedes="fact.neutral.old",
+            ),
+            _obj(
+                "fact.neutral.self",
+                "TemporalFact",
+                supersedes="fact.neutral.self",
+            ),
+        )
+        self.assertEqual(
+            edges(store),
+            [("fact.neutral.new", "fact.neutral.old")],
+        )
+
 
 class TestGraphIsolatedCli(unittest.TestCase):
     """`graph isolated` CLI — 읽기 전용 JSON 리포트(dispatch + 집계 배선 확인)."""
@@ -160,8 +212,8 @@ class TestGraphIsolatedCli(unittest.TestCase):
             payload = json.loads(out.getvalue())
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
-        self.assertIn("code.lonely", payload["isolated"])
-        self.assertNotIn("code.linked", payload["isolated"])
+        self.assertIn("code.neutral.lonely", payload["isolated"])
+        self.assertNotIn("code.neutral.linked", payload["isolated"])
         self.assertEqual(payload["by_kind"], {"CodeLocator": 1})
 
     def test_cli_graph_isolated_kind_filter(self):
@@ -200,9 +252,9 @@ class TestGraphExportCli(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["out"], str(out_path))
         self.assertEqual(payload["nodes"], 2)
-        self.assertEqual(payload["edges"], 1)        # m.x → code.x
+        self.assertEqual(payload["edges"], 1)  # mapping.neutral.x → code.neutral.x
         self.assertIn("vis-network", html)
-        self.assertIn("code.x", html)
+        self.assertIn("code.neutral.x", html)
 
     def test_cli_graph_export_creates_missing_parent_dirs(self):
         # 없는 부모 디렉터리로 내보내면 폴더를 만들어 쓴다(흔한 케이스 — 트레이스백 금지).

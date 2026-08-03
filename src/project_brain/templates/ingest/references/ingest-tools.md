@@ -20,8 +20,9 @@
 근거 약함/충돌/검증 실패 ──ingest(status:candidate)──▶ store 저장 ──질의 시 "확인 필요" 노출──▶ project-brain promote(사용 시점) ──▶ reviewed   ← C
 ```
 
-- `ingest`: 묶음을 받아 **per-object 스키마 검증 → 병합 store 연결무결성 lint → 파일 저장** 순서로 처리한다. 저장 전 검증은 묶음 전체지만 파일 쓰기는 rollback transaction이 아니다.
-  저장 전 두 게이트가 실패하면 `IngestError`를 내고 파일 쓰기를 시작하지 않는다. status는 호출자가 박는다 — 검증 통과 매핑을
+- `ingest`: 묶음을 받아 **per-object 스키마 검증 → 병합 store 연결무결성 lint → mutation
+  transaction** 순서로 처리한다. 저장 전 게이트가 실패하면 파일 쓰기를 시작하지 않고, 쓰기 중
+  실패는 transaction journal로 rollback한다. status는 호출자가 박는다 — 검증 통과 매핑을
   `reviewed`로 넣으면 그대로 검수됨(B), 후퇴(reviewed→candidate)만 거부한다. §6.4로 reviewed `DomainMapping`·
   `GlossaryTerm`은 `evidence_refs` non-empty여야 통과한다(코드앵커는 비강제).
 - `promote`: candidate 객체를 reviewed로 승격하고 (승격 객체 + ReviewRecord)를 돌려주는 **함수**. 저장은 안 하니
@@ -67,13 +68,22 @@ project-brain index rebuild && project-brain eval && project-brain search "..."
 `cli.py`에 `ingest` 서브커맨드가 있다(query 경로는 그대로 유지). 묶음을 JSON 배열 파일로 만들어 넘긴다:
 
 ```bash
-project-brain ingest --objects-file <묶음.json> [--preconditions-file <build리포트.json>]
+project-brain ingest \
+  --objects-file <묶음.json> \
+  [--preconditions-file <build리포트.json>] \
+  --repo-root <absolute-project-root> \
+  --expected-repo-id <repo-id> \
+  --expected-revision-ref <git-ref> \
+  --engine-sha <exact-engine-sha>
 ```
 
 - `--objects-file`: 객체 dict들의 **JSON 배열** 한 파일.
 - `--preconditions-file`: build 리포트 JSON(선택). 저장 직전 `expected_updated_at`를 다시 확인해
   build 이후 store가 바뀌었으면 거부한다(검사–저장 시점차 방지, build의 updates를 쓸 때만 의미 있음).
-- 성공 시 `{"ok": true, "ingested": N}`, 실패 시 `{"ok": false, "error": "..."}` + 종료코드 1.
+- 성공 JSON은 `transaction_id`, `operation=ingest`, `committed`, `manifest_sha256`,
+  `before_fingerprint`, `after_fingerprint`, `ingested_ids`, `ingested_count`를 정확히 담는다.
+  `committed=true`와 lowercase SHA-256 형식의 `manifest_sha256`이 없으면 성공 증거가 아니다.
+  실패 시 `{"ok": false, ...}`와 종료코드 1이다.
 - 레포 안 어느 디렉토리에서든 실행 가능 — 루트 `.project-brain.json` config가 brain root를
   해석한다(`--brain-root`로 덮어쓸 수 있음).
 
@@ -225,7 +235,13 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    없거나 틀리면 build·ingest 전에 실패한다. 중간 비파괴 검증은 `--dry`를 쓴다.
 
    ```bash
-   scripts/run_ingest.sh verify.json domain_spec.py
+   scripts/run_ingest.sh \
+     --repo-root <absolute-project-root> \
+     --brain-root <absolute-brain-root> \
+     --expected-repo-id <repo-id> \
+     --expected-revision-ref <git-ref> \
+     --engine-sha <exact-engine-sha> \
+     verify.json domain_spec.py
    ```
 
 4. 대량은 아래처럼 실행한다. `batch.json`은 item 목록과 top-level `finalization` 계약을 함께 둔다.
@@ -234,6 +250,10 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 
    ```json
    {
+     "repo_root": "/absolute/project/root",
+     "expected_repo_id": "repo-id",
+     "expected_revision_ref": "origin/main",
+     "engine_sha": "40-or-64-lowercase-git-sha",
      "items": [{"key": "a", "verify_json": "a.json", "domain_spec_py": "a.py"}],
      "finalization": {
        "recall_checks": [{
@@ -251,13 +271,47 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    scripts/run_ingest_batch.py batch.json --report batch-report.json --resume batch-report.json
    ```
 
-   첫 실행은 어떤 item보다 먼저 `isolation_baseline`을 report에 저장한다. 재개는 같은 batch 입력과
-   report를 사용하며 이미 성공한 item만 건너뛰고 최초 baseline을 재사용한다. resolved input 내용과
-   finalization 계약은 `manifest_fingerprint`에 함께 들어가므로 query·expected ID 변경도 다른 입력으로
-   거부한다. 완료 검사는 post head == baseline head와 post unmerged == baseline union expected를 함께
+   `repo_root`는 symbolic link가 없는 absolute canonical path이자 실제 Git toplevel이어야 한다.
+   각 item 입력은 manifest 아래 상대경로만 허용하며 absolute path, `..` 탈출, symbolic link는
+   거부한다. runner는 시작 때 no-follow FD로 읽은 verify/spec 바이트를 run 전용 read-only
+   `immutable staged` 파일로 고정한다. child에는 이 staged 경로만 넘기며 원본과 staged 파일의
+   type/device/inode/size/hash를 item 전후와 finalization 직전에 다시 확인한다.
+
+   첫 실행은 어떤 item보다 먼저 `isolation_baseline`을 report에 저장한다. report에는
+   absolute `repo_root`, target config가 해석한 canonical `brain_root`와
+   `brain_root_device`/`brain_root_inode`, `expected_repo_id`, `expected_revision_ref`, resolved
+   `target_revision_sha`, actual `engine_root`와 `engine_sha`, 양쪽 root의 device/inode, batch 파일
+   자체의 `manifest_sha256`, resolved 입력의 `manifest_fingerprint`, authoritative
+   `item_records`가 기록된다. 각 record는 full binding, `pending|failed|committed` status, failure,
+   exact transaction을 한 객체에 묶는다. `transactions`는 `item_records`에서 파생되는 호환
+   출력이며 독립 resume/finalization 근거가 아니다.
+
+   재개는 같은 report의 최초 baseline을 재사용하되 실제 Git toplevel/repo identity, ref가 가리키는
+   exact `target_revision_sha`, 실제 engine Git root/HEAD, repo/brain root inode, manifest와 입력 hash 가운데
+   하나라도 다르면 `resume_contract_mismatch`로 종료한다. 각 item 전과 finalization 직전에도 같은
+   resolved state를 재검증한다. malformed prior report도 fail-closed 처리한다.
+
+   item ingest는 binding을 mutation manifest와 durable batch intent/journal에 함께 기록한다.
+   process가 COMMITTED 뒤 report 갱신 전에 끊겨도 재개는 root-anchored journal에서 exact
+   `durable receipt`를 복구한다. 이때 canonical manifest SHA, operation, engine SHA, action object
+   IDs, before/after fingerprint, 현재 corpus fingerprint, item/input identity를 모두 확인한다.
+   receipt가 없는 suffix만 재실행하며 첫 failed/pending record에서 tail 실행을 멈춘다.
+   `needs_user`, 누락·불일치 transaction, `committed=false`, durable receipt 불일치는 성공이나
+   `finalized`로 승격하지 않는다. 완료 증거는 `finalized=true` 하나가 아니라 모든 `item_records`의
+   exact durable 계약과 `finalization.ok=true`, `finalization.isolation.unexpected_new_ids=[]`,
+   각 recall check의 누락 목록이 빈 상태까지 포함한다.
+   완료 검사는 post head == baseline head와 post unmerged == baseline union expected를 함께
    확인한다. legacy baseline은 당시 허용한 제한만 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
-   완료 증거는 `finalized=true` 하나가 아니라 `finalization.ok=true`,
-   `finalization.isolation.unexpected_new_ids=[]`, 각 recall check의 누락 목록이 빈 상태까지 포함한다.
+   semantic commands가 끝난 뒤 finalizer는 durable receipt chain과 current object corpus tail을
+   `post_gate_object_tail` mode로 다시 확인한다. commit 직후와 semantic commands 전 검증은
+   derived 파일이 없어야 하는 `strict_commit` mode를 유지한다. post-gate mode는
+   intent/journal, canonical manifest와 receipt, full object corpus fingerprint, object action
+   entry를 그대로 검증하면서 index/audit derived 출력만 허용한다. batch runner도 finalizer return 뒤 resolved
+   repo/ref/engine/brain root state, 원본·staged 입력, receipt chain을 `post-finalizer`로 다시
+   확인한 직후에만 `finalized=true`를 쓴다. index/audit 같은 derived 파일 변화는 허용하지만 object
+   corpus tail이나 ref/engine/brain root가 바뀌면 commands가 성공했어도 완료로 승격하지 않는다.
+   config JSON이 object가 아니거나 config loader가 일반 예외를 내더라도 traceback을 노출하지
+   않고 finalizer는 `ok=false`, batch는 `finalized=false`인 JSON 실패를 기록한다.
 
    finalizer JSON의 `unmerged` 블록은 이 Git 범위 검사의 실제 결과다. `ok`가 false면 완료가 아니다.
    `baseline_ids`는 baseline에 있던 미머지 locator, `expected_ids`는 이번 계약이 허용한 locator,
@@ -280,8 +334,16 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 
 ## 적재 후 확인 — semantic finalization
 
-`scripts/finalize_ingest.py`는 아래 게이트를 실행하고 `commands`, `isolation`, `unmerged`, `recall_checks`, `errors`를
+`scripts/finalize_ingest.py`는 authoritative `item_records`의 binding과 exact transaction을
+root-anchored durable intent/journal의 `COMMITTED` receipt chain으로 다시 검증한다. record가 모두
+`committed=true`이고 canonical manifest SHA, before/after fingerprint, operation, engine SHA,
+action object IDs, 현재 corpus fingerprint가 일치할 때만 아래 게이트를 실행하고 `transactions`, `commands`,
+`isolation`, `unmerged`, `recall_checks`, `errors`를
 가진 JSON 한 개를 낸다. runner는 종료 코드만 보지 않고 이 schema와 `ok`를 함께 확인한다.
+모든 command와 recall check 뒤에도 같은 durable receipt/current object tail을
+`post_gate_object_tail` mode로 다시 검증한다. 정상 index/audit derived 출력은 허용하지만
+action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치로 거부하며, 이 두 번째
+검증 실패도 `ok=false`다.
 
 1. **lint clean** — ingest가 성공했으면 연결무결성은 통과한 것. 별도 일괄 작업을 했다면
    `lint_store` 문제 0건 재확인.

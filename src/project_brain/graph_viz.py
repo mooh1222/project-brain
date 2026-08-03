@@ -1,6 +1,6 @@
 """brain 객체 그래프를 vis-network 단일 HTML로 렌더한다 (graph export).
 
-엣지는 정본 graph.edges(INBOUND_REF_FIELDS 기준)를 쓴다 — graph isolated와 같은
+엣지는 정본 graph.edges(reference_fields registry 기준)를 쓴다 — graph isolated와 같은
 그래프를 보여줘, 왜 어떤 잎이 고립인지 화면에서 그대로 확인할 수 있다. vis-network는
 CDN(unpkg)에서 받으므로 파이썬 의존성은 없고, 보려면 인터넷 연결이 필요하다.
 """
@@ -35,7 +35,7 @@ TIP_FIELDS = ["body", "summary", "definition", "meaning", "canonical_summary",
 def build_payload(store: BrainStore) -> dict:
     """store → vis-network payload {nodes, edges, details, kinds, groups}.
 
-    엣지는 graph.edges(정본 INBOUND_REF_FIELDS)로 그린다. 노드 라벨·색·툴팁은
+    엣지는 graph.edges(정본 reference_fields registry)로 그린다. 노드 라벨·색·툴팁은
     표시용 휴리스틱이다."""
     objs = [o for o in store.all() if isinstance(o, dict) and o.get("id")]
 
@@ -60,10 +60,11 @@ def build_payload(store: BrainStore) -> dict:
             "label": label,
             "group": kind,
             "title": "\n".join(tip),
+            "display_only": True,
             "borderWidth": 3 if status == "reviewed" else 1,
             "shapeProperties": {"borderDashes": [5, 5] if status == "candidate" else False},
         })
-        details[oid] = o
+        details[oid] = {**o, "display_only": True}
 
     edge_list = [{"from": f, "to": t} for f, t in graph_edges(store)]
 

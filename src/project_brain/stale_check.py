@@ -10,8 +10,15 @@ git 호출은 git_runner 콜러블로 주입한다 — 로직 함수는 git을 �
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import subprocess
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+
+from project_brain.repo_context import RepoContext
+from project_brain.store import BrainStore
 
 
 def _mappings_referencing(store, locator_id):
@@ -290,74 +297,200 @@ def advisories_by_mapping(stale_set):
     return out
 
 
-def mark_checked(store, *, mapping_ids, checked_head, current_head, now):
-    """검토 완료 reviewed 매핑이 어떤 locator의 blocking closure를 전부 덮으면 갱신.
+_EXACT_GIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
-    입력은 존재하는 reviewed DomainMapping만 허용한다(spec §4 'reviewed-only blocking').
-    unknown/candidate/superseded/non-mapping이 섞이면 ok:False로 거부한다 — candidate가
-    reviewed closure 빈 locator를 vacuous하게 통과시켜 commit_sha를 갱신하는 사각을 입력
-    단에서 차단한다. 그래서 후보 locator의 blocking은 항상 입력 매핑을 포함해 비지 않는다.
 
-    반환(체크 순서대로):
-      head 이동: {"ok": False, "error": "head moved", "checked_head", "current_head", ...빈}
-      거부: {"ok": False, "error": ..., "invalid_inputs": [{id, reason}...], updated/blocked/warnings 빈}
-      정상: {"ok": True, "updated": [갱신 locator 객체...],
-             "blocked": [{locator_id, missing_mapping_ids}...],
-             "warnings": [{locator_id, candidate_mapping_ids}...]}
-    저장은 호출자(CLI). line_* 불변. warnings는 candidate만(superseded 제외, spec §4).
+@dataclass(frozen=True)
+class MarkCheckedPlan:
+    updated: tuple[dict, ...]
+    blocked: tuple[dict, ...]
+    warnings: tuple[dict, ...]
+    preconditions: Mapping[str, str]
+    expected_corpus_fingerprint: str
+    repo_context: RepoContext
+    engine_sha: str
 
-    staleness는 재확인하지 않는다 — 사람이 검토 선언한 매핑의 blocking closure 충족이
-    유일한 갱신 조건이다(이 함수는 git을 받지 않는다). 안 바뀐 locator라도 그 reviewed
-    closure가 입력에 전부 들어오면 commit_sha가 checked_head로 갱신되며, checked_head는
-    origin/develop ancestor라 무해하다(stale 여부 판정은 stale-check의 몫).
-    """
-    empty = {"updated": [], "blocked": [], "warnings": []}
-    if checked_head != current_head:
-        return {"ok": False, "error": "head moved",
-                "checked_head": checked_head, "current_head": current_head, **empty}
 
-    # 입력 검증: 존재하는 reviewed DomainMapping만(spec §4 — vacuous pass 차단).
+class MarkCheckedError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        locator_ids: Sequence[str] = (),
+        invalid_inputs: Sequence[dict] = (),
+    ):
+        self.code = code
+        self.detail = detail
+        self.locator_ids = tuple(locator_ids)
+        self.invalid_inputs = tuple(invalid_inputs)
+        super().__init__(f"{code}: {detail}")
+
+
+def plan_mark_checked(
+    store: BrainStore,
+    *,
+    mapping_ids: Sequence[str],
+    checked_head: str,
+    repo_context: RepoContext,
+    engine_sha: str,
+) -> MarkCheckedPlan:
+    """reviewed mapping closure를 실제 target blob에서 다시 확인해 쓰기 묶음을 만든다."""
+    from project_brain.code_verify import (
+        CodeVerificationError,
+        verify_locator_for_write,
+    )
+    from project_brain.mutation import corpus_fingerprint
+    from project_brain.objbase import now_kst
+    if not isinstance(repo_context, RepoContext):
+        raise MarkCheckedError(
+            "repo_context_required",
+            "explicit RepoContext is required",
+        )
+    if checked_head != repo_context.target_revision_sha:
+        raise MarkCheckedError(
+            "head_moved",
+            (
+                f"head moved: checked head {checked_head!r} does not match resolved target "
+                f"{repo_context.target_revision_sha!r}"
+            ),
+        )
+    if (
+        not isinstance(engine_sha, str)
+        or _EXACT_GIT_SHA.fullmatch(engine_sha) is None
+    ):
+        raise MarkCheckedError(
+            "engine_sha_invalid",
+            "engine_sha must be an exact lowercase Git SHA",
+        )
+
     invalid_inputs = []
-    for mid in mapping_ids:
-        if not store.has(mid):
-            invalid_inputs.append({"id": mid, "reason": "unknown_id"})
-        elif store.get(mid).get("kind") != "DomainMapping":
-            invalid_inputs.append({"id": mid, "reason": "not_domain_mapping"})
-        elif store.get(mid).get("status") != "reviewed":
-            invalid_inputs.append(
-                {"id": mid, "reason": f"status_{store.get(mid).get('status')}"})
+    for mapping_id in mapping_ids:
+        if not store.has(mapping_id):
+            invalid_inputs.append({"id": mapping_id, "reason": "unknown_id"})
+        elif store.get(mapping_id).get("kind") != "DomainMapping":
+            invalid_inputs.append({
+                "id": mapping_id,
+                "reason": "not_domain_mapping",
+            })
+        elif store.get(mapping_id).get("status") != "reviewed":
+            invalid_inputs.append({
+                "id": mapping_id,
+                "reason": f"status_{store.get(mapping_id).get('status')}",
+            })
     if invalid_inputs:
-        return {"ok": False, "error": "mappings must be existing reviewed DomainMapping",
-                "invalid_inputs": invalid_inputs, **empty}
+        raise MarkCheckedError(
+            "invalid_mapping_inputs",
+            "mappings must be existing reviewed DomainMapping",
+            invalid_inputs=invalid_inputs,
+        )
 
     input_set = set(mapping_ids)
-    candidate_locator_ids = set()
-    for mid in mapping_ids:
-        for lid in (store.get(mid).get("code_locator_ids") or []):
-            candidate_locator_ids.add(lid)
+    candidate_locator_ids = sorted({
+        locator_id
+        for mapping_id in mapping_ids
+        for locator_id in (
+            store.get(mapping_id).get("code_locator_ids") or []
+        )
+    })
+    invalid_locators = [
+        locator_id
+        for locator_id in candidate_locator_ids
+        if (
+            not store.has(locator_id)
+            or store.get(locator_id).get("kind") != "CodeLocator"
+        )
+    ]
+    if invalid_locators:
+        raise MarkCheckedError(
+            "locator_reference_invalid",
+            "code_locator_ids must reference existing CodeLocator objects",
+            locator_ids=invalid_locators,
+        )
 
-    updated, blocked, warnings = [], [], []
-    for lid in sorted(candidate_locator_ids):
-        # 갱신 대상은 실제 CodeLocator만 — schema/lint는 code_locator_ids의 "존재"만 보고
-        # "CodeLocator인가"는 강제하지 않으므로(엔진 lint.py), future bad data에서 비-CodeLocator
-        # id가 섞여도 commit_sha/verified_at/updated_at를 엉뚱한 객체에 쓰지 않게 막는다.
-        if not store.has(lid) or store.get(lid).get("kind") != "CodeLocator":
-            continue
-        closure = compute_closure(store, lid)
-        missing = sorted(m for m in closure["blocking"] if m not in input_set)
+    eligible = []
+    blocked = []
+    warnings = []
+    for locator_id in candidate_locator_ids:
+        closure = compute_closure(store, locator_id)
+        missing = sorted(
+            mapping_id
+            for mapping_id in closure["blocking"]
+            if mapping_id not in input_set
+        )
         if missing:
-            blocked.append({"locator_id": lid, "missing_mapping_ids": missing})
+            blocked.append({
+                "locator_id": locator_id,
+                "missing_mapping_ids": missing,
+            })
             continue
-        # warning은 candidate만 — superseded는 현재 사실이 아니라 제외(spec §4).
-        # sorted로 명시(missing_mapping_ids와 일관 — _mappings_referencing 정렬에 암묵 의존하지 않음).
         candidate_only = sorted(
-            m for m in closure["nonblocking"]
-            if store.get(m).get("status") == "candidate")
+            mapping_id
+            for mapping_id in closure["nonblocking"]
+            if store.get(mapping_id).get("status") == "candidate"
+        )
         if candidate_only:
-            warnings.append({"locator_id": lid, "candidate_mapping_ids": candidate_only})
-        loc = dict(store.get(lid))
-        loc["commit_sha"] = checked_head
-        loc["verified_at"] = now
-        loc["updated_at"] = now
-        updated.append(loc)
-    return {"ok": True, "updated": updated, "blocked": blocked, "warnings": warnings}
+            warnings.append({
+                "locator_id": locator_id,
+                "candidate_mapping_ids": candidate_only,
+            })
+        eligible.append(store.get(locator_id))
+
+    no_quote = sorted(
+        str(locator["id"])
+        for locator in eligible
+        if (
+            not isinstance(locator.get("verified_quote"), str)
+            or not locator.get("verified_quote")
+        )
+    )
+    if no_quote:
+        raise MarkCheckedError(
+            "refused_unverifiable",
+            "mark-checked requires a non-empty verified_quote",
+            locator_ids=no_quote,
+        )
+
+    verified_locators = []
+    for locator in eligible:
+        target = dict(locator)
+        target["commit_sha"] = checked_head
+        try:
+            verified = verify_locator_for_write(
+                target,
+                repo=repo_context,
+                manual_symbol_verification=target.get(
+                    "manual_symbol_verification"
+                ),
+            )
+        except CodeVerificationError as exc:
+            raise MarkCheckedError(
+                exc.failure.code,
+                exc.failure.detail,
+                locator_ids=(str(locator["id"]),),
+            ) from exc
+        verified_locators.append(verified.locator)
+
+    verification_event_at = now_kst()
+    updated = []
+    for locator in verified_locators:
+        replacement = dict(locator)
+        replacement["verified_at"] = verification_event_at
+        replacement["updated_at"] = verification_event_at
+        updated.append(replacement)
+
+    preconditions = {
+        locator["id"]: hashlib.sha256(
+            store.object_bytes(store.get(locator["id"]))
+        ).hexdigest()
+        for locator in updated
+    }
+    return MarkCheckedPlan(
+        updated=tuple(updated),
+        blocked=tuple(blocked),
+        warnings=tuple(warnings),
+        preconditions=preconditions,
+        expected_corpus_fingerprint=corpus_fingerprint(store),
+        repo_context=repo_context,
+        engine_sha=engine_sha,
+    )

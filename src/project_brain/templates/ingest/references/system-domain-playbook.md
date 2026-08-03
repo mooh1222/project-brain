@@ -33,7 +33,7 @@
 분리 원칙:
 - **추출 에이전트 = 의미 원자 노트만.** 구조화 스키마로 받는다(Workflow `schema` 옵션으로 강제):
   `mapping_key` / `canonical_summary` / `meaning` / `boundary` /
-  `code_anchors[{path, symbol, quote}]` / `glossary_term_keys`(연결 대상의
+  `code_anchors[{key, path, symbol, quote}]` / `glossary_term_keys`(연결 대상의
   논리 key만, 실제 id 아님) / `uncertainty`(코드로 안 잡히는 의도 — 예외 큐로) / `overlap_with_existing`.
 - **메인(부모) = 결정론적 조립 = `project-brain build`.** 추출 노트를 build 노트(JSON: context/
   sources/glossary/code_anchors/mappings/refs/updates/extra_objects)로 정리해 `project-brain build
@@ -63,6 +63,8 @@ Workflow로 컨텍스트/그룹별 병렬 처리한다(`pipeline`):
 - **verify**: 읽기 전용 검증자로 extract 노트를 받아 각 `code_anchor`를 실제
   파일에서 열어 라인·심볼·quote 일치를 확인하고, `meaning`의 과장·근거 초과·중복·경계 침범을
   적발·수정한다. 반환에 `issues[]` + `verdict`(pass/fixed/needs_user)를 담게 한다.
+  `needs_user`는 미완료 상태다. workflow top-level completed나 후속 runner가 이를
+  성공이나 finalized로 바꾸면 안 된다.
 
 verify가 **적대검증 역할**을 한다(라인 어긋남·과장·날조를 이미 본다). 따라서 **별도 critic 워크플로우는
 대개 중복**이다 — verify를 돌렸으면 critic은 생략하고, reviewer를 `extract-verify-workflow`로
@@ -115,9 +117,10 @@ project-brain promote-auto --ids g.example.one g.example.two
 
 ## 6. 한 묶음 원자 ingest (슬라이스 분할 금지)
 
-`ingest`는 묶음 전체의 연결무결성을 저장 전에 한 번에 검사하므로, **한 파일에 전 객체(컨텍스트·매핑·용어·코드·
-근거·매니페스트)를 담아 한 번에 넣으면** 객체 생성 순서와 무관하게 검증한다. 다만 파일 저장은 rollback
-transaction이 아니다. context→manifest→code→term→evref→mapping 식으로 여러 묶음에 나눠 순차 ingest할 필요가 없다.
+`ingest`는 묶음 전체의 연결무결성을 저장 전에 한 번에 검사하고 rollback transaction으로 쓰므로,
+**한 파일에 전 객체(컨텍스트·매핑·용어·코드·근거·매니페스트)를 담아 한 번에 넣으면** 객체 생성
+순서와 무관하게 검증한다. context→manifest→code→term→evref→mapping 식으로 여러 묶음에 나눠
+순차 ingest할 필요가 없다.
 나누면 "참조 대상이 먼저 들어와야 한다"는 순서 부담만 생긴다.
 
 ## Common Mistakes (baseline 실측)

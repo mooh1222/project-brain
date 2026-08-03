@@ -387,7 +387,7 @@ class IngestSkillContractTest(unittest.TestCase):
             self.assertIn(heading, text)
         for contract in ("supersedes_mapping_ids", "valid_until", "derived_from_event_id",
                          "scope는 객체", "same-ID", "mark-checked", "reviewed→candidate",
-                         "rollback transaction은 아니다"):
+                         "rollback transaction"):
             self.assertIn(contract, text)
         self.assertNotIn("EventLedgerRecord 없이는 적재도", text)
 
@@ -431,6 +431,72 @@ class IngestSkillContractTest(unittest.TestCase):
                       "missing_code_locator_object_ids"):
             self.assertIn(token, checklist)
         self.assertNotIn("이 컨텍스트 핵심 동작", scripts)
+
+    def test_task11_quote_transaction_and_display_contracts_are_explicit(self):
+        object_model = (REFERENCES / "object-model.md").read_text(encoding="utf-8")
+        ingest_tools = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
+        checklist = (REFERENCES / "completeness-checklist.md").read_text(encoding="utf-8")
+        playbook = (REFERENCES / "system-domain-playbook.md").read_text(encoding="utf-8")
+        query = (TEMPLATE_ROOT.parent / "query" / "SKILL.md").read_text(encoding="utf-8")
+        audit = (TEMPLATE_ROOT.parent / "audit" / "SKILL.md").read_text(encoding="utf-8")
+        domain_template = (TEMPLATE_ROOT / "scripts" / "domain_spec.template.py").read_text(
+            encoding="utf-8"
+        )
+        extract_template = (TEMPLATE_ROOT / "scripts" / "extract_template.js").read_text(
+            encoding="utf-8"
+        )
+
+        for token in (
+            "absolute `repo_root`",
+            "canonical `brain_root`",
+            "`brain_root_device`",
+            "`brain_root_inode`",
+            "`expected_repo_id`",
+            "`expected_revision_ref`",
+            "`target_revision_sha`",
+            "`engine_root`",
+            "`engine_sha`",
+            "`manifest_sha256`",
+            "`resume_contract_mismatch`",
+            "`item_records`",
+            "durable receipt",
+            "immutable staged",
+            "post-gate",
+            "post-finalizer",
+            "`strict_commit`",
+            "`post_gate_object_tail`",
+            "`ok=false`",
+            "`committed=true`",
+        ):
+            self.assertIn(token, ingest_tools)
+        self.assertNotIn("성공 item의\n   exact `transactions`", ingest_tools)
+        self.assertIn("`transactions`는 `item_records`에서 파생", ingest_tools)
+        self.assertIn("needs_user", playbook)
+        self.assertIn("성공이나 finalized로", playbook)
+        self.assertIn("anchor-key", object_model)
+        self.assertIn("anchor-key", extract_template)
+        self.assertNotIn("VERIFIED_AT", domain_template)
+        self.assertNotIn("allow-missing-quote", "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in TEMPLATE_ROOT.rglob("*")
+            if path.is_file() and path.suffix in {".md", ".py", ".js", ".sh"}
+        ))
+        for token in ("display_only", "의미 근거로 쓰지 않는다", "quote_access"):
+            self.assertIn(token, query)
+        for token in ("stale", "code_quote=missing", "인용 부채", "독립"):
+            self.assertIn(token, audit)
+        for token in (
+            "item_records",
+            "durable receipt",
+            "target_revision_sha",
+            "brain_root_inode",
+            "post-gate",
+            "post_gate_object_tail",
+            "strict_commit",
+            "manifest_sha256",
+            "finalized=false",
+        ):
+            self.assertIn(token, checklist)
 
 
 if __name__ == "__main__":

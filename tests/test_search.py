@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from project_brain.embedder import StubEmbedder
+from project_brain.id_grammar import format_id, parse_id
 from project_brain.objbase import base
 from project_brain.search import (
     _ABS_SCORE_FLOOR_CANDIDATE,
@@ -42,13 +43,40 @@ def _b(obj):
     return base(obj, tags=["neutral"], created_at=T, updated_at=T)
 
 
+def _contextual_id(kind, object_id, context_id):
+    """옛 short fixture 표기를 context/key가 닫힌 canonical 합성 ID로 만든다."""
+    ctx = parse_id(context_id, "DomainContext").ctx
+    key = object_id.rsplit(".", 1)[-1]
+    if kind == "GlossaryTerm":
+        return format_id(kind, ctx=ctx, key=key)
+    if kind == "CodeLocator":
+        return format_id(kind, ctx=ctx, anchor_key=key)
+    if kind == "DomainMapping":
+        return format_id(kind, ctx=ctx, key=key)
+    if kind == "DecisionRecord":
+        return format_id(kind, ctx=ctx, key=key)
+    if kind == "Insight":
+        return format_id(kind, ctx=ctx, key=key)
+    raise AssertionError(f"unsupported fixture kind {kind}")
+
+
+def _evidence_ref_id(context_id, anchor_key):
+    ctx = parse_id(context_id, "DomainContext").ctx
+    return format_id("EvidenceRef", ctx=ctx, anchor_key=anchor_key)
+
+
 def glossary_term(tid, *, term, definition="정의", status="reviewed",
                   context_id="context.neutral", synonyms=None, aliases=None):
+    tid = _contextual_id("GlossaryTerm", tid, context_id)
     obj = {
         "id": tid, "kind": "GlossaryTerm", "status": status, "truth_role": "domain",
         "title": f"Term: {term}", "context_id": context_id,
         "term": term, "definition": definition,
-        "evidence_refs": ["ev.x"] if status == "reviewed" else [],
+        "evidence_refs": (
+            [_evidence_ref_id(context_id, "term")]
+            if status == "reviewed"
+            else []
+        ),
     }
     if synonyms is not None:
         obj["synonyms"] = synonyms
@@ -60,26 +88,45 @@ def glossary_term(tid, *, term, definition="정의", status="reviewed",
 
 
 def code_locator(cid, *, path, symbol, context_id="context.neutral"):
+    cid = _contextual_id("CodeLocator", cid, context_id)
     return _b({
         "id": cid, "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
         "title": f"Code: {symbol}", "context_id": context_id,
         "repo": "demoapp", "path": path, "symbol": symbol,
         "locator_source": "rg", "verified_at": T,
-        "evidence_refs": ["ev.code"],
+        "evidence_refs": [_evidence_ref_id(context_id, "code")],
     })
 
 
 def domain_mapping(mid, *, meaning, glossary_term_ids=None, code_locator_ids=None,
                    decision_record_ids=None, status="reviewed",
                    context_id="context.neutral"):
+    mid = _contextual_id("DomainMapping", mid, context_id)
+    glossary_term_ids = [
+        _contextual_id("GlossaryTerm", tid, context_id)
+        for tid in (glossary_term_ids or [])
+    ]
+    code_locator_ids = [
+        _contextual_id("CodeLocator", cid, context_id)
+        for cid in (code_locator_ids or [])
+    ]
+    decision_record_ids = [
+        _contextual_id("DecisionRecord", did, context_id)
+        for did in (decision_record_ids or [])
+    ]
     obj = {
         "id": mid, "kind": "DomainMapping", "status": status, "truth_role": "domain",
         "title": f"Mapping: {meaning}", "context_id": context_id,
-        "mapping_key": mid, "canonical_summary": meaning, "meaning": meaning,
-        "boundary": "범위", "glossary_term_ids": glossary_term_ids or [],
-        "decision_record_ids": decision_record_ids or [],
-        "code_locator_ids": code_locator_ids or [],
-        "evidence_refs": ["ev.map"] if status == "reviewed" else [],
+        "mapping_key": parse_id(mid, "DomainMapping").key,
+        "canonical_summary": meaning, "meaning": meaning,
+        "boundary": "범위", "glossary_term_ids": glossary_term_ids,
+        "decision_record_ids": decision_record_ids,
+        "code_locator_ids": code_locator_ids,
+        "evidence_refs": (
+            [_evidence_ref_id(context_id, "mapping")]
+            if status == "reviewed"
+            else []
+        ),
     }
     if status == "candidate":
         obj["candidate"] = {"candidate_state": "ready_for_review", "candidate_source": "spec"}
@@ -88,17 +135,24 @@ def domain_mapping(mid, *, meaning, glossary_term_ids=None, code_locator_ids=Non
 
 def decision_record(did, *, summary, affected_glossary_term_ids=None,
                     affected_mapping_ids=None, context_id="context.neutral"):
+    did = _contextual_id("DecisionRecord", did, context_id)
     obj = {
         "id": did, "kind": "DecisionRecord", "status": "reviewed", "truth_role": "event",
         "title": f"Decision: {summary}", "context_id": context_id,
         "decision_type": "naming_decision", "summary": summary, "decision": summary,
         "source_object_ids": [], "affected_context_ids": [], "spec_reflected": "yes",
-        "evidence_refs": ["ev.dec"],
+        "evidence_refs": [_evidence_ref_id(context_id, "decision")],
     }
     if affected_glossary_term_ids is not None:
-        obj["affected_glossary_term_ids"] = affected_glossary_term_ids
+        obj["affected_glossary_term_ids"] = [
+            _contextual_id("GlossaryTerm", tid, context_id)
+            for tid in affected_glossary_term_ids
+        ]
     if affected_mapping_ids is not None:
-        obj["affected_mapping_ids"] = affected_mapping_ids
+        obj["affected_mapping_ids"] = [
+            _contextual_id("DomainMapping", mid, context_id)
+            for mid in affected_mapping_ids
+        ]
     return _b(obj)
 
 
@@ -189,8 +243,8 @@ class RecallTest(unittest.TestCase):
         hits = recall("카약 경주 진행", db_path=self.db, embedder=self.embedder,
                       brain_root=self.brain)
         by_id = {h["object_id"]: h for h in hits}
-        self.assertIn("g.race", by_id)
-        self.assertEqual(by_id["g.race"]["matched_via"], "both")
+        self.assertIn("g.neutral.race", by_id)
+        self.assertEqual(by_id["g.neutral.race"]["matched_via"], "both")
 
     def test_descending_score_order_when_support_uniform(self):
         # 이 fixture는 아웃바운드 엣지가 없어 graph_support가 전부 0 → 재정렬 1순위 키가
@@ -263,8 +317,8 @@ class RecallTest(unittest.TestCase):
         hits = recall("레이스", scope="context.a", db_path=db, embedder=self.embedder,
                       brain_root=brain)
         ids = {h["object_id"] for h in hits}
-        self.assertIn("g.in", ids)
-        self.assertNotIn("g.out", ids)
+        self.assertIn("g.a.in", ids)
+        self.assertNotIn("g.b.out", ids)
 
     def test_single_channel_vector_only_when_bm25_has_no_tokens(self):
         # 토큰이 안 잡히는 질의("!!!")라 BM25는 0건이어도, 벡터는 KNN으로 행을 돌려준다 —
@@ -276,7 +330,8 @@ class RecallTest(unittest.TestCase):
 
 def scoped_context(cid, *, display_name, title, context_key):
     return _b({
-        "id": cid, "kind": "DomainContext", "status": "reviewed", "truth_role": "domain",
+        "id": format_id("DomainContext", ctx=context_key),
+        "kind": "DomainContext", "status": "reviewed", "truth_role": "domain",
         "title": title, "context_key": context_key, "project_id": "p",
         "display_name": display_name, "boundary_summary": "경계",
         "in_scope": ["a"], "out_of_scope": ["b"],
@@ -309,7 +364,9 @@ class InferScopeTest(unittest.TestCase):
                            title="클리어 토큰 도메인", context_key="clear-token"),
         ])
         self.assertEqual(
-            infer_scope("카약 레이스 보상이 안 들어왔대", store), "context.a")
+            infer_scope("카약 레이스 보상이 안 들어왔대", store),
+            "context.kayak-race",
+        )
 
     def test_no_surface_match_returns_none(self):
         store = self._store([
@@ -349,7 +406,7 @@ class InferScopeTest(unittest.TestCase):
                            title="함정 도메인", context_key="trap-bubble-system"),
         ])
         self.assertEqual(
-            infer_scope("가시 함정 상태", store), "context.spike")
+            infer_scope("가시 함정 상태", store), "context.trap-spike")
 
     def test_only_subset_surface_matched_is_single_scope(self):
         # 일반 질의(고유명 토큰 없음)는 시스템 컨텍스트 표면 {함정}만 매칭 → 시스템으로.
@@ -359,7 +416,10 @@ class InferScopeTest(unittest.TestCase):
             scoped_context("context.system", display_name="함정",
                            title="함정 도메인", context_key="trap-bubble-system"),
         ])
-        self.assertEqual(infer_scope("함정 점수 처리", store), "context.system")
+        self.assertEqual(
+            infer_scope("함정 점수 처리", store),
+            "context.trap-bubble-system",
+        )
 
     def test_two_maximal_surfaces_returns_none(self):
         # maximal 표면이 2개(비포함 관계)면 여전히 None — 두 기능을 동시에 언급한 질의.
@@ -384,16 +444,24 @@ class InferScopeTest(unittest.TestCase):
                            title="카약 레이스 도메인", context_key="kayak-race"),
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
-            glossary_term("g.in", term="보상", context_id="context.a"),
-            glossary_term("g.out", term="보상", context_id="context.b"),
+            glossary_term(
+                "g.in",
+                term="보상",
+                context_id="context.kayak-race",
+            ),
+            glossary_term(
+                "g.out",
+                term="보상",
+                context_id="context.clear-token",
+            ),
         ])
         embedder = StubEmbedder()
         rebuild(brain, db, embedder=embedder)
         hits = recall("카약 레이스 보상 기준", db_path=db, embedder=embedder,
                       brain_root=brain)
         ids = {h["object_id"] for h in hits}
-        self.assertIn("g.in", ids)
-        self.assertNotIn("g.out", ids)
+        self.assertIn("g.kayak-race.in", ids)
+        self.assertNotIn("g.clear-token.out", ids)
 
     def test_recall_explicit_scope_wins_over_inference(self):
         # scope를 명시하면 추론하지 않는다 — 질의가 context.a 표면이어도 명시 b를 따른다.
@@ -406,16 +474,27 @@ class InferScopeTest(unittest.TestCase):
                            title="카약 레이스 도메인", context_key="kayak-race"),
             scoped_context("context.b", display_name="클리어 토큰",
                            title="클리어 토큰 도메인", context_key="clear-token"),
-            glossary_term("g.in", term="보상", context_id="context.a"),
-            glossary_term("g.out", term="보상", context_id="context.b"),
+            glossary_term(
+                "g.in",
+                term="보상",
+                context_id="context.kayak-race",
+            ),
+            glossary_term(
+                "g.out",
+                term="보상",
+                context_id="context.clear-token",
+            ),
         ])
         embedder = StubEmbedder()
         rebuild(brain, db, embedder=embedder)
-        hits = recall("카약 레이스 보상 기준", scope="context.b", db_path=db,
+        hits = recall(
+            "카약 레이스 보상 기준",
+            scope="context.clear-token",
+            db_path=db,
                       embedder=embedder, brain_root=brain)
         ids = {h["object_id"] for h in hits}
-        self.assertIn("g.out", ids)
-        self.assertNotIn("g.in", ids)
+        self.assertIn("g.clear-token.out", ids)
+        self.assertNotIn("g.kayak-race.in", ids)
 
 
 class EvalRecallChannelTest(unittest.TestCase):
@@ -444,11 +523,11 @@ class EvalRecallChannelTest(unittest.TestCase):
                           "advisories", "projection_reuse"})
         result_ids = {h["object_id"] for h in resp["results"]}
         cand_ids = {h["object_id"] for h in resp["candidates"]}
-        self.assertIn("g.race", result_ids)
-        self.assertIn("g.cand", cand_ids)
+        self.assertIn("g.neutral.race", result_ids)
+        self.assertIn("g.neutral.cand", cand_ids)
         # reviewed는 candidates에, candidate는 results에 들어가지 않는다.
-        self.assertNotIn("g.cand", result_ids)
-        self.assertNotIn("g.race", cand_ids)
+        self.assertNotIn("g.neutral.cand", result_ids)
+        self.assertNotIn("g.neutral.race", cand_ids)
         for h in resp["results"]:
             self.assertEqual(h["status"], "reviewed")
         for h in resp["candidates"]:
@@ -535,75 +614,130 @@ class GraphOneHopTest(unittest.TestCase):
         return {h["object_id"]: h for h in hits}
 
     def test_linked_code_locators_are_objects_with_path_symbol(self):
-        # ★code_locators는 {object_id, path, symbol} 객체 — id만 주면 핀포인트가 아니다★.
+        # linked CodeLocator는 정본 4필드만 노출한다. title은 표시용이고,
+        # principal/ACL evaluator가 없는 제품 기본 경로에서는 quote를 절대 내보내지 않는다.
         by_id = self._by_id("시작 팝업 스테이지 개수 안내")
-        self.assertIn("m.popup", by_id)
-        locators = by_id["m.popup"]["linked"]["code_locators"]
+        self.assertIn("mapping.neutral.popup", by_id)
+        locators = by_id["mapping.neutral.popup"]["linked"]["code_locators"]
         by_loc = {c["object_id"]: c for c in locators}
         # dangling(code.dangling)은 빠지고 실존 2개만.
-        self.assertEqual(set(by_loc), {"code.init", "code.contents"})
-        self.assertEqual(by_loc["code.init"]["path"], "a/Popup.cpp")
-        self.assertEqual(by_loc["code.init"]["symbol"], "StartAlert::init")
+        self.assertEqual(
+            set(by_loc),
+            {"code.neutral.init", "code.neutral.contents"},
+        )
+        self.assertEqual(by_loc["code.neutral.init"]["path"], "a/Popup.cpp")
+        self.assertEqual(
+            by_loc["code.neutral.init"]["symbol"],
+            "StartAlert::init",
+        )
+        self.assertEqual(
+            by_loc["code.neutral.init"],
+            {
+                "object_id": "code.neutral.init",
+                "path": "a/Popup.cpp",
+                "symbol": "StartAlert::init",
+                "quote_access": "indeterminate",
+            },
+        )
+
+    def test_linked_locator_never_leaks_title_or_verified_quote_without_principal(self):
+        locator = self.brain / "objects" / "code" / "code.neutral.init.json"
+        payload = BrainStore.load(self.brain).get("code.neutral.init")
+        payload["verified_quote"] = "void StartAlert::init()"
+        locator.write_bytes(BrainStore.object_bytes(payload))
+        rebuild(self.brain, self.db, embedder=self.embedder)
+
+        linked = self._by_id("시작 팝업 스테이지 개수 안내")[
+            "mapping.neutral.popup"
+        ]["linked"]["code_locators"]
+        entry = next(c for c in linked if c["object_id"] == "code.neutral.init")
+        self.assertNotIn("title", entry)
+        self.assertNotIn("verified_quote", entry)
+        self.assertNotIn("quote", entry)
+        self.assertEqual(entry["quote_access"], "indeterminate")
 
     def test_linked_related_object_ids_from_glossary_edges(self):
         # glossary_term_ids → related_object_ids. dangling(g.dangling) 건너뜀.
         by_id = self._by_id("시작 팝업 스테이지 개수 안내")
-        related = by_id["m.popup"]["linked"]["related_object_ids"]
+        related = by_id["mapping.neutral.popup"]["linked"]["related_object_ids"]
         by_rel = {r["object_id"]: r for r in related}
-        self.assertIn("g.target", by_rel)
-        self.assertIn("g.popup", by_rel)
-        self.assertNotIn("g.dangling", by_rel)
+        self.assertIn("g.neutral.target", by_rel)
+        self.assertIn("g.neutral.popup", by_rel)
+        self.assertNotIn("g.neutral.dangling", by_rel)
         # 이웃 dict에 제목 동반(C-2) — id만으론 무엇인지 가늠 어려움.
-        self.assertEqual(by_rel["g.popup"]["title"], "Term: 시작 팝업")
+        self.assertEqual(by_rel["g.neutral.popup"]["title"], "Term: 시작 팝업")
 
     def test_linked_evidence_ref_ids_display_only(self):
         # evidence_refs는 표시 전용으로 동반(랭킹 입력 아님 — 여기선 동반 여부만 확인).
         by_id = self._by_id("시작 팝업 스테이지 개수 안내")
-        self.assertEqual(by_id["m.popup"]["linked"]["evidence_ref_ids"], ["ev.map"])
+        self.assertEqual(
+            by_id["mapping.neutral.popup"]["linked"]["evidence_ref_ids"],
+            ["evref.neutral.mapping"],
+        )
 
     def test_object_without_references_has_empty_linked(self):
         # 참조 엣지가 없는 m.alone은 빈 linked·graph_reached=False.
         by_id = self._by_id("외톨이 매핑 시작 팝업")
-        self.assertIn("m.alone", by_id)
-        linked = by_id["m.alone"]["linked"]
+        self.assertIn("mapping.neutral.alone", by_id)
+        linked = by_id["mapping.neutral.alone"]["linked"]
         self.assertEqual(linked["code_locators"], [])
         self.assertEqual(linked["related_object_ids"], [])
-        self.assertFalse(by_id["m.alone"]["graph_reached"])
-        self.assertEqual(by_id["m.alone"]["graph_hits"], 0)
+        self.assertFalse(by_id["mapping.neutral.alone"]["graph_reached"])
+        self.assertEqual(by_id["mapping.neutral.alone"]["graph_hits"], 0)
 
     def test_graph_hits_counts_mutual_reach_in_top30(self):
         # m.popup이 top30에 함께 든 g.target/g.popup/code.init/code.contents 4개를
         # 가리키면 m.popup의 graph_hits=4(양방향 — 각 피참조 객체도 +1).
         by_id = self._by_id("시작 팝업 스테이지 개수 안내 targetStages StartAlert init makeContents")
-        self.assertIn("m.popup", by_id)
+        self.assertIn("mapping.neutral.popup", by_id)
         # 적중집합에 4개 피참조가 다 들어왔는지 먼저 확인(안 들어오면 도달이 안 세짐).
-        reached_in_set = [oid for oid in ("g.target", "g.popup", "code.init", "code.contents")
+        reached_in_set = [
+            oid
+            for oid in (
+                "g.neutral.target",
+                "g.neutral.popup",
+                "code.neutral.init",
+                "code.neutral.contents",
+            )
                           if oid in by_id]
         # ★리터럴 고정(리뷰 반영)★: stub 벡터 채널이 전 행을 반환하므로 4개 전부
         # 적중집합에 있어야 한다 — 채널 회귀로 빠지면 expected가 조용히 줄어
         # 공허 통과하는 것을 막는다.
         self.assertEqual(len(reached_in_set), 4)
         expected = len(reached_in_set)
-        self.assertEqual(by_id["m.popup"]["graph_hits"], expected)
-        self.assertEqual(by_id["m.popup"]["graph_reached"], expected > 0)
+        self.assertEqual(
+            by_id["mapping.neutral.popup"]["graph_hits"],
+            expected,
+        )
+        self.assertEqual(
+            by_id["mapping.neutral.popup"]["graph_reached"],
+            expected > 0,
+        )
         # 양방향: 피참조 객체도 m.popup으로부터 도달 1회씩.
         for oid in reached_in_set:
             self.assertGreaterEqual(by_id[oid]["graph_hits"], 1)
             self.assertTrue(by_id[oid]["graph_reached"])
 
     def test_evidence_refs_not_in_graph_reach(self):
-        # evidence_refs(ev.map 등)는 그래프 도달에서 제외 — m.alone은 evidence_refs가
+        # evidence_refs(evref.neutral.mapping 등)는 그래프 도달에서 제외 —
+        # m.alone은 evidence_refs가
         # 있어도 graph_reached=False(다른 적중을 엣지로 안 가리킴).
         by_id = self._by_id("외톨이 매핑 시작 팝업")
-        self.assertEqual(by_id["m.alone"]["linked"]["evidence_ref_ids"], ["ev.map"])
-        self.assertFalse(by_id["m.alone"]["graph_reached"])
+        self.assertEqual(
+            by_id["mapping.neutral.alone"]["linked"]["evidence_ref_ids"],
+            ["evref.neutral.mapping"],
+        )
+        self.assertFalse(by_id["mapping.neutral.alone"]["graph_reached"])
 
     def test_surface_is_original_not_tokenized(self):
         # surface 승급(과업 3번): tokenized_text(공백 분리 토큰)가 아니라 extract_surface
         # 원문. 용어 g.target의 표면은 정의 원문 "시작 팝업 스테이지 개수"를 포함한다.
         by_id = self._by_id("targetStages 시작 팝업 스테이지 개수")
-        self.assertIn("g.target", by_id)
-        self.assertIn("시작 팝업 스테이지 개수", by_id["g.target"]["surface"])
+        self.assertIn("g.neutral.target", by_id)
+        self.assertIn(
+            "시작 팝업 스테이지 개수",
+            by_id["g.neutral.target"]["surface"],
+        )
 
     def test_decision_record_affected_edges_as_related(self):
         # affected_glossary_term_ids / affected_mapping_ids도 related_object_ids로.
@@ -621,11 +755,11 @@ class GraphOneHopTest(unittest.TestCase):
         rebuild(brain, db, embedder=self.embedder)
         hits = recall("다음 레벨 전환 결정", db_path=db, embedder=self.embedder, brain_root=brain)
         by_id = {h["object_id"]: h for h in hits}
-        self.assertIn("dec.switch", by_id)
-        related = by_id["dec.switch"]["linked"]["related_object_ids"]
+        self.assertIn("decision.neutral.switch", by_id)
+        related = by_id["decision.neutral.switch"]["linked"]["related_object_ids"]
         related_ids = {r["object_id"] for r in related}
-        self.assertIn("g.next", related_ids)
-        self.assertIn("m.join", related_ids)
+        self.assertIn("g.neutral.next", related_ids)
+        self.assertIn("mapping.neutral.join", related_ids)
 
     def test_deterministic_with_graph(self):
         a = recall("시작 팝업 스테이지 개수 안내", db_path=self.db,
@@ -706,10 +840,28 @@ class GraphRerankTest(unittest.TestCase):
                 code_locator("code.i", path="a/P.cpp", symbol="init"),
             ])
             store = BrainStore.load(brain)
-            hit_ids = ["m.popup", "g.t", "code.i"]
+            hit_ids = [
+                "mapping.neutral.popup",
+                "g.neutral.t",
+                "code.neutral.i",
+            ]
             hits, support = _graph_signals_by_id(hit_ids, store)
-            self.assertEqual(hits, {"m.popup": 2, "g.t": 1, "code.i": 1})
-            self.assertEqual(support, {"m.popup": 2, "g.t": 0, "code.i": 0})
+            self.assertEqual(
+                hits,
+                {
+                    "mapping.neutral.popup": 2,
+                    "g.neutral.t": 1,
+                    "code.neutral.i": 1,
+                },
+            )
+            self.assertEqual(
+                support,
+                {
+                    "mapping.neutral.popup": 2,
+                    "g.neutral.t": 0,
+                    "code.neutral.i": 0,
+                },
+            )
 
     def test_recall_focused_mapping_overtakes_leaf_term(self):
         # 통합: 적중집합 안에서 매핑이 자기 코드/용어를 되찾으면(graph_support>0),
@@ -728,14 +880,20 @@ class GraphRerankTest(unittest.TestCase):
             rebuild(brain, db, embedder=embedder)
             hits = recall("레인 영역 배치", db_path=db, embedder=embedder, brain_root=brain)
             by_id = {h["object_id"]: h for h in hits}
-            self.assertIn("m.lanes", by_id)
+            self.assertIn("mapping.neutral.lanes", by_id)
             # 매핑은 적중집합 안의 g.lane·code.lane을 가리켜 상호지지 2(>0).
-            self.assertGreater(by_id["m.lanes"]["graph_support"], 0)
+            self.assertGreater(
+                by_id["mapping.neutral.lanes"]["graph_support"],
+                0,
+            )
             # 잎 용어 g.lane은 아웃바운드 0 → graph_support 0.
-            self.assertEqual(by_id["g.lane"]["graph_support"], 0)
+            self.assertEqual(by_id["g.neutral.lane"]["graph_support"], 0)
             order = [h["object_id"] for h in hits]
             # 매핑이 잎 용어보다 앞(상호지지 재정렬 결과).
-            self.assertLess(order.index("m.lanes"), order.index("g.lane"))
+            self.assertLess(
+                order.index("mapping.neutral.lanes"),
+                order.index("g.neutral.lane"),
+            )
 
 
 class GatePureFunctionTest(unittest.TestCase):
@@ -951,7 +1109,10 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
             glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
         ])
         resp = eval_recall("레이스", db_path=db, embedder=self.embedder, brain_root=brain)
-        self.assertIn("g.race", {h["object_id"] for h in resp["results"]})
+        self.assertIn(
+            "g.neutral.race",
+            {h["object_id"] for h in resp["results"]},
+        )
         self.assertFalse(resp["needs_clarification"])
 
     def test_anchorless_query_gates_all_channels(self):
@@ -1018,7 +1179,10 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
         resp = eval_recall("레인 영역 배치", db_path=db, embedder=self.embedder,
                            brain_root=brain)
         self.assertEqual(resp["results"], [])
-        self.assertIn("g.only", {h["object_id"] for h in resp["candidates"]})
+        self.assertIn(
+            "g.neutral.only",
+            {h["object_id"] for h in resp["candidates"]},
+        )
         self.assertTrue(resp["needs_clarification"])
 
 
@@ -1071,7 +1235,7 @@ class RawLaneTest(unittest.TestCase):
         hits = recall("레이스 보상 지급", db_path=self.db, embedder=self.embedder,
                       brain_root=self.brain)
         object_ids = [h["object_id"] for h in hits if h["kind"] != "raw_chunk"]
-        self.assertIn("g.race", object_ids)
+        self.assertIn("g.neutral.race", object_ids)
 
     def test_signals_anchor_df_excludes_raw_rows(self):
         # 앵커 df 상한(30)은 객체 코퍼스 분포로 보정된 값(§8) — raw 청크가 분포를
@@ -1132,14 +1296,21 @@ class RawLaneTest(unittest.TestCase):
 def insight(iid, *, body, scope="범위", status="reviewed",
             source_object_ids=None, code_locator_ids=None,
             insight_type="cross-cutting-risk"):
+    iid = _contextual_id("Insight", iid, "context.neutral")
     obj = {
         "id": iid, "kind": "Insight", "status": status, "truth_role": "synthesis",
         "title": f"인사이트: {iid}", "body": body, "scope": scope,
-        "source_object_ids": source_object_ids or ["m.a", "m.b"],
+        "source_object_ids": source_object_ids or [
+            "mapping.neutral.a",
+            "mapping.neutral.b",
+        ],
         "insight_type": insight_type, "evidence_refs": [],
     }
     if code_locator_ids is not None:
-        obj["code_locator_ids"] = code_locator_ids
+        obj["code_locator_ids"] = [
+            _contextual_id("CodeLocator", cid, "context.neutral")
+            for cid in code_locator_ids
+        ]
     return _b(obj)
 
 
@@ -1185,7 +1356,7 @@ class InsightLaneTest(unittest.TestCase):
                       brain_root=self.brain)
         object_ids = [h["object_id"] for h in hits
                       if h["kind"] not in ("Insight", "raw_chunk")]
-        self.assertIn("g.race", object_ids)
+        self.assertIn("g.neutral.race", object_ids)
 
     def test_insight_linked_carries_code_locators(self):
         build_store_dir(self.brain, [
@@ -1198,7 +1369,7 @@ class InsightLaneTest(unittest.TestCase):
                       embedder=self.embedder, brain_root=self.brain)
         ins_hit = next(h for h in hits if h["kind"] == "Insight")
         locs = {c["object_id"] for c in ins_hit["linked"]["code_locators"]}
-        self.assertIn("code.enter", locs)
+        self.assertIn("code.neutral.enter", locs)
 
     def test_signals_anchor_df_excludes_insight_rows(self):
         # 앵커 df 상한(30)은 객체 코퍼스 분포로 보정된 값(§8) — Insight 행이 분포를
@@ -1216,6 +1387,15 @@ class InsightLaneTest(unittest.TestCase):
 
 def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
                status="candidate", fmt="prompt_payload", source_objects=None):
+    ctx = parse_id(context_id, "DomainContext").ctx
+    pid_parts = pid.split(".")
+    requirement_key = pid_parts[-2] if pid_parts[-1] == "reuse" else pid_parts[-1]
+    pid = format_id(
+        "ContextProjection",
+        ctx=ctx,
+        requirement_key=requirement_key,
+        format=fmt,
+    )
     sids = source_object_ids or ["mapping.mina-kayak.race-end-result-achieve"]
     # source_objects(구성 객체 dict들)를 주면 fresh source_content_hash를 lint와
     # 같은 공식으로 계산한다 — Task A6 신선도 가드가 색인에서 빼지 않도록. 안 주면
@@ -1394,7 +1574,10 @@ class EvalRecallAdvisoriesTest(unittest.TestCase):
         resp = eval_recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
         self.assertIn("advisories", resp)
-        self.assertIn("insight.gate", {h["object_id"] for h in resp["advisories"]})
+        self.assertIn(
+            "insight.neutral.gate",
+            {h["object_id"] for h in resp["advisories"]},
+        )
         self.assertFalse([h for h in resp["results"] if h["kind"] == "Insight"])
         self.assertFalse([h for h in resp["candidates"] if h["kind"] == "Insight"])
 

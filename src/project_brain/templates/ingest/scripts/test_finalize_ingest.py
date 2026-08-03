@@ -5,13 +5,57 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from project_brain.corpus_io import recover_committed_receipt
+from project_brain.mutation import (
+    MutationOperation,
+    MutationRequest,
+    MutationService,
+)
+from project_brain.objbase import base
+from project_brain.transaction_receipt import BatchBinding
 
 
 SCRIPT = Path(__file__).with_name("finalize_ingest.py")
 WRAPPER = Path(__file__).with_name("finalize_ingest.sh")
+TRANSACTION = {
+    "ok": True,
+    "transaction_id": "1" * 64,
+    "operation": "ingest",
+    "committed": True,
+    "manifest_sha256": "2" * 64,
+    "before_fingerprint": "3" * 64,
+    "after_fingerprint": "4" * 64,
+    "ingested_ids": ["mapping.a"],
+    "ingested_count": 1,
+}
+BINDING = {
+    "batch_manifest_sha256": "5" * 64,
+    "item_key": "one",
+    "item_input_fingerprint": "6" * 64,
+    "verify_json_sha256": "7" * 64,
+    "domain_spec_py_sha256": "8" * 64,
+    "repo_root": "/tmp/project-brain-consumer",
+    "brain_root": "/tmp/project-brain-consumer/brain",
+    "brain_root_device": 101,
+    "brain_root_inode": 202,
+    "expected_repo_id": "demo",
+    "expected_revision_ref": "HEAD",
+    "target_revision_sha": "9" * 40,
+    "engine_root": "/tmp/project-brain-engine",
+    "engine_sha": "a" * 40,
+}
+ITEM_RECORD = {
+    "binding": BINDING,
+    "status": "committed",
+    "failure": None,
+    "transaction": TRANSACTION,
+}
 
 
 def load_module():
@@ -26,6 +70,22 @@ def load_module():
 
 class SemanticFinalizerTest(unittest.TestCase):
     def setUp(self):
+        self._td = TemporaryDirectory()
+        self.repo_root = Path(self._td.name)
+        self.brain_root = self.repo_root / "brain"
+        self.brain_root.mkdir()
+        brain_stat = self.brain_root.stat()
+        self.binding = {
+            **BINDING,
+            "repo_root": str(self.repo_root.resolve()),
+            "brain_root": str(self.brain_root.resolve()),
+            "brain_root_device": brain_stat.st_dev,
+            "brain_root_inode": brain_stat.st_ino,
+        }
+        self.item_record = {
+            **ITEM_RECORD,
+            "binding": self.binding,
+        }
         self.contract = {
             "recall_checks": [{
                 "key": "feature-a",
@@ -36,6 +96,18 @@ class SemanticFinalizerTest(unittest.TestCase):
             "intentional_terminal_ids": ["code.allowed"],
             "expected_unmerged_locator_ids": [],
         }
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _finalize(self, module, contract, baseline, **kwargs):
+        transaction_results = kwargs.pop("transaction_results", [TRANSACTION])
+        return module.run_finalization(
+            contract,
+            baseline,
+            transaction_results=transaction_results,
+            **kwargs,
+        )
 
     @staticmethod
     def _runner(*, current_isolated=None, search_results=None, failures=(),
@@ -79,13 +151,17 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_success_returns_exact_machine_readable_gate_schema(self):
         module = load_module()
-        report = module.run_finalization(
-            self.contract, ["code.before"], runner=self._runner()
+        self.assertEqual(module.validate_transaction_results([TRANSACTION]), [TRANSACTION])
+        report = self._finalize(module,
+            self.contract, ["code.before"], transaction_results=[TRANSACTION],
+            runner=self._runner()
         )
 
         self.assertEqual(set(report),
-                         {"ok", "commands", "isolation", "unmerged", "recall_checks", "errors"})
+                         {"ok", "transactions", "commands", "isolation", "unmerged",
+                          "recall_checks", "errors"})
         self.assertTrue(report["ok"])
+        self.assertEqual(report["transactions"], [TRANSACTION])
         self.assertEqual(set(report["commands"]),
                          {"index_rebuild", "lint", "eval", "graph_isolated", "audit", "corpus_tests"})
         for command in report["commands"].values():
@@ -102,6 +178,356 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertEqual(report["recall_checks"][0]["missing_object_ids"], [])
         self.assertEqual(report["recall_checks"][0]["missing_code_locator_object_ids"], [])
 
+    def test_missing_mismatched_noncommitted_and_needs_user_transactions_fail_closed(self):
+        module = load_module()
+        invalid = (
+            None,
+            [],
+            [{**TRANSACTION, "committed": False}],
+            [{**TRANSACTION, "manifest_sha256": "A" * 64}],
+            [{**TRANSACTION, "status": "needs_user"}],
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "transaction"):
+                    module.validate_transaction_results(value)
+
+    def test_item_records_are_recovered_from_the_common_durable_receipt_chain(self):
+        module = load_module()
+        observed = []
+
+        def recoverer(
+            brain_root,
+            bindings,
+            expected_receipts,
+            *,
+            verification_mode,
+        ):
+            observed.append((
+                brain_root,
+                bindings,
+                expected_receipts,
+                verification_mode,
+            ))
+            return expected_receipts
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[self.item_record],
+            repo_root=self.repo_root,
+            receipt_recoverer=recoverer,
+            config_loader=lambda start: {
+                "root": self.repo_root,
+                "brain_root": self.brain_root,
+            },
+            runner=self._runner(),
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["transactions"], [TRANSACTION])
+        expected_call = (
+            self.brain_root.resolve(),
+            (self.binding,),
+            (TRANSACTION,),
+        )
+        self.assertEqual(observed, [
+            (*expected_call, "strict_commit"),
+            (*expected_call, "post_gate_object_tail"),
+        ])
+
+    def test_receipt_recovery_uses_strict_then_post_gate_modes(self):
+        module = load_module()
+        observed_modes = []
+
+        def recoverer(
+            _brain_root,
+            _bindings,
+            expected_receipts,
+            *,
+            verification_mode,
+        ):
+            observed_modes.append(verification_mode)
+            return expected_receipts
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[self.item_record],
+            repo_root=self.repo_root,
+            receipt_recoverer=recoverer,
+            config_loader=lambda _start: {
+                "root": self.repo_root,
+                "brain_root": self.brain_root,
+            },
+            runner=self._runner(),
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            observed_modes,
+            ["strict_commit", "post_gate_object_tail"],
+        )
+
+    def test_normal_index_output_passes_real_post_gate_receipt_recovery(self):
+        module = load_module()
+        (self.repo_root / ".project-brain.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        binding = BatchBinding(**self.binding)
+        stamp = "2026-07-29T00:00:00+09:00"
+        obj = base({
+            "id": "context.post-gate-index",
+            "kind": "DomainContext",
+            "status": "reviewed",
+            "truth_role": "domain",
+            "title": "post gate index",
+            "context_key": "post-gate-index",
+            "project_id": "fixture",
+            "display_name": "post gate index",
+            "boundary_summary": "post gate index",
+            "in_scope": ["fixture"],
+            "out_of_scope": ["other"],
+            "injection_profile": {"default_audience": "coding-agent"},
+            "glossary_term_ids": [],
+        }, tags=["fixture"], created_at=stamp, updated_at=stamp)
+        result = MutationService().apply(
+            (obj,),
+            request=MutationRequest(
+                operation=MutationOperation.INGEST,
+                brain_root=self.brain_root,
+                repo_context=None,
+                engine_sha=binding.engine_sha,
+                objects=(obj,),
+                batch_binding=binding,
+            ),
+        )
+        self.assertTrue(result.ok, result.detail)
+        receipt = recover_committed_receipt(self.brain_root, binding)
+        record = {
+            "binding": asdict(binding),
+            "status": "committed",
+            "failure": None,
+            "transaction": receipt,
+        }
+        runner = self._runner()
+
+        def indexing_runner(command):
+            if command[:3] == ["project-brain", "index", "rebuild"]:
+                local = self.brain_root / ".brain-local"
+                local.mkdir(exist_ok=True)
+                (local / "index.db").write_bytes(b"normal index output")
+            return runner(command)
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[record],
+            repo_root=self.repo_root,
+            runner=indexing_runner,
+        )
+
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["transactions"], [receipt])
+
+    def test_config_loader_non_system_exception_is_normalized(self):
+        module = load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "receipt verification config loading failed",
+        ):
+            module.recover_item_record_transactions(
+                [self.item_record],
+                repo_root=self.repo_root,
+                config_loader=lambda _start: (_ for _ in ()).throw(
+                    RuntimeError("broken config loader")
+                ),
+            )
+        for system_error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(system_error=type(system_error).__name__):
+                with self.assertRaises(type(system_error)):
+                    module.recover_item_record_transactions(
+                        [self.item_record],
+                        repo_root=self.repo_root,
+                        config_loader=lambda _start, error=system_error: (
+                            _ for _ in ()
+                        ).throw(error),
+                    )
+
+    def test_main_malformed_top_level_project_config_returns_json_error(self):
+        config_path = self.repo_root / "finalization.json"
+        baseline_path = self.repo_root / "baseline.json"
+        records_path = self.repo_root / "item-records.json"
+        config_path.write_text(
+            json.dumps(self.contract),
+            encoding="utf-8",
+        )
+        baseline_path.write_text(
+            json.dumps(["code.before"]),
+            encoding="utf-8",
+        )
+        records_path.write_text(
+            json.dumps([self.item_record]),
+            encoding="utf-8",
+        )
+        (self.repo_root / ".project-brain.json").write_text(
+            "[]\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--config",
+                str(config_path),
+                "--baseline",
+                str(baseline_path),
+                "--item-records",
+                str(records_path),
+                "--repo-root",
+                str(self.repo_root),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(set(payload), {
+            "ok",
+            "transactions",
+            "commands",
+            "isolation",
+            "unmerged",
+            "recall_checks",
+            "errors",
+        })
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "receipt verification config loading failed",
+            "\n".join(payload["errors"]),
+        )
+
+    def test_item_record_forgery_or_noncommitted_state_blocks_before_commands(self):
+        module = load_module()
+        cases = (
+            [{**self.item_record, "status": "pending", "transaction": None}],
+            [{**self.item_record, "transaction": {**TRANSACTION, "manifest_sha256": "f" * 64}}],
+        )
+        for records in cases:
+            calls = []
+            with self.subTest(records=records), self.assertRaises(ValueError):
+                module.run_finalization(
+                    self.contract,
+                    ["code.before"],
+                    item_records=records,
+                    repo_root=self.repo_root,
+                    receipt_recoverer=lambda _root, _bindings, _expected, **_kwargs: (
+                        TRANSACTION,
+                    ),
+                    config_loader=lambda start: {
+                        "root": self.repo_root,
+                        "brain_root": self.brain_root,
+                    },
+                    runner=lambda command: calls.append(command),
+                )
+            self.assertEqual(calls, [])
+
+    def test_receipt_chain_is_revalidated_after_semantic_commands(self):
+        module = load_module()
+        recover_calls = 0
+        commands = []
+
+        def recoverer(
+            _brain_root,
+            _bindings,
+            expected_receipts,
+            **_kwargs,
+        ):
+            nonlocal recover_calls
+            recover_calls += 1
+            if recover_calls == 2:
+                raise ValueError("object corpus tail changed")
+            return expected_receipts
+
+        runner = self._runner()
+
+        def observed_runner(command):
+            commands.append(command)
+            return runner(command)
+
+        report = module.run_finalization(
+            self.contract,
+            ["code.before"],
+            item_records=[self.item_record],
+            repo_root=self.repo_root,
+            receipt_recoverer=recoverer,
+            config_loader=lambda start: {
+                "root": self.repo_root,
+                "brain_root": self.brain_root,
+            },
+            runner=observed_runner,
+        )
+
+        self.assertEqual(recover_calls, 2)
+        self.assertTrue(commands)
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "post-gate durable receipt verification failed",
+            "\n".join(report["errors"]),
+        )
+
+    def test_post_gate_allows_derived_change_but_rejects_brain_root_swap(self):
+        module = load_module()
+        for change in ("derived", "brain_root_swap"):
+            with self.subTest(change=change):
+                changed = False
+                runner = self._runner()
+
+                def changing_runner(command):
+                    nonlocal changed
+                    if not changed:
+                        changed = True
+                        if change == "derived":
+                            local = self.brain_root / ".brain-local"
+                            local.mkdir()
+                            (local / "index.db").write_bytes(b"derived")
+                        else:
+                            detached = self.repo_root / "brain-detached"
+                            self.brain_root.rename(detached)
+                            self.brain_root.mkdir()
+                    return runner(command)
+
+                report = module.run_finalization(
+                    self.contract,
+                    ["code.before"],
+                    item_records=[self.item_record],
+                    repo_root=self.repo_root,
+                    receipt_recoverer=lambda _root, _bindings, expected, **_kwargs: (
+                        expected
+                    ),
+                    config_loader=lambda start: {
+                        "root": self.repo_root,
+                        "brain_root": self.brain_root,
+                    },
+                    runner=changing_runner,
+                )
+
+                self.assertIs(
+                    report["ok"],
+                    change == "derived",
+                )
+                if change == "brain_root_swap":
+                    self.assertIn(
+                        "post-gate durable receipt verification failed",
+                        "\n".join(report["errors"]),
+                    )
+
     def test_unmerged_expected_ids_are_compared_as_exact_union(self):
         module = load_module()
         baseline_ids = [f"code.baseline-{number:02d}" for number in range(1, 8)]
@@ -113,7 +539,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": baseline_ids,
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             contract, baseline,
             runner=self._runner(unmerged_locator_ids=[*baseline_ids, *expected_ids]),
         )
@@ -124,7 +550,7 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertEqual(report["unmerged"]["expected_ids"], expected_ids)
         self.assertEqual(report["unmerged"]["new_ids"], expected_ids)
 
-        blocked = module.run_finalization(
+        blocked = self._finalize(module,
             contract, baseline,
             runner=self._runner(unmerged_locator_ids=[*baseline_ids, *expected_ids,
                                                        "code.unexpected-31"]),
@@ -141,7 +567,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": ["code.existing"],
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             contract, baseline,
             runner=self._runner(unmerged_locator_ids=["code.existing"]),
         )
@@ -157,7 +583,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": ["code.before-unmerged"],
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             self.contract, baseline,
             runner=self._runner(target_head="CHANGED", unmerged_locator_ids=["code.extra"]),
         )
@@ -174,7 +600,7 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_audit_failure_blocks_even_when_other_gates_pass(self):
         module = load_module()
-        report = module.run_finalization(
+        report = self._finalize(module,
             self.contract,
             {"ok": True, "isolated_ids": ["code.before"], "target_head": "TARGET",
              "unmerged_locator_ids": []},
@@ -193,7 +619,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             "target_head": "TARGET",
             "unmerged_locator_ids": ["code.before-unmerged"],
         }
-        report = module.run_finalization(
+        report = self._finalize(module,
             self.contract, baseline,
             runner=self._runner(
                 failures=("project-brain audit --no-fetch",),
@@ -247,7 +673,7 @@ class SemanticFinalizerTest(unittest.TestCase):
 
         for name, (anchors, diagnostic) in cases.items():
             with self.subTest(name=name):
-                report = module.run_finalization(
+                report = self._finalize(module,
                     contract,
                     baseline,
                     runner=self._runner(
@@ -295,22 +721,22 @@ class SemanticFinalizerTest(unittest.TestCase):
     def test_legacy_baseline_is_allowed_only_without_expected_unmerged_ids(self):
         module = load_module()
         legacy = {"ok": True, "isolated_ids": ["code.before"]}
-        allowed = module.run_finalization(self.contract, legacy, runner=self._runner())
+        allowed = self._finalize(module, self.contract, legacy, runner=self._runner())
         self.assertTrue(allowed["ok"])
 
         calls = []
         contract = dict(self.contract, expected_unmerged_locator_ids=["code.new"])
         with self.assertRaisesRegex(ValueError, "Git baseline"):
-            module.run_finalization(contract, legacy, runner=lambda command: calls.append(command))
+            self._finalize(module, contract, legacy, runner=lambda command: calls.append(command))
         self.assertEqual(calls, [])
 
     def test_new_isolation_is_blocking_except_declared_terminal(self):
         module = load_module()
-        allowed = module.run_finalization(
+        allowed = self._finalize(module,
             self.contract, ["code.before"],
             runner=self._runner(current_isolated=["code.before", "code.allowed"]),
         )
-        blocked = module.run_finalization(
+        blocked = self._finalize(module,
             self.contract, ["code.before"],
             runner=self._runner(current_isolated=["code.before", "code.unexpected"]),
         )
@@ -322,10 +748,10 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_recall_requires_each_expected_id_and_its_linked_code_locator(self):
         module = load_module()
-        missing = module.run_finalization(
+        missing = self._finalize(module,
             self.contract, ["code.before"], runner=self._runner(search_results=[])
         )
-        unlinked = module.run_finalization(
+        unlinked = self._finalize(module,
             self.contract, ["code.before"],
             runner=self._runner(search_results=[{"object_id": "mapping.a", "linked": {}}]),
         )
@@ -388,6 +814,8 @@ class CorpusCheck(unittest.TestCase):
 """, encoding="utf-8")
             config = root / "config.json"
             config.write_text(json.dumps(self.contract), encoding="utf-8")
+            transactions = root / "transactions.json"
+            transactions.write_text(json.dumps([TRANSACTION]), encoding="utf-8")
             env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
             for name, baseline in (
@@ -399,7 +827,8 @@ class CorpusCheck(unittest.TestCase):
                     baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
                     result = subprocess.run(
                         [str(WRAPPER), "--config", str(config),
-                         "--baseline", str(baseline_path)],
+                         "--baseline", str(baseline_path),
+                         "--transactions", str(transactions)],
                         cwd=root, env=env, text=True, capture_output=True, check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -419,7 +848,7 @@ class CorpusCheck(unittest.TestCase):
         for baseline in invalid:
             calls = []
             with self.subTest(baseline=baseline), self.assertRaises(ValueError):
-                module.run_finalization(
+                self._finalize(module,
                     self.contract, baseline,
                     runner=lambda command: calls.append(command),
                 )

@@ -2,6 +2,19 @@
 spec: docs/superpowers/specs/2026-05-27-project-brain-object-model-design.md
 router가 실제로 읽는 필드는 일부지만, 적재 무결성을 위해 spec 필수 필드 전체를 강제한다."""
 
+from project_brain.id_grammar import ID_GRAMMARS, validate_id_fields
+from project_brain.reference_fields import (
+    LIST_REFERENCE_FIELDS,
+    NESTED_REFERENCE_POINTERS,
+    SCALAR_REFERENCE_FIELDS,
+    _NonCanonicalArrayIndexError,
+    _escape_pointer_token,
+    _pointer_tokens,
+    _resolve_pointer,
+    iter_object_refs,
+)
+
+
 BASE_REQUIRED = (
     "id", "kind", "schema_version", "status", "poc_priority",
     "truth_role", "title", "created_at", "updated_at", "tags", "evidence_refs",
@@ -72,6 +85,10 @@ PROJECTION_FORMAT_VALUES = frozenset({"context_md", "prompt_payload"})
 INDEX_NAME_VALUES = frozenset({"fts", "timeline", "entity", "code_locator", "trigram", "vector"})
 
 VALID_KINDS = frozenset(KIND_REQUIRED)
+if VALID_KINDS != frozenset(ID_GRAMMARS):
+    missing = sorted(VALID_KINDS - frozenset(ID_GRAMMARS))
+    extra = sorted(frozenset(ID_GRAMMARS) - VALID_KINDS)
+    raise RuntimeError(f"ID grammar/schema kind mismatch: missing={missing!r}, extra={extra!r}")
 
 # enum 값 집합 (spec §6.1 EvidenceManifest.source_type / §6.2 EvidenceRef.ref_type).
 # 필드 존재만 보던 검증이 잘못된 값(예: spec_ppt, slide)을 통과시켰던 회귀를 막는다.
@@ -125,18 +142,102 @@ class SchemaError(ValueError):
     pass
 
 
-def validate_object(obj: dict) -> list[str]:
-    """위반 메시지 목록을 반환한다(빈 목록 = 통과). Lint가 모아 보고하도록 예외 대신 목록."""
+_KNOWN_ID_PREFIXES = frozenset(
+    prefix
+    for grammar in ID_GRAMMARS.values()
+    for prefix in grammar.prefixes
+)
+
+
+def id_problem_code(obj: dict) -> str:
+    """ID 위반이 미등록 grammar인지, 등록 grammar의 형식 위반인지 구분한다."""
+    object_id = obj.get("id")
+    if isinstance(object_id, str):
+        prefix = object_id.split(".", 1)[0]
+        if prefix not in _KNOWN_ID_PREFIXES:
+            return "unknown_grammar"
+        if (
+            obj.get("kind") == "ReviewRecord"
+            and object_id.startswith("review.")
+            and not object_id.startswith("review.bundle.")
+        ):
+            target_id = object_id.removeprefix("review.")
+            if target_id.split(".", 1)[0] not in _KNOWN_ID_PREFIXES:
+                return "unknown_grammar"
+
+    for ref in iter_object_refs(obj):
+        if ref.object_id.split(".", 1)[0] not in _KNOWN_ID_PREFIXES:
+            return "unknown_grammar"
+    return "invalid_id"
+
+
+def _validate_reference_field_types(obj: dict) -> list[str]:
+    object_id = obj.get("id", "?")
+    errors: list[str] = []
+
+    for field in sorted(SCALAR_REFERENCE_FIELDS):
+        if field not in obj:
+            continue
+        value = obj[field]
+        if not isinstance(value, str):
+            pointer = f"/{_escape_pointer_token(field)}"
+            errors.append(
+                f"{object_id}: reference field {field!r} at {pointer} "
+                f"must be a string, got {type(value).__name__}"
+            )
+
+    for field in sorted(LIST_REFERENCE_FIELDS):
+        if field not in obj:
+            continue
+        value = obj[field]
+        pointer = f"/{_escape_pointer_token(field)}"
+        if not isinstance(value, list):
+            errors.append(
+                f"{object_id}: reference field {field!r} at {pointer} "
+                f"must be a list of strings, got {type(value).__name__}"
+            )
+            continue
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                errors.append(
+                    f"{object_id}: reference field {field!r} at {pointer}/{index} "
+                    f"must be a string, got {type(item).__name__}"
+                )
+
+    for pointer in NESTED_REFERENCE_POINTERS:
+        try:
+            found, value = _resolve_pointer(obj, pointer)
+        except _NonCanonicalArrayIndexError:
+            continue
+        if not found or isinstance(value, str):
+            continue
+        field = _pointer_tokens(pointer)[-1]
+        errors.append(
+            f"{object_id}: reference field {field!r} at {pointer} "
+            f"must be a string, got {type(value).__name__}"
+        )
+
+    return errors
+
+
+def _validate_object_schema(
+    obj: dict,
+    *,
+    omitted_required_fields: frozenset[str] = frozenset(),
+) -> list[str]:
     kind = obj.get("kind")
-    if kind not in VALID_KINDS:
+    if not isinstance(kind, str) or kind not in VALID_KINDS:
         return [f"{obj.get('id', '?')}: unknown kind {kind!r}"]
+    if "id" not in obj:
+        return ["?: missing base field 'id'"]
     errors = []
     for field in BASE_REQUIRED:
         if field not in obj:
             errors.append(f"{obj['id']}: missing base field {field!r}")
     for field in KIND_REQUIRED[kind]:
-        if field not in obj:
+        if field not in obj and field not in omitted_required_fields:
             errors.append(f"{obj['id']}: {kind} missing field {field!r}")
+    errors.extend(_validate_reference_field_types(obj))
     status = obj.get("status")
     if status is not None and status not in OBJECT_STATUS_VALUES:
         errors.append(f"{obj['id']}: invalid status {status!r}")
@@ -288,3 +389,38 @@ def validate_object(obj: dict) -> list[str]:
         elif "target_object_id" not in obj:
             errors.append(f"{obj['id']}: ReviewRecord missing field 'target_object_id'")
     return errors
+
+
+def validate_object_schema(obj: dict) -> list[str]:
+    """ID 문법을 제외한 최종 저장 schema·enum 위반 메시지를 반환한다."""
+    return _validate_object_schema(obj)
+
+
+def validate_mutation_input_schema(obj: dict) -> list[str]:
+    """저장 전 검증 대상 CodeLocator만 ``verified_at`` 누락을 허용한다.
+
+    일반 schema와 최종 merged lint는 계속 엄격하다. 이 API는
+    MutationService가 quote/symbol을 검증해 엔진 시각을 넣기 전 입력 단계에서만 쓴다.
+    """
+    omitted = (
+        frozenset({"verified_at"})
+        if obj.get("kind") == "CodeLocator"
+        else frozenset()
+    )
+    return _validate_object_schema(
+        obj,
+        omitted_required_fields=omitted,
+    )
+
+
+def validate_object_id(obj: dict) -> list[str]:
+    """ID 문법과 객체 필드 합치 위반만 반환한다."""
+    return validate_id_fields(obj)
+
+
+def validate_object(obj: dict) -> list[str]:
+    """전체 위반 메시지 목록을 반환한다(빈 목록 = 통과)."""
+    schema_errors = validate_object_schema(obj)
+    if obj.get("kind") not in VALID_KINDS:
+        return schema_errors
+    return schema_errors + validate_object_id(obj)

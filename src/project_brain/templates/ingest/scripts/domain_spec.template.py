@@ -22,9 +22,8 @@ CLAIM_STATUS = "reviewed"
 # 근거 출처는 기본값이 없다. 빈 값은 assembly가 거부한다.
 SOURCE_ACL: list[str] = []
 CAPTURED_AT = ""
-# CodeLocator의 원문 인용은 공백·줄바꿈을 바꾸지 않고 저장한다. 빈 값은 assembly가 거부한다.
-VERIFIED_AT = ""
-# Task 5 finalizer가 사용할 선언값. 이 조립기에서는 아직 해석하지 않는다.
+# CodeLocator의 verified_at은 write verifier가 만든다. domain spec에서 받지 않는다.
+# finalizer가 사용할 선언값. 이 조립기에서는 아직 해석하지 않는다.
 EXPECT_UNMERGED_ANCHORS = False
 CORRECTIONS = {}             # 선언적 보정 {mapping_key: {"meaning": "...", "drop_terms": [...]}}
 DECISIONS = []               # decisions[] 노트 그대로(엔진 build_decisions가 조립).

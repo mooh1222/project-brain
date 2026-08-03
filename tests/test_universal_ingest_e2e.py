@@ -22,11 +22,15 @@ single_object 승격 → 단계3 mapping_bundle 승격을 generic 부품으로 �
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from project_brain.ingest import ingest
+from project_brain.code_verify import VerifiedLocator
+from project_brain.id_grammar import format_id
+from tests.test_ingest import ingest
 from project_brain.lint import lint_store
 from project_brain.objbase import base
 from project_brain.promote import promote
+from project_brain.repo_context import RepoContext
 from project_brain.router import QueryRouter
 from project_brain.store import BrainStore
 
@@ -39,7 +43,20 @@ BUNDLE_KEY = "bundle.mina-kayak.domain-mapping"
 # ── 살아있는 소스에서 추출한 candidate bundle 빌더 ──────────────────────────────
 
 
+def _fixture_id(kind, legacy_id):
+    key = legacy_id.rsplit(".", 1)[-1]
+    if kind == "EvidenceManifest":
+        return format_id(kind, ctx="mina-kayak", key=key)
+    if kind in {"EvidenceRef", "CodeLocator"}:
+        field = "anchor_key"
+        return format_id(kind, ctx="mina-kayak", **{field: key})
+    if kind in {"GlossaryTerm", "DecisionRecord", "DomainMapping"}:
+        return format_id(kind, ctx="mina-kayak", key=key)
+    raise AssertionError(f"unsupported E2E fixture kind {kind}")
+
+
 def _manifest(mid, *, source_type, title, locator, captured_by):
+    mid = _fixture_id("EvidenceManifest", mid)
     return base(
         {
             "id": mid,
@@ -60,6 +77,8 @@ def _manifest(mid, *, source_type, title, locator, captured_by):
 
 
 def _spec_ref(rid, *, manifest_id, summary, section):
+    rid = _fixture_id("EvidenceRef", rid)
+    manifest_id = _fixture_id("EvidenceManifest", manifest_id)
     return base(
         {
             "id": rid,
@@ -77,6 +96,7 @@ def _spec_ref(rid, *, manifest_id, summary, section):
 
 
 def _code_locator(lid, *, path, symbol, line_start, line_end, title):
+    lid = _fixture_id("CodeLocator", lid)
     return base(
         {
             "id": lid,
@@ -90,13 +110,16 @@ def _code_locator(lid, *, path, symbol, line_start, line_end, title):
             "line_start": line_start,
             "line_end": line_end,
             "locator_source": "rg",
-            "verified_at": T,
+            "verified_quote": f"synthetic quote for {symbol}",
         },
         tags=["mina-kayak"], created_at=T, updated_at=T,
     )
 
 
 def _code_ref(rid, *, manifest_id, locator_id, summary):
+    rid = _fixture_id("EvidenceRef", rid)
+    manifest_id = _fixture_id("EvidenceManifest", manifest_id)
+    locator_id = _fixture_id("CodeLocator", locator_id)
     return base(
         {
             "id": rid,
@@ -115,6 +138,11 @@ def _code_ref(rid, *, manifest_id, locator_id, summary):
 
 def _candidate_term(tid, *, term, definition, synonyms, candidate_state="ready_for_review",
                     evidence_refs=None, conflicts_with=None):
+    tid = _fixture_id("GlossaryTerm", tid)
+    evidence_refs = [
+        _fixture_id("EvidenceRef", evidence_ref_id)
+        for evidence_ref_id in (evidence_refs or [])
+    ]
     candidate = {
         "candidate_state": candidate_state,
         "candidate_source": "spec",
@@ -135,12 +163,22 @@ def _candidate_term(tid, *, term, definition, synonyms, candidate_state="ready_f
         "candidate": candidate,
     }
     # evidence_refs는 base() setdefault가 [] 안 덮도록 obj에 미리 박는다(caller field 보존).
-    if evidence_refs is not None:
+    if evidence_refs:
         obj["evidence_refs"] = evidence_refs
     return base(obj, tags=["mina-kayak"], created_at=T, updated_at=T)
 
 
 def _decision(did, *, decision_type, summary, decision, source_object_ids, affected_mapping_ids=None):
+    did = _fixture_id("DecisionRecord", did)
+    source_object_ids = [
+        _fixture_id("EvidenceRef", source_object_id)
+        for source_object_id in source_object_ids
+    ]
+    if affected_mapping_ids is not None:
+        affected_mapping_ids = [
+            _fixture_id("DomainMapping", mapping_id)
+            for mapping_id in affected_mapping_ids
+        ]
     obj = {
         "id": did,
         "kind": "DecisionRecord",
@@ -162,6 +200,23 @@ def _decision(did, *, decision_type, summary, decision, source_object_ids, affec
 def _candidate_mapping(mid, *, mapping_key, canonical_summary, meaning, boundary,
                        glossary_term_ids, decision_record_ids, code_locator_ids=None,
                        evidence_refs=None):
+    mid = format_id("DomainMapping", ctx="mina-kayak", key=mapping_key)
+    glossary_term_ids = [
+        _fixture_id("GlossaryTerm", term_id)
+        for term_id in glossary_term_ids
+    ]
+    decision_record_ids = [
+        _fixture_id("DecisionRecord", decision_id)
+        for decision_id in decision_record_ids
+    ]
+    code_locator_ids = [
+        _fixture_id("CodeLocator", locator_id)
+        for locator_id in (code_locator_ids or [])
+    ]
+    evidence_refs = [
+        _fixture_id("EvidenceRef", evidence_ref_id)
+        for evidence_ref_id in (evidence_refs or [])
+    ]
     obj = {
         "id": mid,
         "kind": "DomainMapping",
@@ -175,9 +230,9 @@ def _candidate_mapping(mid, *, mapping_key, canonical_summary, meaning, boundary
         "boundary": boundary,
         "glossary_term_ids": glossary_term_ids,
         "decision_record_ids": decision_record_ids,
-        "code_locator_ids": code_locator_ids or [],
+        "code_locator_ids": code_locator_ids,
     }
-    if evidence_refs is not None:
+    if evidence_refs:
         obj["evidence_refs"] = evidence_refs
     return base(obj, tags=["mina-kayak"], created_at=T, updated_at=T)
 
@@ -352,7 +407,7 @@ def build_candidate_bundle():
         summary="서버 5개 레이스 상태를 표시 4개로 접는다",
         decision="RACE_END와 FINISHED는 사용자에게 동일한 '종료' 화면이라 둘 다 ENDED로 매핑한다.",
         source_object_ids=["ev.ref.code.state-fold", "ev.ref.code.race-status-enum"],
-        affected_mapping_ids=["mapping.state-fold"],
+        affected_mapping_ids=["mapping.race-state-fold"],
     ))
     objs.append(_decision(
         "decision.dummy-only",
@@ -360,7 +415,7 @@ def build_candidate_bundle():
         summary="레이스 매칭은 더미 NPC만",
         decision="실제 유저와 매칭하지 않고 본인 외 자리는 모두 더미 NPC로 채운다.",
         source_object_ids=["ev.ref.spec.dummy-npc"],
-        affected_mapping_ids=["mapping.dummy-npc"],
+        affected_mapping_ids=["mapping.dummy-npc-matching"],
     ))
     objs.append(_decision(
         "decision.cooltime",
@@ -368,7 +423,7 @@ def build_candidate_bundle():
         summary="완주 후 쿨타임 경과해야 새 레이스",
         decision="레이스 완주 후 정해진 쿨타임이 지나야 새 레이스를 시작할 수 있고, 반복 참여 MAX 제한이 있다.",
         source_object_ids=["ev.ref.spec.cooltime"],
-        affected_mapping_ids=["mapping.cooltime"],
+        affected_mapping_ids=["mapping.cooltime-repeat"],
     ))
 
     # DomainMapping (candidate) — 용어↔기획의미↔결정↔코드앵커 묶음.
@@ -425,8 +480,12 @@ def build_candidate_bundle():
             "out_of_scope": ["UI 컴포넌트", "팝업 세부", "보상 아이템 상세"],
             "injection_profile": {"default_audience": "coding-agent"},
             "glossary_term_ids": [
-                "g.race-status", "g.view-state", "g.dummy-npc",
-                "g.finish-rank", "g.cooltime", "g.repeat-join",
+                _fixture_id("GlossaryTerm", "g.race-status"),
+                _fixture_id("GlossaryTerm", "g.view-state"),
+                _fixture_id("GlossaryTerm", "g.dummy-npc"),
+                _fixture_id("GlossaryTerm", "g.finish-rank"),
+                _fixture_id("GlossaryTerm", "g.cooltime"),
+                _fixture_id("GlossaryTerm", "g.repeat-join"),
             ],
         },
         tags=["mina-kayak"], created_at=T, updated_at=T,
@@ -436,28 +495,77 @@ def build_candidate_bundle():
 
 
 GLOSSARY_IDS = [
-    "g.race-status", "g.view-state", "g.dummy-npc",
-    "g.finish-rank", "g.cooltime", "g.repeat-join",
+    _fixture_id("GlossaryTerm", term_id)
+    for term_id in (
+        "g.race-status",
+        "g.view-state",
+        "g.dummy-npc",
+        "g.finish-rank",
+        "g.cooltime",
+        "g.repeat-join",
+    )
 ]
-MAPPING_IDS = ["mapping.state-fold", "mapping.dummy-npc", "mapping.cooltime"]
+MAPPING_IDS = [
+    format_id("DomainMapping", ctx="mina-kayak", key=mapping_key)
+    for mapping_key in (
+        "race-state-fold",
+        "dummy-npc-matching",
+        "cooltime-repeat",
+    )
+]
 # 단일 승격 시연 대상 — 도구와 무관한 경로 시연이라 어느 term이든 무방.
 # 충돌 term(g.view-state)은 승격 불가라 피하고 conflict 아닌 term을 고른다.
-PROMOTE_TERM_ID = "g.finish-rank"
+PROMOTE_TERM_ID = _fixture_id("GlossaryTerm", "g.finish-rank")
 
 
 class MinaKayakEndToEndTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        self.repo_context = RepoContext(
+            repo_root=self.root,
+            expected_repo_id=REPO,
+            expected_revision_ref="origin/develop",
+            target_revision_sha="a" * 40,
+        )
+
+        def verify_fixture_locator(
+            locator,
+            *,
+            repo,
+            manual_symbol_verification=None,
+        ):
+            verified = dict(locator)
+            verified["verified_at"] = T
+            return VerifiedLocator(
+                locator=verified,
+                quote_sha256="f" * 64,
+                verified_at=T,
+                symbol_status="verified",
+            )
+
+        self._verify_patcher = mock.patch(
+            "project_brain.mutation.verify_locator_for_write",
+            side_effect=verify_fixture_locator,
+        )
+        self._verify_patcher.start()
 
     def tearDown(self):
+        self._verify_patcher.stop()
         self._tmp.cleanup()
+
+    def _ingest(self, objects):
+        return ingest(
+            self.root,
+            objects,
+            repo_context=self.repo_context,
+        )
 
     # ── Task 6 단계별 ─────────────────────────────────────────────────────────
 
     def test_e2e_candidate_ingest(self):
         """AC2 단계1: candidate bundle 1회 ingest. mapping/glossary가 candidate."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         store = BrainStore.load(self.root)
         for mid in MAPPING_IDS:
             self.assertEqual(store.get(mid)["status"], "candidate", mid)
@@ -466,26 +574,26 @@ class MinaKayakEndToEndTest(unittest.TestCase):
 
     def test_e2e_promote_glossary(self):
         """AC2 단계2: single_object 승격 후 ingest. 대상 term reviewed + review.<id> 존재."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         bundle = build_candidate_bundle()
         promoted, reviews = promote(
             bundle, [PROMOTE_TERM_ID], "single_object",
             reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, promoted + reviews)
+        self._ingest(promoted + reviews)
         store = BrainStore.load(self.root)
         self.assertEqual(store.get(PROMOTE_TERM_ID)["status"], "reviewed")
         self.assertTrue(store.has("review." + PROMOTE_TERM_ID))
 
     def test_e2e_promote_mapping_bundle(self):
         """AC2 단계3: mapping_bundle 승격 후 ingest. mapping reviewed + 공유 review_record."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         bundle = build_candidate_bundle()
         promoted, reviews = promote(
             bundle, MAPPING_IDS, "mapping_bundle",
             bundle_key=BUNDLE_KEY, reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, promoted + reviews)
+        self._ingest(promoted + reviews)
         store = BrainStore.load(self.root)
         for mid in MAPPING_IDS:
             self.assertEqual(store.get(mid)["status"], "reviewed", mid)
@@ -529,18 +637,18 @@ class MinaKayakEndToEndTest(unittest.TestCase):
 
     def _reingest_full(self):
         """단계1~3을 모두 태운 store를 만든다(reviewed mapping까지)."""
-        ingest(self.root, build_candidate_bundle())
+        self._ingest(build_candidate_bundle())
         bundle = build_candidate_bundle()
         g_promoted, g_reviews = promote(
             bundle, [PROMOTE_TERM_ID], "single_object",
             reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, g_promoted + g_reviews)
+        self._ingest(g_promoted + g_reviews)
         m_promoted, m_reviews = promote(
             bundle, MAPPING_IDS, "mapping_bundle",
             bundle_key=BUNDLE_KEY, reviewer="user-confirmed", reviewed_at=T,
         )
-        ingest(self.root, m_promoted + m_reviews)
+        self._ingest(m_promoted + m_reviews)
 
     def test_e2e_lint_clean_after_full_reingest(self):
         """AC5: 전체 재적재 완료 store가 lint clean."""
@@ -561,7 +669,10 @@ class MinaKayakEndToEndTest(unittest.TestCase):
         store = BrainStore.load(self.root)
         answer = QueryRouter(store).answer("쿨타임이 무슨 뜻이야?")
         self.assertIn("glossary_meaning", answer["intents"])
-        self.assertIn("mapping.cooltime", answer["source_object_ids"])
+        self.assertIn(
+            "mapping.mina-kayak.cooltime-repeat",
+            answer["source_object_ids"],
+        )
         self.assertFalse(answer["needs_clarification"])
 
 

@@ -109,6 +109,23 @@ class TestBuildReuseProjection(unittest.TestCase):
         proj = self._make_proj()
         self.assertEqual(proj["stale_policy"], "fail_on_manual_edit")
 
+    def test_noncanonical_requirement_key_is_rejected(self):
+        store = _store_with([
+            _context("context.mina-kayak", context_key="mina-kayak"),
+            _mapping("mapping.mina-kayak.race-end-result-achieve", "context.mina-kayak"),
+        ])
+        with self.assertRaises(ValueError):
+            build_reuse_projection(
+                store,
+                context_id="context.mina-kayak",
+                requirement_key="result_popup",
+                source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
+                reuse_payload="payload",
+                title="title",
+                generated_at=T,
+                generated_by="test",
+            )
+
 
 class TestBuildReuseFreshnessRoundtrip(unittest.TestCase):
     """build_reuse_projection(생성식)이 박은 source_content_hash ↔ projection_is_fresh

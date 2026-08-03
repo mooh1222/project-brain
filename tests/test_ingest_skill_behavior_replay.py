@@ -47,6 +47,32 @@ class RawReplayDriverTest(unittest.TestCase):
         shutil.copytree(FIXTURE, Path(td.name), dirs_exist_ok=True)
         return td
 
+    def test_installed_runtime_source_has_no_exit_only_or_quote_bypass_success(self):
+        scripts = ROOT / "src" / "project_brain" / "templates" / "ingest" / "scripts"
+        batch = (scripts / "run_ingest_batch.py").read_text(encoding="utf-8")
+        finalizer = (scripts / "finalize_ingest.py").read_text(encoding="utf-8")
+        shell = (scripts / "run_ingest.sh").read_text(encoding="utf-8")
+        combined = "\n".join((batch, finalizer, shell))
+
+        for token in (
+            "validate_transaction_results",
+            "manifest_sha256",
+            "resume_contract_mismatch",
+            "--validate-transaction",
+            "item_records",
+            "recover_committed_receipts",
+            "target_revision_sha",
+            "batch-binding.json",
+            "--brain-root",
+            "brain_root_inode",
+            "post-finalizer verification",
+            "post_gate_object_tail",
+            "strict_commit",
+        ):
+            self.assertIn(token, combined)
+        self.assertNotIn("allow_missing_quote", combined)
+        self.assertNotIn("allow-missing-quote", combined)
+
     def run_driver(self, target: Path, *, timeout: float = 2) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(DRIVER)], cwd=target, text=True,
                               capture_output=True, check=False, timeout=timeout)

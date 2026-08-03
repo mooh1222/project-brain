@@ -10,7 +10,6 @@ SPEC = {
     "HISTORY_COVERAGE": "partial", "NOW": "2026-06-26T00:00:00+09:00",
     "CLAIM_STATUS": "reviewed", "SOURCE_ACL": ["team"],
     "CAPTURED_AT": "2026-06-26T00:00:00+09:00",
-    "VERIFIED_AT": "2026-06-26T00:00:00+09:00",
     "EXPECT_UNMERGED_ANCHORS": False,
     "CORRECTIONS": {}, "DECISIONS": [],
 }
@@ -19,7 +18,15 @@ def _atom(mk, anchors=1, terms=()):
     return {
         "mapping_key": mk, "canonical_summary": f"{mk} 요약",
         "meaning": f"{mk} 의미", "boundary": f"{mk} 경계",
-        "code_anchors": [{"path": f"{mk}.cpp", "symbol": f"sym{i}", "quote": "q"} for i in range(anchors)],
+        "code_anchors": [
+            {
+                "key": f"{mk}-anchor-{i}",
+                "path": f"{mk}.cpp",
+                "symbol": f"sym{i}",
+                "quote": "q",
+            }
+            for i in range(anchors)
+        ],
         "glossary_terms": [{"term_key": t, "term": t, "definition": f"{t} 정의"} for t in terms],
     }
 
@@ -27,16 +34,19 @@ def _atom(mk, anchors=1, terms=()):
 class BuildNotesTest(unittest.TestCase):
     def test_anchor_key_and_mapping_links(self):
         notes = build_notes([_atom("m1", anchors=2, terms=["t1"])], SPEC)
-        self.assertEqual([c["key"] for c in notes["code_anchors"]], ["m1--0", "m1--1"])
+        self.assertEqual(
+            [c["key"] for c in notes["code_anchors"]],
+            ["m1-anchor-0", "m1-anchor-1"],
+        )
         m = notes["mappings"][0]
-        self.assertEqual(m["code_evref_keys"], ["m1--0", "m1--1"])
+        self.assertEqual(m["code_evref_keys"], ["m1-anchor-0", "m1-anchor-1"])
         self.assertEqual(m["glossary_keys"], ["t1"])
         self.assertEqual(m["caveats"], ["history_coverage=partial"])
 
     def test_glossary_first_anchor_evidence(self):
         notes = build_notes([_atom("m1", anchors=2, terms=["t1"])], SPEC)
         g = next(g for g in notes["glossary"] if g["key"] == "t1")
-        self.assertEqual(g["evidence_refs"], ["evref.ctx.m1--0"])
+        self.assertEqual(g["evidence_refs"], ["evref.ctx.m1-anchor-0"])
 
     def test_exclude_terms_dropped(self):
         notes = build_notes([_atom("m1", terms=["keep", "drop-me"])], SPEC)
@@ -62,15 +72,23 @@ class BuildNotesTest(unittest.TestCase):
         # ingest schema(필수 필드 + enum)를 통과한다. 누락 시 "missing field"로 적재 거부.
         self.assertEqual(notes["sources"][0]["redaction_status"], "approved")
 
-    def test_explicit_provenance_and_claim_status_pass_through(self):
+    def test_explicit_source_provenance_and_claim_status_pass_through(self):
         spec = dict(SPEC, CLAIM_STATUS="candidate", SOURCE_ACL=["brain-team"],
-                    CAPTURED_AT="2026-07-23T00:00:00+09:00",
-                    VERIFIED_AT="2026-07-23T00:01:00+09:00")
+                    CAPTURED_AT="2026-07-23T00:00:00+09:00")
         notes = build_notes([_atom("m1")], spec)
         self.assertEqual(notes["context"]["claim_status"], "candidate")
         self.assertEqual(notes["sources"][0]["acl"], ["brain-team"])
         self.assertEqual(notes["sources"][0]["captured_at"], "2026-07-23T00:00:00+09:00")
-        self.assertEqual(notes["code_anchors"][0]["verified_at"], "2026-07-23T00:01:00+09:00")
+
+    def test_code_anchor_omits_external_verification_fields(self):
+        notes = build_notes(
+            [_atom("m1")],
+            dict(SPEC, VERIFIED_AT="2026-07-23T00:01:00+09:00"),
+        )
+        self.assertEqual(
+            set(notes["code_anchors"][0]),
+            {"key", "path", "symbol", "manifest", "quote"},
+        )
 
     def test_glossary_candidate_metadata_passes_through_from_first_definition(self):
         candidate = {
@@ -102,18 +120,23 @@ class BuildNotesTest(unittest.TestCase):
     def test_anchor_quote_is_preserved_exactly(self):
         quote = "\tfirst();\r\n\tsecond();"
         atom = _atom("m1", anchors=0)
-        atom["code_anchors"] = [{"path": "m1.cpp", "symbol": "sym", "quote": quote}]
+        atom["code_anchors"] = [{
+            "key": "anchor-key",
+            "path": "m1.cpp",
+            "symbol": "sym",
+            "quote": quote,
+        }]
         notes = build_notes([atom], SPEC)
+        self.assertEqual(notes["mappings"][0]["code_evref_keys"], ["anchor-key"])
         self.assertEqual(notes["code_anchors"][0]["quote"], quote)
 
     def test_empty_provenance_reaches_actionable_assembly_rejection(self):
         from project_brain.assembly import validate_notes
-        spec = dict(SPEC, SOURCE_ACL=[], CAPTURED_AT="", VERIFIED_AT="")
+        spec = dict(SPEC, SOURCE_ACL=[], CAPTURED_AT="")
         notes = build_notes([_atom("m1")], spec)
         errors = validate_notes(notes)
         self.assertTrue(any("acl" in error and "비어" in error for error in errors))
         self.assertTrue(any("captured_at" in error and "비어" in error for error in errors))
-        self.assertTrue(any("verified_at" in error and "비어" in error for error in errors))
 
 
 class NormalizeTest(unittest.TestCase):
@@ -177,7 +200,8 @@ class FinalizationContractTest(unittest.TestCase):
         )
 
         self.assertEqual(contract["expected_unmerged_locator_ids"],
-                         ["code.ctx.m1--0", "code.ctx.m1--1", "code.ctx.m2--0"])
+                         ["code.ctx.m1-anchor-0", "code.ctx.m1-anchor-1",
+                          "code.ctx.m2-anchor-0"])
 
     def test_false_or_missing_unmerged_expectation_is_empty(self):
         notes = build_notes([_atom("m1")], SPEC)

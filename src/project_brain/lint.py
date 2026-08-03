@@ -2,17 +2,56 @@
 런타임(router ⑤ _resolve_current_conflicts)은 쿼리 시점 충돌만, Lint는 전수 선제 검사.
 충돌 탐지는 router의 순수 함수 _conflicting_fact_groups를 재사용한다(중복 구현 금지)."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from project_brain.hash_utils import sha256_text as _sha256_text
 from project_brain.hash_utils import source_content_hash as _source_content_hash
 from project_brain.promote import select_vouched_candidates
+from project_brain.reference_fields import ObjectRef, iter_object_refs
 from project_brain.router import _conflicting_fact_groups
-from project_brain.schema import validate_object
+from project_brain.schema import (
+    VALID_KINDS,
+    id_problem_code,
+    validate_mutation_input_schema,
+    validate_object_id,
+    validate_object_schema,
+)
 from project_brain.store import BrainStore
 
 GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
 LEGACY_SOURCE_TYPES = {"context", "wiki"}
+
+
+@dataclass(frozen=True, order=True)
+class LintProblem:
+    code: str
+    object_ids: tuple[str, ...]
+    message: str
+
+
+def _object_id(obj: dict) -> str:
+    value = obj.get("id")
+    return value if isinstance(value, str) else "?"
+
+
+def _pointer_field(pointer: str) -> str:
+    tokens = [token.replace("~1", "/").replace("~0", "~")
+              for token in pointer.removeprefix("/").split("/")]
+    if tokens[-1].isdigit():
+        return tokens[-2]
+    return tokens[-1]
+
+
+def _dangling_label(obj: dict, ref: ObjectRef) -> str:
+    field = _pointer_field(ref.pointer)
+    if field == "evidence_refs":
+        return "evidence_ref"
+    if obj.get("kind") == "CurrentView" and field == "source_fact_ids":
+        return "source_fact_id"
+    if obj.get("kind") == "ContextProjection" and field == "source_object_ids":
+        return "source_object_id"
+    return field
 
 
 def _compute_source_content_hash(store: BrainStore, source_object_ids: list[str]) -> str:
@@ -110,110 +149,146 @@ def unpromoted_vouched_terms(store: BrainStore) -> list[str]:
     return warnings
 
 
-def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[str]:
-    problems: list[str] = []
+def _lint_store_report(
+    store: BrainStore,
+    workspace_root: Path | None,
+    *,
+    mutation_input: bool,
+) -> tuple[LintProblem, ...]:
+    problems: list[LintProblem] = []
     objs = store.all()
 
+    def add(code: str, object_ids: tuple[str, ...], message: str) -> None:
+        problems.append(
+            LintProblem(
+                code=code,
+                object_ids=tuple(sorted(object_ids)),
+                message=message,
+            )
+        )
+
     # 1) 스키마 위반 (kind별 필수 필드)
+    schema_valid_objs: list[dict] = []
     for obj in objs:
-        problems.extend(validate_object(obj))
+        object_id = _object_id(obj)
+        schema_problems = (
+            validate_mutation_input_schema(obj)
+            if mutation_input
+            else validate_object_schema(obj)
+        )
+        for message in schema_problems:
+            add("schema", (object_id,), message)
+        id_problems = (
+            validate_object_id(obj)
+            if obj.get("kind") in VALID_KINDS
+            else []
+        )
+        for message in id_problems:
+            add(id_problem_code(obj), (object_id,), message)
+        if not schema_problems and not id_problems:
+            schema_valid_objs.append(obj)
+
+    # 타입을 전제로 하는 후속 의미 검사는 schema-valid 객체만 소비한다. 위반 객체를
+    # 계속 흘리면 malformed 참조 원소가 hash lookup 등에서 예외를 내 schema 진단을 가린다.
+    # 단 공용 iter 기반 dangling은 malformed를 안전히 skip하므로 원본 objs/store로 전수한다.
+    semantic_store = BrainStore({obj["id"]: obj for obj in schema_valid_objs})
 
     # 2) 같은 subject+predicate에 valid_until 없는 reviewed fact가 값 갈리며 2+ (object-model L298)
-    for group in _conflicting_fact_groups(store.by_kind("TemporalFact")):
-        ids = ", ".join(sorted(f["id"] for f in group))
-        problems.append(f"conflict: open reviewed facts [{ids}] share subject+predicate but differ in value")
+    for group in _conflicting_fact_groups(semantic_store.by_kind("TemporalFact")):
+        object_ids = tuple(sorted(f["id"] for f in group))
+        ids = ", ".join(object_ids)
+        add(
+            "temporal_conflict",
+            object_ids,
+            f"conflict: open reviewed facts [{ids}] share subject+predicate but differ in value",
+        )
 
-    # 3) CurrentView가 없는 fact를 가리킴
-    for view in store.by_kind("CurrentView"):
-        for fid in view.get("source_fact_ids", []):
-            if not store.has(fid):
-                problems.append(f"{view['id']}: dangling source_fact_id {fid}")
-
-    # 4) dangling evidence_refs / review_record_id
+    # 3) 공용 registry가 선언한 Brain 객체 참조의 dangling 검사.
     for obj in objs:
-        for ref in obj.get("evidence_refs", []):
-            if not store.has(ref):
-                problems.append(f"{obj['id']}: dangling evidence_ref {ref}")
-        rrid = obj.get("review_record_id")
-        if rrid and not store.has(rrid):
-            problems.append(f"{obj['id']}: dangling review_record_id {rrid}")
+        for ref in iter_object_refs(obj):
+            if not store.has(ref.object_id):
+                label = _dangling_label(obj, ref)
+                object_id = _object_id(obj)
+                add(
+                    "dangling_reference",
+                    (object_id,),
+                    f"{object_id}: dangling {label} {ref.object_id}",
+                )
 
-    # 5) DomainContext v2: legacy path/source_format must not be canonical fields.
-    for context in store.by_kind("DomainContext"):
+    # 4) DomainContext v2: legacy path/source_format must not be canonical fields.
+    for context in semantic_store.by_kind("DomainContext"):
         for legacy_field in ("path", "source_format"):
             if legacy_field in context:
-                problems.append(f"{context['id']}: DomainContext legacy field {legacy_field} is not allowed")
+                add(
+                    "domain_context_legacy_field",
+                    (context["id"],),
+                    f"{context['id']}: DomainContext legacy field {legacy_field} is not allowed",
+                )
 
-    # 6) GlossaryTerm lifecycle/evidence guard.
-    for term in store.by_kind("GlossaryTerm"):
+    # 5) GlossaryTerm lifecycle/evidence guard.
+    for term in semantic_store.by_kind("GlossaryTerm"):
         if term.get("status") == "candidate" and not term.get("candidate"):
-            problems.append(f"{term['id']}: candidate GlossaryTerm missing candidate metadata")
+            add(
+                "glossary_lifecycle",
+                (term["id"],),
+                f"{term['id']}: candidate GlossaryTerm missing candidate metadata",
+            )
         candidate = term.get("candidate") or {}
         if term.get("status") == "reviewed":
             if candidate.get("candidate_state") == "conflict" or candidate.get("open_questions"):
-                problems.append(f"{term['id']}: reviewed GlossaryTerm has unresolved candidate metadata")
-            if _has_only_legacy_evidence(store, term):
-                problems.append(f"{term['id']}: reviewed GlossaryTerm has legacy-only evidence")
+                add(
+                    "glossary_lifecycle",
+                    (term["id"],),
+                    f"{term['id']}: reviewed GlossaryTerm has unresolved candidate metadata",
+                )
+            if _has_only_legacy_evidence(semantic_store, term):
+                add(
+                    "legacy_only_evidence",
+                    (term["id"],),
+                    f"{term['id']}: reviewed GlossaryTerm has legacy-only evidence",
+                )
         if term.get("status") == "rejected" and not term.get("rejection"):
-            problems.append(f"{term['id']}: rejected GlossaryTerm missing rejection metadata")
+            add(
+                "glossary_lifecycle",
+                (term["id"],),
+                f"{term['id']}: rejected GlossaryTerm missing rejection metadata",
+            )
 
-    # 7) ContextProjection guard.
-    for projection in store.by_kind("ContextProjection"):
+    # 6) ContextProjection guard.
+    for projection in semantic_store.by_kind("ContextProjection"):
         if projection.get("manual_edit_detected"):
-            problems.append(f"{projection['id']}: manual_edit_detected is true")
+            add(
+                "projection_manual_edit",
+                (projection["id"],),
+                f"{projection['id']}: manual_edit_detected is true",
+            )
         source_object_ids = projection.get("source_object_ids") or []
-        # dangling source_object_ids (DomainMapping 8a·DecisionRecord 8b·Insight 9와 동형):
-        # 가리키는 근거가 사라지면 브리핑이 조용히 깨진다.
-        for ref_id in source_object_ids:
-            if ref_id and not store.has(ref_id):
-                problems.append(f"{projection['id']}: dangling source_object_id {ref_id}")
         if source_object_ids:
-            expected_hash = _compute_source_content_hash(store, source_object_ids)
+            expected_hash = _compute_source_content_hash(
+                semantic_store,
+                source_object_ids,
+            )
             if expected_hash != projection.get("source_content_hash"):
-                problems.append(
-                    f"{projection['id']}: source_content_hash mismatch"
-                    " (source objects changed since projection was generated)"
+                add(
+                    "projection_source_hash_mismatch",
+                    (projection["id"],),
+                    (
+                        f"{projection['id']}: source_content_hash mismatch"
+                        " (source objects changed since projection was generated)"
+                    ),
                 )
         if workspace_root is not None:
-            problems.extend(_lint_generated_projection_file(projection, Path(workspace_root)))
+            for message in _lint_generated_projection_file(
+                projection,
+                Path(workspace_root),
+            ):
+                add("projection_file_mismatch", (projection["id"],), message)
 
-    # 8) DomainMapping / DecisionRecord lifecycle integrity (spec §5, §6.1, §8.3).
-    mappings = store.by_kind("DomainMapping")
-    decisions = store.by_kind("DecisionRecord")
+    # 7) DomainMapping / DecisionRecord lifecycle integrity (spec §5, §6.1, §8.3).
+    mappings = semantic_store.by_kind("DomainMapping")
+    decisions = semantic_store.by_kind("DecisionRecord")
 
-    # 8a) dangling mapping reference links
-    for mapping in mappings:
-        link_fields = (
-            ("context_id", [mapping.get("context_id")]),
-            ("glossary_term_ids", mapping.get("glossary_term_ids") or []),
-            ("decision_record_ids", mapping.get("decision_record_ids") or []),
-            ("spec_revision_ids", mapping.get("spec_revision_ids") or []),
-            ("code_locator_ids", mapping.get("code_locator_ids") or []),
-            ("supersedes_mapping_ids", mapping.get("supersedes_mapping_ids") or []),
-        )
-        for field_name, ids in link_fields:
-            for ref_id in ids:
-                if ref_id and not store.has(ref_id):
-                    problems.append(f"{mapping['id']}: dangling {field_name} {ref_id}")
-
-    # 8b) dangling decision reference links
-    for decision in decisions:
-        link_fields = (
-            ("source_object_ids", decision.get("source_object_ids") or []),
-            ("affected_context_ids", decision.get("affected_context_ids") or []),
-            ("affected_mapping_ids", decision.get("affected_mapping_ids") or []),
-            ("affected_glossary_term_ids", decision.get("affected_glossary_term_ids") or []),
-            ("spec_revision_ids", decision.get("spec_revision_ids") or []),
-            ("jira_issue_ids", decision.get("jira_issue_ids") or []),
-            ("slack_thread_ids", decision.get("slack_thread_ids") or []),
-            ("code_locator_ids", decision.get("code_locator_ids") or []),
-        )
-        for field_name, ids in link_fields:
-            for ref_id in ids:
-                if ref_id and not store.has(ref_id):
-                    problems.append(f"{decision['id']}: dangling {field_name} {ref_id}")
-
-    # 8c) review-needed drift (spec §8.3): a decision affects a reviewed mapping the mapping has
+    # 7a) review-needed drift (spec §8.3): a decision affects a reviewed mapping the mapping has
     #     not incorporated (not in decision_record_ids) and is not superseded (status != reviewed).
     #     Blocking, and mapping-specific — never a whole-bundle rollback (spec §6.1).
     #     Detection is by non-incorporation (update-ingest arrival order), NOT wall-clock
@@ -228,44 +303,72 @@ def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[st
                 continue
             if decision["id"] in (mapping.get("decision_record_ids") or []):
                 continue
-            problems.append(
-                f"{mapping_id}: unincorporated decision {decision['id']} may affect reviewed mapping; "
-                f"review needed (spec_reflected={decision.get('spec_reflected')})"
+            add(
+                "unincorporated_decision",
+                (mapping_id, decision["id"]),
+                (
+                    f"{mapping_id}: unincorporated decision {decision['id']} "
+                    "may affect reviewed mapping; review needed "
+                    f"(spec_reflected={decision.get('spec_reflected')})"
+                ),
             )
 
-    # 8d) supersession consistency: a mapping superseded by another must not stay reviewed.
+    # 7b) supersession consistency: a mapping superseded by another must not stay reviewed.
     for mapping in mappings:
         for superseded_id in mapping.get("supersedes_mapping_ids") or []:
-            if not store.has(superseded_id):
-                continue  # dangling already reported in 8a
-            if store.get(superseded_id).get("status") == "reviewed":
-                problems.append(
-                    f"{superseded_id}: superseded by {mapping['id']} but status is still 'reviewed'"
+            if not semantic_store.has(superseded_id):
+                continue  # dangling은 공용 registry 검사에서 이미 보고됨
+            if semantic_store.get(superseded_id).get("status") == "reviewed":
+                add(
+                    "supersession_lifecycle",
+                    (superseded_id, mapping["id"]),
+                    (
+                        f"{superseded_id}: superseded by {mapping['id']} "
+                        "but status is still 'reviewed'"
+                    ),
                 )
 
-    # 8e) ReviewRecord target resolution (single + bundle).
-    for review in store.by_kind("ReviewRecord"):
-        target = review.get("target_object_id")
-        if target and not store.has(target):
-            problems.append(f"{review['id']}: dangling target_object_id {target}")
-        for target_id in review.get("target_object_ids") or []:
-            if not store.has(target_id):
-                problems.append(f"{review['id']}: dangling target_object_ids {target_id}")
-
-    # 9) Insight dangling source_object_ids / code_locator_ids (spec 2026-06-15 §4.7).
-    #    "여러 객체를 가로지른다"가 본질이라 가리키는 근거가 사라지면 조용히 깨진다 —
-    #    DomainMapping(8a)·DecisionRecord(8b)와 동형으로 막는다.
-    for insight in store.by_kind("Insight"):
-        link_fields = (
-            ("source_object_ids", insight.get("source_object_ids") or []),
-            ("code_locator_ids", insight.get("code_locator_ids") or []),
-        )
-        for field_name, ids in link_fields:
-            for ref_id in ids:
-                if ref_id and not store.has(ref_id):
-                    problems.append(f"{insight['id']}: dangling {field_name} {ref_id}")
-
     if workspace_root is not None:
-        problems.extend(_lint_generated_files_have_projection(store, Path(workspace_root)))
+        for message in _lint_generated_files_have_projection(
+            semantic_store,
+            Path(workspace_root),
+        ):
+            add("generated_file_without_projection", (), message)
 
-    return problems
+    return tuple(problems)
+
+
+def lint_store_report(
+    store: BrainStore,
+    workspace_root: Path | None = None,
+) -> tuple[LintProblem, ...]:
+    """최종 저장 객체에 대한 엄격한 구조화 lint."""
+    return _lint_store_report(
+        store,
+        workspace_root,
+        mutation_input=False,
+    )
+
+
+def lint_mutation_input_store_report(
+    store: BrainStore,
+    workspace_root: Path | None = None,
+) -> tuple[LintProblem, ...]:
+    """MutationService에 넘길 draft bundle 전용 lint.
+
+    CodeLocator의 ``verified_at`` 누락만 verifier 실행 전까지 허용한다.
+    일반/public lint와 최종 merged lint는 이 함수를 사용하지 않는다.
+    """
+    return _lint_store_report(
+        store,
+        workspace_root,
+        mutation_input=True,
+    )
+
+
+def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[str]:
+    """호환용 문자열 message 목록 wrapper."""
+    return [
+        problem.message
+        for problem in lint_store_report(store, workspace_root=workspace_root)
+    ]

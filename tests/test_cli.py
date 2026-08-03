@@ -9,21 +9,69 @@ ingest 서브커맨드가 ingest()를 호출해 store에 적재하는지(test_cl
 import io
 import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
 from project_brain import cli
 from project_brain.cli import _run_build
+from project_brain.id_grammar import format_id
+from project_brain.mutation import (
+    MutationOperation,
+    MutationService,
+    corpus_fingerprint,
+)
+from project_brain.repo_context import (
+    RepoContext,
+    resolve_git_checkout,
+)
 from project_brain.store import BrainStore
+from project_brain.transaction_receipt import BatchBinding
 from tests.test_ingest import (
     candidate_term,
     context,
     evidence_ref,
     manifest,
 )
+
+ENGINE_ARGS = ("--engine-sha", "e" * 40)
+
+
+def _commit_git_fixture(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "cli@test.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "CLI Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m", "fixture"],
+        check=True,
+    )
+
+
+def _context_object(ctx):
+    from project_brain.assembly import build_context
+    return build_context(
+        {
+            "context": {
+                "key": ctx,
+                "repo": "demoapp",
+                "display_name": "합성 컨텍스트",
+                "boundary_summary": "합성 테스트 경계",
+            },
+        },
+        "2026-06-16T00:00:00Z",
+    )[0]
 
 
 class TestCli(unittest.TestCase):
@@ -74,8 +122,12 @@ class TestCli(unittest.TestCase):
         rebuild(self.root, db, embedder=StubEmbedder())
         argv = ["--brain-root", str(self.root), "--db", str(db),
                 "--stub-embedder", "makeLanes0 어디 구현?"]
+        unrelated = self.input_dir / "unrelated-project"
+        unrelated.mkdir()
+        (unrelated / ".project-brain.json").write_text("{invalid", encoding="utf-8")
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        with mock.patch("project_brain.config.Path.cwd", return_value=unrelated), \
+             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         answer = json.loads(out.getvalue())
@@ -83,6 +135,47 @@ class TestCli(unittest.TestCase):
                    if s["intent"] == "implementation_location")
         self.assertGreaterEqual(len(loc["object_ids"]), 1)
         self.assertLessEqual(len(loc["object_ids"]), 5)
+
+    def test_cli_query_uses_existing_config_db_by_default(self):
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from tests.test_search import code_locator
+
+        project = self.input_dir / "project"
+        # config가 프로젝트 바깥의 corpus/DB 절대경로를 가리켜도 같은 config를 써야 한다.
+        brain = self.root / "configured-brain"
+        db = self.root / "configured.db"
+        project.mkdir()
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": str(brain), "db": str(db)}),
+            encoding="utf-8",
+        )
+        for i in range(12):
+            BrainStore.save_object(
+                brain,
+                code_locator(
+                    f"code.{i:02d}",
+                    path=f"a/Lane{i}.cpp",
+                    symbol=f"makeLanes{i}",
+                ),
+            )
+        rebuild(brain, db, embedder=StubEmbedder())
+
+        out = io.StringIO()
+        with mock.patch("project_brain.config.Path.cwd", return_value=project), \
+             mock.patch("sys.argv", [
+                 "cli", "--stub-embedder", "makeLanes0 어디 구현?",
+             ]), redirect_stdout(out):
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        answer = json.loads(out.getvalue())
+        section = next(
+            s for s in answer["sections"]
+            if s["intent"] == "implementation_location"
+        )
+        self.assertGreaterEqual(len(section["object_ids"]), 1)
+        self.assertLessEqual(len(section["object_ids"]), 5)
+        self.assertNotIn("details_omitted_reason", section)
 
     def test_cli_query_surfaces_stale_advisory_from_cache(self):
         # Step 2: .brain-local/stale-set.json이 있으면 query가 읽어 매핑에 stale_advisory 부착.
@@ -93,8 +186,13 @@ class TestCli(unittest.TestCase):
                                    glossary_term_ids=["g.boost"])):
             BrainStore.save_object(self.root, obj)
         write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.boost"],
-            "detail": {"m.boost": {"change_types": ["M"], "paths": ["a/X.cpp"]}}})
+            "target_head": "T", "computed_at": "t",
+            "stale_mapping_ids": ["mapping.neutral.boost"],
+            "detail": {
+                "mapping.neutral.boost": {
+                    "change_types": ["M"], "paths": ["a/X.cpp"]
+                }
+            }})
         argv = ["--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -102,7 +200,10 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         answer = json.loads(out.getvalue())
         gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(x for x in gm["mappings"] if x["id"] == "m.boost")
+        m = next(
+            x for x in gm["mappings"]
+            if x["id"] == "mapping.neutral.boost"
+        )
         self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
 
     def test_cli_query_surfaces_unmerged_advisory_without_changing_status(self):
@@ -114,9 +215,11 @@ class TestCli(unittest.TestCase):
             BrainStore.save_object(self.root, obj)
         write_stale_set(self.root, {
             "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
-            "detail": {"m.boost": {"code_changed": False, "unmerged_anchor": True,
+            "detail": {"mapping.neutral.boost": {
+                                   "code_changed": False, "unmerged_anchor": True,
                                    "unmerged_reasons": ["not_ancestor"],
-                                   "locator_ids": ["code.work"], "from_commits": ["WORK"],
+                                   "locator_ids": ["code.neutral.work"],
+                                   "from_commits": ["WORK"],
                                    "change_types": [], "paths": ["a/Work.cpp"]}}})
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
@@ -131,7 +234,10 @@ class TestCli(unittest.TestCase):
             "check whether it is unmerged or history was rewritten.",
             answer["warnings"],
         )
-        self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
+        self.assertEqual(
+            BrainStore.load(self.root).get("mapping.neutral.boost")["status"],
+            "reviewed",
+        )
 
     def test_cli_query_surfaces_unverifiable_anchor_without_changing_status(self):
         from project_brain.stale_check import write_stale_set
@@ -142,9 +248,11 @@ class TestCli(unittest.TestCase):
             BrainStore.save_object(self.root, obj)
         write_stale_set(self.root, {
             "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
-            "detail": {"m.boost": {"code_changed": False, "unmerged_anchor": True,
+            "detail": {"mapping.neutral.boost": {
+                                   "code_changed": False, "unmerged_anchor": True,
                                    "unmerged_reasons": ["anchor_unverifiable"],
-                                   "locator_ids": ["code.unknown"], "from_commits": ["UNKNOWN"],
+                                   "locator_ids": ["code.neutral.unknown"],
+                                   "from_commits": ["UNKNOWN"],
                                    "change_types": [], "paths": ["a/Work.cpp"]}}})
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
@@ -154,9 +262,14 @@ class TestCli(unittest.TestCase):
         warning = next(w for w in answer["warnings"] if "could not be verified" in w)
         self.assertNotIn("Verified", warning)
         self.assertNotIn("unmerged", warning.lower())
-        self.assertEqual(BrainStore.load(self.root).get("m.boost")["status"], "reviewed")
+        self.assertEqual(
+            BrainStore.load(self.root).get("mapping.neutral.boost")["status"],
+            "reviewed",
+        )
 
     def test_audit_stale_check_and_mark_checked_use_configured_default_branch(self):
+        from project_brain.stale_check import MarkCheckedPlan
+
         project = self.root / "project"
         brain = project / "brain"
         project.mkdir()
@@ -177,8 +290,8 @@ class TestCli(unittest.TestCase):
             head_calls.append(kwargs)
             return "HEAD"
 
-        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
-             mock.patch("project_brain.stale_check.stale_check", side_effect=fake_stale_check), \
+        with mock.patch("project_brain.audit.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.audit.stale_check", side_effect=fake_stale_check), \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(brain), "--no-fetch"]), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
@@ -191,18 +304,41 @@ class TestCli(unittest.TestCase):
             self.assertEqual(cli.main(), 0)
         self.assertEqual(stale_calls[-1]["default_branch"], "trunk")
 
+        mark_context = RepoContext(
+            repo_root=project,
+            expected_repo_id="demo",
+            expected_revision_ref="HEAD",
+            target_revision_sha="a" * 40,
+        )
         with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
              mock.patch("project_brain.stale_check.resolve_target_head", side_effect=fake_target_head), \
-             mock.patch("project_brain.stale_check.mark_checked",
-                        return_value={"ok": True, "updated": [], "blocked": [], "warnings": []}), \
+             mock.patch(
+                 "project_brain.stale_check.plan_mark_checked",
+                 return_value=MarkCheckedPlan(
+                     updated=(),
+                     blocked=(),
+                     warnings=(),
+                     preconditions={},
+                     expected_corpus_fingerprint="f" * 64,
+                     repo_context=mark_context,
+                     engine_sha="e" * 40,
+                 ),
+             ), \
+             mock.patch.object(
+                 cli,
+                 "_resolve_mutation_context",
+                 return_value=mark_context,
+             ), \
              mock.patch("sys.argv", ["cli", "mark-checked", "--brain-root", str(brain),
-                                      "--mappings", "m.any", "--checked-head", "HEAD", "--no-fetch"]), \
+                                      "--mappings", "mapping.neutral.any",
+                                      "--checked-head", "HEAD", "--no-fetch",
+                                      *ENGINE_ARGS]), \
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         self.assertEqual(head_calls[-1]["default_branch"], "trunk")
 
     def test_cli_ingest_subcommand_writes(self):
-        bundle = [manifest(), evidence_ref(), candidate_term()]
+        bundle = [manifest(), evidence_ref(), context(), candidate_term()]
         objects_file = self.input_dir / "bundle.json"
         objects_file.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
         argv = [
@@ -211,16 +347,264 @@ class TestCli(unittest.TestCase):
             str(self.root),
             "--objects-file",
             str(objects_file),
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
+        self.assertEqual(apply.call_count, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {
+            "ok", "transaction_id", "operation", "committed",
+            "manifest_sha256", "before_fingerprint", "after_fingerprint",
+            "ingested_ids", "ingested_count",
+        })
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["operation"], "ingest")
+        self.assertRegex(payload["transaction_id"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["manifest_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["before_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["after_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["ingested_ids"], [obj["id"] for obj in bundle])
+        self.assertEqual(payload["ingested_count"], len(bundle))
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.INGEST,
+        )
         # ingest()가 호출되어 store에 적재됨
         store = BrainStore.load(self.root)
-        self.assertTrue(store.has("ev.manifest"))
-        self.assertTrue(store.has("ev.ref"))
-        self.assertEqual(store.get("g.x")["status"], "candidate")
+        self.assertTrue(store.has("manifest.neutral.source"))
+        self.assertTrue(store.has("evref.neutral.ref"))
+        self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
+
+    def test_cli_batch_ingest_binds_inputs_state_and_durable_receipt(self):
+        project = self.input_dir / "batch-project"
+        brain = project / "brain"
+        project.mkdir()
+        brain.mkdir()
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain", "repo": "demo"}),
+            encoding="utf-8",
+        )
+        _commit_git_fixture(project)
+        target_sha = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        engine = resolve_git_checkout(Path(cli.__file__))
+        brain_stat = brain.stat()
+        verify = self.input_dir / "batch-verify.json"
+        domain = self.input_dir / "batch-domain.py"
+        verify.write_text("{}\n", encoding="utf-8")
+        domain.write_text("# domain\n", encoding="utf-8")
+        binding = BatchBinding(
+            batch_manifest_sha256="a" * 64,
+            item_key="one",
+            item_input_fingerprint="b" * 64,
+            verify_json_sha256=hashlib.sha256(
+                verify.read_bytes()
+            ).hexdigest(),
+            domain_spec_py_sha256=hashlib.sha256(
+                domain.read_bytes()
+            ).hexdigest(),
+            repo_root=str(project.resolve()),
+            brain_root=str(brain.resolve()),
+            brain_root_device=brain_stat.st_dev,
+            brain_root_inode=brain_stat.st_ino,
+            expected_repo_id="demo",
+            expected_revision_ref="HEAD",
+            target_revision_sha=target_sha,
+            engine_root=str(engine.root),
+            engine_sha=engine.head_sha,
+        )
+        binding_file = self.input_dir / "batch-binding.json"
+        binding_file.write_text(
+            json.dumps(
+                asdict(binding),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        objects_file = self.input_dir / "batch-objects.json"
+        obj = context()
+        objects_file.write_text(
+            json.dumps([obj], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        wrong_project = self.input_dir / "wrong-batch-project"
+        wrong_brain = wrong_project / "brain"
+        wrong_brain.mkdir(parents=True)
+        (wrong_project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain", "repo": "demo"}),
+            encoding="utf-8",
+        )
+        wrong_obj = dict(obj)
+        wrong_obj["title"] = "wrong corpus sentinel"
+        wrong_path = BrainStore.object_path(wrong_brain, wrong_obj)
+        wrong_path.parent.mkdir(parents=True)
+        wrong_path.write_bytes(BrainStore.object_bytes(wrong_obj))
+        out = io.StringIO()
+        original_apply = MutationService.apply
+        argv = [
+            "cli",
+            "ingest",
+            "--brain-root",
+            str(brain.resolve()),
+            "--objects-file",
+            str(objects_file),
+            "--repo-root",
+            str(project.resolve()),
+            "--expected-repo-id",
+            "demo",
+            "--expected-revision-ref",
+            "HEAD",
+            "--engine-sha",
+            engine.head_sha,
+            "--batch-binding-file",
+            str(binding_file.resolve()),
+            "--verify-json",
+            str(verify.resolve()),
+            "--domain-spec-py",
+            str(domain.resolve()),
+        ]
+
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(wrong_project)
+            with mock.patch.object(
+                MutationService,
+                "apply",
+                autospec=True,
+                side_effect=original_apply,
+            ) as apply, mock.patch("sys.argv", argv), redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+        finally:
+            os.chdir(original_cwd)
+
+        payload = json.loads(out.getvalue())
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["ingested_ids"], [obj["id"]])
+        request = apply.call_args.kwargs["request"]
+        self.assertEqual(request.batch_binding, binding)
+        self.assertEqual(
+            request.repo_context.target_revision_sha,
+            binding.target_revision_sha,
+        )
+        self.assertEqual(
+            BrainStore.load(wrong_brain).get(obj["id"])["title"],
+            "wrong corpus sentinel",
+        )
+
+    def test_cli_ingest_resolves_config_repo_context_and_exact_revision(self):
+        from tests.test_mutation import _code_locator, _write_raw
+
+        project = self.input_dir / "project"
+        brain = project / "brain"
+        project.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=project,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=project,
+            check=True,
+        )
+        (project / "Foo.cpp").write_text(
+            "void Foo::bar() {}\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "Foo.cpp"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "fixture"],
+            cwd=project,
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/develop", sha],
+            cwd=project,
+            check=True,
+        )
+        (project / ".project-brain.json").write_text(
+            json.dumps({
+                "brain_root": "brain",
+                "repo": "demo",
+                "default_branch": "develop",
+            }),
+            encoding="utf-8",
+        )
+        locator = _code_locator(commit_sha=sha, verified_at=None)
+        objects_file = self.input_dir / "locator-bundle.json"
+        objects_file.write_text(
+            json.dumps([locator], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        argv = [
+            "ingest",
+            "--brain-root",
+            str(brain.resolve()),
+            "--objects-file",
+            str(objects_file),
+            *ENGINE_ARGS,
+        ]
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(), 0)
+
+        request = apply.call_args.kwargs["request"]
+        self.assertEqual(request.brain_root, brain.resolve())
+        self.assertEqual(request.repo_context.repo_root, project.resolve())
+        self.assertEqual(request.repo_context.expected_repo_id, "demo")
+        self.assertEqual(
+            request.repo_context.expected_revision_ref,
+            "origin/develop",
+        )
+        self.assertEqual(request.repo_context.target_revision_sha, sha)
+        self.assertEqual(request.engine_sha, "e" * 40)
+        stored = BrainStore.load(brain).get(locator["id"])
+        self.assertEqual(stored["title"], "Foo::bar")
+        self.assertIn("verified_at", stored)
 
     def test_cli_projection_label_split_by_status(self):
         # spec 2026-06-17 Task A5: projection_reuse 채널의 신뢰 라벨이 status로 갈린다 —
@@ -402,7 +786,7 @@ class TestCli(unittest.TestCase):
 
     def test_cli_lint_clean_store_ok(self):
         # 깨끗한 store(서로 참조 정상) → lint ok=true, problems 0 (test_lint.py와 동일 조합)
-        for obj in (manifest(), evidence_ref(), candidate_term()):
+        for obj in (manifest(), evidence_ref(), context(), candidate_term()):
             BrainStore.save_object(self.root, obj)
         argv = ["lint", "--brain-root", str(self.root)]
         out = io.StringIO()
@@ -417,7 +801,12 @@ class TestCli(unittest.TestCase):
         # 근거 객체가 없는 Insight → dangling source_object_ids 보고 + rc=1
         from tests.test_ingest import insight
         BrainStore.save_object(
-            self.root, insight(source_object_ids=["m.gone", "m.gone2"]))
+            self.root,
+            insight(source_object_ids=[
+                "mapping.neutral.gone",
+                "mapping.neutral.gone2",
+            ]),
+        )
         argv = ["lint", "--brain-root", str(self.root)]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -429,9 +818,10 @@ class TestCli(unittest.TestCase):
             any("dangling source_object_ids" in p for p in report["problems"]))
 
 
-def candidate_term_with_evidence(tid="g.x", term="갈고리"):
+def candidate_term_with_evidence(tid="g.neutral.x", term="갈고리"):
     """근거(ev.ref) 보유 candidate GlossaryTerm. promote 후 §6.4(reviewed 근거 필수)를 통과한다."""
     from project_brain.objbase import base
+    tid = format_id("GlossaryTerm", ctx="neutral", key=tid.rsplit(".", 1)[-1])
     return base(
         {
             "id": tid,
@@ -442,7 +832,7 @@ def candidate_term_with_evidence(tid="g.x", term="갈고리"):
             "context_id": "context.neutral",
             "term": term,
             "definition": "후보 정의",
-            "evidence_refs": ["ev.ref"],
+            "evidence_refs": ["evref.neutral.ref"],
             "candidate": {"candidate_state": "ready_for_review", "candidate_source": "spec"},
         },
         tags=["neutral"], created_at="2026-06-04T00:00:00Z", updated_at="2026-06-04T00:00:00Z",
@@ -458,29 +848,57 @@ class TestCliPromote(unittest.TestCase):
         self._tmp.cleanup()
 
     def _ingest(self):
-        from project_brain.ingest import ingest
-        ingest(self.root, [manifest(), evidence_ref(), candidate_term_with_evidence()])
+        from tests.test_ingest import ingest
+        ingest(
+            self.root,
+            [manifest(), evidence_ref(), context(), candidate_term_with_evidence()],
+        )
 
     def test_promote_round_trip(self):
         self._ingest()
         # promote 전: 후보가 candidate로 노출
-        self.assertEqual(BrainStore.load(self.root).get("g.x")["status"], "candidate")
+        self.assertEqual(
+            BrainStore.load(self.root).get("g.neutral.x")["status"],
+            "candidate",
+        )
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.x", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply, mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.PROMOTE,
+        )
         result = json.loads(out.getvalue())
         self.assertTrue(result["ok"])
         store = BrainStore.load(self.root)
         # 승격 객체 + 검토 기록 둘 다 저장됨
-        self.assertEqual(store.get("g.x")["status"], "reviewed")
-        self.assertEqual(store.get("g.x")["review_record_id"], "review.g.x")
-        self.assertTrue(store.has("review.g.x"))
+        self.assertEqual(store.get("g.neutral.x")["status"], "reviewed")
+        self.assertEqual(
+            store.get("g.neutral.x")["review_record_id"],
+            "review.g.neutral.x",
+        )
+        self.assertTrue(store.has("review.g.neutral.x"))
         # 없는 기록 가리킴 0건(사후 lint clean)
         from project_brain.lint import lint_store
         self.assertEqual(lint_store(store), [])
@@ -490,21 +908,23 @@ class TestCliPromote(unittest.TestCase):
         self._ingest()
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.x", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
-        rr = BrainStore.load(self.root).get("review.g.x")
+        rr = BrainStore.load(self.root).get("review.g.neutral.x")
         self.assertTrue(rr["reviewed_at"].endswith("+09:00"), rr["reviewed_at"])
 
     def test_promote_missing_id_returns_error(self):
         self._ingest()
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.nope", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.nope", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -516,30 +936,32 @@ class TestCliPromote(unittest.TestCase):
         from project_brain.router import QueryRouter
         self._ingest()  # candidate g.x (term=갈고리, evidence 보유) + manifest + ref
         before = QueryRouter(BrainStore.load(self.root)).answer("갈고리 용어 무슨 뜻?")
-        self.assertIn("g.x", before["promotable_candidate_ids"])
-        self.assertNotIn("g.x", before["source_object_ids"])
+        self.assertIn("g.neutral.x", before["promotable_candidate_ids"])
+        self.assertNotIn("g.neutral.x", before["source_object_ids"])
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.x", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         after = QueryRouter(BrainStore.load(self.root)).answer("갈고리 용어 무슨 뜻?")
         # 승격 후: 후보에서 빠지고 검수 source로(reviewed GlossaryTerm은 glossary_objects 덤프로 노출)
-        self.assertNotIn("g.x", after["promotable_candidate_ids"])
-        self.assertIn("g.x", after["source_object_ids"])
+        self.assertNotIn("g.neutral.x", after["promotable_candidate_ids"])
+        self.assertIn("g.neutral.x", after["source_object_ids"])
 
     def test_promote_zero_evidence_rejected(self):
         # §6.4 활성 후: 근거 없는 candidate(candidate엔 §6.4 미적용 → 적재는 됨)를 승격하면
         # 승격 결과물(reviewed, 근거 빔)이 쓰기 전 일괄 검증에 걸려 rc=1, 디스크 불변(원자성).
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         from tests.test_ingest import candidate_term  # evidence_refs=[] 기본
-        ingest(self.root, [candidate_term("g.noev")])
+        ingest(self.root, [context(), candidate_term("g.neutral.noev")])
         argv = [
             "promote", "--brain-root", str(self.root),
-            "--ids", "g.noev", "--reviewer", "user-confirmed",
+            "--ids", "g.neutral.noev", "--reviewer", "user-confirmed",
             "--reviewed-at", "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
         ]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
@@ -550,34 +972,37 @@ class TestCliPromote(unittest.TestCase):
         self.assertIn("requires non-empty evidence_refs", result["error"])
         # 원자성: 거부됐으니 g.noev는 여전히 candidate(부분 쓰기·review 기록 생성 없음)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.noev")["status"], "candidate")
-        self.assertFalse(store.has("review.g.noev"))
+        self.assertEqual(store.get("g.neutral.noev")["status"], "candidate")
+        self.assertFalse(store.has("review.g.neutral.noev"))
 
     def test_promote_backfills_empty_evidence_from_mapping(self):
         # 빈 근거 candidate + 짝 reviewed 매핑 → 수동 promote가 backfill해 §6.4 통과.
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         ingest(self.root, [
             manifest(), _ar_evref("evref.a"), context(),
             _ar_term("g.empty", term="빈근거"),
             _ar_mapping("m.empty", term_ids=["g.empty"], evidence_refs=["evref.a"], mapping_key="me"),
         ])
         argv = ["promote", "--brain-root", str(self.root),
-                "--ids", "g.empty", "--reviewer", "user-confirmed",
-                "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--ids", "g.neutral.empty", "--reviewer", "user-confirmed",
+                "--reviewed-at", "2026-06-08T00:00:00Z", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.empty")["status"], "reviewed")
-        self.assertEqual(store.get("g.empty")["evidence_refs"], ["evref.a"])
+        self.assertEqual(store.get("g.neutral.empty")["status"], "reviewed")
+        self.assertEqual(
+            store.get("g.neutral.empty")["evidence_refs"],
+            ["evref.neutral.a"],
+        )
 
     def test_promote_rejects_already_reviewed(self):
         # 멱등 가드: 같은 id 두 번 promote → 두 번째 rc=1.
         self._ingest()  # candidate g.x (term=갈고리, evidence 보유)
         base_argv = ["promote", "--brain-root", str(self.root),
-                     "--ids", "g.x", "--reviewer", "user-confirmed",
-                     "--reviewed-at", "2026-06-06T00:00:00Z"]
+                     "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
+                     "--reviewed-at", "2026-06-06T00:00:00Z", *ENGINE_ARGS]
         with mock.patch("sys.argv", ["cli"] + base_argv), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
         out = io.StringIO()
@@ -586,27 +1011,88 @@ class TestCliPromote(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("already reviewed", json.loads(out.getvalue())["error"])
 
+    def test_promote_fails_closed_if_target_changes_before_apply(self):
+        from project_brain.promote import promote
+
+        self._ingest()
+        original_apply = cli._apply_mutation
+
+        def apply_after_competing_promotion(**kwargs):
+            stale_target = BrainStore.load(self.root).get("g.neutral.x")
+            first_promoted, first_records = promote(
+                [stale_target],
+                [stale_target["id"]],
+                "single_object",
+                reviewer="first-reviewer",
+                reviewed_at="2026-06-05T00:00:00Z",
+            )
+            for obj in first_promoted + first_records:
+                BrainStore.save_object(self.root, obj)
+            return original_apply(**kwargs)
+
+        argv = [
+            "promote",
+            "--brain-root",
+            str(self.root),
+            "--ids",
+            "g.neutral.x",
+            "--reviewer",
+            "second-reviewer",
+            "--reviewed-at",
+            "2026-06-06T00:00:00Z",
+            *ENGINE_ARGS,
+        ]
+        out = io.StringIO()
+        with mock.patch.object(
+            cli,
+            "_apply_mutation",
+            side_effect=apply_after_competing_promotion,
+        ), mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        stored = BrainStore.load(self.root)
+        self.assertEqual(
+            stored.get("review.g.neutral.x")["reviewer"],
+            "first-reviewer",
+        )
+        self.assertEqual(
+            stored.get("g.neutral.x")["updated_at"],
+            "2026-06-05T00:00:00Z",
+        )
+
     def test_promote_conflict_records_resolution(self):
         # 수동 conflict 승격(spec §5.2 사람 판정 허용) → 해소 근거가 검수 기록에 남음.
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         conflict_term = _ar_term("g.c", term="충돌", candidate_state="conflict",
                                  evidence_refs=["evref.a"])
         ingest(self.root, [manifest(), _ar_evref("evref.a"), context(), conflict_term])
         argv = ["promote", "--brain-root", str(self.root),
-                "--ids", "g.c", "--reviewer", "user-confirmed",
+                "--ids", "g.neutral.c", "--reviewer", "user-confirmed",
                 "--reviewed-at", "2026-06-08T00:00:00Z",
-                "--conflict-resolution", "위키 정설 채택"]
+                "--conflict-resolution", "위키 정설 채택", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.c")["status"], "reviewed")
-        self.assertEqual(store.get("review.g.c")["conflict_resolution"], "위키 정설 채택")
+        self.assertEqual(store.get("g.neutral.c")["status"], "reviewed")
+        self.assertEqual(
+            store.get("review.g.neutral.c")["conflict_resolution"],
+            "위키 정설 채택",
+        )
 
 
-def _ar_evref(rid, manifest_id="ev.manifest"):
+def _ar_evref(rid, manifest_id="manifest.neutral.source"):
     from project_brain.objbase import base
+    rid = format_id(
+        "EvidenceRef",
+        ctx="neutral",
+        anchor_key=rid.rsplit(".", 1)[-1],
+    )
     return base(
         {
             "id": rid, "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
@@ -619,12 +1105,21 @@ def _ar_evref(rid, manifest_id="ev.manifest"):
 
 def _ar_term(tid, *, term, candidate_state="evidence_verified", evidence_refs=None):
     from project_brain.objbase import base
+    tid = format_id("GlossaryTerm", ctx="neutral", key=tid.rsplit(".", 1)[-1])
+    canonical_evidence_refs = [
+        format_id(
+            "EvidenceRef",
+            ctx="neutral",
+            anchor_key=evidence_ref_id.rsplit(".", 1)[-1],
+        )
+        for evidence_ref_id in (evidence_refs if evidence_refs is not None else [])
+    ]
     return base(
         {
             "id": tid, "kind": "GlossaryTerm", "status": "candidate", "truth_role": "domain",
             "title": f"Candidate term: {term}", "context_id": "context.neutral",
             "term": term, "definition": "후보 정의",
-            "evidence_refs": evidence_refs if evidence_refs is not None else [],
+            "evidence_refs": canonical_evidence_refs,
             "candidate": {"candidate_state": candidate_state, "candidate_source": "spec"},
         },
         tags=["neutral"], created_at="2026-06-04T00:00:00Z", updated_at="2026-06-04T00:00:00Z",
@@ -633,6 +1128,19 @@ def _ar_term(tid, *, term, candidate_state="evidence_verified", evidence_refs=No
 
 def _ar_mapping(mid, *, term_ids, evidence_refs, mapping_key):
     from project_brain.objbase import base
+    mid = format_id("DomainMapping", ctx="neutral", key=mapping_key)
+    term_ids = [
+        format_id("GlossaryTerm", ctx="neutral", key=term_id.rsplit(".", 1)[-1])
+        for term_id in term_ids
+    ]
+    evidence_refs = [
+        format_id(
+            "EvidenceRef",
+            ctx="neutral",
+            anchor_key=evidence_ref_id.rsplit(".", 1)[-1],
+        )
+        for evidence_ref_id in evidence_refs
+    ]
     return base(
         {
             "id": mid, "kind": "DomainMapping", "status": "reviewed", "truth_role": "domain",
@@ -653,7 +1161,7 @@ class TestCliPromoteAuto(unittest.TestCase):
         self._tmp.cleanup()
 
     def _ingest_corpus(self):
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         bundle = [
             manifest(),
             _ar_evref("evref.a"), _ar_evref("evref.b"),
@@ -672,7 +1180,8 @@ class TestCliPromoteAuto(unittest.TestCase):
 
     def _run(self, ids):
         argv = ["promote-auto", "--brain-root", str(self.root),
-                "--ids", *ids, "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--ids", *ids, "--reviewed-at", "2026-06-08T00:00:00Z",
+                *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -680,47 +1189,128 @@ class TestCliPromoteAuto(unittest.TestCase):
 
     def test_batch_promotes_eligible_skips_conflict_and_unknown(self):
         self._ingest_corpus()
-        rc, result = self._run(["g.empty", "g.has", "g.conflict", "g.multi", "g.nope"])
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply:
+            rc, result = self._run([
+                "g.neutral.empty",
+                "g.neutral.has",
+                "g.neutral.conflict",
+                "g.neutral.multi",
+                "g.neutral.nope",
+            ])
         self.assertEqual(rc, 0)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.PROMOTE_AUTO,
+        )
         self.assertTrue(result["ok"])
-        self.assertEqual(set(result["promoted"]), {"g.empty", "g.has", "g.multi"})
-        self.assertEqual(result["skipped"]["conflict"], ["g.conflict"])
-        self.assertEqual(result["skipped"]["unknown_id"], ["g.nope"])
+        self.assertEqual(
+            set(result["promoted"]),
+            {"g.neutral.empty", "g.neutral.has", "g.neutral.multi"},
+        )
+        self.assertEqual(result["skipped"]["conflict"], ["g.neutral.conflict"])
+        self.assertEqual(result["skipped"]["unknown_id"], ["g.neutral.nope"])
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.empty")["status"], "reviewed")
+        self.assertEqual(store.get("g.neutral.empty")["status"], "reviewed")
         # backfill: 빈 근거 용어가 짝 매핑 evref로 채워짐
-        self.assertEqual(store.get("g.empty")["evidence_refs"], ["evref.a"])
+        self.assertEqual(
+            store.get("g.neutral.empty")["evidence_refs"],
+            ["evref.neutral.a"],
+        )
         from project_brain.lint import lint_store
         self.assertEqual(lint_store(store), [])
 
     def test_review_record_records_auto_reviewer_and_vouched_by(self):
         self._ingest_corpus()
-        self._run(["g.empty", "g.multi"])
+        self._run(["g.neutral.empty", "g.neutral.multi"])
         store = BrainStore.load(self.root)
-        rr_empty = store.get("review.g.empty")
+        rr_empty = store.get("review.g.neutral.empty")
         self.assertEqual(rr_empty["reviewer"], "auto:mapping-vouched")
-        self.assertEqual(rr_empty["vouched_by_mapping_ids"], ["m.empty"])
+        self.assertEqual(
+            rr_empty["vouched_by_mapping_ids"],
+            ["mapping.neutral.me"],
+        )
         # 다중 참조: 보증 매핑 전부, 정렬됨
-        rr_multi = store.get("review.g.multi")
-        self.assertEqual(rr_multi["vouched_by_mapping_ids"], ["m.a", "m.z"])
+        rr_multi = store.get("review.g.neutral.multi")
+        self.assertEqual(
+            rr_multi["vouched_by_mapping_ids"],
+            ["mapping.neutral.a", "mapping.neutral.z"],
+        )
 
     def test_dedup_multi_mapping_promotes_once(self):
         self._ingest_corpus()
-        rc, result = self._run(["g.multi", "g.multi"])
+        rc, result = self._run(["g.neutral.multi", "g.neutral.multi"])
         self.assertEqual(rc, 0)
-        self.assertEqual(result["promoted"], ["g.multi"])
+        self.assertEqual(result["promoted"], ["g.neutral.multi"])
 
     def test_rerun_is_idempotent(self):
         self._ingest_corpus()
-        self._run(["g.empty", "g.has", "g.multi"])
-        rc, result = self._run(["g.empty", "g.has", "g.multi"])
+        self._run(["g.neutral.empty", "g.neutral.has", "g.neutral.multi"])
+        rc, result = self._run(
+            ["g.neutral.empty", "g.neutral.has", "g.neutral.multi"]
+        )
         self.assertEqual(rc, 0)
         self.assertEqual(result["promoted"], [])
-        self.assertEqual(set(result["skipped"]["already_reviewed"]), {"g.empty", "g.has", "g.multi"})
+        self.assertEqual(
+            set(result["skipped"]["already_reviewed"]),
+            {"g.neutral.empty", "g.neutral.has", "g.neutral.multi"},
+        )
+
+    def test_auto_fails_closed_if_vouching_snapshot_changes_before_apply(self):
+        self._ingest_corpus()
+        original_apply = cli._apply_mutation
+
+        def apply_after_voucher_change(**kwargs):
+            store = BrainStore.load(self.root)
+            mapping = dict(store.get("mapping.neutral.me"))
+            mapping["glossary_term_ids"] = []
+            BrainStore.save_object(self.root, mapping)
+            return original_apply(**kwargs)
+
+        out = io.StringIO()
+        argv = [
+            "promote-auto",
+            "--brain-root",
+            str(self.root),
+            "--ids",
+            "g.neutral.empty",
+            "--reviewed-at",
+            "2026-06-08T00:00:00Z",
+            *ENGINE_ARGS,
+        ]
+        with mock.patch.object(
+            cli,
+            "_apply_mutation",
+            side_effect=apply_after_voucher_change,
+        ), mock.patch(
+            "sys.argv",
+            ["cli"] + argv,
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 1)
+        stored = BrainStore.load(self.root)
+        self.assertEqual(stored.get("g.neutral.empty")["status"], "candidate")
+        self.assertFalse(stored.has("review.g.neutral.empty"))
 
 
-def _ar_legacy_manifest(mid="ev.wiki", source_type="wiki"):
+def _ar_legacy_manifest(mid="manifest.neutral.wiki", source_type="wiki"):
     from project_brain.objbase import base
+    mid = format_id(
+        "EvidenceManifest",
+        ctx="neutral",
+        key=mid.rsplit(".", 1)[-1],
+    )
     return base(
         {
             "id": mid, "kind": "EvidenceManifest", "status": "reviewed", "truth_role": "source",
@@ -732,8 +1322,21 @@ def _ar_legacy_manifest(mid="ev.wiki", source_type="wiki"):
     )
 
 
-def _ar_legacy_evref(rid="evref.wiki", manifest_id="ev.wiki"):
+def _ar_legacy_evref(
+    rid="evref.neutral.wiki",
+    manifest_id="manifest.neutral.wiki",
+):
     from project_brain.objbase import base
+    rid = format_id(
+        "EvidenceRef",
+        ctx="neutral",
+        anchor_key=rid.rsplit(".", 1)[-1],
+    )
+    manifest_id = format_id(
+        "EvidenceManifest",
+        ctx="neutral",
+        key=manifest_id.rsplit(".", 1)[-1],
+    )
     return base(
         {
             "id": rid, "kind": "EvidenceRef", "status": "reviewed", "truth_role": "reference",
@@ -756,12 +1359,12 @@ class TestCliPromoteAtomicity(unittest.TestCase):
     def test_manual_promote_legacy_only_rejected_disk_unchanged(self):
         # legacy(wiki) 근거만 가진 용어를 수동 승격하면 reviewed가 legacy-only(lint 6 위반).
         # 사전 lint가 막아 rc=1, 디스크는 candidate 그대로(원자성 — save 전 lint).
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         term = _ar_term("g.legacy", term="레거시", evidence_refs=["evref.wiki"])
         ingest(self.root, [_ar_legacy_manifest(), _ar_legacy_evref(), context(), term])
         argv = ["promote", "--brain-root", str(self.root),
-                "--ids", "g.legacy", "--reviewer", "user-confirmed",
-                "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--ids", "g.neutral.legacy", "--reviewer", "user-confirmed",
+                "--reviewed-at", "2026-06-08T00:00:00Z", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
@@ -769,12 +1372,12 @@ class TestCliPromoteAtomicity(unittest.TestCase):
         self.assertIn("legacy-only", json.dumps(json.loads(out.getvalue()), ensure_ascii=False))
         # 원자성: 디스크 불변(부분 쓰기·review 기록 생성 없음)
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.legacy")["status"], "candidate")
-        self.assertFalse(store.has("review.g.legacy"))
+        self.assertEqual(store.get("g.neutral.legacy")["status"], "candidate")
+        self.assertFalse(store.has("review.g.neutral.legacy"))
 
     def test_promote_auto_skips_legacy_only_evidence(self):
         # 짝 매핑 evidence가 wiki(legacy)뿐인 용어는 자동 승격 부적격 → skip. 정상 용어만 승격.
-        from project_brain.ingest import ingest
+        from tests.test_ingest import ingest
         from project_brain.lint import lint_store
         ingest(self.root, [
             manifest(), _ar_evref("evref.spec"),
@@ -786,17 +1389,21 @@ class TestCliPromoteAtomicity(unittest.TestCase):
             _ar_mapping("m.legacy", term_ids=["g.legacy"], evidence_refs=["evref.wiki"], mapping_key="mleg"),
         ])
         argv = ["promote-auto", "--brain-root", str(self.root),
-                "--ids", "g.ok", "g.legacy", "--reviewed-at", "2026-06-08T00:00:00Z"]
+                "--ids", "g.neutral.ok", "g.neutral.legacy",
+                "--reviewed-at", "2026-06-08T00:00:00Z", *ENGINE_ARGS]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         result = json.loads(out.getvalue())
-        self.assertEqual(result["promoted"], ["g.ok"])
-        self.assertEqual(result["skipped"]["legacy_only_evidence"], ["g.legacy"])
+        self.assertEqual(result["promoted"], ["g.neutral.ok"])
+        self.assertEqual(
+            result["skipped"]["legacy_only_evidence"],
+            ["g.neutral.legacy"],
+        )
         store = BrainStore.load(self.root)
-        self.assertEqual(store.get("g.ok")["status"], "reviewed")
-        self.assertEqual(store.get("g.legacy")["status"], "candidate")
+        self.assertEqual(store.get("g.neutral.ok")["status"], "reviewed")
+        self.assertEqual(store.get("g.neutral.legacy")["status"], "candidate")
         self.assertEqual(lint_store(store), [])
 
 
@@ -843,11 +1450,27 @@ class TestCliSearch(unittest.TestCase):
         self.assertIn("needs_clarification", payload)
         # reviewed 적중에 검수상태·linked(코드 위치)가 동반된다.
         ids = {h["object_id"] for h in payload["results"]}
-        self.assertIn("m.lane", ids)
-        m = next(h for h in payload["results"] if h["object_id"] == "m.lane")
+        self.assertIn("mapping.neutral.lane", ids)
+        m = next(
+            h for h in payload["results"]
+            if h["object_id"] == "mapping.neutral.lane"
+        )
         self.assertEqual(m["status"], "reviewed")
         locs = {c["object_id"] for c in m["linked"]["code_locators"]}
-        self.assertIn("code.lane", locs)
+        self.assertIn("code.neutral.lane", locs)
+        linked = next(
+            c for c in m["linked"]["code_locators"]
+            if c["object_id"] == "code.neutral.lane"
+        )
+        self.assertEqual(
+            linked,
+            {
+                "object_id": "code.neutral.lane",
+                "path": "a/Lane.cpp",
+                "symbol": "makeLanes",
+                "quote_access": "indeterminate",
+            },
+        )
 
     def test_search_candidate_channel(self):
         from tests.test_search import glossary_term
@@ -857,7 +1480,7 @@ class TestCliSearch(unittest.TestCase):
         rc, payload = self._search("레인 영역 배치")
         self.assertEqual(rc, 0)
         cand_ids = {h["object_id"] for h in payload["candidates"]}
-        self.assertIn("g.cand", cand_ids)
+        self.assertIn("g.neutral.cand", cand_ids)
         # reviewed 게이트 통과 0건 → needs_clarification.
         self.assertEqual(payload["results"], [])
         self.assertTrue(payload["needs_clarification"])
@@ -894,7 +1517,10 @@ class TestCliSearch(unittest.TestCase):
         rc, payload = self._search("클리어 토큰 노출 게이트 이중구현")
         self.assertEqual(rc, 0)
         self.assertIn("advisories", payload)
-        self.assertIn("insight.gate", {h["object_id"] for h in payload["advisories"]})
+        self.assertIn(
+            "insight.neutral.gate",
+            {h["object_id"] for h in payload["advisories"]},
+        )
         for h in payload["advisories"]:
             self.assertEqual(h["trust_label"], "가로지르는 위험·교훈(검증됨)")
 
@@ -903,6 +1529,7 @@ class TestCliSearch(unittest.TestCase):
         # stale는 git 의존이라 --no-stale로 건너뛴다(결정론). 고아 candidate 용어는
         # evidence_refs=[]라 dangling 없이 isolated만 잡힌다.
         from tests.test_search import glossary_term
+        BrainStore.save_object(self.brain, context())
         BrainStore.save_object(
             self.brain, glossary_term("g.orphan", term="고아", definition="d", status="candidate"))
         argv = ["audit", "--no-stale", "--brain-root", str(self.brain)]
@@ -912,27 +1539,28 @@ class TestCliSearch(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(rc, 0)  # lint clean → rc 0
         self.assertTrue(payload["lint"]["ok"])
-        self.assertIn("g.orphan", payload["isolated"]["isolated"])
+        self.assertIn("g.neutral.orphan", payload["isolated"]["isolated"])
         self.assertIsNone(payload["stale"])        # 기존 --no-stale 계약 보존
         self.assertTrue(payload["stale_status"]["ok"])
         self.assertTrue(payload["stale_status"]["skipped"])
         self.assertTrue(payload["code_quotes"]["check_skipped"])
+        self.assertFalse(payload["code_quotes"]["ok"])
         self.assertEqual(payload["code_quotes"]["checked"], 0)
         self.assertIsNone(payload["cache_written"])
 
     def test_audit_succeeds_when_stale_and_exact_quote_checks_pass(self):
         from tests.test_stale_check import code_locator
         loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
-        loc["verified_quote"] = "return exact;"
+        loc["verified_quote"] = "void sym() {}"
         BrainStore.save_object(self.brain, loc)
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
                  "unmerged_anchors": [], "coverage": {"covered_mappings": [],
                                                         "uncovered_mappings": []}}
         out = io.StringIO()
-        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
-             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
-             mock.patch("project_brain.code_verify.make_git_blob_reader",
-                        return_value=lambda _commit, _path: b"return exact;"), \
+        with mock.patch("project_brain.audit.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.audit.stale_check", return_value=stale), \
+             mock.patch("project_brain.audit.make_git_blob_reader",
+                        return_value=lambda _commit, _path: b"void sym() {}"), \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
              redirect_stdout(out):
             rc = cli.main()
@@ -946,8 +1574,8 @@ class TestCliSearch(unittest.TestCase):
     def test_audit_fails_closed_on_global_git_error(self):
         from project_brain.stale_check import GitError
         out = io.StringIO()
-        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
-             mock.patch("project_brain.stale_check.stale_check", side_effect=GitError("fetch failed")), \
+        with mock.patch("project_brain.audit.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.audit.stale_check", side_effect=GitError("fetch failed")), \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
              redirect_stdout(out):
             rc = cli.main()
@@ -972,14 +1600,15 @@ class TestCliSearch(unittest.TestCase):
 
     def test_audit_fails_closed_on_unverifiable_anchor(self):
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
-                 "unmerged_anchors": [{"locator_id": "code.unknown", "path": "a/X.cpp",
+                 "unmerged_anchors": [{"locator_id": "code.neutral.unknown",
+                                        "path": "a/X.cpp",
                                         "from_commit": "MISSING", "reason": "anchor_unverifiable",
                                         "blocking_affected_mapping_ids": [],
                                         "nonblocking_affected_mapping_ids": []}],
                  "coverage": {"covered_mappings": [], "uncovered_mappings": []}}
         out = io.StringIO()
-        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
-             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
+        with mock.patch("project_brain.audit.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.audit.stale_check", return_value=stale), \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
              redirect_stdout(out):
             rc = cli.main()
@@ -990,14 +1619,15 @@ class TestCliSearch(unittest.TestCase):
 
     def test_audit_keeps_not_ancestor_as_successful_advisory(self):
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
-                 "unmerged_anchors": [{"locator_id": "code.work", "path": "a/X.cpp",
+                 "unmerged_anchors": [{"locator_id": "code.neutral.work",
+                                        "path": "a/X.cpp",
                                         "from_commit": "WORK", "reason": "not_ancestor",
                                         "blocking_affected_mapping_ids": [],
                                         "nonblocking_affected_mapping_ids": []}],
                  "coverage": {"covered_mappings": [], "uncovered_mappings": []}}
         out = io.StringIO()
-        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
-             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
+        with mock.patch("project_brain.audit.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.audit.stale_check", return_value=stale), \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
              redirect_stdout(out):
             rc = cli.main()
@@ -1009,33 +1639,34 @@ class TestCliSearch(unittest.TestCase):
     def test_audit_fails_when_verified_quote_is_missing_from_blob(self):
         from tests.test_stale_check import code_locator
         loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
-        loc["verified_quote"] = "return exact;"
+        loc["verified_quote"] = "void sym() {}"
         BrainStore.save_object(self.brain, loc)
         stale = {"target_head": "TARGET", "candidates": [], "locator_group": [],
                  "unmerged_anchors": [], "coverage": {"covered_mappings": [],
                                                         "uncovered_mappings": []}}
         out = io.StringIO()
-        with mock.patch("project_brain.stale_check.make_git_runner", return_value=object()), \
-             mock.patch("project_brain.stale_check.stale_check", return_value=stale), \
-             mock.patch("project_brain.code_verify.make_git_blob_reader",
-                        return_value=lambda _commit, _path: b"return changed;"), \
+        with mock.patch("project_brain.audit.make_git_runner", return_value=object()), \
+             mock.patch("project_brain.audit.stale_check", return_value=stale), \
+             mock.patch("project_brain.audit.make_git_blob_reader",
+                        return_value=lambda _commit, _path: b"void other() {}"), \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-fetch"]), \
              redirect_stdout(out):
             rc = cli.main()
         payload = json.loads(out.getvalue())
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
+        self.assertEqual(payload["locators"][0]["code_quote"], "mismatch")
         self.assertEqual(payload["code_quotes"]["failures"], [
-            {"locator_id": "code.quoted", "reason": "quote_not_found"},
+            {"locator_id": "code.x.quoted", "reason": "mismatch"},
         ])
 
     def test_audit_no_stale_skips_both_git_dependent_checks(self):
         from tests.test_stale_check import code_locator
         loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
-        loc["verified_quote"] = "return exact;"
+        loc["verified_quote"] = "void sym() {}"
         BrainStore.save_object(self.brain, loc)
         out = io.StringIO()
-        with mock.patch("project_brain.code_verify.make_git_blob_reader") as blob_reader, \
+        with mock.patch("project_brain.audit.make_git_blob_reader") as blob_reader, \
              mock.patch("sys.argv", ["cli", "audit", "--brain-root", str(self.brain), "--no-stale"]), \
              redirect_stdout(out):
             rc = cli.main()
@@ -1045,7 +1676,38 @@ class TestCliSearch(unittest.TestCase):
         self.assertIsNone(payload["stale"])
         self.assertTrue(payload["stale_status"]["skipped"])
         self.assertTrue(payload["code_quotes"]["check_skipped"])
+        self.assertFalse(payload["code_quotes"]["ok"])
+        self.assertEqual(payload["locators"][0]["stale"], "unverifiable")
+        self.assertEqual(payload["locators"][0]["code_quote"], "unverifiable")
+        self.assertEqual(
+            payload["locators"][0]["symbol_relation"],
+            "unverifiable",
+        )
         blob_reader.assert_not_called()
+
+    def test_audit_unknown_id_grammar_returns_rc1(self):
+        from tests.test_stale_check import code_locator
+
+        loc = code_locator("code.bad", path="a/X.cpp", commit_sha="SHA1")
+        loc["id"] = "mystery.x.bad"
+        path = (
+            self.brain
+            / BrainStore._KIND_DIR["CodeLocator"]
+            / "mystery.x.bad.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(BrainStore.object_bytes(loc))
+
+        out = io.StringIO()
+        with mock.patch(
+            "sys.argv",
+            ["cli", "audit", "--brain-root", str(self.brain), "--no-stale"],
+        ), redirect_stdout(out):
+            rc = cli.main()
+        payload = json.loads(out.getvalue())
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["locators"][0]["id_format"], "unknown_grammar")
 
     def test_search_missing_index_errors(self):
         argv = ["search", "레인", "--db", str(self.db),
@@ -1265,6 +1927,7 @@ class RunBuildTest(unittest.TestCase):
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
+            BrainStore.save_object(brain, _context_object("ctx"))
             # reviewed GlossaryTerm은 evidence_refs가 필수(schema) → source+code_anchor로 닫는다
             notes_path.write_text(json.dumps({
                 "context": {"key": "ctx", "commit": "abc",
@@ -1275,7 +1938,6 @@ class RunBuildTest(unittest.TestCase):
                              "redaction_status": "approved"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                                   "line_start": 1, "line_end": 1, "quote": "q",
-                                  "verified_at": "2026-06-16T00:00:00Z",
                                   "manifest": "manifest.ctx.code"}],
                 "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                               "evidence_refs": ["evref.ctx.hit-hook"]}],
@@ -1307,6 +1969,7 @@ class RunBuildTest(unittest.TestCase):
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
+            BrainStore.save_object(brain, _context_object("ctx"))
             notes_path.write_text(json.dumps({
                 "context": {"key": "ctx", "commit": "abc", "repo": "demoapp"},  # now 생략
                 "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
@@ -1315,7 +1978,6 @@ class RunBuildTest(unittest.TestCase):
                              "redaction_status": "approved"}],
                 "code_anchors": [{"key": "hit-hook", "path": "D.h", "symbol": "S",
                                   "line_start": 1, "line_end": 1, "quote": "q",
-                                  "verified_at": "2026-06-16T00:00:00Z",
                                   "manifest": "manifest.ctx.code"}],
                 "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                               "evidence_refs": ["evref.ctx.hit-hook"]}],
@@ -1367,6 +2029,7 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--title", "결과 팝업 순위 표시 착수 브리핑",
             "--payload-file", str(self.payload_file),
             "--generated-by", "demo-brain-query",
+            *ENGINE_ARGS,
             *extra,
         ]
 
@@ -1378,8 +2041,24 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
 
     def test_write_ingests_projection_readable_from_store(self):
         # (a) source 다 존재 시 --write로 ingest 경유 저장 → store에서 읽힘.
-        rc, payload = self._run("--write")
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply:
+            rc, payload = self._run("--write")
         self.assertEqual(rc, 0, payload)
+        self.assertEqual(apply.call_count, 1)
+        self.assertIs(
+            apply.call_args.kwargs["request"].operation,
+            MutationOperation.PROJECTION,
+        )
         self.assertTrue(payload["ok"])
         pid = "projection.neutral.result-popup-rank.reuse"
         self.assertEqual(payload["id"], pid)
@@ -1401,18 +2080,20 @@ class TestCliProjectionBuildReuse(unittest.TestCase):
             "--brain-root", str(self.root),
             "--context-id", "context.neutral",
             "--requirement-key", "result-popup-rank",
-            "--source-object-ids", "mapping.neutral.race-end", "mapping.does-not-exist",
+            "--source-object-ids", "mapping.neutral.race-end",
+            "mapping.neutral.does-not-exist",
             "--title", "결과 팝업 순위 표시 착수 브리핑",
             "--payload-file", str(self.payload_file),
             "--generated-by", "demo-brain-query",
             "--write",
+            *ENGINE_ARGS,
         ]
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         payload = json.loads(out.getvalue())
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
-        self.assertIn("mapping.does-not-exist", payload["error"])
+        self.assertIn("mapping.neutral.does-not-exist", payload["error"])
         store = BrainStore.load(self.root)
         self.assertFalse(store.has("projection.neutral.result-popup-rank.reuse"))
 
@@ -1512,6 +2193,7 @@ class TestCliProjectionRefresh(unittest.TestCase):
     def _run_refresh(self, *extra):
         out = io.StringIO()
         argv = ["projection", "refresh", "--brain-root", str(self.root), *extra]
+        argv.extend(ENGINE_ARGS)
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         return rc, json.loads(out.getvalue())
@@ -1532,6 +2214,31 @@ class TestCliProjectionRefresh(unittest.TestCase):
             store2.get(self.pid)["source_content_hash"],
             _compute_source_content_hash(store2, ["mapping.neutral.race-end"]))
         self.assertEqual([p for p in lint_store(store2) if self.pid in p], [])
+
+    def test_refresh_routes_once_as_projection_repair_without_direct_save(self):
+        from project_brain.mutation import MutationOperation, MutationService
+
+        original_apply = MutationService.apply
+        with mock.patch.object(
+            BrainStore,
+            "save_object",
+            side_effect=AssertionError("direct save_object call"),
+        ), mock.patch.object(
+            MutationService,
+            "apply",
+            autospec=True,
+            side_effect=original_apply,
+        ) as apply:
+            rc, payload = self._run_refresh()
+
+        self.assertEqual(rc, 0, payload)
+        self.assertEqual(apply.call_count, 1)
+        request = apply.call_args.kwargs["request"]
+        self.assertIs(request.operation, MutationOperation.PROJECTION_REPAIR)
+        self.assertEqual(
+            set(request.preconditions),
+            {self.pid},
+        )
 
     def test_refresh_updates_reviewed_projection(self):
         # reviewed projection도 갱신된다(plan C3 Step1 명시) — ingest 후퇴 가드는
@@ -1561,7 +2268,7 @@ class TestCliProjectionRefresh(unittest.TestCase):
             "truth_role": "index", "title": "끊긴 브리핑", "context_id": "context.neutral",
             "format": "prompt_payload", "reuse_payload": "x",
             "output_locator": "indexes/context_projections/dangling.txt",
-            "source_object_ids": ["mapping.does-not-exist"],
+            "source_object_ids": ["mapping.neutral.does-not-exist"],
             "source_content_hash": "whatever", "projection_hash": "y",
             "generated_at": self.GEN_AT, "generated_by": "t",
             "stale_policy": "fail_on_manual_edit",
@@ -1638,18 +2345,21 @@ class TestCliShow(unittest.TestCase):
             domain_mapping("m.x", meaning="레이스 시작",
                            glossary_term_ids=["g.race"], code_locator_ids=["code.x"]),
         ])
-        rc, payload = self._show("m.x")
+        rc, payload = self._show("mapping.neutral.x")
         self.assertEqual(rc, 0)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["object"]["id"], "m.x")
+        self.assertEqual(payload["object"]["id"], "mapping.neutral.x")
+        self.assertTrue(payload["display_only"])
+        self.assertTrue(payload["object"]["display_only"])
         by_nb = {n["object_id"]: n for n in payload["neighbors"]}
         # 이웃은 저장소에 실존하는 참조만 — 종류·제목 동반.
-        self.assertEqual(by_nb["g.race"]["kind"], "GlossaryTerm")
-        self.assertEqual(by_nb["g.race"]["title"], "Term: 레이스")
-        self.assertEqual(by_nb["code.x"]["kind"], "CodeLocator")
-        # 끊긴 참조(evidence_refs=["ev.map"])·자기참조(id)는 이웃에 안 뜬다.
-        self.assertNotIn("ev.map", by_nb)
-        self.assertNotIn("m.x", by_nb)
+        self.assertEqual(by_nb["g.neutral.race"]["kind"], "GlossaryTerm")
+        self.assertEqual(by_nb["g.neutral.race"]["title"], "Term: 레이스")
+        self.assertTrue(by_nb["g.neutral.race"]["display_only"])
+        self.assertEqual(by_nb["code.neutral.x"]["kind"], "CodeLocator")
+        # 끊긴 참조(evidence_refs=["evref.neutral.mapping"])·자기참조(id)는 이웃에 안 뜬다.
+        self.assertNotIn("evref.neutral.map", by_nb)
+        self.assertNotIn("mapping.neutral.x", by_nb)
 
     def test_show_attaches_stale_advisory_for_stale_mapping(self):
         # Step 2: show 대상이 stale-set에 들면 payload 최상위에 stale_advisory(객체 본문 불변).
@@ -1660,9 +2370,14 @@ class TestCliShow(unittest.TestCase):
             domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
         ])
         write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.x"],
-            "detail": {"m.x": {"change_types": ["M"], "paths": ["a/X.cpp"]}}})
-        rc, payload = self._show("m.x")
+            "target_head": "T", "computed_at": "t",
+            "stale_mapping_ids": ["mapping.neutral.x"],
+            "detail": {
+                "mapping.neutral.x": {
+                    "change_types": ["M"], "paths": ["a/X.cpp"]
+                }
+            }})
+        rc, payload = self._show("mapping.neutral.x")
         self.assertEqual(rc, 0)
         self.assertEqual(payload["stale_advisory"]["change_types"], ["M"])
         self.assertNotIn("stale_advisory", payload["object"])  # 객체 본문은 불변
@@ -1675,13 +2390,18 @@ class TestCliShow(unittest.TestCase):
             domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
         ])
         write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": ["m.x"],
-            "detail": {"m.x": {"code_changed": True, "unmerged_anchor": True,
+            "target_head": "T", "computed_at": "t",
+            "stale_mapping_ids": ["mapping.neutral.x"],
+            "detail": {"mapping.neutral.x": {
+                               "code_changed": True, "unmerged_anchor": True,
                                "unmerged_reasons": ["not_ancestor"],
-                               "locator_ids": ["code.changed", "code.work"],
+                               "locator_ids": [
+                                   "code.neutral.changed",
+                                   "code.neutral.work",
+                               ],
                                "from_commits": ["SHA1", "WORK"], "change_types": ["M"],
                                "paths": ["a/Race.cpp"]}}})
-        rc, payload = self._show("m.x")
+        rc, payload = self._show("mapping.neutral.x")
         self.assertEqual(rc, 0)
         self.assertTrue(payload["stale_advisory"]["code_changed"])
         self.assertTrue(payload["stale_advisory"]["unmerged_anchor"])
@@ -1693,15 +2413,542 @@ class TestCliShow(unittest.TestCase):
             glossary_term("g.race", term="레이스"),
             domain_mapping("m.x", meaning="레이스 시작", glossary_term_ids=["g.race"]),
         ])
-        rc, payload = self._show("m.x")  # 캐시 안 떨굼
+        rc, payload = self._show("mapping.neutral.x")  # 캐시 안 떨굼
         self.assertEqual(rc, 0)
         self.assertNotIn("stale_advisory", payload)
 
     def test_show_missing_id_errors(self):
-        rc, payload = self._show("nope.404")
+        rc, payload = self._show("mapping.neutral.missing")
         self.assertEqual(rc, 1)
         self.assertFalse(payload["ok"])
-        self.assertIn("nope.404", payload["error"])
+        self.assertIn("mapping.neutral.missing", payload["error"])
+
+    def test_snapshot_create_verify_restore_subcommands(self):
+        project = self.root / "snapshot-project"
+        brain = project / "brain"
+        engine = self.root / "snapshot-engine"
+        snapshots = project / ".snapshots"
+        engine.mkdir()
+        project.mkdir(exist_ok=True)
+        (project / ".project-brain.json").write_text(
+            json.dumps({"brain_root": "brain"}),
+            encoding="utf-8",
+        )
+        original = context()
+        BrainStore.save_object(brain, original)
+        _commit_git_fixture(project)
+        _commit_git_fixture(engine)
+
+        create_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "snapshot", "create",
+            "--brain-root", str(brain.resolve()),
+            "--repo-root", str(project.resolve()),
+            "--engine-root", str(engine.resolve()),
+            "--output-root", str(snapshots.resolve()),
+            "--snapshot-id", "cli-snapshot",
+        ]), redirect_stdout(create_out):
+            self.assertEqual(cli.main(), 0)
+        created = json.loads(create_out.getvalue())
+        self.assertTrue(created["ok"])
+        self.assertEqual(created["restore_scope"], "brain_only")
+
+        verify_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "snapshot", "verify",
+            "--snapshot-root", created["snapshot_root"],
+            "--expected-manifest-sha256", created["manifest_sha256"],
+        ]), redirect_stdout(verify_out):
+            self.assertEqual(cli.main(), 0)
+        self.assertTrue(json.loads(verify_out.getvalue())["ok"])
+
+        changed = dict(original)
+        changed["title"] = "changed"
+        BrainStore.save_object(brain, changed)
+        restore_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "snapshot", "restore",
+            "--snapshot-root", created["snapshot_root"],
+            "--brain-root", str(brain.resolve()),
+            "--expected-manifest-sha256", created["manifest_sha256"],
+        ]), redirect_stdout(restore_out):
+            self.assertEqual(cli.main(), 0)
+        self.assertEqual(BrainStore.load(brain).get(original["id"]), original)
+        self.assertEqual(
+            json.loads(restore_out.getvalue())["restore_scope"],
+            "brain_only",
+        )
+
+    def test_context_replace_plan_is_read_only_and_apply_requires_exact_sha(self):
+        brain = (self.root / "context-brain").resolve()
+        input_dir = self.root / "context-inputs"
+        input_dir.mkdir()
+        old = candidate_term("g.neutral.old", term="이전")
+        old_context = context(glossary_term_ids=[old["id"]])
+        for obj in (old_context, old):
+            BrainStore.save_object(brain, obj)
+        new = candidate_term("g.neutral.new", term="새 값")
+        desired_context = dict(old_context)
+        desired_context["glossary_term_ids"] = [new["id"]]
+        desired_file = input_dir / "desired.json"
+        moves_file = input_dir / "moves.json"
+        manifest_file = input_dir / "context-replace.manifest.json"
+        desired_file.write_text(
+            json.dumps([desired_context, new], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        moves_file.write_text(
+            json.dumps({old["id"]: new["id"]}),
+            encoding="utf-8",
+        )
+
+        plan_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "context-replace", "plan",
+            "--brain-root", str(brain),
+            "--context-id", old_context["id"],
+            "--desired-objects-file", str(desired_file),
+            "--expected-moves-file", str(moves_file),
+            "--manifest", str(manifest_file),
+            *ENGINE_ARGS,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0)
+        planned = json.loads(plan_out.getvalue())
+        self.assertTrue(manifest_file.is_file())
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+        self.assertFalse(BrainStore.load(brain).has(new["id"]))
+
+        wrong_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "context-replace", "apply",
+            "--brain-root", str(brain),
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", "0" * 64,
+            *ENGINE_ARGS,
+        ]), redirect_stdout(wrong_out):
+            self.assertEqual(cli.main(), 1)
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+
+        apply_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "context-replace", "apply",
+            "--brain-root", str(brain),
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+            *ENGINE_ARGS,
+        ]), redirect_stdout(apply_out):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        store = BrainStore.load(brain)
+        self.assertFalse(store.has(old["id"]))
+        self.assertTrue(store.has(new["id"]))
+
+    def test_id_migration_cli_plan_is_read_only_and_apply_requires_receipts(self):
+        from project_brain.snapshot import SnapshotVerification
+        from tests.test_mutation import _code_locator, _write_raw
+
+        brain = (self.root / "migration-brain").resolve()
+        input_dir = self.root / "migration-inputs"
+        input_dir.mkdir()
+        old = _code_locator(
+            object_id="code.Legacy",
+            quote=None,
+            title="legacy display",
+        )
+        _write_raw(brain, old)
+        (brain / "eval_scenarios.json").write_text(
+            json.dumps({
+                "scenarios": [{
+                    "id": "s",
+                    "query": "q",
+                    "expect": {"top5_any": [old["id"]]},
+                }],
+            }),
+            encoding="utf-8",
+        )
+        renames_file = input_dir / "renames.json"
+        manifest_file = input_dir / "id-migration.manifest.json"
+        renames_file.write_text(
+            json.dumps({old["id"]: "code.neutral.legacy"}),
+            encoding="utf-8",
+        )
+        snapshot_root = input_dir / "snapshot"
+        snapshot_receipt = "a" * 64
+        repo_head = "b" * 40
+        verification = SnapshotVerification(
+            ok=True,
+            snapshot_id="trusted-migration-snapshot",
+            manifest_sha256=snapshot_receipt,
+            file_count=1,
+            repo_head=repo_head,
+            engine_head=ENGINE_ARGS[1],
+            corpus_fingerprint=corpus_fingerprint(BrainStore.load(brain)),
+        )
+
+        plan_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ) as verify_snapshot_call, mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "id", "plan",
+            "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
+            "--renames-file", str(renames_file),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            *ENGINE_ARGS,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        self.assertEqual(verify_snapshot_call.call_count, 1)
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+        artifact = json.loads(manifest_file.read_bytes())
+        self.assertEqual(
+            set(artifact["rows"][0]),
+            {
+                "old_id",
+                "new_id",
+                "kind",
+                "canonical_payload_hash",
+                "reference_rewrites",
+                "dependent_artifacts",
+                "snapshot_id",
+            },
+        )
+
+        wrong_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "id", "apply",
+            "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", "0" * 64,
+            *ENGINE_ARGS,
+        ]), redirect_stdout(wrong_out):
+            self.assertEqual(cli.main(), 1)
+        self.assertTrue(BrainStore.load(brain).has(old["id"]))
+
+        apply_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "id", "apply",
+            "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+            *ENGINE_ARGS,
+        ]), redirect_stdout(apply_out):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        store = BrainStore.load(brain)
+        self.assertFalse(store.has(old["id"]))
+        self.assertTrue(store.has("code.neutral.legacy"))
+
+    def _canonical_cli_fixture(self, name):
+        from project_brain.snapshot import (
+            SnapshotRequest,
+            create_snapshot,
+        )
+        from tests.test_canonical_repair import _canonical_plan_fixture
+
+        fixture = _canonical_plan_fixture(self.root / name)
+        input_dir = self.root / f"{name}-inputs"
+        input_dir.mkdir()
+        decisions_file = input_dir / "canonicalization-decisions.json"
+        classification_file = input_dir / "phase-a-classification.json"
+        manifest_file = input_dir / "canonical-repair.manifest.json"
+        decisions_file.write_bytes(fixture.ledger_bytes)
+        classification_file.write_bytes(fixture.classification_bytes)
+        snapshot_result = create_snapshot(SnapshotRequest(
+            brain_root=fixture.brain_root,
+            repo_root=fixture.repo_root,
+            engine_root=fixture.engine_root,
+            output_root=(self.root / f"{name}-snapshots").resolve(),
+            snapshot_id=f"{name}-before",
+        ))
+        common_args = [
+            "--brain-root", str(fixture.brain_root),
+            "--repo-root", str(fixture.repo_root),
+            "--engine-root", str(fixture.engine_root),
+            "--snapshot-root", str(snapshot_result.snapshot_root),
+            "--expected-snapshot-manifest-sha256",
+            snapshot_result.manifest_sha256,
+            "--decisions-file", str(decisions_file),
+            "--expected-decisions-sha256", fixture.ledger.sha256,
+            "--classification-file", str(classification_file),
+            "--expected-classification-sha256",
+            fixture.classification_sha256,
+            "--manifest", str(manifest_file),
+            "--engine-sha", fixture.engine_sha,
+        ]
+        return fixture, common_args, manifest_file, snapshot_result
+
+    def test_canonical_repair_cli_plan_is_read_only_and_apply_is_receipt_bound(self):
+        fixture, common_args, manifest_file, snapshot_result = (
+            self._canonical_cli_fixture("canonical-cli")
+        )
+        success_keys = {
+            "ok",
+            "migration_kind",
+            "manifest",
+            "manifest_sha256",
+            "transaction_id",
+            "row_count",
+            "action_count",
+            "decision_ledger_sha256",
+            "phase_a_classification_sha256",
+            "snapshot_id",
+            "snapshot_manifest_sha256",
+        }
+        before = corpus_fingerprint(BrainStore.load(fixture.brain_root))
+
+        plan_out = io.StringIO()
+        plan_err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "plan", *common_args,
+        ]), redirect_stdout(plan_out), redirect_stderr(plan_err):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        self.assertEqual(set(planned), success_keys)
+        self.assertEqual(planned["migration_kind"], "canonical_repair")
+        self.assertEqual(planned["row_count"], 7)
+        self.assertEqual(
+            planned["decision_ledger_sha256"],
+            fixture.ledger.sha256,
+        )
+        self.assertEqual(
+            planned["phase_a_classification_sha256"],
+            fixture.classification_sha256,
+        )
+        self.assertEqual(
+            planned["snapshot_manifest_sha256"],
+            snapshot_result.manifest_sha256,
+        )
+        self.assertEqual(plan_err.getvalue(), "")
+        self.assertEqual(
+            corpus_fingerprint(BrainStore.load(fixture.brain_root)),
+            before,
+        )
+
+        wrong_out = io.StringIO()
+        wrong_err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "apply",
+            *common_args,
+            "--expected-manifest-sha256", "0" * 64,
+        ]), redirect_stdout(wrong_out), redirect_stderr(wrong_err):
+            self.assertEqual(cli.main(), 1)
+        wrong = json.loads(wrong_out.getvalue())
+        self.assertEqual(set(wrong), {"ok", "error_code", "error"})
+        self.assertIs(wrong["ok"], False)
+        self.assertEqual(wrong["error_code"], "manifest_sha256_mismatch")
+        self.assertEqual(wrong_err.getvalue(), "")
+        self.assertEqual(
+            corpus_fingerprint(BrainStore.load(fixture.brain_root)),
+            before,
+        )
+
+        apply_out = io.StringIO()
+        apply_err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "apply",
+            *common_args,
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+        ]), redirect_stdout(apply_out), redirect_stderr(apply_err):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        applied = json.loads(apply_out.getvalue())
+        self.assertEqual(set(applied), success_keys)
+        self.assertEqual(applied["migration_kind"], "canonical_repair")
+        self.assertEqual(applied["row_count"], 7)
+        self.assertEqual(
+            applied["action_count"],
+            planned["action_count"],
+        )
+        self.assertEqual(
+            applied["decision_ledger_sha256"],
+            fixture.ledger.sha256,
+        )
+        self.assertEqual(apply_err.getvalue(), "")
+        after = BrainStore.load(fixture.brain_root)
+        self.assertFalse(after.has("mapping.neutral.Legacy0"))
+        self.assertTrue(after.has("mapping.neutral.repair-0"))
+        self.assertFalse(after.has("review.bundle.Neutral.domain-mapping"))
+        self.assertTrue(after.has("review.bundle.neutral.domain-mapping"))
+
+    def test_canonical_repair_cli_plan_reports_corrupt_object_as_json(self):
+        fixture, common_args, _, _ = self._canonical_cli_fixture(
+            "canonical-plan-corrupt",
+        )
+        corrupt_path = BrainStore.object_path(
+            fixture.brain_root,
+            fixture.existing.get("mapping.neutral.Legacy0"),
+        )
+        corrupt_path.write_bytes(b"{")
+        out = io.StringIO()
+        err = io.StringIO()
+
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "plan", *common_args,
+        ]), redirect_stdout(out), redirect_stderr(err):
+            result = cli.main()
+
+        self.assertEqual(result, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {"ok", "error_code", "error"})
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["error_code"], "object_json_invalid")
+        self.assertEqual(
+            payload["error"],
+            (
+                f"tracked object JSON is invalid at {corrupt_path}: "
+                "Expecting property name enclosed in double quotes: "
+                "line 1 column 2 (char 1)"
+            ),
+        )
+        self.assertEqual(err.getvalue(), "")
+
+    def test_canonical_repair_cli_apply_reports_corpus_io_error_as_json(self):
+        fixture, common_args, _, _ = self._canonical_cli_fixture(
+            "canonical-apply-corrupt",
+        )
+        plan_out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "plan", *common_args,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        lock_path = fixture.brain_root / ".brain-local" / "corpus.lock"
+        lock_path.unlink()
+        lock_path.mkdir()
+        out = io.StringIO()
+        err = io.StringIO()
+
+        with mock.patch("sys.argv", [
+            "cli", "migration", "canonical-repair", "apply",
+            *common_args,
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+        ]), redirect_stdout(out), redirect_stderr(err):
+            result = cli.main()
+
+        self.assertEqual(result, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {"ok", "error_code", "error"})
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["error_code"], "anchored_io_failed")
+        self.assertEqual(
+            payload["error"],
+            (
+                f"anchored path operation failed for {lock_path}: "
+                "[Errno 21] Is a directory: 'corpus.lock'"
+            ),
+        )
+        self.assertEqual(err.getvalue(), "")
+
+    def test_display_migration_cli_normalizes_only_locator_titles(self):
+        from project_brain.snapshot import SnapshotVerification
+        from tests.test_mutation import _code_locator
+
+        brain = (self.root / "display-brain").resolve()
+        input_dir = self.root / "display-inputs"
+        input_dir.mkdir()
+        locator = _code_locator(
+            object_id="code.neutral.display",
+            title="semantic label",
+            symbol="Display::Run",
+            quote=None,
+        )
+        BrainStore.save_object(brain, locator)
+        manifest_file = input_dir / "display-migration.manifest.json"
+        snapshot_receipt = "b" * 64
+        repo_head = "c" * 40
+        verification = SnapshotVerification(
+            ok=True,
+            snapshot_id="trusted-display-snapshot",
+            manifest_sha256=snapshot_receipt,
+            file_count=1,
+            repo_head=repo_head,
+            engine_head=ENGINE_ARGS[1],
+            corpus_fingerprint=corpus_fingerprint(BrainStore.load(brain)),
+        )
+        snapshot_root = input_dir / "snapshot"
+
+        plan_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "display", "plan",
+            "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            *ENGINE_ARGS,
+        ]), redirect_stdout(plan_out):
+            self.assertEqual(cli.main(), 0, plan_out.getvalue())
+        planned = json.loads(plan_out.getvalue())
+        self.assertEqual(
+            BrainStore.load(brain).get(locator["id"])["title"],
+            "semantic label",
+        )
+
+        apply_out = io.StringIO()
+        with mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=verification,
+        ), mock.patch(
+            "project_brain.migration.verify_git_root_head",
+            side_effect=lambda root, label: (
+                repo_head if label == "repo_root" else ENGINE_ARGS[1]
+            ),
+        ), mock.patch("sys.argv", [
+            "cli", "migration", "display", "apply",
+            "--brain-root", str(brain),
+            "--repo-root", str(self.root.resolve()),
+            "--engine-root", str(input_dir.resolve()),
+            "--snapshot-root", str(snapshot_root),
+            "--expected-snapshot-manifest-sha256", snapshot_receipt,
+            "--manifest", str(manifest_file),
+            "--expected-manifest-sha256", planned["manifest_sha256"],
+            *ENGINE_ARGS,
+        ]), redirect_stdout(apply_out):
+            self.assertEqual(cli.main(), 0, apply_out.getvalue())
+        self.assertEqual(
+            BrainStore.load(brain).get(locator["id"])["title"],
+            "Display::Run",
+        )
 
 
 if __name__ == "__main__":

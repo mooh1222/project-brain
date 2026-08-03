@@ -31,6 +31,8 @@ class TestBuildPayload(unittest.TestCase):
         self.assertIn({"from": "m", "to": "c1"}, payload["edges"])
         self.assertEqual(payload["kinds"], {"DomainMapping": 1, "CodeLocator": 1})
         self.assertEqual(payload["details"]["m"]["title"], "매핑")
+        self.assertTrue(payload["details"]["m"]["display_only"])
+        self.assertTrue(next(n for n in payload["nodes"] if n["id"] == "m")["display_only"])
 
 
 class TestNodeLabel(unittest.TestCase):

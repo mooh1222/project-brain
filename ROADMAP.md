@@ -33,6 +33,48 @@
 
 ---
 
+## 진행 중
+
+### Task 17 canonical ID 복구 (2026-07-31~)
+
+strict ID grammar를 유지한 채 ID-only migration과 제한된 canonical repair를 분리하고,
+decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 지원을
+구현했다. 승인된 collision source를 기존 canonical target에 합치는
+`collision_merge_into_existing`은 source delete, survivor/referrer update,
+보수적 근거 병합, 참조 축약 receipt, intermediate 검증, 전체 before/after recovery까지
+갖췄다. Task 6 독립 통합 리뷰에서 확인된 ContextProjection 재작성, 원장 0행 게이트,
+merge 끝점 raw bytes, receipt 좌표 투영의 Major 4건과 byte-exact 비교 보완을 세 차례
+fix round로 수정했고, 최종 scoped 재리뷰는 Blocker 0 / Major 0 / Minor 0으로 통과했다.
+canonical repair와 다음 ID-only migration 사이에는 검증된 intermediate snapshot을 두며,
+실제 BB2 corpus의 canonical ID 판단과 증거는 데이터 레포가 소유한다.
+
+엔진 지원 완료와 실코퍼스 적용 완료는 별개다. 현재 남은 경계는 다음과 같다.
+
+- Task 6 코드·테스트·문서는 독립 재리뷰를 통과해 clean `ENGINE_SHA` 고정 조건을
+  충족했다. Task 7 산출물은 이 최종 SHA에 다시 묶어야 한다.
+- 새 engine SHA에 다시 묶은 exact 156행 live decision ledger bytes는 아직 사용자 승인을
+  받지 않았다.
+- Task 9 apply는 시작하지 않았다. 이번 엔진 작업에서는 BB2 object·eval·index·stale-set을
+  건드리거나 검증하지 않았으며, 승인 뒤 실제 mutation과 BB2 checks/eval, 필요한 index
+  검증을 별도 영수증으로 고정해야 한다.
+
+따라서 이 상태는 검색 품질 회귀 완료나 실코퍼스 migration 완료를 뜻하지 않는다.
+
+Task 17 전체는 아직 완료가 아니다. 다음 조건을 모두 만족해야 완료 단계로 옮긴다.
+
+- 코드·테스트·문서가 독립 리뷰를 통과한 clean engine commit으로 고정됨
+- 전체 decision ledger에 대한 사용자 승인과 byte-exact staging에 대한 live 적용 승인이
+  각각 명시적으로 기록됨
+- 승인된 경로만 담은 BB2 Task 17 commit이 만들어짐
+- 그 commit을 포함한 final full snapshot 검증과, snapshot 바깥의 final binding receipt가
+  BB2 HEAD·engine SHA·corpus/index/stale fingerprint·사용자 변경 receipt를 고정함
+
+설계와 실행 순서는 [Task 17 canonical ID 복구 설계](docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md),
+[collision merge 설계](docs/superpowers/specs/2026-08-02-task17-collision-merge-design.md),
+[collision merge 구현 계획](docs/superpowers/plans/2026-08-02-task17-collision-merge.md)에 있다.
+
+---
+
 ## 완료 단계
 
 ### 1차 마일스톤 — 검색층 + 라우터 통합
@@ -133,7 +175,8 @@ bb2_client 고립 노드 정비 4세션(2026-06-23)을 회고해 도출·검증�
 코퍼스를 vis-network 단일 HTML로 내보내는 `project-brain graph export <out.html>`.
 데이터 레포의 `.brain-local/graph_export.py` 로컬 프로토타입(git 미추적이라 다른 머신·
 새 클론에 없어 재현 불가)을 정식 명령으로 승격. 엣지는 `graph isolated`와 같은 정본
-정의(`graph.edges` = INBOUND_REF_FIELDS, 외부 키 제외)를 써서 "어떤 잎이 왜 고립인지"가
+정의(`graph.edges`가 `reference_fields` registry의 `iter_object_refs()`를 사용하고 외부 키는
+제외)를 써서 "어떤 잎이 왜 고립인지"가
 화면에서 그대로 보인다(둘이 어긋나지 않게 단일 출처). 노드 클릭 시 객체 전체·kind 필터·
 검색·이웃만 보기 지원. vis-network는 CDN(unpkg)에서 받아 파이썬 의존성 0, 볼 때 인터넷
 필요. 읽기 전용(store 불변, 출력 파일만). 다관점 적대 리뷰 8건 중 4건 확정·반영

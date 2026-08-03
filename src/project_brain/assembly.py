@@ -5,28 +5,26 @@
 저장은 절대 안 한다 — build()는 객체 묶음 + diff만 반환하고 ingest가 저장한다.
 """
 import copy
+import hashlib
 import re
 
+from project_brain.id_grammar import format_id
 from project_brain.objbase import base
-from project_brain.schema import validate_object
-from project_brain.lint import lint_store
+from project_brain.schema import (
+    validate_mutation_input_schema,
+    validate_object,
+    validate_object_id,
+)
+from project_brain.lint import lint_mutation_input_store_report
 from project_brain.graph import ISOLATION_LEAF_KINDS, referenced_ids
 from project_brain.store import BrainStore
 
-# id 파생 규칙 (kind → prefix). 컨벤션: g.<ctx>.<key> / mapping.<ctx>.<key> 등.
-_ID_PREFIX = {
-    "GlossaryTerm": "g",
-    "DomainMapping": "mapping",
-    "CodeLocator": "code",
-    "EvidenceRef": "evref",
-    "DecisionRecord": "decision",
-    "DomainContext": "context",
-}
-
-
 def derive_id(kind, ctx, key):
-    """kind+컨텍스트+key로 객체 id를 만든다. 규칙은 _ID_PREFIX 고정."""
-    return f"{_ID_PREFIX[kind]}.{ctx}.{key}"
+    """kind+컨텍스트+key로 객체 id를 만든다. 문법은 id_grammar 정본을 따른다."""
+    if kind == "DomainContext":
+        return format_id(kind, ctx=ctx)
+    key_field = "anchor_key" if kind in {"CodeLocator", "EvidenceRef"} else "key"
+    return format_id(kind, ctx=ctx, **{key_field: key})
 
 
 def build_glossary_terms(notes, now):
@@ -41,7 +39,7 @@ def build_glossary_terms(notes, now):
             "status": g.get("status", claim_status),
             "truth_role": "domain",
             "title": g["key"],
-            "context_id": f"context.{ctx}",
+            "context_id": format_id("DomainContext", ctx=ctx),
             "term": g["term"],
             "definition": g["definition"],
             "evidence_refs": g.get("evidence_refs", []),
@@ -71,7 +69,7 @@ def build_code_evidence(notes, now):
             "kind": "CodeLocator", "status": "reviewed", "truth_role": "reference",
             "title": title, "repo": repo, "path": a["path"], "symbol": a["symbol"],
             "locator_source": a.get("locator_source", "rg"),
-            "commit_sha": commit, "verified_quote": quote, "verified_at": a["verified_at"],
+            "commit_sha": commit, "verified_quote": quote,
         }
         ev = {
             "id": derive_id("EvidenceRef", ctx, key),
@@ -99,7 +97,8 @@ def build_mappings(notes, refs_map, now):
         obj = {
             "id": derive_id("DomainMapping", ctx, m["key"]),
             "kind": "DomainMapping", "status": m.get("status", claim_status), "truth_role": "domain",
-            "title": m["canonical_summary"][:120], "context_id": f"context.{ctx}",
+            "title": m["canonical_summary"][:120],
+            "context_id": format_id("DomainContext", ctx=ctx),
             "mapping_key": m["key"], "canonical_summary": m["canonical_summary"],
             "meaning": m["meaning"], "boundary": m["boundary"],
             "caveats": m.get("caveats", ["history_coverage=unsearched"]),
@@ -134,14 +133,18 @@ def build_decisions(notes, now):
 
     def ensure_evref(item):
         etype, ref = item["type"], item["ref"]
-        eid = f"evref.{ctx}.{etype}-{ref}"
+        eid = derive_id("EvidenceRef", ctx, f"{etype}-{ref}".lower())
         if eid not in made:
             made.add(eid)
             locator = {"repo": repo, "sha": ref} if etype == "commit" else item["locator"]
             ev = {
                 "id": eid, "kind": "EvidenceRef", "status": "reviewed",
                 "truth_role": "reference", "title": (item.get("summary") or ref)[:120],
-                "evidence_manifest_id": f"manifest.{ctx}.{etype}",
+                "evidence_manifest_id": format_id(
+                    "EvidenceManifest",
+                    ctx=ctx,
+                    key=etype,
+                ),
                 "ref_type": _DECISION_REF_TYPE[etype], "locator": locator,
                 "summary": item.get("summary") or ref,
             }
@@ -157,7 +160,7 @@ def build_decisions(notes, now):
             "summary": d["summary"], "decision": d["decision"],
             "spec_reflected": d.get("spec_reflected", "not_applicable"),
             "source_object_ids": ref_ids, "evidence_refs": ref_ids,
-            "affected_context_ids": [f"context.{ctx}"],
+            "affected_context_ids": [format_id("DomainContext", ctx=ctx)],
             "affected_mapping_ids": [derive_id("DomainMapping", ctx, mk)
                                      for mk in d.get("affects", [])],
         }
@@ -195,7 +198,8 @@ def build_context(notes, now):
         return []
     ctx = cx["key"]
     obj = {
-        "id": f"context.{ctx}", "kind": "DomainContext", "status": "reviewed",
+        "id": format_id("DomainContext", ctx=ctx),
+        "kind": "DomainContext", "status": "reviewed",
         "truth_role": "domain", "title": cx["display_name"][:80], "context_key": ctx,
         "project_id": cx.get("repo", "demoapp"), "display_name": cx["display_name"],
         "boundary_summary": cx["boundary_summary"], "in_scope": cx.get("in_scope", []),
@@ -325,7 +329,7 @@ _ANCHOR_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:--[0-9]+)?$")
 _ITEM_REQUIRED = {
     # glossary는 claim_status가 reviewed일 때 evidence_refs가 필수(2층 schema가 막는 걸 1층에서 친절히).
     "glossary": ("key", "term", "definition", "evidence_refs"),
-    "code_anchors": ("key", "path", "symbol", "manifest", "quote", "verified_at"),
+    "code_anchors": ("key", "path", "symbol", "manifest", "quote"),
     "mappings": ("key", "canonical_summary", "meaning", "boundary"),
     "sources": ("id", "source_type", "title", "locator", "captured_at", "acl"),
     "decisions": ("key", "decision_type", "title", "summary", "decision"),
@@ -437,15 +441,17 @@ def validate_notes(notes):
     for i, anchor in enumerate(notes.get("code_anchors") if isinstance(notes.get("code_anchors"), list) else []):
         if not isinstance(anchor, dict):
             continue
+        for external_field in ("title", "verified_at"):
+            if external_field in anchor:
+                errors.append(
+                    f"노트: code_anchors[{i}].{external_field}는 외부 입력으로 허용하지 않음"
+                )
         if not isinstance(anchor.get("quote"), str) or anchor.get("quote") == "":
             errors.append(f"노트: code_anchors[{i}].quote는 비어 있지 않은 원문 필수")
         symbol = anchor.get("symbol")
         if not isinstance(symbol, str) or not symbol.strip():
             # 빈 symbol은 title도 비우고 색인 표면을 path 하나로 줄인다 — 조용히 넘기지 않는다.
             errors.append(f"노트: code_anchors[{i}].symbol은 비어 있지 않은 값 필수")
-        verified_at = anchor.get("verified_at")
-        if not isinstance(verified_at, str) or not verified_at.strip():
-            errors.append(f"노트: code_anchors[{i}].verified_at은 비어 있지 않은 값 필수")
     # glossary는 reviewed일 때 evidence_refs가 비어 있어도 안 됨(2층 schema를 1층에서 친절히).
     # candidate GlossaryTerm은 현재 schema의 candidate_state·candidate_source 계약을 그대로 쓴다.
     # _ITEM_REQUIRED는 키 존재만 보므로 빈 리스트와 후보 메타데이터는 여기서 별도로 잡는다.
@@ -537,27 +543,29 @@ def build(notes, store, now):
 
     upd_objs, diffs, upd_errors = apply_updates(notes, store, now)
     errors += upd_errors
-    preconditions = {up["id"]: up["expected_updated_at"] for up in notes.get("updates", [])}
+    preconditions = {
+        up["id"]: hashlib.sha256(
+            BrainStore.object_bytes(store.get(up["id"]))
+        ).hexdigest()
+        for up in notes.get("updates", [])
+        if store.has(up["id"])
+    }
 
     all_objs = new_objs + upd_objs
 
     # 2층: 객체 스키마 + dangling + merged lint
     for o in all_objs:
-        errors += validate_object(o)
+        if o.get("kind") == "CodeLocator" and "verified_at" not in o:
+            errors += validate_mutation_input_schema(o)
+            errors += validate_object_id(o)
+        else:
+            errors += validate_object(o)
     merged = {o["id"]: o for o in store.all()}
     for o in all_objs:
         merged[o["id"]] = o
 
-    # EvidenceRef → EvidenceManifest dangling (lint.py 사각지대 — lint는 EvidenceRef가
-    # 가리키는 manifest 실존을 안 본다. _source_type_for_evidence_ref는 None만 반환).
-    for o in all_objs:
-        if o.get("kind") == "EvidenceRef":
-            mid = o.get("evidence_manifest_id")
-            if mid and mid not in merged:
-                errors.append(f"{o['id']}: dangling evidence_manifest_id {mid}")
-
-    # updates union 대상 id 실존 (lint.py 사각지대 — lint는 DomainMapping 링크만 보므로
-    # DomainContext.glossary_term_ids 등은 직접 검사. id 리스트 필드만, 자유텍스트 list 제외).
+    # updates union 대상 id 실존을 update별 오류로 명시한다.
+    # id 리스트 필드만 검사하고 자유텍스트 list는 제외한다.
     for up in notes.get("updates", []):
         for f, vs in (up.get("union") or {}).items():
             if f.endswith("_ids") or f == "evidence_refs":
@@ -567,7 +575,10 @@ def build(notes, store, now):
                                       f"(store·이번 묶음 어디에도)")
 
     merged_store = BrainStore(merged)
-    errors += lint_store(merged_store)
+    errors += [
+        problem.message
+        for problem in lint_mutation_input_store_report(merged_store)
+    ]
 
     # C8: 이번 묶음 신규 잎 중 인바운드 0(아무도 안 가리킴)을 비차단 경고로 담는다 — 차단
     # 아님(candidate 일시 고립은 정상). 역인덱스·점검 잎 kind는 graph.py를 C1과 공유.

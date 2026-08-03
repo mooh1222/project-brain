@@ -45,7 +45,10 @@ project-brain audit --no-stale  # Git 없는 환경: Git stale/reachability와 e
 | `isolated.isolated` | 아무도 안 가리키는 잎(CodeLocator·GlossaryTerm·EvidenceRef) | 명백한 건 에이전트가 (a)즉시 연결 (b)의도적 종착점 유지 (c)제거, 애매한 것만 사용자 확인(검수 정책 B+C) |
 | `stale.target_head` | 확인에 사용한 {{DEFAULT_BRANCH}} HEAD | `mark-checked --checked-head`에 그대로 쓴다 |
 | `stale.unmerged_anchors` | 기본 브랜치 조상이 아닌 앵커와 이유 | `not_ancestor`는 advisory, `anchor_unverifiable`은 실패로 처리 |
-| `code_quotes` | opt-in `verified_quote`의 정확한 인용 검사 결과 | 실패가 있으면 원문과 앵커를 다시 확인 |
+| `locators[].stale` | 코드 좌표의 변경 상태 | quote 유무와 독립적으로 항상 판정 |
+| `locators[].code_quote` | exact quote 상태 | `code_quote=missing`은 stale이 아니라 인용 부채 |
+| `locators[].quote_access` | 인용 공개 가능 상태 | stale·quote 일치와 독립적으로 판단 |
+| `code_quotes` | `verified_quote`의 정확한 인용 검사 요약 | 실패가 있으면 원문과 앵커를 다시 확인 |
 
 ## stale 후보 처리 (검수 정책 B+C)
 
@@ -63,9 +66,11 @@ audit이 캐시를 쓰면 그 다음부터 query/show에 `stale_advisory`(코드
 
 ## 정확한 코드 인용과 앵커 범위
 
-`verified_quote`가 있는 locator만 exact quote 검사 대상이다. 확인은 locator의 commit/path가 가리키는
-Git blob 바이트에서 하며 공백·줄바꿈을 정규화하지 않는다. 인용을 새로 만들거나 고치려면 먼저 그 blob을
-읽고 바이트 단위로 같은 텍스트를 기록한다.
+`stale`과 quote 상태는 독립 축이다. `verified_quote`가 없어 `code_quote=missing`이어도 stale 검사를
+건너뛰지 않는다. missing quote는 별도의 인용 부채로 보고, 좌표가 실제로 바뀐 stale과 섞어 세지 않는다.
+quote가 있으면 locator의 commit/path가 가리키는 Git blob 바이트에서 exact match를 확인하며
+공백·줄바꿈을 정규화하지 않는다. 인용을 새로 만들거나 고치려면 먼저 그 blob을 읽고 바이트 단위로
+같은 텍스트를 기록한다. `quote_access`는 인용을 공개해도 되는지를 나타내는 또 다른 독립 축이다.
 
 `reviewed`는 근거와 해석을 검증했다는 뜻이다. 작업 브랜치의 `unmerged` 여부는 별도의 범위 advisory다.
 아직 합쳐지지 않았다는 이유만으로 검증된 prototype을 candidate로 내리지 않는다. candidate는 근거나
