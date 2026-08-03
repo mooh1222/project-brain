@@ -2059,6 +2059,77 @@ def test_id_only_migration_allows_only_id_and_registered_reference_changes(tmp_p
     }
 
 
+def _colliding_review_migration(tmp_path, *, review_ids=None):
+    """참조만 다른 동일 payload ReviewRecord 두 개를 가진 ID 전용 마이그레이션.
+
+    `_id_only_shape`는 등록된 참조를 전부 하나의 자리표로 뭉개므로 두 ReviewRecord의
+    모양이 완전히 같아진다. payload 모양만으로는 짝을 고를 수 없는 상태다.
+    """
+    brain_root = tmp_path / "brain"
+    old_a = _code_locator(object_id="code.LegacyA", quote=None, title="legacy A")
+    old_b = _code_locator(object_id="code.LegacyB", quote=None, title="legacy B")
+    review_a_id, review_b_id = review_ids or (
+        "review.code.LegacyA",
+        "review.code.LegacyB",
+    )
+    old_review_a = review_record_for(review_a_id, old_a["id"])
+    old_review_b = review_record_for(review_b_id, old_b["id"])
+    for obj in (old_a, old_b, old_review_a, old_review_b):
+        _write_raw(brain_root, obj)
+
+    new_a = dict(old_a)
+    new_a["id"] = "code.neutral.legacy-a"
+    new_b = dict(old_b)
+    new_b["id"] = "code.neutral.legacy-b"
+    new_review_a = dict(old_review_a)
+    new_review_a["id"] = f"review.{new_a['id']}"
+    new_review_a["target_object_id"] = new_a["id"]
+    new_review_b = dict(old_review_b)
+    new_review_b["id"] = f"review.{new_b['id']}"
+    new_review_b["target_object_id"] = new_b["id"]
+
+    return brain_root, (
+        (old_a, new_a),
+        (old_b, new_b),
+        (old_review_a, new_review_a),
+        (old_review_b, new_review_b),
+    )
+
+
+def test_id_only_migration_disambiguates_colliding_reviews_by_target(tmp_path):
+    """참조만 다른 ReviewRecord 두 개도 대상 객체의 짝에서 구조로 유도해야 한다."""
+    brain_root, moves = _colliding_review_migration(tmp_path)
+    result = _plan(
+        brain_root,
+        [new for _, new in moves],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        delete_ids=tuple(old["id"] for old, _ in moves),
+    )
+
+    assert result.ok is True, (result.error_code, result.detail)
+    assert {
+        (rename["old_id"], rename["new_id"])
+        for rename in result.manifest.renames
+    } == {(old["id"], new["id"]) for old, new in moves}
+
+
+def test_id_only_migration_still_rejects_undecidable_review_collision(tmp_path):
+    """구조 유도가 불가능한 모양 충돌은 계속 거부해야 한다(추측 금지)."""
+    brain_root, moves = _colliding_review_migration(
+        tmp_path,
+        review_ids=("review.code.LegacyB", "review.code.LegacyA"),
+    )
+    result = _plan(
+        brain_root,
+        [new for _, new in moves],
+        operation=MutationOperation.ID_ONLY_MIGRATION,
+        delete_ids=tuple(old["id"] for old, _ in moves),
+    )
+
+    assert result.ok is False
+    assert result.error_code == "id_only_payload_changed"
+
+
 @pytest.mark.parametrize("review_scope", ["absent", "single_object"])
 def test_target_derived_single_review_rename_accepts_current_valid_single_scope(
     review_scope,

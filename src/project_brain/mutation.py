@@ -1702,26 +1702,55 @@ def _infer_id_only_renames(
     ]
     unused_new = set(created_ids)
     pairs: list[tuple[str, str]] = []
-    for old_id in sorted(delete_ids):
-        old = existing_by_id[old_id]
-        comparable_old = _id_only_shape(old)
-        matches = [
-            new_id
-            for new_id in sorted(unused_new)
-            if input_by_id[new_id].get("kind") == old.get("kind")
-            and _id_only_shape(input_by_id[new_id]) == comparable_old
-        ]
-        if len(matches) != 1:
+    paired: dict[str, str] = {}
+    pending = sorted(delete_ids)
+    while pending:
+        deferred: list[str] = []
+        progressed = False
+        for old_id in pending:
+            old = existing_by_id[old_id]
+            comparable_old = _id_only_shape(old)
+            matches = [
+                new_id
+                for new_id in sorted(unused_new)
+                if input_by_id[new_id].get("kind") == old.get("kind")
+                and _id_only_shape(input_by_id[new_id]) == comparable_old
+            ]
+            if not matches:
+                # 후보가 아예 없다. unused_new는 줄기만 하므로 뒤로 미뤄도 생기지 않는다.
+                return (), _failure(
+                    "id_only_payload_changed",
+                    (
+                        f"{old_id}: ID-only migration requires exactly one "
+                        "payload-identical replacement"
+                    ),
+                )
+            new_id = matches[0] if len(matches) == 1 else None
+            if new_id is None:
+                # payload 모양이 같은 후보가 둘 이상이다. 등록된 참조가 자리표로
+                # 뭉개져 모양만으로는 구별되지 않는 경우다(예: 대상만 다른
+                # single-object ReviewRecord). 코퍼스 자신의 구조로 좁힌다 —
+                # 호출자가 준 rename 지도는 쓰지 않는다.
+                derived = _target_derived_review_candidate(old_id, old, paired)
+                if derived in matches:
+                    new_id = derived
+            if new_id is None:
+                deferred.append(old_id)
+                continue
+            unused_new.remove(new_id)
+            paired[old_id] = new_id
+            pairs.append((old_id, new_id))
+            progressed = True
+        if not progressed:
             return (), _failure(
                 "id_only_payload_changed",
                 (
-                    f"{old_id}: ID-only migration requires exactly one "
+                    f"{deferred[0]}: ID-only migration requires exactly one "
                     "payload-identical replacement"
                 ),
             )
-        new_id = matches[0]
-        unused_new.remove(new_id)
-        pairs.append((old_id, new_id))
+        pending = deferred
+    pairs.sort()
 
     if unused_new:
         return (), _failure(
@@ -1788,6 +1817,30 @@ def _infer_id_only_renames(
                 ),
             )
     return tuple(pairs), None
+
+
+def _target_derived_review_candidate(
+    old_id: str,
+    old: Mapping[str, object],
+    paired: Mapping[str, str],
+) -> str | None:
+    """`review.<대상id>` 구조에서 새 ReviewRecord id를 유도한다.
+
+    이미 짝지어진 대상 객체의 새 id만 쓰므로 호출자 입력에 의존하지 않는다.
+    반환값은 후보 제안일 뿐이고, 채택 여부는 payload 모양 일치와 이후의 바이트
+    정확 대조가 결정한다.
+    """
+    if old.get("kind") != "ReviewRecord":
+        return None
+    before_target = old.get("target_object_id")
+    if not isinstance(before_target, str) or not before_target:
+        return None
+    if old_id != f"review.{before_target}":
+        return None
+    after_target = paired.get(before_target)
+    if not isinstance(after_target, str) or not after_target:
+        return None
+    return f"review.{after_target}"
 
 
 def _id_only_shape(obj: Mapping[str, object]) -> dict:
