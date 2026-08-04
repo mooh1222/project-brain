@@ -29,6 +29,12 @@ _LEXICAL_SCOPE_TYPES = frozenset({
     "union_specifier",
     "enum_specifier",
 })
+_DECLARATOR_WRAPPERS = frozenset({
+    "function_declarator",
+    "pointer_declarator",
+    "reference_declarator",
+    "parenthesized_declarator",
+})
 _SIMPLE_IDENTIFIER = re.compile(r"~?[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -156,6 +162,13 @@ def verify_symbol_relation(
                 "lexical scope and identifier boundary span quote byte range",
             )
 
+    if _enclosing_body_segments(root, blob, quote_start, quote_end) == segments:
+        return SymbolVerification(
+            SymbolStatus.VERIFIED,
+            symbol,
+            "enclosing function definition body spans quote byte range",
+        )
+
     if unsupported_qualified_structure:
         return SymbolVerification(
             SymbolStatus.UNSUPPORTED,
@@ -167,6 +180,53 @@ def verify_symbol_relation(
         symbol,
         "no matching C/C++ identifier relation overlaps quote byte range",
     )
+
+
+def _enclosing_body_segments(
+    root: Node,
+    blob: bytes,
+    start: int,
+    end: int,
+) -> tuple[str, ...] | None:
+    """quote를 **몸통 안에** 통째로 담는 가장 안쪽 함수 정의의 canonical segments.
+
+    시그니처에 걸친 quote는 몸통 밖이므로 이 규칙이 걸리지 않는다 — 식별자 조각
+    하나로 symbol 라벨을 참이라 주장하는 것을 계속 막는다.
+    """
+    innermost: Node | None = None
+    innermost_body_start = -1
+    for node in _iter_nodes(root):
+        if node.type != "function_definition":
+            continue
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        if body.start_byte <= start and end <= body.end_byte:
+            if body.start_byte > innermost_body_start:
+                innermost = node
+                innermost_body_start = body.start_byte
+    if innermost is None:
+        return None
+    return _function_definition_segments(innermost, blob)
+
+
+def _function_definition_segments(
+    node: Node,
+    blob: bytes,
+) -> tuple[str, ...] | None:
+    declarator = node.child_by_field_name("declarator")
+    while declarator is not None and declarator.type in _DECLARATOR_WRAPPERS:
+        declarator = declarator.child_by_field_name("declarator")
+    if declarator is None:
+        return None
+    if declarator.type in _QUALIFIED_TYPES:
+        return _qualified_identifier_segments(declarator, blob)
+    if declarator.type not in _IDENTIFIER_TYPES:
+        return None
+    lexical_scope = _lexical_scope_segments(declarator, blob)
+    if lexical_scope is None:
+        return None
+    return (*lexical_scope, _node_text(declarator, blob))
 
 
 def _iter_nodes(root: Node):

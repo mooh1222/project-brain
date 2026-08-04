@@ -187,5 +187,116 @@ class VerifySymbolRelationTest(unittest.TestCase):
         self.assertEqual(result.evidence, "unsupported extension")
 
 
+_BODY_SOURCE = """\
+float Settings::getValue(std::string key) {
+\tstd::string raw = lookup(key);
+\tif (raw.empty()) {
+\t\treturn 0;
+\t}
+\treturn parse(raw);
+}
+"""
+
+
+class EnclosingBodyRelationTest(unittest.TestCase):
+    """인용문이 심볼 이름을 담지 않아도 그 심볼의 몸통 안이면 관계가 성립한다."""
+
+    def _verify(self, *, source: str, quote: str, symbol: str, path: str = "src/example.cpp"):
+        blob = source.encode("utf-8")
+        quote_bytes = quote.encode("utf-8")
+        start = blob.index(quote_bytes)
+        return verify_symbol_relation(
+            path=path,
+            blob=blob,
+            quote_start=start,
+            quote_end=start + len(quote_bytes),
+            symbol=symbol,
+        )
+
+    def test_quote_inside_function_body_verifies_by_enclosing_definition(self):
+        result = self._verify(
+            source=_BODY_SOURCE,
+            quote="if (raw.empty()) {",
+            symbol="Settings::getValue",
+        )
+
+        self.assertEqual(result.status, SymbolStatus.VERIFIED)
+        self.assertEqual(result.canonical_symbol, "Settings::getValue")
+
+    def test_enclosing_body_rule_rejects_wrong_symbol(self):
+        result = self._verify(
+            source=_BODY_SOURCE,
+            quote="if (raw.empty()) {",
+            symbol="Settings::otherValue",
+        )
+
+        self.assertEqual(result.status, SymbolStatus.MISMATCH)
+
+    def test_enclosing_body_rule_ignores_signature_overlap(self):
+        """시그니처를 스치는 조각은 몸통 밖이라 규칙이 걸리지 않는다."""
+        qualified = self._verify(
+            source="void Foo::bar() { return; }\n",
+            quote=":",
+            symbol="Foo::bar",
+        )
+        unqualified = self._verify(
+            source="int compute_value() { return 1; }\n",
+            quote="c",
+            symbol="compute_value",
+        )
+
+        self.assertEqual(qualified.status, SymbolStatus.MISMATCH)
+        self.assertEqual(unqualified.status, SymbolStatus.MISMATCH)
+
+    def test_enclosing_body_rule_handles_in_class_method_definition(self):
+        result = self._verify(
+            source=(
+                "class Widget {\n"
+                "\tvoid draw() {\n"
+                "\t\tint count = 0;\n"
+                "\t\tpaint(count);\n"
+                "\t}\n"
+                "};\n"
+            ),
+            quote="int count = 0;",
+            symbol="Widget::draw",
+        )
+
+        self.assertEqual(result.status, SymbolStatus.VERIFIED)
+
+    def test_enclosing_body_rule_handles_anonymous_namespace_free_function(self):
+        result = self._verify(
+            source=(
+                "namespace {\n"
+                "\tint compute(int a) {\n"
+                "\t\tint doubled = a * 2;\n"
+                "\t\treturn doubled;\n"
+                "\t}\n"
+                "}\n"
+            ),
+            quote="int doubled = a * 2;",
+            symbol="compute",
+        )
+
+        self.assertEqual(result.status, SymbolStatus.VERIFIED)
+
+    def test_enclosing_body_rule_prefers_innermost_definition(self):
+        source = (
+            "void outer() {\n"
+            "\tstruct Helper {\n"
+            "\t\tvoid run() {\n"
+            "\t\t\tint v = 1;\n"
+            "\t\t}\n"
+            "\t};\n"
+            "}\n"
+        )
+
+        innermost = self._verify(source=source, quote="int v = 1;", symbol="Helper::run")
+        outermost = self._verify(source=source, quote="int v = 1;", symbol="outer")
+
+        self.assertEqual(innermost.status, SymbolStatus.VERIFIED)
+        self.assertEqual(outermost.status, SymbolStatus.MISMATCH)
+
+
 if __name__ == "__main__":
     unittest.main()
