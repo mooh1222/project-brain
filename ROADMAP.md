@@ -35,43 +35,12 @@
 
 ## 진행 중
 
-### Task 17 canonical ID 복구 (2026-07-31~)
+진행 중인 항목이 없다. Task 17 canonical ID 복구는 2026-08-04에 실코퍼스 적용까지
+끝나 완료 단계로 옮겼다.
 
-strict ID grammar를 유지한 채 ID-only migration과 제한된 canonical repair를 분리하고,
-decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 지원을
-구현했다. 승인된 collision source를 기존 canonical target에 합치는
-`collision_merge_into_existing`은 source delete, survivor/referrer update,
-보수적 근거 병합, 참조 축약 receipt, intermediate 검증, 전체 before/after recovery까지
-갖췄다. Task 6 독립 통합 리뷰에서 확인된 ContextProjection 재작성, 원장 0행 게이트,
-merge 끝점 raw bytes, receipt 좌표 투영의 Major 4건과 byte-exact 비교 보완을 세 차례
-fix round로 수정했고, 최종 scoped 재리뷰는 Blocker 0 / Major 0 / Minor 0으로 통과했다.
-canonical repair와 다음 ID-only migration 사이에는 검증된 intermediate snapshot을 두며,
-실제 BB2 corpus의 canonical ID 판단과 증거는 데이터 레포가 소유한다.
-
-엔진 지원 완료와 실코퍼스 적용 완료는 별개다. 현재 남은 경계는 다음과 같다.
-
-- Task 6 코드·테스트·문서는 독립 재리뷰를 통과해 clean `ENGINE_SHA` 고정 조건을
-  충족했다. Task 7 산출물은 이 최종 SHA에 다시 묶어야 한다.
-- 새 engine SHA에 다시 묶은 exact 156행 live decision ledger bytes는 아직 사용자 승인을
-  받지 않았다.
-- Task 9 apply는 시작하지 않았다. 이번 엔진 작업에서는 BB2 object·eval·index·stale-set을
-  건드리거나 검증하지 않았으며, 승인 뒤 실제 mutation과 BB2 checks/eval, 필요한 index
-  검증을 별도 영수증으로 고정해야 한다.
-
-따라서 이 상태는 검색 품질 회귀 완료나 실코퍼스 migration 완료를 뜻하지 않는다.
-
-Task 17 전체는 아직 완료가 아니다. 다음 조건을 모두 만족해야 완료 단계로 옮긴다.
-
-- 코드·테스트·문서가 독립 리뷰를 통과한 clean engine commit으로 고정됨
-- 전체 decision ledger에 대한 사용자 승인과 byte-exact staging에 대한 live 적용 승인이
-  각각 명시적으로 기록됨
-- 승인된 경로만 담은 BB2 Task 17 commit이 만들어짐
-- 그 commit을 포함한 final full snapshot 검증과, snapshot 바깥의 final binding receipt가
-  BB2 HEAD·engine SHA·corpus/index/stale fingerprint·사용자 변경 receipt를 고정함
-
-설계와 실행 순서는 [Task 17 canonical ID 복구 설계](docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md),
-[collision merge 설계](docs/superpowers/specs/2026-08-02-task17-collision-merge-design.md),
-[collision merge 구현 계획](docs/superpowers/plans/2026-08-02-task17-collision-merge.md)에 있다.
+다음에 손댈 후보는 아래 "미뤄둔 작업"에 착수 트리거와 함께 있다. 특히 7번(Task 17
+복구 번들 소속과 엔진 흡수)과 8번(옛 앵커 수정을 막는 읽기/쓰기 비대칭)은 이번
+작업에서 새로 드러난 것이다.
 
 ---
 
@@ -404,6 +373,41 @@ Step 2가 읽기(`query`/`show`)·쓰기(`stale-check --write-cache`) 양끝을 
   실행하지 않았다.
 - 계획: [branch-aware audit hardening plan](docs/superpowers/plans/2026-07-23-brain-ingest-branch-audit-hardening.md)
 - 최종 결과: [completion report](docs/reports/2026-07-23-brain-ingest-branch-audit-hardening-completion.md)
+
+### Task 17 canonical ID 복구 — 실코퍼스 적용 완료 (2026-07-31~2026-08-04)
+
+strict ID grammar를 유지한 채 ID-only migration과 제한된 canonical repair를 분리하고,
+decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶는 엔진 지원을
+구현한 뒤, BB2 실코퍼스에 적용해 **잘못된 객체 이름 158개를 0으로 만들었다.**
+
+- **엔진**: `canonical_repair.py` 신설, `mutation.py`에 `CANONICAL_REPAIR`와 exact diff
+  guard. 승인된 collision source를 기존 canonical target에 합치는
+  `collision_merge_into_existing`은 source 삭제, survivor/referrer 갱신, 보수적 근거 병합,
+  참조 축약 receipt, intermediate 검증, 전체 before/after 복구까지 갖췄다. Task 6 독립
+  리뷰의 Major 4건을 세 차례 fix round로 수정하고 최종 재리뷰 Blocker/Major/Minor 0으로
+  통과했다.
+- **적용**: 두 단계로 나눴다 — canonical repair(이름 5개 변경 + 2개 삭제 + 참조 12곳
+  재작성) 다음 ID-only migration(148개 + 참조 71개). 두 경로로 독립 유도한 rename map이
+  정확히 일치할 때만 썼다. 예행 2회가 같은 지문을 내고 라이브가 그것을 바이트 단위로
+  재현했다. BB2 commit `e28ff4ee7d`(153 renames + 2 deletes + 93 modifications).
+- **폐기한 경로**: 맞춤 러너 `run_task17_live.py`(974행)는 회상·eval 점검이 상수를
+  돌려주는 가짜 영수증이었고 잠금 교착까지 있어 버렸다. 엔진 공개 API만 조합한
+  569행 `run_migration.py` + 테스트 15개로 대체했다. 그 안의 안전장치 네 가지와
+  엔진 흡수 조건은 아래 미뤄둔 작업 7번에 있다.
+- **마무리(2026-08-04)**: audit을 막고 있던 symbol 불일치 5건을 4 대 1로 갈라 해결했다.
+  4건은 라벨이 정확한데도 실패한 거짓 경보라 엔진에 몸통 규칙을 넣었고(`ab27a9c`),
+  1건은 인용문이 라벨과 다른 함수 안에 있던 진짜 데이터 오류라 라벨을 고쳤다.
+  이 과정에서 드러난 읽기/쓰기 비대칭은 미뤄둔 작업 8번에 기록했다.
+- **최종 상태**: `audit ok=true`(lint 0, 참조 3809 intact, symbol mismatch 0),
+  엔진 pytest 1522 + ingest runtime 99, 실코퍼스 checks 10(건너뜀 0), eval 15/15,
+  색인 7,884개(mecab-ko + bge-m3). 최종 스냅샷 `ad657ec5…`(11,132 파일) 검증 통과,
+  Task 18 연결점 `135ce054…` 고정. engine `148c9e7d`.
+- **미충족 1건**: recovery bundle을 BB2 commit에 넣는 항목은 사용자가 brain 공유 방식을
+  바꾸기로 해 보류했다. 파일은 `bb2 brain/recovery/`에 있고 그 폴더 README와 아래 7번에
+  경위를 적었다.
+- 설계: [Task 17 설계](docs/superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md) ·
+  [collision merge 설계](docs/superpowers/specs/2026-08-02-task17-collision-merge-design.md)
+- 마무리 계획: [몸통 규칙 + Task 13](docs/plans/2026-08-04-symbol-verify-body-scope-and-task13.md)
 
 ---
 
