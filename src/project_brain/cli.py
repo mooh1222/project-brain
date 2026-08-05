@@ -942,15 +942,12 @@ def _run_build(argv) -> int:
     from project_brain.coverage import CoverageError, plan_expected_objects, read_coverage
     from project_brain.store import BrainStore
 
-    brain_root = resolve_brain_root(args.brain_root)
-    notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
-    # 객체 created_at/updated_at 시점. 노트에 context.now를 적으면 그 값을 쓰고
-    # (소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
-    now = notes.get("context", {}).get("now") or now_kst()
-    store = BrainStore.load(brain_root)
     try:
         binding = read_coverage(Path(args.coverage_file))
+        brain_root = resolve_brain_root(args.brain_root)
+        store = BrainStore.load(brain_root)
         plan_expected_objects(binding, store)
+        notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
         if binding.mode == "assembled":
             group_names = binding.contract["verify_groups"]["names"]
             assembly.validate_assembled_inputs(
@@ -959,6 +956,9 @@ def _run_build(argv) -> int:
                 notes=notes,
                 store=store,
             )
+        # 객체 created_at/updated_at 시점. 노트에 context.now를 적으면 그 값을 쓰고
+        # (소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
+        now = notes.get("context", {}).get("now") or now_kst()
         result = assembly.build(notes, store, now)
         if result["errors"]:
             print(json.dumps({"ok": False, "errors": result["errors"]},

@@ -226,6 +226,18 @@ class NormalizeTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "coverage_notes_mismatch")
 
+    def test_malformed_verify_group_is_structured_coverage_mismatch(self):
+        spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g1"]))
+        for malformed in (None, {"group": None}, {"group": 7}):
+            with self.subTest(malformed=malformed):
+                verify = {"groups": [
+                    {"group": "g1", "verify": {"corrected_atoms": []}},
+                    malformed,
+                ]}
+                with self.assertRaises(CoverageError) as raised:
+                    normalize(verify, spec)
+                self.assertEqual(raised.exception.code, "coverage_notes_mismatch")
+
     def test_corrections_applied(self):
         spec = dict(SPEC, CORRECTIONS={"m1": {"meaning": "고친 의미", "drop_terms": ["t1"]}})
         groups = [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1", terms=["t1", "keep"])]},

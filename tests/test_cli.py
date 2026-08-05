@@ -2111,6 +2111,42 @@ def test_build_cli_requires_coverage_file():
         cli._run_build(["--notes", "notes.json", "--objects-file", "objects.json"])
 
 
+def test_build_reads_invalid_coverage_before_missing_notes(tmp_path, capsys):
+    coverage_path = tmp_path / "coverage.json"
+    coverage_path.write_text("{", encoding="utf-8")
+
+    assert cli._run_build([
+        "--notes", str(tmp_path / "missing-notes.json"),
+        "--coverage-file", str(coverage_path),
+        "--objects-file", str(tmp_path / "objects.json"),
+        "--brain-root", str(tmp_path / "brain"),
+    ]) == 1
+
+    assert json.loads(capsys.readouterr().out)["error_code"] == "coverage_invalid"
+
+
+def test_build_reads_invalid_coverage_before_store_access(
+    tmp_path, capsys, monkeypatch
+):
+    coverage_path = tmp_path / "coverage.json"
+    coverage_path.write_text("{", encoding="utf-8")
+    notes_path = tmp_path / "notes.json"
+    notes_path.write_text("{}", encoding="utf-8")
+
+    def unexpected_store_access(cls, brain_root):
+        raise AssertionError(f"store accessed before coverage: {brain_root}")
+
+    monkeypatch.setattr(BrainStore, "load", classmethod(unexpected_store_access))
+
+    assert cli._run_build([
+        "--notes", str(notes_path),
+        "--coverage-file", str(coverage_path),
+        "--objects-file", str(tmp_path / "objects.json"),
+        "--brain-root", str(tmp_path / "brain"),
+    ]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "coverage_invalid"
+
+
 def test_build_report_contains_exact_coverage_binding_fields(tmp_path, capsys):
     notes_path, coverage_path, objects_path = _write_complete_build_inputs(tmp_path)
 

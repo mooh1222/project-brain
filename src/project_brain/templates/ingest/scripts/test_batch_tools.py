@@ -1674,7 +1674,7 @@ class RunIngestCleanupTest(unittest.TestCase):
 
     def _run(self, flags=(), *, finalizer_exit=0, ingest_exit=0, build_exit=0,
              invalid_finalization=False, omit_finalization=False,
-             log_runner_commands=False):
+             log_runner_commands=False, extra_env=None):
         env = dict(os.environ, TMPDIR=str(self.tmp_dir),
                    PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
                    FAKE_CALL_LOG=str(self.call_log),
@@ -1684,6 +1684,8 @@ class RunIngestCleanupTest(unittest.TestCase):
                    FAKE_LOG_RUNNER_COMMANDS="1" if log_runner_commands else "0",
                    FAKE_INVALID_FINALIZATION="1" if invalid_finalization else "0",
                    FAKE_OMIT_FINALIZATION="1" if omit_finalization else "0")
+        if extra_env:
+            env.update(extra_env)
         context_flags = [
             "--repo-root", str(self.root.resolve()),
             "--brain-root", str(self.brain_root.resolve()),
@@ -1695,6 +1697,38 @@ class RunIngestCleanupTest(unittest.TestCase):
                                *context_flags,
                                str(self.verify), str(self.spec)],
                               env=env, text=True, capture_output=True, check=False)
+
+    def test_intermediate_mktemp_failure_removes_earlier_files(self):
+        counter = self.root / "mktemp-count.txt"
+        fake_mktemp = self.bin_dir / "mktemp"
+        fake_mktemp.write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import os
+            import sys
+            from pathlib import Path
+
+            counter = Path(os.environ["FAKE_MKTEMP_COUNTER"])
+            count = int(counter.read_text(encoding="utf-8")) + 1 if counter.exists() else 1
+            counter.write_text(str(count), encoding="utf-8")
+            if count == int(os.environ["FAKE_MKTEMP_FAIL_AT"]):
+                raise SystemExit(70)
+            temporary = Path(os.environ["FAKE_MKTEMP_DIR"]) / f"created-{count}.tmp"
+            temporary.write_text("", encoding="utf-8")
+            print(temporary)
+        """), encoding="utf-8")
+        fake_mktemp.chmod(fake_mktemp.stat().st_mode | stat.S_IXUSR)
+
+        result = self._run(
+            ["--dry"],
+            extra_env={
+                "FAKE_MKTEMP_COUNTER": str(counter),
+                "FAKE_MKTEMP_FAIL_AT": "3",
+                "FAKE_MKTEMP_DIR": str(self.tmp_dir),
+            },
+        )
+
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertEqual(list(self.tmp_dir.iterdir()), [])
 
     def test_single_runner_forwards_assembled_coverage_to_build(self):
         result = self._run(["--dry"], log_runner_commands=True)

@@ -203,6 +203,50 @@ def test_assemble_does_not_filter_malformed_unexpected_item():
     assert exc.value.code == "coverage_notes_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("section", "malformed"),
+    [
+        ("decisions", {"not": "a list"}),
+        ("refs", ["not", "an", "object"]),
+    ],
+)
+def test_assemble_rejects_malformed_empty_section(section, malformed):
+    coverage = _assembled_coverage_fixture()
+    list_field = "items"
+    coverage["sections"][section] = {
+        list_field: [], "empty_reason": f"{section} 없음",
+    }
+    notes = _complete_notes_fixture()
+    notes[section] = malformed
+
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(coverage),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
+def test_assemble_rejects_malformed_verify_group_when_none_declared():
+    coverage = _assembled_coverage_fixture()
+    coverage["verify_groups"] = {
+        "names": [], "empty_reason": "verify group 없음",
+    }
+
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(coverage),
+            verify_data={"groups": [None]},
+            notes=_complete_notes_fixture(),
+            store=BrainStore({}),
+        )
+
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
 class DeriveIdTest(unittest.TestCase):
     def test_glossary_id(self):
         self.assertEqual(derive_id("GlossaryTerm", "trap-bubble-system", "hit"),

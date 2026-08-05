@@ -110,19 +110,21 @@ def _coverage_token(value: object) -> str:
         return f"<invalid:{exc}>"
 
 
-def _verify_group_names(verify_data: object) -> list[str]:
+def _verify_group_names(verify_data: object) -> list[object]:
     groups = (
         verify_data.get("groups")
         if isinstance(verify_data, Mapping)
         else verify_data
     )
     if not isinstance(groups, list):
-        return []
-    return [
-        str(group.get("group"))
-        for group in groups
-        if isinstance(group, Mapping) and isinstance(group.get("group"), str)
-    ]
+        return [groups]
+    names: list[object] = []
+    for group in groups:
+        if isinstance(group, Mapping) and "group" in group:
+            names.append(group["group"])
+        else:
+            names.append(group)
+    return names
 
 
 def validate_assembled_inputs(
@@ -206,6 +208,8 @@ def validate_assembled_inputs(
                 else:
                     evidence.append(item)
             decisions.append({"key": decision.get("key"), "evidence": evidence})
+    else:
+        decisions.append(raw_decisions)
     _compare_coverage_values(
         binding,
         section="decisions",
@@ -230,6 +234,8 @@ def validate_assembled_inputs(
                     })
                 else:
                     refs.append({"category": category, "alias": alias, "spec": spec})
+    else:
+        refs.append(raw_refs)
     _compare_coverage_values(
         binding,
         section="refs",

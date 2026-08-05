@@ -35,6 +35,21 @@ if [ "$DRY" = "0" ] && { [ -z "$REPO_ROOT" ] || [ -z "$BRAIN_ROOT" ] || [ -z "$E
   exit 2
 fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NOTES=""
+OBJS=""
+BUILD_REPORT=""
+FINALIZATION_CONFIG=""
+COVERAGE=""
+ISOLATION_BASELINE=""
+TRANSACTION_RESULT=""
+cleanup() {
+  for path in "$NOTES" "$OBJS" "$BUILD_REPORT" "$FINALIZATION_CONFIG" "$COVERAGE" "$ISOLATION_BASELINE" "$TRANSACTION_RESULT"; do
+    if [ -n "$path" ]; then
+      rm -f -- "$path"
+    fi
+  done
+}
+trap cleanup EXIT
 NOTES="$(mktemp -t notes.XXXXXX.json)"
 OBJS="$(mktemp -t objects.XXXXXX.json)"
 BUILD_REPORT="$(mktemp -t build-report.XXXXXX.json)"
@@ -42,7 +57,6 @@ FINALIZATION_CONFIG="$(mktemp -t finalization.XXXXXX.json)"
 COVERAGE="$(mktemp -t coverage.XXXXXX.json)"
 ISOLATION_BASELINE="$(mktemp -t isolation-baseline.XXXXXX.json)"
 TRANSACTION_RESULT="$(mktemp -t transaction-result.XXXXXX.json)"
-trap 'rm -f "$NOTES" "$OBJS" "$BUILD_REPORT" "$FINALIZATION_CONFIG" "$COVERAGE" "$ISOLATION_BASELINE" "$TRANSACTION_RESULT"' EXIT
 
 step() { echo "── [$1] ──" >&2; }
 

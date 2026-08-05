@@ -9,6 +9,7 @@ coverage 정본은 엔진 모듈을 사용한다. 금지선: 그룹 분해·결�
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 from project_brain.coverage import CoverageError, normalize_coverage
@@ -17,7 +18,6 @@ from project_brain.coverage import CoverageError, normalize_coverage
 def normalize(verify_data, spec):
     """verify 출력 → 정렬·보정된 atom 리스트."""
     # CASE: verify 결과가 list(main-map) 또는 {"groups": [...]}(ball-select) — 둘 다 흡수 (근거: ball-select·main-map 2026-06). 새 래핑은 여기 추가.
-    groups = verify_data["groups"] if isinstance(verify_data, dict) else verify_data
     binding = normalize_coverage(spec["COVERAGE"])
     if binding.mode != "assembled":
         raise CoverageError(
@@ -27,14 +27,40 @@ def normalize(verify_data, spec):
             coverage_sha256=binding.sha256,
         )
     expected_groups = list(binding.contract["verify_groups"]["names"])
-    actual_groups = [g.get("group") for g in groups if isinstance(g, dict)]
-    if sorted(expected_groups) != sorted(actual_groups) or len(expected_groups) != len(actual_groups):
+    groups = verify_data.get("groups") if isinstance(verify_data, dict) else verify_data
+    if not isinstance(groups, list):
+        raise CoverageError(
+            "coverage_notes_mismatch",
+            "verify groups must be an array",
+            section="verify_groups",
+            unexpected=(repr(groups),),
+            coverage_sha256=binding.sha256,
+        )
+    malformed_groups = [
+        repr(group)
+        for group in groups
+        if not isinstance(group, dict) or not isinstance(group.get("group"), str)
+    ]
+    if malformed_groups:
+        raise CoverageError(
+            "coverage_notes_mismatch",
+            "verify group entries require a string group name",
+            section="verify_groups",
+            unexpected=tuple(malformed_groups),
+            coverage_sha256=binding.sha256,
+        )
+    actual_groups = [group["group"] for group in groups]
+    expected_counts = Counter(expected_groups)
+    actual_counts = Counter(actual_groups)
+    if expected_counts != actual_counts:
+        missing = tuple(sorted((expected_counts - actual_counts).elements()))
+        unexpected = tuple(sorted((actual_counts - expected_counts).elements()))
         raise CoverageError(
             "coverage_notes_mismatch",
             "verify groups do not match coverage",
             section="verify_groups",
-            missing=tuple(sorted(set(expected_groups) - set(actual_groups))),
-            unexpected=tuple(sorted(set(actual_groups) - set(expected_groups))),
+            missing=missing,
+            unexpected=unexpected,
             coverage_sha256=binding.sha256,
         )
     by_group = {}
