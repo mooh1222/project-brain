@@ -202,9 +202,13 @@ def _timestamp_details_target_stat(
     return target_stat
 
 
-def _same_inode(left: os.stat_result | None, right: os.stat_result) -> bool:
+def _same_inode(
+    left: os.stat_result | None,
+    right: os.stat_result | None,
+) -> bool:
     return (
         left is not None
+        and right is not None
         and left.st_dev == right.st_dev
         and left.st_ino == right.st_ino
     )
@@ -316,8 +320,12 @@ def _publish_timestamp_details_over_existing(
     guard_stat: os.stat_result,
     temporary_stat: os.stat_result,
 ) -> None:
+    exchanged = False
+    published = None
+    displaced = None
     try:
         _exchange_directory_entries(parent_fd, temporary_name, target_name)
+        exchanged = True
         published = _directory_entry_stat(parent_fd, target_name)
         displaced = _directory_entry_stat(parent_fd, temporary_name)
         anchored = _directory_entry_stat(parent_fd, guard_name)
@@ -330,24 +338,32 @@ def _publish_timestamp_details_over_existing(
                 "timestamp details temp or target changed during publication"
             )
     except Exception:
-        anchored = _directory_entry_stat(parent_fd, guard_name)
-        if not _same_inode(anchored, guard_stat):
-            raise OSError("timestamp details rollback anchor changed")
-        current = _directory_entry_stat(parent_fd, target_name)
-        if not _same_inode(current, guard_stat):
-            if current is None:
-                os.link(
-                    guard_name,
-                    target_name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
-                    follow_symlinks=False,
+        if exchanged:
+            current_target = _directory_entry_stat(parent_fd, target_name)
+            current_temporary = _directory_entry_stat(
+                parent_fd,
+                temporary_name,
+            )
+            if not (
+                _same_inode(current_target, published)
+                and displaced is not None
+                and _same_inode(current_temporary, displaced)
+            ):
+                raise OSError(
+                    "timestamp details publication changed before rollback"
                 )
-            else:
-                _exchange_directory_entries(parent_fd, guard_name, target_name)
-        restored = _directory_entry_stat(parent_fd, target_name)
-        if not _same_inode(restored, guard_stat):
-            raise OSError("timestamp details target rollback failed")
+            _exchange_directory_entries(
+                parent_fd,
+                temporary_name,
+                target_name,
+            )
+            restored = _directory_entry_stat(parent_fd, target_name)
+            returned = _directory_entry_stat(parent_fd, temporary_name)
+            if not (
+                _same_inode(restored, displaced)
+                and _same_inode(returned, published)
+            ):
+                raise OSError("timestamp details exchange rollback failed")
         _remove_directory_entry(parent_fd, guard_name)
         _remove_directory_entry(parent_fd, temporary_name)
         os.fsync(parent_fd)
@@ -355,6 +371,65 @@ def _publish_timestamp_details_over_existing(
     _remove_directory_entry(parent_fd, temporary_name)
     _remove_directory_entry(parent_fd, guard_name)
     os.fsync(parent_fd)
+
+
+def _remove_linked_target_if_unchanged(
+    parent_fd: int,
+    *,
+    target_name: str,
+    linked_stat: os.stat_result,
+) -> None:
+    marker_name, marker_fd = _create_timestamp_entry(
+        parent_fd,
+        target_name,
+        "cleanup",
+    )
+    marker_stat = os.fstat(marker_fd)
+    os.close(marker_fd)
+    exchanged = False
+    displaced = None
+    try:
+        try:
+            _exchange_directory_entries(parent_fd, marker_name, target_name)
+        except FileNotFoundError:
+            return
+        exchanged = True
+        marker_at_target = _directory_entry_stat(parent_fd, target_name)
+        displaced = _directory_entry_stat(parent_fd, marker_name)
+        if (
+            _same_inode(marker_at_target, marker_stat)
+            and _same_inode(displaced, linked_stat)
+        ):
+            _remove_directory_entry(parent_fd, target_name)
+            _remove_directory_entry(parent_fd, marker_name)
+            exchanged = False
+            os.fsync(parent_fd)
+            return
+
+        current_target = _directory_entry_stat(parent_fd, target_name)
+        current_marker = _directory_entry_stat(parent_fd, marker_name)
+        if not (
+            _same_inode(current_target, marker_at_target)
+            and displaced is not None
+            and _same_inode(current_marker, displaced)
+        ):
+            raise OSError(
+                "timestamp details cleanup target changed during comparison"
+            )
+        _exchange_directory_entries(parent_fd, marker_name, target_name)
+        exchanged = False
+        os.fsync(parent_fd)
+    finally:
+        if exchanged:
+            current_target = _directory_entry_stat(parent_fd, target_name)
+            current_marker = _directory_entry_stat(parent_fd, marker_name)
+            if (
+                _same_inode(current_target, marker_stat)
+                and displaced is not None
+                and _same_inode(current_marker, displaced)
+            ):
+                _exchange_directory_entries(parent_fd, marker_name, target_name)
+        _remove_directory_entry(parent_fd, marker_name)
 
 
 def _publish_timestamp_details_to_absent(
@@ -373,8 +448,6 @@ def _publish_timestamp_details_to_absent(
             follow_symlinks=False,
         )
     except FileExistsError:
-        _exchange_directory_entries(parent_fd, temporary_name, target_name)
-        _remove_directory_entry(parent_fd, target_name)
         _remove_directory_entry(parent_fd, temporary_name)
         os.fsync(parent_fd)
         raise ValueError("timestamp details target appeared during publication")
@@ -385,7 +458,16 @@ def _publish_timestamp_details_to_absent(
         _same_inode(published, temporary_stat)
         and _same_inode(source, temporary_stat)
     ):
-        _remove_directory_entry(parent_fd, target_name)
+        if (
+            _same_inode(published, temporary_stat)
+            or _same_inode(published, source)
+        ):
+            assert published is not None
+            _remove_linked_target_if_unchanged(
+                parent_fd,
+                target_name=target_name,
+                linked_stat=published,
+            )
         _remove_directory_entry(parent_fd, temporary_name)
         os.fsync(parent_fd)
         raise ValueError("timestamp details temp changed during publication")

@@ -10,6 +10,7 @@ import io
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -1995,7 +1996,7 @@ class TestCliSearch(unittest.TestCase):
 
         self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
-    def test_timestamp_details_swap_race_restores_existing_regular_target(self):
+    def test_timestamp_details_swap_race_preserves_pre_exchange_target(self):
         variants = (
             "temp_symlink",
             "temp_regular",
@@ -2060,16 +2061,29 @@ class TestCliSearch(unittest.TestCase):
                     with self.assertRaises((OSError, ValueError)):
                         cli._atomic_write_timestamp_details(target, b"new\n")
 
-                self.assertFalse(target.is_symlink())
-                self.assertTrue(target.is_file())
-                self.assertEqual(target.read_bytes(), b"old\n")
                 self.assertEqual(victim.read_bytes(), b"victim\n")
-                self.assertEqual(
-                    sorted(path.name for path in case_dir.iterdir()),
-                    ["details.json", "victim.txt"],
+                self.assertFalse(
+                    any(
+                        path.name.endswith((".guard", ".tmp", ".cleanup"))
+                        for path in case_dir.iterdir()
+                    )
                 )
+                if variant.startswith("temp_"):
+                    self.assertEqual(target.read_bytes(), b"old\n")
+                elif variant == "target_symlink":
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(target.resolve(), victim.resolve())
+                elif variant == "target_directory":
+                    self.assertTrue(target.is_dir())
+                elif variant == "target_fifo":
+                    self.assertTrue(stat.S_ISFIFO(target.lstat().st_mode))
+                elif variant == "target_regular":
+                    self.assertEqual(target.read_bytes(), b"injected\n")
+                else:
+                    self.assertFalse(target.exists())
+                    self.assertFalse(target.is_symlink())
 
-    def test_timestamp_details_swap_race_restores_absent_target(self):
+    def test_timestamp_details_absent_race_preserves_concurrent_target(self):
         variants = (
             "temp_symlink",
             "temp_regular",
@@ -2131,13 +2145,99 @@ class TestCliSearch(unittest.TestCase):
                     with self.assertRaises((OSError, ValueError)):
                         cli._atomic_write_timestamp_details(target, b"new\n")
 
-                self.assertFalse(target.exists())
-                self.assertFalse(target.is_symlink())
                 self.assertEqual(victim.read_bytes(), b"victim\n")
-                self.assertEqual(
-                    sorted(path.name for path in case_dir.iterdir()),
-                    ["victim.txt"],
+                self.assertFalse(
+                    any(
+                        path.name.endswith((".guard", ".tmp", ".cleanup"))
+                        for path in case_dir.iterdir()
+                    )
                 )
+                if variant.startswith("temp_"):
+                    self.assertFalse(target.exists())
+                    self.assertFalse(target.is_symlink())
+                elif variant == "target_symlink":
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(target.resolve(), victim.resolve())
+                elif variant == "target_directory":
+                    self.assertTrue(target.is_dir())
+                elif variant == "target_fifo":
+                    self.assertTrue(stat.S_ISFIFO(target.lstat().st_mode))
+                else:
+                    self.assertEqual(target.read_bytes(), b"injected\n")
+
+    def test_timestamp_details_link_cleanup_preserves_later_winner(self):
+        case_dir = Path(self._tmp.name) / "link-later-winner"
+        case_dir.mkdir()
+        target = case_dir / "details.json"
+        real_link = os.link
+        real_cleanup = cli._remove_linked_target_if_unchanged
+
+        def link_then_substitute_temp(
+            source,
+            destination,
+            *,
+            src_dir_fd=None,
+            dst_dir_fd=None,
+            follow_symlinks=True,
+        ):
+            result = real_link(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+            if destination == target.name and str(source).endswith(".tmp"):
+                os.unlink(source, dir_fd=src_dir_fd)
+                descriptor = os.open(
+                    source,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=src_dir_fd,
+                )
+                try:
+                    os.write(descriptor, b"substituted\n")
+                finally:
+                    os.close(descriptor)
+            return result
+
+        def publish_winner_before_cleanup(
+            parent_fd,
+            *,
+            target_name,
+            linked_stat,
+        ):
+            os.unlink(target_name, dir_fd=parent_fd)
+            descriptor = os.open(
+                target_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                os.write(descriptor, b"winner\n")
+            finally:
+                os.close(descriptor)
+            return real_cleanup(
+                parent_fd,
+                target_name=target_name,
+                linked_stat=linked_stat,
+            )
+
+        with mock.patch.object(os, "link", side_effect=link_then_substitute_temp), \
+             mock.patch.object(
+                 cli,
+                 "_remove_linked_target_if_unchanged",
+                 side_effect=publish_winner_before_cleanup,
+             ):
+            with self.assertRaises((OSError, ValueError)):
+                cli._atomic_write_timestamp_details(target, b"loser\n")
+
+        self.assertEqual(target.read_bytes(), b"winner\n")
+        self.assertEqual(
+            sorted(path.name for path in case_dir.iterdir()),
+            ["details.json"],
+        )
 
     def test_audit_succeeds_when_stale_and_exact_quote_checks_pass(self):
         from tests.test_stale_check import code_locator
