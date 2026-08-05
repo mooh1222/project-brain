@@ -338,6 +338,40 @@ def test_assembled_revalidates_build_binding_dataclass_version(tmp_path):
     assert result.error_details["coverage_sha256"] == _canonical_sha(coverage)
 
 
+def test_assembled_rejects_malformed_dataclass_identity_structurally(tmp_path):
+    brain_root = tmp_path / "brain"
+    coverage, objects, raw_binding = _assembled_artifacts(
+        brain_root,
+        context_mode="create",
+    )
+    actual = tuple(
+        ObjectIdentity(item["id"], item["kind"])
+        for item in raw_binding["actual_objects"]
+    )
+    build_binding = BuildArtifactBinding(
+        version=1,
+        coverage_sha256=raw_binding["coverage_sha256"],
+        expected_objects=("not-an-object-identity",),
+        actual_objects=actual,
+        objects_sha256=raw_binding["objects_sha256"],
+    )
+    request = _request(
+        brain_root,
+        objects,
+        coverage=coverage,
+        build_binding=build_binding,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["field"] == "expected_objects[0]"
+    assert result.error_details["coverage_sha256"] == _canonical_sha(coverage)
+
+
 @pytest.mark.parametrize(
     ("tamper", "section"),
     [

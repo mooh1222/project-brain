@@ -813,7 +813,7 @@ def _validate_pre_store_contract(
         else:
             try:
                 raw_build_binding = (
-                    request.build_binding.as_dict()
+                    asdict(request.build_binding)
                     if isinstance(request.build_binding, BuildArtifactBinding)
                     else request.build_binding
                 )
