@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from project_brain.config import (
@@ -114,6 +115,8 @@ def _apply_mutation(
     preconditions=None,
     expected_corpus_fingerprint=None,
     batch_binding=None,
+    coverage=None,
+    build_binding=None,
 ):
     return ingest(
         brain_root,
@@ -124,6 +127,8 @@ def _apply_mutation(
         operation=operation,
         expected_corpus_fingerprint=expected_corpus_fingerprint,
         batch_binding=batch_binding,
+        coverage=coverage,
+        build_binding=build_binding,
     )
 
 
@@ -238,16 +243,126 @@ def _run_ingest(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli ingest")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--objects-file", required=True)
+    parser.add_argument("--coverage-file", required=True)
+    parser.add_argument("--build-report")
     parser.add_argument("--preconditions-file",
-                        help="build 리포트 JSON (preconditions 키 — 저장 직전 낙관적 잠금 재검사)")
+                        help="direct 적재용 순수 ID→hash JSON")
     parser.add_argument("--batch-binding-file")
     parser.add_argument("--verify-json")
     parser.add_argument("--domain-spec-py")
     _add_mutation_context_arguments(parser, engine_required=True)
     args = parser.parse_args(argv)
 
+    from project_brain.coverage import (
+        CoverageError,
+        build_artifact_binding,
+        normalize_build_artifact_binding,
+        read_coverage,
+    )
+
+    try:
+        coverage_binding = read_coverage(Path(args.coverage_file))
+    except CoverageError as exc:
+        print(json.dumps(
+            {"ok": False, "error_code": exc.code, **exc.as_dict()},
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+    if coverage_binding.mode == "assembled":
+        if args.build_report is None:
+            parser.error("assembled coverage에는 --build-report가 필요합니다")
+        if args.preconditions_file is not None:
+            parser.error(
+                "assembled coverage는 --preconditions-file을 받지 않습니다"
+            )
+    elif args.build_report is not None:
+        parser.error("direct coverage는 --build-report를 받지 않습니다")
+
     brain_root = resolve_brain_root(args.brain_root).resolve()
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
+    build_binding = None
+    preconditions = None
+    try:
+        if args.build_report is not None:
+            report = json.loads(
+                Path(args.build_report).read_text(encoding="utf-8")
+            )
+            if not isinstance(report, Mapping):
+                raise ValueError("build report must contain an object")
+            required = {
+                "coverage_sha256",
+                "expected_objects",
+                "actual_objects",
+                "objects_sha256",
+                "build_binding",
+                "preconditions",
+            }
+            missing = sorted(required - set(report))
+            if missing:
+                raise ValueError(
+                    "build report is missing fields: " + ", ".join(missing)
+                )
+            if not isinstance(report["build_binding"], Mapping):
+                raise ValueError("build_binding must contain an object")
+            build_binding = normalize_build_artifact_binding(
+                report["build_binding"]
+            )
+            binding_dict = build_binding.as_dict()
+            for field_name in (
+                "coverage_sha256",
+                "expected_objects",
+                "actual_objects",
+                "objects_sha256",
+            ):
+                if report[field_name] != binding_dict[field_name]:
+                    raise ValueError(
+                        f"build report {field_name} does not match build_binding"
+                    )
+            preconditions = report["preconditions"]
+            recalculated = build_artifact_binding(coverage_binding, objects)
+            if recalculated != build_binding:
+                raise CoverageError(
+                    "coverage_binding_mismatch",
+                    "objects file does not match build report",
+                    section="objects",
+                    coverage_sha256=coverage_binding.sha256,
+                )
+        elif args.preconditions_file is not None:
+            preconditions = json.loads(
+                Path(args.preconditions_file).read_text(encoding="utf-8")
+            )
+        if preconditions is not None and (
+            not isinstance(preconditions, Mapping)
+            or not all(
+                isinstance(object_id, str)
+                and isinstance(expected_hash, str)
+                and len(expected_hash) == 64
+                and all(char in "0123456789abcdef" for char in expected_hash)
+                for object_id, expected_hash in preconditions.items()
+            )
+        ):
+            raise ValueError("preconditions must be a pure ID→SHA-256 object")
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, CoverageError) as exc:
+        if isinstance(exc, CoverageError):
+            payload = {
+                "ok": False,
+                "error_code": exc.code,
+                **exc.as_dict(),
+            }
+        else:
+            payload = {
+                "ok": False,
+                "error_code": "coverage_binding_mismatch",
+                "error": str(exc),
+                "error_details": {
+                    "section": "build_report"
+                    if args.build_report is not None
+                    else "preconditions"
+                },
+            }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
     batch_binding = None
     batch_paths = (
         args.batch_binding_file,
@@ -330,10 +445,6 @@ def _run_ingest(argv) -> int:
                 ensure_ascii=False,
             ))
             return 1
-    preconditions = None
-    if args.preconditions_file:
-        report = json.loads(Path(args.preconditions_file).read_text(encoding="utf-8"))
-        preconditions = report.get("preconditions", report)
     try:
         result = _apply_mutation(
             operation=MutationOperation.INGEST,
@@ -343,9 +454,15 @@ def _run_ingest(argv) -> int:
             objects=objects,
             preconditions=preconditions,
             batch_binding=batch_binding,
+            coverage=coverage_binding.contract,
+            build_binding=build_binding,
         )
     except IngestError as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        print(json.dumps(
+            {"ok": False, **exc.as_dict()},
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 1
     if batch_binding is not None:
         from project_brain.corpus_io import (

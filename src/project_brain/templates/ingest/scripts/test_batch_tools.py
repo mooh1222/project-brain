@@ -201,6 +201,11 @@ request = MutationRequest(
     engine_sha=binding.engine_sha,
     objects=(obj,),
     batch_binding=binding,
+    coverage={
+        "version": 1,
+        "mode": "direct",
+        "objects": [{"id": obj["id"], "kind": obj["kind"]}],
+    },
 )
 result = MutationService().apply((obj,), request=request)
 if not result.ok:
@@ -1566,7 +1571,7 @@ class RunIngestCleanupTest(unittest.TestCase):
             Path(sys.argv[sys.argv.index("-o") + 1]).write_text("notes", encoding="utf-8")
             if "--coverage-out" in sys.argv:
                 Path(sys.argv[sys.argv.index("--coverage-out") + 1]).write_text(
-                    "{}\\n", encoding="utf-8")
+                    '{"mode":"assembled"}\\n', encoding="utf-8")
             if "--finalization-out" in sys.argv and os.environ.get("FAKE_OMIT_FINALIZATION") != "1":
                 payload = {} if os.environ.get("FAKE_INVALID_FINALIZATION") == "1" else {
                     "recall_checks": [{"key": "one", "query": "one query",
@@ -1638,9 +1643,12 @@ class RunIngestCleanupTest(unittest.TestCase):
                 raise SystemExit(int(os.environ.get("FAKE_BUILD_EXIT", "0")))
             if command == "ingest":
                 observed = {"kind": "ingest", "args": args}
-                if "--preconditions-file" in args:
-                    report = Path(args[args.index("--preconditions-file") + 1])
-                    observed["preconditions"] = report.read_text(encoding="utf-8")
+                if "--build-report" in args:
+                    report = Path(args[args.index("--build-report") + 1])
+                    observed["build_report"] = report.read_text(encoding="utf-8")
+                if "--coverage-file" in args:
+                    coverage = Path(args[args.index("--coverage-file") + 1])
+                    observed["coverage"] = coverage.read_text(encoding="utf-8")
                 with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
                     print(json.dumps(observed), file=log)
                 exit_code = int(os.environ.get("FAKE_INGEST_EXIT", "0"))
@@ -1743,16 +1751,18 @@ class RunIngestCleanupTest(unittest.TestCase):
         self.assertIn("--coverage-out", assemble["args"])
         self.assertIn("--coverage-file", build["args"])
 
-    def test_build_report_is_forwarded_to_ingest_as_preconditions(self):
+    def test_coverage_and_build_report_are_forwarded_to_ingest(self):
         result = self._run(["--defer-finalize"])
 
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in self.call_log.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["kind"], "ingest")
-        self.assertIn("--preconditions-file", calls[0]["args"])
-        self.assertEqual(json.loads(calls[0]["preconditions"]),
+        self.assertIn("--coverage-file", calls[0]["args"])
+        self.assertIn("--build-report", calls[0]["args"])
+        self.assertEqual(json.loads(calls[0]["build_report"]),
                          {"ok": True, "preconditions": {"expected": "fresh"}})
+        self.assertEqual(json.loads(calls[0]["coverage"])["mode"], "assembled")
 
     def test_single_run_captures_baseline_before_ingest_and_passes_semantic_inputs(self):
         result = self._run()

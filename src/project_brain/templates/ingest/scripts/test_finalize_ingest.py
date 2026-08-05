@@ -301,6 +301,11 @@ class SemanticFinalizerTest(unittest.TestCase):
                 engine_sha=binding.engine_sha,
                 objects=(obj,),
                 batch_binding=binding,
+                coverage={
+                    "version": 1,
+                    "mode": "direct",
+                    "objects": [{"id": obj["id"], "kind": obj["kind"]}],
+                },
             ),
         )
         self.assertTrue(result.ok, result.detail)

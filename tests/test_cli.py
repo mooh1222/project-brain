@@ -34,6 +34,7 @@ from project_brain.repo_context import (
 )
 from project_brain.store import BrainStore
 from project_brain.transaction_receipt import BatchBinding
+from tests.coverage_helpers import direct_coverage
 from tests.test_ingest import (
     candidate_term,
     context,
@@ -87,6 +88,14 @@ class TestCli(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
         self._tmp_in.cleanup()
+
+    def _coverage_file(self, name, objects):
+        path = self.input_dir / name
+        path.write_text(
+            json.dumps(direct_coverage(*objects), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return path
 
     def test_cli_query_path_unchanged(self):
         # tempfile store에 새 중립 객체 적재(query 경로가 회수할 대상)
@@ -343,12 +352,15 @@ class TestCli(unittest.TestCase):
         bundle = [manifest(), evidence_ref(), context(), candidate_term()]
         objects_file = self.input_dir / "bundle.json"
         objects_file.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
+        coverage_file = self._coverage_file("bundle.coverage.json", bundle)
         argv = [
             "ingest",
             "--brain-root",
             str(self.root),
             "--objects-file",
             str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
             *ENGINE_ARGS,
         ]
         out = io.StringIO()
@@ -393,6 +405,70 @@ class TestCli(unittest.TestCase):
         self.assertTrue(store.has("manifest.neutral.source"))
         self.assertTrue(store.has("evref.neutral.ref"))
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
+
+    def test_cli_ingest_requires_coverage_file(self):
+        objects_file = self.input_dir / "missing-coverage-objects.json"
+        objects_file.write_text("[]", encoding="utf-8")
+
+        with self.assertRaises(SystemExit):
+            cli._run_ingest([
+                "--brain-root",
+                str(self.root),
+                "--objects-file",
+                str(objects_file),
+                *ENGINE_ARGS,
+            ])
+
+    def test_cli_direct_coverage_rejects_build_report(self):
+        obj = context()
+        objects_file = self.input_dir / "direct-objects.json"
+        objects_file.write_text(json.dumps([obj]), encoding="utf-8")
+        coverage_file = self._coverage_file("direct-coverage.json", [obj])
+        report_file = self.input_dir / "direct-report.json"
+        report_file.write_text("{}", encoding="utf-8")
+
+        with self.assertRaises(SystemExit):
+            cli._run_ingest([
+                "--brain-root",
+                str(self.root),
+                "--objects-file",
+                str(objects_file),
+                "--coverage-file",
+                str(coverage_file),
+                "--build-report",
+                str(report_file),
+                *ENGINE_ARGS,
+            ])
+
+    def test_cli_preserves_structured_coverage_failure(self):
+        obj = context()
+        objects_file = self.input_dir / "kind-mismatch-objects.json"
+        objects_file.write_text(json.dumps([obj]), encoding="utf-8")
+        coverage = direct_coverage(obj)
+        obj["kind"] = "GlossaryTerm"
+        objects_file.write_text(json.dumps([obj]), encoding="utf-8")
+        coverage_file = self.input_dir / "kind-mismatch-coverage.json"
+        coverage_file.write_text(json.dumps(coverage), encoding="utf-8")
+        out = io.StringIO()
+
+        with redirect_stdout(out):
+            rc = cli._run_ingest([
+                "--brain-root",
+                str(self.root),
+                "--objects-file",
+                str(objects_file),
+                "--coverage-file",
+                str(coverage_file),
+                *ENGINE_ARGS,
+            ])
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["error_code"], "coverage_binding_mismatch")
+        self.assertEqual(
+            payload["error_details"]["object_id"],
+            obj["id"],
+        )
 
     def test_cli_batch_ingest_binds_inputs_state_and_durable_receipt(self):
         project = self.input_dir / "batch-project"
@@ -453,6 +529,7 @@ class TestCli(unittest.TestCase):
             json.dumps([obj], ensure_ascii=False),
             encoding="utf-8",
         )
+        coverage_file = self._coverage_file("batch.coverage.json", [obj])
         wrong_project = self.input_dir / "wrong-batch-project"
         wrong_brain = wrong_project / "brain"
         wrong_brain.mkdir(parents=True)
@@ -474,6 +551,8 @@ class TestCli(unittest.TestCase):
             str(brain.resolve()),
             "--objects-file",
             str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
             "--repo-root",
             str(project.resolve()),
             "--expected-repo-id",
@@ -570,12 +649,15 @@ class TestCli(unittest.TestCase):
             json.dumps([locator], ensure_ascii=False),
             encoding="utf-8",
         )
+        coverage_file = self._coverage_file("locator.coverage.json", [locator])
         argv = [
             "ingest",
             "--brain-root",
             str(brain.resolve()),
             "--objects-file",
             str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
             *ENGINE_ARGS,
         ]
         original_apply = MutationService.apply

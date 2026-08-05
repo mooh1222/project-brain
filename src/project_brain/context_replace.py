@@ -362,6 +362,33 @@ def _verify_repo_context(
         )
 
 
+_CORPUS_JOURNAL_MANIFEST_FIELDS = (
+    "transaction_id",
+    "operation",
+    "engine_sha",
+    "creates",
+    "updates",
+    "deletes",
+    "renames",
+    "reference_rewrites",
+    "auxiliary_updates",
+    "before_fingerprint",
+    "expected_after_fingerprint",
+    "grandfathered_problems_before",
+    "grandfathered_problems_after",
+    "batch_binding",
+    "canonical_repair_binding",
+)
+
+
+def _corpus_journal_manifest(core: Mapping[str, object]) -> dict[str, object]:
+    """확장 mutation 영수증을 기존 strict corpus journal에 투영한다."""
+    return {
+        field_name: core[field_name]
+        for field_name in _CORPUS_JOURNAL_MANIFEST_FIELDS
+    }
+
+
 def apply_context_replace_artifact(
     *,
     manifest_bytes: bytes,
@@ -453,7 +480,7 @@ def apply_context_replace_artifact(
         try:
             apply_transaction(
                 brain_root,
-                manifest=core,
+                manifest=_corpus_journal_manifest(core),
                 after_files=after_files,
             )
         except (CorpusIOError, ValueError, OSError) as exc:

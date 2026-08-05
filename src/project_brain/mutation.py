@@ -26,6 +26,17 @@ from project_brain.corpus_io import (
     read_tracked_file_bytes,
     recover_unfinished_transaction_unlocked,
 )
+from project_brain.coverage import (
+    BuildArtifactBinding,
+    CoverageBinding,
+    CoverageError,
+    ObjectIdentity,
+    build_artifact_binding,
+    normalize_build_artifact_binding,
+    normalize_coverage,
+    object_identities,
+    plan_expected_objects,
+)
 from project_brain.hash_utils import stable_json
 from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.lint import LintProblem, lint_store_report
@@ -131,6 +142,8 @@ class MutationRequest:
     canonical_repair_intents: tuple[CanonicalRepairIntent, ...] = ()
     canonical_repair_reference_collapses: tuple[ReferenceCollapse, ...] = ()
     canonical_repair_binding: Mapping[str, str] | None = None
+    coverage: Mapping[str, object] | None = None
+    build_binding: BuildArtifactBinding | Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +151,10 @@ class MutationManifest:
     transaction_id: str
     operation: str
     engine_sha: str
+    coverage_sha256: str | None
+    expected_objects: tuple[dict[str, str], ...]
+    verified_objects: tuple[dict[str, str], ...]
+    changed_objects: tuple[dict[str, str], ...]
     creates: tuple[dict, ...]
     updates: tuple[dict, ...]
     deletes: tuple[dict, ...]
@@ -163,6 +180,7 @@ class MutationPlanResult:
     manifest_bytes: bytes = b""
     manifest_sha256: str = ""
     auxiliary_after_files: Mapping[str, bytes] = field(default_factory=dict)
+    error_details: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -184,6 +202,9 @@ class MutationService:
         if request_error is not None:
             return request_error
         assert inputs is not None
+        _, _, pre_store_error = _validate_pre_store_contract(inputs, request)
+        if pre_store_error is not None:
+            return pre_store_error
 
         with corpus_lock(request.brain_root, exclusive=True):
             recover_unfinished_transaction_unlocked(request.brain_root)
@@ -232,7 +253,7 @@ class MutationService:
             after_files.update(result.auxiliary_after_files)
             apply_transaction(
                 request.brain_root,
-                manifest=asdict(result.manifest),
+                manifest=_transaction_manifest(result.manifest),
                 after_files=after_files,
                 failure_injector=failure_injector,
             )
@@ -249,43 +270,12 @@ class MutationService:
         if request_error is not None:
             return request_error
         assert inputs is not None
-
-        # 1) sequence에서 완성 object ID 중복 검사. dict로 접기 전에 수행한다.
-        seen_ids: set[object] = set()
-        for obj in inputs:
-            object_id = obj.get("id")
-            if not isinstance(object_id, str):
-                continue
-            if object_id in seen_ids:
-                return _failure(
-                    "duplicate_object_id",
-                    f"duplicate object id in input sequence: {object_id!r}",
-                )
-            seen_ids.add(object_id)
-
-        # 2) 입력 logical key와 source ID 중복 검사.
-        duplicate = _find_duplicate_identity(inputs, _LOGICAL_KEY_FIELDS)
-        if duplicate is not None:
-            field_name, value = duplicate
-            return _failure(
-                "duplicate_logical_key",
-                f"duplicate {field_name} in input sequence: {value!r}",
-            )
-        duplicate = _find_duplicate_source_id(inputs)
-        if duplicate is not None:
-            _, value = duplicate
-            return _failure(
-                "duplicate_source_id",
-                f"duplicate source_id in input sequence: {value!r}",
-            )
-        # delete_ids 중복은 store 상태가 아니라 request sequence 자체의 모순이므로
-        # schema·lifecycle보다 앞선 입력 shape 단계에서 닫는다.
+        coverage_binding, build_binding, pre_store_error = (
+            _validate_pre_store_contract(inputs, request)
+        )
+        if pre_store_error is not None:
+            return pre_store_error
         delete_ids = tuple(request.delete_ids)
-        if len(set(delete_ids)) != len(delete_ids):
-            return _failure(
-                "duplicate_delete_id",
-                "delete_ids contains a duplicate object id",
-            )
 
         # 이 시점 이후에만 ID map을 만든다.
         input_by_id = {
@@ -301,6 +291,18 @@ class MutationService:
         else:
             existing_store = _existing_store
         existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
+
+        batch_root_error = _validate_batch_binding_brain_root(request)
+        if batch_root_error is not None:
+            return batch_root_error
+        coverage_error = _validate_post_store_coverage(
+            inputs,
+            coverage_binding=coverage_binding,
+            build_binding=build_binding,
+            store=existing_store,
+        )
+        if coverage_error is not None:
+            return coverage_error
 
         auxiliary_error = _validate_auxiliary_updates(request)
         if auxiliary_error is not None:
@@ -673,6 +675,7 @@ class MutationService:
             source_sha256_by_id[object_id] = source_sha256
         manifest = _build_manifest(
             request=request,
+            coverage_binding=coverage_binding,
             existing_by_id=existing_by_id,
             planned_by_id=planned_by_id,
             merged=merged,
@@ -703,8 +706,317 @@ class MutationService:
         )
 
 
-def _failure(code: str, detail: str) -> MutationPlanResult:
-    return MutationPlanResult(ok=False, error_code=code, detail=detail)
+def _failure(
+    code: str,
+    detail: str,
+    error_details: Mapping[str, object] | None = None,
+) -> MutationPlanResult:
+    return MutationPlanResult(
+        ok=False,
+        error_code=code,
+        detail=detail,
+        error_details=dict(error_details or {}),
+    )
+
+
+def _coverage_error_failure(
+    exc: CoverageError,
+    *,
+    code: str | None = None,
+    section: str | None = None,
+    coverage_sha256: str | None = None,
+) -> MutationPlanResult:
+    details = {
+        key: value
+        for key, value in exc.as_dict().items()
+        if key not in {"code", "detail"}
+        and value is not None
+        and value != ()
+        and value != []
+    }
+    resolved_section = section or exc.section or exc.field
+    if resolved_section is not None:
+        details["section"] = resolved_section
+    resolved_sha = coverage_sha256 or exc.coverage_sha256
+    if resolved_sha is not None:
+        details["coverage_sha256"] = resolved_sha
+    return _failure(code or exc.code, exc.detail, details)
+
+
+def _identity_text(identity: ObjectIdentity) -> str:
+    return f"{identity.id}:{identity.kind}"
+
+
+def _identity_diff(
+    expected: tuple[ObjectIdentity, ...],
+    actual: tuple[ObjectIdentity, ...],
+) -> tuple[list[str], list[str]]:
+    return (
+        [_identity_text(item) for item in sorted(set(expected) - set(actual))],
+        [_identity_text(item) for item in sorted(set(actual) - set(expected))],
+    )
+
+
+def _validate_pre_store_contract(
+    inputs: tuple[dict, ...],
+    request: MutationRequest,
+) -> tuple[
+    CoverageBinding | None,
+    BuildArtifactBinding | None,
+    MutationPlanResult | None,
+]:
+    coverage_binding = None
+    build_binding = None
+    if request.operation is not MutationOperation.INGEST:
+        unexpected = []
+        if request.coverage is not None:
+            unexpected.append("coverage")
+        if request.build_binding is not None:
+            unexpected.append("build_binding")
+        if unexpected:
+            return None, None, _failure(
+                "operation_action_invalid",
+                "coverage and build binding are allowed only for ingest",
+                {"unexpected": unexpected},
+            )
+    else:
+        if request.coverage is None:
+            return None, None, _failure(
+                "coverage_required",
+                "coverage is required",
+                {"missing": ["coverage"]},
+            )
+        try:
+            coverage_binding = normalize_coverage(request.coverage)
+        except CoverageError as exc:
+            return None, None, _coverage_error_failure(exc)
+
+        if coverage_binding.mode == "direct":
+            if request.build_binding is not None:
+                return None, None, _failure(
+                    "coverage_binding_mismatch",
+                    "direct coverage does not accept a build binding",
+                    {
+                        "unexpected": ["build_binding"],
+                        "coverage_sha256": coverage_binding.sha256,
+                    },
+                )
+        elif request.build_binding is None:
+            return None, None, _failure(
+                "coverage_binding_mismatch",
+                "assembled coverage requires a build binding",
+                {
+                    "missing": ["build_binding"],
+                    "coverage_sha256": coverage_binding.sha256,
+                },
+            )
+        else:
+            try:
+                build_binding = (
+                    request.build_binding
+                    if isinstance(request.build_binding, BuildArtifactBinding)
+                    else normalize_build_artifact_binding(request.build_binding)
+                )
+            except (CoverageError, TypeError) as exc:
+                if isinstance(exc, CoverageError):
+                    return None, None, _coverage_error_failure(
+                        exc,
+                        code="coverage_binding_mismatch",
+                        coverage_sha256=coverage_binding.sha256,
+                    )
+                return None, None, _failure(
+                    "coverage_binding_mismatch",
+                    "build binding must be an object",
+                    {
+                        "section": "build_binding",
+                        "coverage_sha256": coverage_binding.sha256,
+                    },
+                )
+            if build_binding.coverage_sha256 != coverage_binding.sha256:
+                return None, None, _failure(
+                    "coverage_binding_mismatch",
+                    "build binding coverage SHA does not match coverage",
+                    {
+                        "section": "coverage",
+                        "coverage_sha256": coverage_binding.sha256,
+                    },
+                )
+
+        hidden_actions = [
+            name
+            for name, value in (
+                ("delete_ids", request.delete_ids),
+                ("renames", request.renames),
+                ("auxiliary_updates", request.auxiliary_updates),
+            )
+            if value
+        ]
+        if hidden_actions:
+            return None, None, _failure(
+                "operation_action_invalid",
+                "ingest accepts object create/update actions only",
+                {"unexpected": hidden_actions},
+            )
+
+    seen_ids: set[str] = set()
+    for obj in inputs:
+        object_id = obj.get("id")
+        if not isinstance(object_id, str):
+            continue
+        if object_id in seen_ids:
+            return None, None, _failure(
+                "duplicate_object_id",
+                f"duplicate object id in input sequence: {object_id!r}",
+                {"object_id": object_id},
+            )
+        seen_ids.add(object_id)
+
+    duplicate = _find_duplicate_identity(inputs, _LOGICAL_KEY_FIELDS)
+    if duplicate is not None:
+        field_name, value = duplicate
+        return None, None, _failure(
+            "duplicate_logical_key",
+            f"duplicate {field_name} in input sequence: {value!r}",
+        )
+    duplicate = _find_duplicate_source_id(inputs)
+    if duplicate is not None:
+        _, value = duplicate
+        return None, None, _failure(
+            "duplicate_source_id",
+            f"duplicate source_id in input sequence: {value!r}",
+        )
+    if len(set(request.delete_ids)) != len(request.delete_ids):
+        return None, None, _failure(
+            "duplicate_delete_id",
+            "delete_ids contains a duplicate object id",
+        )
+    return coverage_binding, build_binding, None
+
+
+def _validate_post_store_coverage(
+    inputs: tuple[dict, ...],
+    *,
+    coverage_binding: CoverageBinding | None,
+    build_binding: BuildArtifactBinding | None,
+    store: BrainStore,
+) -> MutationPlanResult | None:
+    if coverage_binding is None:
+        return None
+    try:
+        planned = plan_expected_objects(coverage_binding, store)
+    except CoverageError as exc:
+        return _coverage_error_failure(
+            exc,
+            code="coverage_binding_mismatch",
+            coverage_sha256=coverage_binding.sha256,
+        )
+
+    if build_binding is not None:
+        for section, actual in (
+            ("expected_objects", build_binding.expected_objects),
+            ("actual_objects", build_binding.actual_objects),
+        ):
+            if actual != planned:
+                missing, unexpected = _identity_diff(planned, actual)
+                return _failure(
+                    "coverage_binding_mismatch",
+                    f"build binding {section} does not match planned objects",
+                    {
+                        "section": section,
+                        "missing": missing,
+                        "unexpected": unexpected,
+                        "coverage_sha256": coverage_binding.sha256,
+                    },
+                )
+
+    try:
+        actual_objects = object_identities(inputs)
+    except CoverageError as exc:
+        if all(
+            isinstance(obj.get("id"), str)
+            and isinstance(obj.get("kind"), str)
+            for obj in inputs
+        ):
+            actual_objects = tuple(sorted(
+                ObjectIdentity(str(obj["id"]), str(obj["kind"]))
+                for obj in inputs
+            ))
+        else:
+            return _coverage_error_failure(
+                exc,
+                code="coverage_binding_mismatch",
+                section="objects",
+                coverage_sha256=coverage_binding.sha256,
+            )
+    if actual_objects != planned:
+        missing, unexpected = _identity_diff(planned, actual_objects)
+        expected_by_id = {item.id: item.kind for item in planned}
+        actual_by_id = {item.id: item.kind for item in actual_objects}
+        object_id = next(
+            (
+                object_id
+                for object_id in sorted(set(expected_by_id) & set(actual_by_id))
+                if expected_by_id[object_id] != actual_by_id[object_id]
+            ),
+            None,
+        )
+        details: dict[str, object] = {
+            "section": "objects",
+            "missing": missing,
+            "unexpected": unexpected,
+            "coverage_sha256": coverage_binding.sha256,
+        }
+        if object_id is not None:
+            details["object_id"] = object_id
+        return _failure(
+            "coverage_binding_mismatch",
+            "request objects do not match planned coverage objects",
+            details,
+        )
+
+    if build_binding is not None:
+        try:
+            recalculated = build_artifact_binding(coverage_binding, inputs)
+        except CoverageError as exc:
+            return _coverage_error_failure(
+                exc,
+                code="coverage_binding_mismatch",
+                section="objects",
+                coverage_sha256=coverage_binding.sha256,
+            )
+        if recalculated.objects_sha256 != build_binding.objects_sha256:
+            return _failure(
+                "coverage_binding_mismatch",
+                "object bundle SHA does not match build binding",
+                {
+                    "section": "objects",
+                    "coverage_sha256": coverage_binding.sha256,
+                },
+            )
+    return None
+
+
+def _validate_batch_binding_brain_root(
+    request: MutationRequest,
+) -> MutationPlanResult | None:
+    binding = normalize_batch_binding(request.batch_binding)
+    if binding is None:
+        return None
+    try:
+        brain_root = request.brain_root.resolve(strict=True)
+        brain_stat = brain_root.stat()
+    except OSError as exc:
+        return _failure("request_invalid", str(exc))
+    if (
+        binding.brain_root != str(brain_root)
+        or binding.brain_root_device != brain_stat.st_dev
+        or binding.brain_root_inode != brain_stat.st_ino
+    ):
+        return _failure(
+            "request_invalid",
+            "batch_binding brain_root identity must match request.brain_root",
+        )
+    return None
 
 
 def _validate_auxiliary_updates(
@@ -1100,16 +1412,6 @@ def _validate_request_shape(
             if binding.engine_sha != request.engine_sha:
                 raise ValueError(
                     "batch_binding.engine_sha must match request.engine_sha"
-                )
-            brain_root = request.brain_root.resolve(strict=True)
-            brain_stat = brain_root.stat()
-            if (
-                binding.brain_root != str(brain_root)
-                or binding.brain_root_device != brain_stat.st_dev
-                or binding.brain_root_inode != brain_stat.st_ino
-            ):
-                raise ValueError(
-                    "batch_binding brain_root identity must match request.brain_root"
                 )
         return tuple(dict(obj) for obj in raw_inputs), None
     except Exception as exc:
@@ -2038,6 +2340,7 @@ def _required_source_receipt_ids(
 def _build_manifest(
     *,
     request: MutationRequest,
+    coverage_binding: CoverageBinding | None,
     existing_by_id: Mapping[str, dict],
     planned_by_id: Mapping[str, dict],
     merged: Mapping[str, dict],
@@ -2129,6 +2432,50 @@ def _build_manifest(
         if request.canonical_repair_binding is not None
         else None
     )
+    expected_objects = (
+        tuple(
+            {"id": identity.id, "kind": identity.kind}
+            for identity in coverage_binding.expected_objects
+        )
+        if coverage_binding is not None
+        else ()
+    )
+    verified_objects = expected_objects
+    changed_objects = (
+        tuple(
+            {
+                "action": "create",
+                "id": action["object_id"],
+                "kind": planned_by_id[action["object_id"]]["kind"],
+            }
+            for action in creates
+        )
+        + tuple(
+            {
+                "action": "update",
+                "id": action["object_id"],
+                "kind": planned_by_id[action["object_id"]]["kind"],
+            }
+            for action in updates
+        )
+        + tuple(
+            {
+                "action": "delete",
+                "id": action["object_id"],
+                "kind": existing_by_id[action["object_id"]]["kind"],
+            }
+            for action in deletes
+        )
+        + tuple(
+            {
+                "action": "rename",
+                "old_id": action["old_id"],
+                "new_id": action["new_id"],
+                "kind": merged[action["new_id"]]["kind"],
+            }
+            for action in renames
+        )
+    )
     seed = {
         "operation": request.operation.value,
         "engine_sha": request.engine_sha,
@@ -2153,7 +2500,7 @@ def _build_manifest(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    return MutationManifest(
+    manifest_kwargs = dict(
         transaction_id=transaction_id,
         operation=request.operation.value,
         engine_sha=request.engine_sha,
@@ -2170,6 +2517,18 @@ def _build_manifest(
         batch_binding=batch_binding,
         canonical_repair_binding=canonical_repair_binding,
     )
+    manifest = MutationManifest(
+        **manifest_kwargs,
+        coverage_sha256=(
+            coverage_binding.sha256
+            if coverage_binding is not None
+            else None
+        ),
+        expected_objects=expected_objects,
+        verified_objects=verified_objects,
+        changed_objects=changed_objects,
+    )
+    return manifest
 
 
 def _manifest_bytes(manifest: MutationManifest) -> bytes:
@@ -2182,3 +2541,16 @@ def _manifest_bytes(manifest: MutationManifest) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _transaction_manifest(manifest: MutationManifest) -> dict[str, object]:
+    """Task 8 receipt 확장 전의 corpus_io journal 계약으로 투영한다."""
+    payload = asdict(manifest)
+    for field_name in (
+        "coverage_sha256",
+        "expected_objects",
+        "verified_objects",
+        "changed_objects",
+    ):
+        payload.pop(field_name, None)
+    return payload

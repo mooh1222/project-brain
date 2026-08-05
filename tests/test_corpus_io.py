@@ -38,6 +38,7 @@ from project_brain.mutation import (
 )
 from project_brain.store import BrainStore
 from project_brain.transaction_receipt import BatchBinding, batch_intent_id
+from tests.coverage_helpers import direct_coverage
 from tests.test_ingest import candidate_term, context
 from tests.test_mutation import (
     _canonical_repair_binding,
@@ -67,6 +68,18 @@ PREPARATION_FAILURE_POINTS = (
 
 class InjectedCrash(RuntimeError):
     pass
+
+
+def _journal_manifest(manifest) -> dict[str, object]:
+    payload = asdict(manifest)
+    for field_name in (
+        "coverage_sha256",
+        "expected_objects",
+        "verified_objects",
+        "changed_objects",
+    ):
+        payload.pop(field_name, None)
+    return payload
 
 
 def _hold_stable_lock_in_child(brain_root, ready, release) -> None:
@@ -154,14 +167,20 @@ def _request(
     objects: tuple[dict, ...],
     *,
     batch_binding: BatchBinding | None = None,
+    operation: MutationOperation = MutationOperation.INGEST,
 ) -> MutationRequest:
     return MutationRequest(
-        operation=MutationOperation.INGEST,
+        operation=operation,
         brain_root=brain_root,
         repo_context=None,
         engine_sha="e" * 40,
         objects=objects,
         batch_binding=batch_binding,
+        coverage=(
+            direct_coverage(*objects)
+            if operation is MutationOperation.INGEST
+            else None
+        ),
     )
 
 
@@ -269,7 +288,7 @@ def _exact_child_names(path: Path) -> set[str]:
 def _case_only_apply_inputs(planned, new: dict) -> tuple[dict, dict[str, bytes]]:
     rename = planned.manifest.renames[0]
     return (
-        asdict(planned.manifest),
+        _journal_manifest(planned.manifest),
         {rename["new_path"]: BrainStore.object_bytes(new)},
     )
 
@@ -697,7 +716,7 @@ def test_manifest_always_contains_canonical_repair_binding(tmp_path):
     )
 
     assert planned.ok and planned.manifest is not None
-    assert "canonical_repair_binding" in asdict(planned.manifest)
+    assert "canonical_repair_binding" in _journal_manifest(planned.manifest)
     assert planned.manifest.canonical_repair_binding is None
 
 
@@ -735,7 +754,7 @@ def test_invalid_canonical_repair_binding_is_rejected_before_journal_publish(
         request=_request(brain_root, (after,)),
     )
     assert planned.ok and planned.manifest is not None
-    manifest = asdict(planned.manifest)
+    manifest = _journal_manifest(planned.manifest)
     manifest["operation"] = operation
     manifest["canonical_repair_binding"] = binding
     after_path = planned.manifest.updates[0]["path"]
@@ -764,7 +783,7 @@ def test_manifest_missing_canonical_repair_binding_is_rejected_before_publish(
         request=_request(brain_root, (after,)),
     )
     assert planned.ok and planned.manifest is not None
-    manifest = asdict(planned.manifest)
+    manifest = _journal_manifest(planned.manifest)
     manifest.pop("canonical_repair_binding")
 
     with pytest.raises(ValueError, match="manifest keys"):
@@ -813,7 +832,11 @@ def test_canonical_repair_rolls_back_every_transaction_failure_point(
             failure_injector=_crash_at(failure_point),
         )
 
-    recovery_request = _request(request.brain_root, ())
+    recovery_request = _request(
+        request.brain_root,
+        (),
+        operation=MutationOperation.PROJECTION,
+    )
     assert MutationService().apply((), request=recovery_request).ok is True
     assert _state_fingerprint(request.brain_root) == before_fingerprint
     store = BrainStore.load(request.brain_root)
@@ -985,8 +1008,9 @@ def _historical_context_replace_journal(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    request = replace(
-        _request(brain_root, (after,)),
+    request = _request(
+        brain_root,
+        (after,),
         operation=MutationOperation.CONTEXT_REPLACE,
     )
     result = MutationService().apply((after,), request=request)
@@ -1144,8 +1168,9 @@ def test_current_noncanonical_journal_writes_explicit_null_canonical_binding(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    request = replace(
-        _request(brain_root, (after,)),
+    request = _request(
+        brain_root,
+        (after,),
         operation=MutationOperation.CONTEXT_REPLACE,
     )
 
@@ -1684,7 +1709,7 @@ def test_local_binding_swap_before_live_fails_without_mutating_corpus(tmp_path):
         with pytest.raises(RuntimeError) as caught:
             apply_transaction(
                 brain_root,
-                manifest=asdict(planned.manifest),
+                manifest=_journal_manifest(planned.manifest),
                 after_files={
                     relative_path: BrainStore.object_bytes(after),
                 },
@@ -2004,7 +2029,7 @@ def test_preparation_validation_failure_leaves_no_active_poison(
     live_path = _write_object(brain_root, before)
     service = MutationService()
     planned = service.plan((after,), request=_request(brain_root, (after,)))
-    manifest = asdict(planned.manifest)
+    manifest = _journal_manifest(planned.manifest)
     relative_path = live_path.relative_to(brain_root).as_posix()
     after_files = {relative_path: BrainStore.object_bytes(after)}
     if mismatch == "before_hash":
@@ -2056,7 +2081,7 @@ def test_private_preparation_interruption_never_publishes_partial_active(
         with pytest.raises(InjectedCrash, match=failure_point):
             apply_transaction(
                 brain_root,
-                manifest=asdict(planned.manifest),
+                manifest=_journal_manifest(planned.manifest),
                 after_files={
                     relative_path: BrainStore.object_bytes(after),
                 },
@@ -2101,7 +2126,7 @@ def test_different_private_attempt_ids_do_not_accumulate_and_reader_ignores_them
         with pytest.raises(InjectedCrash, match="after_private_root_mkdir"):
             apply_transaction(
                 brain_root,
-                manifest=asdict(planned.manifest),
+                manifest=_journal_manifest(planned.manifest),
                 after_files={
                     relative_path: BrainStore.object_bytes(after),
                 },
@@ -2310,7 +2335,7 @@ def test_apply_handles_create_update_delete_and_rename_actions(tmp_path):
     new_context["glossary_term_ids"] = [new_term["id"]]
     objects = (new_context, new_term)
     request = MutationRequest(
-        operation=MutationOperation.INGEST,
+        operation=MutationOperation.CONTEXT_REPLACE,
         brain_root=brain_root,
         repo_context=None,
         engine_sha="e" * 40,
@@ -2441,7 +2466,14 @@ def test_next_mutation_recovers_case_only_rename_without_roll_forward(tmp_path):
             failure_injector=_crash_at("after_first_live_replace"),
         )
 
-    assert MutationService().apply((), request=_request(brain_root, ())).ok
+    assert MutationService().apply(
+        (),
+        request=_request(
+            brain_root,
+            (),
+            operation=MutationOperation.PROJECTION,
+        ),
+    ).ok
     assert _state_fingerprint(brain_root) == before_fingerprint
     assert old_path.name in _exact_child_names(old_path.parent)
     assert new_path.name not in _exact_child_names(new_path.parent)
@@ -2465,7 +2497,7 @@ def test_multi_case_only_rename_rejects_second_inode_swap_before_move(tmp_path):
         count=2,
     )
     before_fingerprint = _state_fingerprint(brain_root)
-    manifest = asdict(planned.manifest)
+    manifest = _journal_manifest(planned.manifest)
     after_files = {
         rename["new_path"]: BrainStore.object_bytes(new)
         for rename, (_old_path, _new_path, _old, new) in zip(
@@ -2598,7 +2630,7 @@ def test_folded_rename_with_genuinely_absent_new_lookup_stays_general(tmp_path, 
     with corpus_io._AnchoredRoot(brain_root) as anchored:
         assert corpus_io._inspect_case_only_renames(
             anchored,
-            asdict(planned.manifest),
+            _journal_manifest(planned.manifest),
         ) == ()
     manifest, after_files = _case_only_apply_inputs(planned, new)
     apply_transaction(brain_root, manifest=manifest, after_files=after_files)
@@ -2687,7 +2719,7 @@ def test_case_only_rename_rejects_hard_linked_before_image(tmp_path):
     with pytest.raises(CorpusIOError, match="case_only_rename_ambiguous"):
         apply_transaction(
             brain_root,
-            manifest=asdict(planned.manifest),
+            manifest=_journal_manifest(planned.manifest),
             after_files={
                 planned.manifest.renames[0]["new_path"]: BrainStore.object_bytes(
                     new
@@ -2845,7 +2877,11 @@ def test_next_mutation_rolls_back_every_injected_crash_without_roll_forward(
             failure_injector=_crash_at(failure_point),
         )
 
-    empty_request = _request(brain_root, ())
+    empty_request = _request(
+        brain_root,
+        (),
+        operation=MutationOperation.PROJECTION,
+    )
     result = MutationService().apply((), request=empty_request)
 
     assert result.ok is True
@@ -2904,7 +2940,11 @@ def test_id_migration_rolls_object_eval_and_derived_back_together(
             failure_injector=_crash_at(failure_point),
         )
 
-    recovery_request = _request(brain_root, ())
+    recovery_request = _request(
+        brain_root,
+        (),
+        operation=MutationOperation.PROJECTION,
+    )
     assert MutationService().apply((), request=recovery_request).ok is True
     assert _state_fingerprint(brain_root) == before_fingerprint
     assert BrainStore.load(brain_root).has(old["id"])
@@ -2970,7 +3010,7 @@ def test_transaction_rejects_missing_or_unexpected_auxiliary_after_bytes(
     with pytest.raises(corpus_io.CorpusIOError) as missing:
         apply_transaction(
             brain_root,
-            manifest=asdict(planned.manifest),
+            manifest=_journal_manifest(planned.manifest),
             after_files={},
         )
     assert missing.value.code == "after_payload_invalid"
@@ -2978,7 +3018,7 @@ def test_transaction_rejects_missing_or_unexpected_auxiliary_after_bytes(
     with pytest.raises(corpus_io.CorpusIOError) as unexpected:
         apply_transaction(
             brain_root,
-            manifest=asdict(planned.manifest),
+            manifest=_journal_manifest(planned.manifest),
             after_files={
                 "eval_scenarios.json": after,
                 "unexpected.json": b"unexpected",
@@ -3035,7 +3075,7 @@ def test_low_level_manifest_auxiliary_allowlist_fails_closed(
         auxiliary_updates=(update,),
     )
     planned = MutationService().plan((), request=request)
-    manifest = asdict(planned.manifest)
+    manifest = _journal_manifest(planned.manifest)
     mutation(manifest)
 
     with pytest.raises(ValueError, match=expected_message):
@@ -3069,7 +3109,7 @@ def test_low_level_manifest_rejects_auxiliary_noop_without_invalidation(
         auxiliary_updates=(update,),
     )
     planned = MutationService().plan((), request=request)
-    manifest = asdict(planned.manifest)
+    manifest = _journal_manifest(planned.manifest)
     action = manifest["auxiliary_updates"][0]
     action["after_sha256"] = action["before_sha256"]
 

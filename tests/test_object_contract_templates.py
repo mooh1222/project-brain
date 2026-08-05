@@ -33,6 +33,7 @@ from project_brain.schema import (
     validate_object_id,
 )
 from project_brain.store import BrainStore
+from tests.coverage_helpers import direct_coverage
 
 
 ROOT = Path(__file__).parents[1]
@@ -94,6 +95,11 @@ def _mutation_plan(
         objects=inputs,
         preconditions=preconditions or {},
         expected_corpus_fingerprint=expected_corpus_fingerprint,
+        coverage=(
+            direct_coverage(*inputs)
+            if operation is MutationOperation.INGEST
+            else None
+        ),
     )
     return MutationService().plan(inputs, request=request)
 

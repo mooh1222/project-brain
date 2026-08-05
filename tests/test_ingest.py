@@ -15,6 +15,7 @@ from unittest import mock
 from project_brain.ingest import IngestError, ingest as _product_ingest
 from project_brain.objbase import base
 from project_brain.store import BrainStore
+from tests.coverage_helpers import direct_coverage
 
 T = "2026-06-04T00:00:00Z"
 ENGINE_SHA = "e" * 40
@@ -22,11 +23,13 @@ ENGINE_SHA = "e" * 40
 
 def ingest(brain_root, objects, preconditions=None, **kwargs):
     """합성 테스트 writer도 exact engine SHA를 명시한다."""
+    coverage = kwargs.pop("coverage", direct_coverage(*objects))
     return _product_ingest(
         brain_root,
         objects,
         preconditions=preconditions,
         engine_sha=kwargs.pop("engine_sha", ENGINE_SHA),
+        coverage=coverage,
         **kwargs,
     )
 
@@ -256,6 +259,29 @@ class TestIngest(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+    def test_ingest_error_preserves_structured_coverage_details(self):
+        obj = candidate_term()
+
+        with self.assertRaises(IngestError) as caught:
+            _product_ingest(
+                self.root,
+                [obj],
+                engine_sha=ENGINE_SHA,
+                coverage=None,
+            )
+
+        self.assertEqual(caught.exception.code, "coverage_required")
+        self.assertEqual(caught.exception.detail, "coverage is required")
+        self.assertEqual(
+            caught.exception.error_details,
+            {"missing": ["coverage"]},
+        )
+        self.assertEqual(caught.exception.as_dict(), {
+            "error_code": "coverage_required",
+            "error": "coverage is required",
+            "error_details": {"missing": ["coverage"]},
+        })
 
     def test_ingest_writes_valid_bundle(self):
         bundle = [manifest(), evidence_ref(), context(), candidate_term()]

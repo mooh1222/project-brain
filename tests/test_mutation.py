@@ -30,6 +30,7 @@ from project_brain.reference_fields import rewrite_object_refs
 from project_brain.schema import validate_object_id
 from project_brain.store import BrainStore
 from project_brain.transaction_receipt import BatchBinding
+from tests.coverage_helpers import direct_coverage
 from tests.test_ingest import (
     candidate_mapping,
     candidate_term,
@@ -42,6 +43,7 @@ from tests.test_canonical_merge import merge_pair
 
 
 T = "2026-07-28T00:00:00+09:00"
+_AUTO_COVERAGE = object()
 
 
 class _ExplodingSequence(Sequence):
@@ -67,7 +69,15 @@ def _request(
     canonical_repair_intents: tuple[object, ...] = (),
     canonical_repair_reference_collapses: tuple[ReferenceCollapse, ...] = (),
     canonical_repair_binding: dict[str, str] | None = None,
+    coverage=_AUTO_COVERAGE,
+    build_binding=None,
 ) -> MutationRequest:
+    if coverage is _AUTO_COVERAGE:
+        coverage = (
+            direct_coverage(*objects)
+            if operation is MutationOperation.INGEST
+            else None
+        )
     return MutationRequest(
         operation=operation,
         brain_root=brain_root,
@@ -85,6 +95,8 @@ def _request(
             canonical_repair_reference_collapses
         ),
         canonical_repair_binding=canonical_repair_binding,
+        coverage=coverage,
+        build_binding=build_binding,
     )
 
 
@@ -121,6 +133,350 @@ def _file_update(path: str, before: bytes, after: bytes) -> AuxiliaryFileUpdate:
         after_sha256=hashlib.sha256(after).hexdigest(),
         after_bytes=after,
     )
+
+
+def _canonical_sha(value: object) -> str:
+    payload = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _assembled_coverage(*, context_mode: str) -> dict[str, object]:
+    expected = [
+        {"id": "ledger.ctx.one", "kind": "EventLedgerRecord"},
+    ]
+    if context_mode == "create":
+        expected.insert(0, {"id": "context.ctx", "kind": "DomainContext"})
+    return {
+        "version": 1,
+        "mode": "assembled",
+        "verify_groups": {"names": ["fixture"]},
+        "context": {"key": "ctx", "mode": context_mode},
+        "sections": {
+            "sources": {"ids": [], "empty_reason": "fixture에 source 없음"},
+            "glossary": {"keys": [], "empty_reason": "fixture에 glossary 없음"},
+            "code_anchors": {
+                "keys": [],
+                "empty_reason": "fixture에 code anchor 없음",
+            },
+            "mappings": {"keys": [], "empty_reason": "fixture에 mapping 없음"},
+            "decisions": {"items": [], "empty_reason": "fixture에 decision 없음"},
+            "refs": {"items": [], "empty_reason": "fixture에 ref 없음"},
+            "updates": {"ids": [], "empty_reason": "fixture에 update 없음"},
+            "extra_objects": {
+                "objects": [
+                    {"id": "ledger.ctx.one", "kind": "EventLedgerRecord"}
+                ]
+            },
+        },
+        "expected_objects": expected,
+    }
+
+
+def _ctx_object() -> dict:
+    obj = context("context.ctx")
+    obj["context_key"] = "ctx"
+    obj["project_id"] = "ctx-project"
+    return obj
+
+
+def _event_object(
+    object_id: str = "ledger.ctx.one",
+) -> dict:
+    return base(
+        {
+            "id": object_id,
+            "kind": "EventLedgerRecord",
+            "status": "reviewed",
+            "truth_role": "event",
+            "title": "fixture event",
+            "event_type": "spec_revision",
+            "happened_at": T,
+            "summary": "fixture event",
+            "related_objects": [],
+        },
+        tags=["fixture"],
+        created_at=T,
+        updated_at=T,
+    )
+
+
+def _assembled_artifacts(
+    brain_root: Path,
+    *,
+    context_mode: str,
+) -> tuple[dict[str, object], tuple[dict, ...], dict[str, object]]:
+    coverage = _assembled_coverage(context_mode=context_mode)
+    objects = (
+        (_ctx_object(), _event_object())
+        if context_mode == "create"
+        else (_event_object(),)
+    )
+    identities = coverage["expected_objects"]
+    assert isinstance(identities, list)
+    build_binding = {
+        "version": 1,
+        "coverage_sha256": _canonical_sha(coverage),
+        "expected_objects": [dict(item) for item in identities],
+        "actual_objects": [dict(item) for item in identities],
+        "objects_sha256": _canonical_sha(
+            sorted(objects, key=lambda item: (item["id"], item["kind"]))
+        ),
+    }
+    if context_mode == "reuse":
+        _write_raw(brain_root, _ctx_object())
+    return coverage, objects, build_binding
+
+
+def test_ingest_requires_full_coverage_contract(tmp_path):
+    obj = _event_object()
+    request = _request(tmp_path / "brain", (obj,), coverage=None)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (False, "coverage_required")
+    assert result.error_details["missing"] == ["coverage"]
+
+
+def test_ingest_rejects_empty_live_expected_objects(tmp_path):
+    request = _request(
+        tmp_path / "brain",
+        (),
+        coverage={"version": 1, "mode": "direct", "objects": []},
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (False, "coverage_invalid")
+    assert result.error_details["field"] == "objects"
+
+
+def test_direct_coverage_rejects_build_binding(tmp_path):
+    obj = _event_object()
+    identity = [{"id": obj["id"], "kind": obj["kind"]}]
+    request = _request(
+        tmp_path / "brain",
+        (obj,),
+        build_binding={
+            "version": 1,
+            "coverage_sha256": "0" * 64,
+            "expected_objects": identity,
+            "actual_objects": identity,
+            "objects_sha256": "0" * 64,
+        },
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["unexpected"] == ["build_binding"]
+
+
+def test_assembled_coverage_requires_build_binding(tmp_path):
+    coverage, objects, _ = _assembled_artifacts(
+        tmp_path / "brain",
+        context_mode="create",
+    )
+    request = _request(
+        tmp_path / "brain",
+        objects,
+        coverage=coverage,
+        build_binding=None,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["missing"] == ["build_binding"]
+
+
+@pytest.mark.parametrize(
+    ("tamper", "section"),
+    [
+        ("coverage_sha256", "coverage"),
+        ("expected_objects", "expected_objects"),
+        ("objects_sha256", "objects"),
+    ],
+)
+def test_mutation_recomputes_assembled_coverage_and_build_binding(
+    tmp_path,
+    tamper,
+    section,
+):
+    brain_root = tmp_path / "brain"
+    coverage, objects, build_binding = _assembled_artifacts(
+        brain_root,
+        context_mode="create",
+    )
+    if tamper == "coverage_sha256":
+        build_binding["coverage_sha256"] = "0" * 64
+    elif tamper == "expected_objects":
+        wrong = [{"id": "ledger.ctx.other", "kind": "EventLedgerRecord"}]
+        build_binding["expected_objects"] = wrong
+        build_binding["actual_objects"] = wrong
+    else:
+        build_binding["objects_sha256"] = "0" * 64
+    request = _request(
+        brain_root,
+        objects,
+        coverage=coverage,
+        build_binding=build_binding,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["section"] == section
+    assert result.error_details["coverage_sha256"] == _canonical_sha(coverage)
+
+
+def test_mutation_replans_authored_expected_instead_of_trusting_aligned_bundle(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    coverage, _, build_binding = _assembled_artifacts(
+        brain_root,
+        context_mode="create",
+    )
+    replacement = _event_object("ledger.ctx.other")
+    wrong = [{"id": replacement["id"], "kind": replacement["kind"]}]
+    coverage["expected_objects"] = wrong
+    build_binding.update(
+        {
+            "coverage_sha256": _canonical_sha(coverage),
+            "expected_objects": wrong,
+            "actual_objects": wrong,
+            "objects_sha256": _canonical_sha([replacement]),
+        }
+    )
+    request = _request(
+        brain_root,
+        (replacement,),
+        coverage=coverage,
+        build_binding=build_binding,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["section"] == "expected_objects"
+    assert result.error_details["missing"] == [
+        "context.ctx:DomainContext",
+        "ledger.ctx.one:EventLedgerRecord",
+    ]
+    assert result.error_details["unexpected"] == [
+        "ledger.ctx.other:EventLedgerRecord"
+    ]
+
+
+def test_mutation_replans_assembled_expected_after_store_load(tmp_path):
+    brain_root = tmp_path / "brain"
+    coverage, objects, build_binding = _assembled_artifacts(
+        brain_root,
+        context_mode="create",
+    )
+    _write_raw(brain_root, _ctx_object())
+    request = _request(
+        brain_root,
+        objects,
+        coverage=coverage,
+        build_binding=build_binding,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["section"] == "context"
+
+
+def test_mutation_replans_reuse_against_loaded_store(tmp_path):
+    brain_root = tmp_path / "brain"
+    coverage, objects, build_binding = _assembled_artifacts(
+        brain_root,
+        context_mode="reuse",
+    )
+    BrainStore.object_path(brain_root, _ctx_object()).unlink()
+    request = _request(
+        brain_root,
+        objects,
+        coverage=coverage,
+        build_binding=build_binding,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["section"] == "context"
+
+
+def test_mutation_rejects_request_object_kind_mismatch(tmp_path):
+    obj = _event_object()
+    coverage = direct_coverage(obj)
+    obj["kind"] = "TemporalFact"
+    request = _request(tmp_path / "brain", (obj,), coverage=coverage)
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["object_id"] == obj["id"]
+
+
+@pytest.mark.parametrize("field", ["delete_ids", "renames", "auxiliary_updates"])
+def test_ingest_rejects_hidden_non_object_actions(tmp_path, field):
+    obj = _event_object()
+    overrides = {
+        "delete_ids": ("ledger.ctx.old",),
+        "renames": {"ledger.ctx.old": obj["id"]},
+        "auxiliary_updates": (
+            AuxiliaryFileUpdate(
+                path="eval_scenarios.json",
+                before_sha256="a" * 64,
+                after_sha256="b" * 64,
+                after_bytes=b"{}\n",
+            ),
+        ),
+    }
+    request = _request(
+        tmp_path / "brain",
+        (obj,),
+        **{field: overrides[field]},
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "operation_action_invalid",
+    )
+    assert result.error_details["unexpected"] == [field]
 
 
 def _problem_object_hash(obj: dict) -> str:
@@ -589,11 +945,17 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "canonical_repair_intents",
         "canonical_repair_reference_collapses",
         "canonical_repair_binding",
+        "coverage",
+        "build_binding",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
         "operation",
         "engine_sha",
+        "coverage_sha256",
+        "expected_objects",
+        "verified_objects",
+        "changed_objects",
         "creates",
         "updates",
         "deletes",
@@ -631,7 +993,7 @@ def test_canonical_repair_operation_and_manifest_binding_are_registered():
 def test_canonical_intent_is_rejected_for_ingest(tmp_path):
     request = _mapping_repair_request(
         tmp_path,
-        operation=MutationOperation.INGEST,
+        operation=MutationOperation.PROJECTION,
     )
 
     result = MutationService().plan(request.objects, request=request)
@@ -985,7 +1347,11 @@ def test_malformed_request_is_rejected_before_store_load(tmp_path, case):
     broken = brain_root / "objects" / "domain" / "broken.json"
     broken.parent.mkdir(parents=True)
     broken.write_text("{", encoding="utf-8")
-    request = _request(brain_root, ())
+    request = _request(
+        brain_root,
+        (),
+        operation=MutationOperation.PROJECTION,
+    )
     objects = ()
 
     if case == "request_type":
@@ -1719,7 +2085,7 @@ def test_context_replace_explicit_rename_is_a_real_manifest_action(tmp_path):
 @pytest.mark.parametrize(
     ("case", "expected_code"),
     [
-        ("wrong_operation", "explicit_rename_operation_invalid"),
+        ("wrong_operation", "operation_action_invalid"),
         ("old_not_deleted", "explicit_rename_old_not_deleted"),
         ("old_missing", "explicit_rename_old_missing"),
         ("new_missing", "explicit_rename_new_missing"),
@@ -1776,7 +2142,11 @@ def test_duplicate_full_id_is_rejected_before_dict_fold_and_schema(tmp_path):
     second = dict(first)
     second.pop("status")
 
-    result = _plan(tmp_path / "brain", [first, second])
+    result = _plan(
+        tmp_path / "brain",
+        [first, second],
+        coverage=direct_coverage(first),
+    )
 
     assert result.error_code == "duplicate_object_id"
 
@@ -1788,7 +2158,11 @@ def test_malformed_non_string_ids_reach_validation_instead_of_duplicate_fold(tmp
     second["context_key"] = "other"
     second["id"] = []
 
-    result = _plan(tmp_path / "brain", [first, second])
+    result = _plan(
+        tmp_path / "brain",
+        [first, second],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "new_or_modified_lint_problem"
 
@@ -1797,7 +2171,11 @@ def test_missing_id_is_a_schema_failure_instead_of_an_exception(tmp_path):
     obj = context()
     obj.pop("id")
 
-    result = _plan(tmp_path / "brain", [obj])
+    result = _plan(
+        tmp_path / "brain",
+        [obj],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "schema_invalid"
 
@@ -1806,7 +2184,11 @@ def test_unhashable_kind_is_a_schema_failure_instead_of_an_exception(tmp_path):
     obj = context()
     obj["kind"] = []
 
-    result = _plan(tmp_path / "brain", [obj])
+    result = _plan(
+        tmp_path / "brain",
+        [obj],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "schema_invalid"
 
@@ -1846,7 +2228,11 @@ def test_schema_is_rejected_before_invalid_id(tmp_path):
     obj = _legacy_invalid_context()
     obj.pop("status")
 
-    result = _plan(tmp_path / "brain", [obj])
+    result = _plan(
+        tmp_path / "brain",
+        [obj],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "schema_invalid"
 
@@ -1854,7 +2240,11 @@ def test_schema_is_rejected_before_invalid_id(tmp_path):
 def test_invalid_id_is_rejected_before_missing_quote(tmp_path):
     locator = _code_locator(object_id="code.Legacy", quote=None)
 
-    result = _plan(tmp_path / "brain", [locator])
+    result = _plan(
+        tmp_path / "brain",
+        [locator],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "new_or_modified_lint_problem"
 
@@ -2267,7 +2657,7 @@ def test_id_only_plan_binds_existing_eval_update_to_exact_bytes(tmp_path):
         (
             MutationOperation.INGEST,
             "eval_scenarios.json",
-            "auxiliary_update_operation_invalid",
+            "operation_action_invalid",
         ),
         (
             MutationOperation.ID_ONLY_MIGRATION,
@@ -2298,10 +2688,15 @@ def test_auxiliary_update_allowlist_fails_closed(
     after = b'{"scenarios":[]}\n'
     (brain_root / "eval_scenarios.json").write_bytes(before)
     update = _file_update(path, before, after)
+    objects = (
+        [_event_object()]
+        if operation is MutationOperation.INGEST
+        else []
+    )
 
     result = _plan(
         brain_root,
-        [],
+        objects,
         operation=operation,
         auxiliary_updates=(update,),
     )
@@ -2523,7 +2918,11 @@ def test_changed_or_new_invalid_id_is_rejected(tmp_path, mode):
         _write_raw(brain_root, invalid)
         invalid = _legacy_invalid_context(title="changed")
 
-    result = _plan(brain_root, [invalid])
+    result = _plan(
+        brain_root,
+        [invalid],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "new_or_modified_lint_problem"
 
@@ -2534,7 +2933,11 @@ def test_unchanged_invalid_id_uses_stable_json_not_key_insertion_order(tmp_path)
     _write_raw(brain_root, invalid)
     reordered = dict(reversed(tuple(invalid.items())))
 
-    result = _plan(brain_root, [reordered])
+    result = _plan(
+        brain_root,
+        [reordered],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.ok is True
     assert result.manifest.grandfathered_problems_after
@@ -2548,7 +2951,7 @@ def test_unchanged_unknown_grammar_is_grandfathered_with_exact_problem_binding(
     _write_raw(brain_root, context())
     _write_raw(brain_root, legacy)
 
-    result = _plan(brain_root, [])
+    result = _plan(brain_root, [], operation=MutationOperation.PROJECTION)
 
     assert result.ok is True
     assert result.manifest.grandfathered_problems_before == (
@@ -2576,7 +2979,11 @@ def test_unchanged_unknown_grammar_uses_stable_json_not_key_insertion_order(
     _write_raw(brain_root, legacy)
     reordered = dict(reversed(tuple(legacy.items())))
 
-    result = _plan(brain_root, [reordered])
+    result = _plan(
+        brain_root,
+        [reordered],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.ok is True
     assert result.manifest.grandfathered_problems_after
@@ -2594,7 +3001,11 @@ def test_changed_or_new_unknown_grammar_is_rejected(tmp_path, change):
     else:
         candidate["id"] = "review.disturb-hedgehog.cloud-fix"
 
-    result = _plan(brain_root, [candidate])
+    result = _plan(
+        brain_root,
+        [candidate],
+        operation=MutationOperation.PROJECTION,
+    )
 
     assert result.error_code == "new_or_modified_lint_problem"
 
@@ -2635,7 +3046,7 @@ def test_unknown_grammar_does_not_grandfather_an_existing_non_id_problem(tmp_pat
         context("context.broken", glossary_term_ids=["g.neutral.missing"]),
     )
 
-    result = _plan(brain_root, [])
+    result = _plan(brain_root, [], operation=MutationOperation.PROJECTION)
 
     assert result.error_code == "dangling_reference"
 
@@ -2661,7 +3072,7 @@ def test_existing_non_id_lint_problem_is_never_grandfathered(tmp_path):
     broken = context(glossary_term_ids=["g.neutral.missing"])
     _write_raw(brain_root, broken)
 
-    result = _plan(brain_root, [])
+    result = _plan(brain_root, [], operation=MutationOperation.PROJECTION)
 
     assert result.error_code == "dangling_reference"
 
@@ -2686,7 +3097,12 @@ def test_merged_references_are_checked_before_merged_lint(tmp_path):
     _write_raw(brain_root, ctx)
     _write_raw(brain_root, term)
 
-    result = _plan(brain_root, [], delete_ids=(term["id"],))
+    result = _plan(
+        brain_root,
+        [],
+        operation=MutationOperation.CONTEXT_REPLACE,
+        delete_ids=(term["id"],),
+    )
 
     assert result.error_code == "dangling_reference"
 
@@ -2701,6 +3117,7 @@ def test_lifecycle_failure_precedes_missing_delete_target(tmp_path):
     result = _plan(
         brain_root,
         [replacement],
+        operation=MutationOperation.CONTEXT_REPLACE,
         delete_ids=("g.neutral.missing",),
     )
 
@@ -2765,6 +3182,7 @@ def test_reference_rewrites_are_recorded_with_exact_pointer(tmp_path):
     result = _plan(
         brain_root,
         [replacement, new_term],
+        operation=MutationOperation.CONTEXT_REPLACE,
         delete_ids=(old_term["id"],),
     )
 
@@ -2795,7 +3213,7 @@ def test_existing_duplicate_payload_id_blocks_plan_without_manifest(
     first_path.write_bytes(BrainStore.object_bytes(first))
     second_path.write_bytes(BrainStore.object_bytes(second))
 
-    result = _plan(brain_root, [])
+    result = _plan(brain_root, [], operation=MutationOperation.PROJECTION)
 
     assert result.error_code == "duplicate_existing_object_id"
     assert result.manifest is None
@@ -2809,7 +3227,7 @@ def test_corrupt_tracked_object_json_returns_corpus_invalid(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text("{", encoding="utf-8")
 
-    result = _plan(brain_root, [])
+    result = _plan(brain_root, [], operation=MutationOperation.PROJECTION)
 
     assert result.error_code == "corpus_invalid"
     assert result.manifest is None
@@ -2821,7 +3239,11 @@ def test_apply_corrupt_tracked_object_json_returns_corpus_invalid(tmp_path):
     broken = brain_root / "objects" / "domain" / "broken.json"
     broken.parent.mkdir(parents=True)
     broken.write_text("{", encoding="utf-8")
-    request = _request(brain_root, ())
+    request = _request(
+        brain_root,
+        (),
+        operation=MutationOperation.PROJECTION,
+    )
 
     result = MutationService().apply((), request=request)
 

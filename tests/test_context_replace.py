@@ -9,6 +9,7 @@ import pytest
 
 from project_brain.context_replace import (
     ContextReplaceError,
+    _corpus_journal_manifest,
     apply_context_replace_artifact,
     create_context_replace_artifact,
     plan_context_replace,
@@ -79,6 +80,37 @@ def _apply_artifact(brain_root: Path, request):
         engine_sha=ENGINE_SHA,
     )
     return artifact, result
+
+
+def test_context_replace_projects_expanded_manifest_before_journal_apply(tmp_path):
+    brain_root = tmp_path / "brain"
+    before = context()
+    _write_raw(brain_root, before)
+    after = dict(before)
+    after["title"] = "확장 manifest 적용"
+    request = _plan(brain_root, desired_objects=[after])
+    artifact = create_context_replace_artifact(request)
+    expanded = {
+        **artifact.manifest,
+        "coverage_sha256": None,
+        "expected_objects": [],
+        "verified_objects": [],
+        "changed_objects": [],
+    }
+    manifest_bytes = (
+        json.dumps(expanded, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+    result = apply_context_replace_artifact(
+        manifest_bytes=manifest_bytes,
+        expected_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        brain_root=brain_root,
+        repo_context=None,
+        engine_sha=ENGINE_SHA,
+    )
+
+    assert result.action_count == 1
+    assert BrainStore.load(brain_root).get(after["id"]) == after
 
 
 def test_context_replace_does_not_force_old_and_new_counts_to_match(tmp_path):
@@ -411,10 +443,10 @@ def test_context_replace_rejects_post_plan_legacy_whitespace_change_before_write
     with pytest.raises(CorpusIOError, match="before_hash_mismatch"):
         apply_transaction(
             brain_root,
-            manifest={
+            manifest=_corpus_journal_manifest({
                 field.name: artifact.manifest[field.name]
                 for field in fields(MutationManifest)
-            },
+            }),
             after_files={
                 artifact.manifest["updates"][0]["path"]: BrainStore.object_bytes(
                     replacement

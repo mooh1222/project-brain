@@ -87,7 +87,8 @@ step "ingest"
 INGEST=(project-brain ingest \
   --brain-root "$BRAIN_ROOT" \
   --objects-file "$OBJS" \
-  --preconditions-file "$BUILD_REPORT" \
+  --coverage-file "$COVERAGE" \
+  --build-report "$BUILD_REPORT" \
   --repo-root "$REPO_ROOT" \
   --expected-repo-id "$EXPECTED_REPO_ID" \
   --expected-revision-ref "$EXPECTED_REVISION_REF" \

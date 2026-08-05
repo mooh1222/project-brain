@@ -13,12 +13,29 @@ from project_brain.mutation import (
     MutationRequest,
     MutationService,
 )
+from project_brain.coverage import BuildArtifactBinding
 from project_brain.repo_context import RepoContext
 from project_brain.transaction_receipt import BatchBinding
 
 
 class IngestError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        error_details: Mapping[str, object] | None = None,
+    ) -> None:
+        self.code = code
+        self.detail = detail
+        self.error_details = dict(error_details or {})
+        super().__init__(f"{code}: {detail}" if code else detail)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "error_code": self.code,
+            "error": self.detail,
+            "error_details": dict(self.error_details),
+        }
 
 
 def ingest(
@@ -27,6 +44,8 @@ def ingest(
     preconditions: Mapping[str, str] | None = None,
     *,
     engine_sha: str,
+    coverage: Mapping[str, object] | None = None,
+    build_binding: BuildArtifactBinding | Mapping[str, object] | None = None,
     repo_context: RepoContext | None = None,
     operation: MutationOperation = MutationOperation.INGEST,
     expected_corpus_fingerprint: str | None = None,
@@ -43,10 +62,14 @@ def ingest(
         preconditions=preconditions or {},
         expected_corpus_fingerprint=expected_corpus_fingerprint,
         batch_binding=batch_binding,
+        coverage=coverage,
+        build_binding=build_binding,
     )
     result = MutationService().apply(inputs, request=request)
     if not result.ok:
-        detail = result.detail or "mutation failed"
-        code = f"{result.error_code}: " if result.error_code else ""
-        raise IngestError(f"{code}{detail}")
+        raise IngestError(
+            result.error_code or "mutation_failed",
+            result.detail or "mutation failed",
+            result.error_details,
+        )
     return result
