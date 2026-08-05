@@ -13,12 +13,14 @@ from pathlib import Path
 from unittest import mock
 
 from project_brain.ingest import IngestError, ingest as _product_ingest
+from project_brain.mutation import MutationService
 from project_brain.objbase import base
 from project_brain.store import BrainStore
 from tests.coverage_helpers import direct_coverage
 
 T = "2026-06-04T00:00:00Z"
 ENGINE_SHA = "e" * 40
+FIXED_TIME = "2026-08-05T12:34:56+09:00"
 
 
 def ingest(brain_root, objects, preconditions=None, **kwargs):
@@ -304,6 +306,25 @@ class TestIngest(unittest.TestCase):
         self.assertTrue(store.has("evref.neutral.ref"))
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
 
+    def test_ingest_uses_private_mutation_service_factory(self):
+        draft = manifest()
+        draft.pop("created_at")
+        draft.pop("updated_at")
+        service = MutationService(clock=lambda: FIXED_TIME)
+
+        with mock.patch(
+            "project_brain.ingest._new_mutation_service",
+            return_value=service,
+        ):
+            result = ingest(self.root, [draft])
+
+        stored = BrainStore.load(self.root).get(draft["id"])
+        self.assertEqual(result.after, stored)
+        self.assertEqual(
+            (stored["created_at"], stored["updated_at"]),
+            (FIXED_TIME, FIXED_TIME),
+        )
+
     def test_product_code_has_no_direct_brain_store_save_calls(self):
         package = Path(__file__).parents[1] / "src" / "project_brain"
         offenders = []
@@ -519,7 +540,10 @@ class PreconditionsTest(unittest.TestCase):
             new = _mapping_obj("2026-06-16T00:00:00Z", boundary="새 경계")
             import hashlib
 
-            expected = hashlib.sha256(BrainStore.object_bytes(current)).hexdigest()
+            stored_current = BrainStore.load(brain).get(current["id"])
+            expected = hashlib.sha256(
+                BrainStore.object_bytes(stored_current)
+            ).hexdigest()
             ingest(brain, [new], preconditions={"mapping.ctx.x": expected})
 
     def test_precondition_target_missing_is_error(self):

@@ -6,7 +6,8 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
@@ -51,8 +52,20 @@ from project_brain.schema import (
 from project_brain.store import BrainStore, StoreLoadError
 from project_brain.transaction_receipt import (
     BatchBinding,
+    MutationOutcome,
     batch_binding_dict,
     normalize_batch_binding,
+)
+from project_brain.write_semantics import (
+    ObjectActionKind,
+    ObjectWriteAction,
+    TimestampPolicy,
+    VerifiedReferenceRewrite,
+    apply_timestamp_policy,
+    classify_object_actions,
+    engine_owned_input_fields,
+    engine_owned_temporal_fields,
+    validate_write_semantics,
 )
 
 
@@ -88,6 +101,18 @@ def _json_exact(left: object, right: object) -> bool:
             for left_item, right_item in zip(left, right, strict=True)
         )
     return left == right
+
+
+def _transaction_time_error(value: object) -> str | None:
+    if not isinstance(value, str) or "T" not in value:
+        return "transaction clock must return a timezone-aware ISO timestamp"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return "transaction clock must return a timezone-aware ISO timestamp"
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return "transaction clock must return a timezone-aware ISO timestamp"
+    return None
 
 
 class MutationOperation(StrEnum):
@@ -181,6 +206,7 @@ class MutationPlanResult:
     manifest_sha256: str = ""
     auxiliary_after_files: Mapping[str, bytes] = field(default_factory=dict)
     error_details: Mapping[str, object] = field(default_factory=dict)
+    outcome: MutationOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +217,36 @@ class _CanonicalRepairValidation:
 
 
 class MutationService:
+    def __init__(self, *, clock: Callable[[], str] = now_kst) -> None:
+        self._clock = clock
+
+    def preview(
+        self,
+        objects: Sequence[dict],
+        *,
+        request: MutationRequest,
+    ) -> MutationPlanResult:
+        """시간·manifest·corpus write 없는 unstamped preflight를 반환한다."""
+        return self._plan(
+            objects,
+            request=request,
+            _preview_only=True,
+        )
+
+    def plan(
+        self,
+        objects: Sequence[dict],
+        *,
+        request: MutationRequest,
+        _existing_store: BrainStore | None = None,
+    ) -> MutationPlanResult:
+        """호환 preflight 뒤 stamp와 manifest를 만들되 corpus는 쓰지 않는다."""
+        return self._plan(
+            objects,
+            request=request,
+            _existing_store=_existing_store,
+        )
+
     def apply(
         self,
         objects: Sequence[dict],
@@ -214,7 +270,7 @@ class MutationService:
                 if isinstance(exc.__cause__, CorpusIOError):
                     raise exc.__cause__
                 return _store_load_failure(exc)
-            result = self.plan(
+            result = self._plan(
                 inputs,
                 request=request,
                 _existing_store=existing_store,
@@ -231,7 +287,7 @@ class MutationService:
                 + result.manifest.auxiliary_updates
             )
             if not actions:
-                return result
+                return replace(result, outcome=MutationOutcome.NO_CHANGES)
             after_paths = {
                 str(action["path"])
                 for action in writable_actions
@@ -257,14 +313,15 @@ class MutationService:
                 after_files=after_files,
                 failure_injector=failure_injector,
             )
-            return result
+            return replace(result, outcome=MutationOutcome.COMMITTED)
 
-    def plan(
+    def _plan(
         self,
         objects: Sequence[dict],
         *,
         request: MutationRequest,
         _existing_store: BrainStore | None = None,
+        _preview_only: bool = False,
     ) -> MutationPlanResult:
         inputs, request_error = _validate_request_shape(objects, request)
         if request_error is not None:
@@ -327,10 +384,9 @@ class MutationService:
         for obj in inputs:
             errors = validate_mutation_input_schema(
                 obj,
-                omitted_required_fields=(
-                    frozenset({"verified_at"})
-                    if obj.get("kind") == "CodeLocator"
-                    else frozenset()
+                omitted_required_fields=engine_owned_input_fields(
+                    request.operation.value,
+                    str(obj.get("kind", "")),
                 ),
             )
             if errors:
@@ -474,14 +530,6 @@ class MutationService:
                         )
                 planned_inputs.append(planned)
 
-        if request.operation is MutationOperation.MARK_CHECKED:
-            verification_event_at = now_kst()
-            for planned in planned_inputs:
-                if planned.get("id") not in verified_locator_ids:
-                    continue
-                planned["verified_at"] = verification_event_at
-                planned["updated_at"] = verification_event_at
-
         # 8) 기존 객체 precondition과 before hash.
         explicit_rename_pairs, explicit_rename_error = (
             _validate_explicit_renames(
@@ -518,6 +566,19 @@ class MutationService:
             return rename_error
         if request.operation is MutationOperation.ID_ONLY_MIGRATION:
             planned_inputs = [dict(obj) for obj in inputs]
+        unstamped_inputs: list[dict] = []
+        for obj in planned_inputs:
+            unstamped = dict(obj)
+            caller = input_by_id.get(str(obj.get("id", "")), {})
+            for field_name in engine_owned_temporal_fields(
+                str(obj.get("kind", ""))
+            ):
+                if field_name in caller:
+                    unstamped[field_name] = caller[field_name]
+                else:
+                    unstamped.pop(field_name, None)
+            unstamped_inputs.append(unstamped)
+        planned_inputs = unstamped_inputs
         planned_by_id = {obj["id"]: obj for obj in planned_inputs}
 
         before_fingerprint = _corpus_fingerprint(existing_by_id)
@@ -545,6 +606,150 @@ class MutationService:
                         f"does not match {actual_hash!r}"
                     ),
                 )
+
+        replacements = dict(rename_pairs)
+        verified_reference_rewrites = tuple(
+            VerifiedReferenceRewrite(
+                object_id=str(row["object_id"]),
+                pointer=str(row["pointer"]),
+                before_id=str(row["before_id"]),
+                after_id=str(row["after_id"]),
+            )
+            for row in _reference_rewrites(
+                existing_by_id,
+                planned_by_id,
+                rename_pairs,
+                suppressed_fields=(
+                    canonical_validation.suppressed_reference_fields
+                ),
+            )
+            if replacements.get(str(row["before_id"])) == row["after_id"]
+        )
+        try:
+            object_actions = classify_object_actions(
+                operation=request.operation.value,
+                existing_by_id=existing_by_id,
+                transformed_by_id=planned_by_id,
+                delete_ids=delete_ids,
+                rename_pairs=rename_pairs,
+                verified_reference_rewrites=verified_reference_rewrites,
+            )
+        except ValueError as exc:
+            return _failure("timestamp_policy_missing", str(exc))
+
+        if request.operation is MutationOperation.MARK_CHECKED:
+            object_actions = tuple(
+                ObjectWriteAction(
+                    action=ObjectActionKind.UPDATE,
+                    object_id=action.object_id,
+                    object_kind=action.object_kind,
+                    source_id=action.source_id,
+                    timestamp_policy=TimestampPolicy.LIVE,
+                )
+                if (
+                    action.action is ObjectActionKind.NO_CHANGE
+                    and action.object_id in verified_locator_ids
+                )
+                else action
+                for action in object_actions
+            )
+
+        if _preview_only:
+            after = planned_inputs[0] if len(planned_inputs) == 1 else None
+            return MutationPlanResult(
+                ok=True,
+                after=after,
+                after_objects=tuple(planned_inputs),
+            )
+
+        has_action = bool(request.auxiliary_updates) or any(
+            action.action is not ObjectActionKind.NO_CHANGE
+            for action in object_actions
+        )
+        event_time: str | None = None
+        if has_action:
+            event_time = self._clock()
+            timestamp_error = _transaction_time_error(event_time)
+            if timestamp_error is not None:
+                return _failure("timestamp_invalid", timestamp_error)
+
+        action_by_id = {
+            action.object_id: action
+            for action in object_actions
+        }
+        stamping_inputs: list[dict] = []
+        for item in planned_inputs:
+            obj = dict(item)
+            action = action_by_id.get(str(obj.get("id", "")))
+            source = (
+                existing_by_id.get(action.source_id)
+                if action is not None and action.source_id is not None
+                else None
+            )
+            if (
+                action is not None
+                and action.timestamp_policy is TimestampPolicy.LIVE
+                and source is not None
+            ):
+                for field_name in (
+                    engine_owned_temporal_fields(
+                        str(obj.get("kind", ""))
+                    )
+                    - {"created_at", "updated_at"}
+                ):
+                    if (
+                        field_name in source
+                        and not (
+                            field_name == "verified_at"
+                            and action.object_id in verified_locator_ids
+                        )
+                        and not (
+                            field_name == "generated_at"
+                            and request.operation is MutationOperation.PROJECTION
+                        )
+                    ):
+                        obj[field_name] = source[field_name]
+            stamping_inputs.append(obj)
+
+        try:
+            planned_inputs = list(apply_timestamp_policy(
+                stamping_inputs,
+                actions=object_actions,
+                existing_by_id=existing_by_id,
+                operation=request.operation.value,
+                verified_object_ids=verified_locator_ids,
+                event_time=event_time,
+            ))
+        except ValueError as exc:
+            code = (
+                "timestamp_invalid"
+                if str(exc).startswith("timestamp_invalid")
+                else "timestamp_policy_missing"
+            )
+            return _failure(code, str(exc))
+        planned_by_id = {obj["id"]: obj for obj in planned_inputs}
+
+        source_id_by_after_id = {
+            action.object_id: action.source_id
+            for action in object_actions
+            if action.source_id is not None
+        }
+        write_report = validate_write_semantics(
+            before_by_id=existing_by_id,
+            after_by_id=planned_by_id,
+            source_id_by_after_id=source_id_by_after_id,
+        )
+        if write_report.errors:
+            problem = write_report.errors[0]
+            return _failure(problem.code, problem.message)
+
+        for obj in planned_inputs:
+            errors = validate_mutation_input_schema(
+                obj,
+                omitted_required_fields=frozenset(),
+            )
+            if errors:
+                return _failure("schema_invalid", "; ".join(errors))
 
         merged = dict(existing_by_id)
         for object_id in delete_ids:

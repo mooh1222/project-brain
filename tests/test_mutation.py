@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import project_brain.mutation as mutation
+import project_brain.transaction_receipt as transaction_receipt
 from project_brain.canonical_merge import (
     ReferenceCollapse,
     project_collision_merges,
@@ -44,6 +45,8 @@ from tests.test_canonical_merge import merge_pair
 
 
 T = "2026-07-28T00:00:00+09:00"
+FIXED_TIME = "2026-08-05T12:34:56+09:00"
+NEW_EVENT_TIME = "2026-08-04T09:30:00+09:00"
 _AUTO_COVERAGE = object()
 
 
@@ -108,7 +111,7 @@ def _plan(
 ):
     inputs = tuple(objects)
     request = _request(brain_root, inputs, **request_kwargs)
-    return MutationService().plan(inputs, request=request)
+    return MutationService(clock=lambda: T).plan(inputs, request=request)
 
 
 def _write_raw(brain_root: Path, obj: dict) -> None:
@@ -125,6 +128,34 @@ def _write_raw(brain_root: Path, obj: dict) -> None:
 
 def _object_hash(obj: dict) -> str:
     return hashlib.sha256(BrainStore.object_bytes(obj)).hexdigest()
+
+
+def object_by_id(objects: Sequence[dict], object_id: str) -> dict:
+    return next(obj for obj in objects if obj["id"] == object_id)
+
+
+def _event(
+    object_id: str = "ledger.neutral.change",
+    *,
+    happened_at: str = T,
+) -> dict:
+    return base(
+        {
+            "id": object_id,
+            "kind": "EventLedgerRecord",
+            "status": "reviewed",
+            "truth_role": "event",
+            "title": "변경 사건",
+            "event_type": "rule_change",
+            "happened_at": happened_at,
+            "summary": "합성 변경 사건",
+            "related_objects": [],
+            "evidence_refs": [],
+        },
+        tags=["neutral"],
+        created_at=T,
+        updated_at=T,
+    )
 
 
 def _file_update(path: str, before: bytes, after: bytes) -> AuxiliaryFileUpdate:
@@ -2121,6 +2152,7 @@ def test_context_replace_explicit_rename_is_a_real_manifest_action(tmp_path):
     assert result.ok is True
     assert result.manifest.creates == ()
     assert result.manifest.deletes == ()
+    stamped_new = object_by_id(result.after_objects, new["id"])
     assert result.manifest.renames == ({
         "old_id": old["id"],
         "new_id": new["id"],
@@ -2131,7 +2163,7 @@ def test_context_replace_explicit_rename_is_a_real_manifest_action(tmp_path):
             "objects/domain/g.neutral.new.json"
         ),
         "before_sha256": _object_hash(old),
-        "after_sha256": _object_hash(new),
+        "after_sha256": _object_hash(stamped_new),
     },)
     assert {
         (
@@ -3227,11 +3259,12 @@ def test_manifest_is_deterministic_relative_and_hash_bound(tmp_path):
         )
         + "\n"
     ).encode("utf-8")
+    stamped_replacement = object_by_id(first.after_objects, existing["id"])
     assert first.manifest.updates[0] == {
         "object_id": existing["id"],
         "path": "objects/domain/context.neutral.json",
         "before_sha256": _object_hash(existing),
-        "after_sha256": _object_hash(replacement),
+        "after_sha256": _object_hash(stamped_replacement),
     }
     assert first.manifest.creates[0]["path"] == "objects/domain/g.neutral.x.json"
     assert Path(first.manifest.creates[0]["path"]).is_absolute() is False
@@ -3361,3 +3394,217 @@ def test_plan_rejects_malformed_injected_source_receipt_before_manifest(
 
     assert result.error_code == "source_receipt_invalid"
     assert result.manifest is None
+
+
+def test_live_create_uses_one_injected_clock_for_all_engine_timestamps(tmp_path):
+    calls: list[str] = []
+    first = _event()
+    first["created_at"] = "2000-01-01T00:00:00+09:00"
+    first["updated_at"] = "2000-01-01T00:00:00+09:00"
+    second = manifest("manifest.neutral.second")
+    second["created_at"] = "2001-01-01T00:00:00+09:00"
+    second["updated_at"] = "2001-01-01T00:00:00+09:00"
+    inputs = (first, second)
+    request = _request(tmp_path / "brain", inputs)
+
+    result = MutationService(
+        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME
+    ).apply(inputs, request=request)
+
+    assert result.ok
+    assert result.outcome is transaction_receipt.MutationOutcome.COMMITTED
+    assert calls == [FIXED_TIME]
+    assert {
+        (obj["created_at"], obj["updated_at"])
+        for obj in result.after_objects
+    } == {(FIXED_TIME, FIXED_TIME)}
+
+
+def test_live_update_preserves_created_and_bumps_updated_for_substantive_change(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    old = _event()
+    _write_raw(brain_root, old)
+    changed = {
+        **old,
+        "summary": "실제 변경",
+        "created_at": "2099-01-01T00:00:00+09:00",
+        "updated_at": "2099-01-01T00:00:00+09:00",
+    }
+    request = _request(brain_root, (changed,))
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    stored = object_by_id(result.after_objects, old["id"])
+    assert result.outcome is transaction_receipt.MutationOutcome.COMMITTED
+    assert stored["created_at"] == old["created_at"]
+    assert stored["updated_at"] == FIXED_TIME
+    assert BrainStore.load(brain_root).get(old["id"]) == stored
+
+
+def test_live_noop_does_not_call_clock_and_existing_bytes_win(tmp_path):
+    brain_root = tmp_path / "brain"
+    old = _event()
+    _write_raw(brain_root, old)
+    path = BrainStore.object_path(brain_root, old)
+    before_bytes = path.read_bytes()
+    caller = {
+        **old,
+        "created_at": "2099-01-01T00:00:00+09:00",
+        "updated_at": "2099-01-01T00:00:00+09:00",
+    }
+    request = _request(brain_root, (caller,))
+
+    def forbidden_clock() -> str:
+        raise AssertionError("no-op opened the clock")
+
+    result = MutationService(clock=forbidden_clock).apply(
+        request.objects,
+        request=request,
+    )
+
+    assert result.ok
+    assert result.outcome is transaction_receipt.MutationOutcome.NO_CHANGES
+    assert object_by_id(result.after_objects, old["id"]) == old
+    assert result.manifest is not None
+    assert result.manifest.creates == ()
+    assert result.manifest.updates == ()
+    assert result.manifest.changed_objects == ()
+    assert path.read_bytes() == before_bytes
+    assert not (brain_root / ".brain-local" / "transactions").exists()
+
+
+def test_live_pre_schema_allows_engine_fields_omission_before_final_stamp(
+    tmp_path,
+):
+    draft = _event()
+    draft.pop("created_at")
+    draft.pop("updated_at")
+    request = _request(tmp_path / "brain", (draft,))
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    stored = object_by_id(result.after_objects, draft["id"])
+    assert result.ok
+    assert stored["created_at"] == stored["updated_at"] == FIXED_TIME
+
+
+def test_invalid_injected_clock_fails_before_manifest(tmp_path):
+    draft = _event()
+    draft.pop("created_at")
+    draft.pop("updated_at")
+    request = _request(tmp_path / "brain", (draft,))
+
+    result = MutationService(clock=lambda: "2026-08-05T12:00:00").apply(
+        request.objects,
+        request=request,
+    )
+
+    assert (result.ok, result.error_code, result.manifest) == (
+        False,
+        "timestamp_invalid",
+        None,
+    )
+
+
+def test_preview_never_opens_transaction_clock_or_builds_manifest(tmp_path):
+    draft = _event()
+    draft.pop("created_at")
+    draft.pop("updated_at")
+    request = _request(tmp_path / "brain", (draft,))
+
+    def forbidden_clock() -> str:
+        raise AssertionError("preview opened the clock")
+
+    preview = MutationService(clock=forbidden_clock).preview(
+        request.objects,
+        request=request,
+    )
+
+    assert preview.ok
+    assert preview.outcome is None
+    assert preview.manifest is None
+    assert "created_at" not in preview.after_objects[0]
+    assert "updated_at" not in preview.after_objects[0]
+
+
+def test_compat_plan_stamps_without_committing_or_setting_outcome(tmp_path):
+    brain_root = tmp_path / "brain"
+    draft = _event()
+    draft.pop("created_at")
+    draft.pop("updated_at")
+    request = _request(brain_root, (draft,))
+
+    result = MutationService(clock=lambda: FIXED_TIME).plan(
+        request.objects,
+        request=request,
+    )
+
+    assert result.ok
+    assert result.outcome is None
+    assert result.manifest is not None
+    assert result.after_objects[0]["created_at"] == FIXED_TIME
+    assert BrainStore.load(brain_root).all() == []
+
+
+def test_apply_with_internal_preflight_calls_clock_once(tmp_path):
+    calls: list[str] = []
+    draft = _event()
+    draft.pop("created_at")
+    draft.pop("updated_at")
+    request = _request(tmp_path / "brain", (draft,))
+
+    result = MutationService(
+        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME
+    ).apply(request.objects, request=request)
+
+    assert result.ok
+    assert calls == [FIXED_TIME]
+
+
+def test_valid_caller_event_time_change_is_substantive_and_bumps_updated(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    old = manifest()
+    _write_raw(brain_root, old)
+    changed = {**old, "captured_at": NEW_EVENT_TIME}
+    request = _request(brain_root, (changed,))
+    calls: list[str] = []
+
+    result = MutationService(
+        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME
+    ).apply(request.objects, request=request)
+
+    stored = object_by_id(result.after_objects, old["id"])
+    assert result.outcome is transaction_receipt.MutationOutcome.COMMITTED
+    assert calls == [FIXED_TIME]
+    assert stored["captured_at"] == NEW_EVENT_TIME
+    assert stored["created_at"] == old["created_at"]
+    assert stored["updated_at"] == FIXED_TIME
+
+
+def test_invalid_changed_caller_event_time_is_blocking(tmp_path):
+    brain_root = tmp_path / "brain"
+    old = manifest()
+    _write_raw(brain_root, old)
+    changed = {**old, "captured_at": "2026-08-05T12:00:00"}
+    request = _request(brain_root, (changed,))
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    assert (result.ok, result.error_code, result.manifest) == (
+        False,
+        "timestamp_invalid",
+        None,
+    )

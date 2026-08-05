@@ -64,10 +64,19 @@ PREPARATION_FAILURE_POINTS = (
     "after_snapshot_dir_mkdir",
     "before_active_publish",
 )
+TRANSACTION_TIME = "2026-06-04T00:00:00Z"
 
 
 class InjectedCrash(RuntimeError):
     pass
+
+
+def _service() -> MutationService:
+    return MutationService(clock=lambda: TRANSACTION_TIME)
+
+
+def _result_object(result, object_id: str) -> dict:
+    return next(obj for obj in result.after_objects if obj["id"] == object_id)
 
 
 def _journal_manifest(manifest) -> dict[str, object]:
@@ -270,7 +279,7 @@ def _case_only_migration(tmp_path):
         objects=(new,),
         delete_ids=(old["id"],),
     )
-    planned = MutationService().plan((new,), request=request)
+    planned = _service().plan((new,), request=request)
     assert planned.ok and planned.manifest is not None
     rename = planned.manifest.renames[0]
     old_path = brain_root / rename["old_path"]
@@ -287,9 +296,10 @@ def _exact_child_names(path: Path) -> set[str]:
 
 def _case_only_apply_inputs(planned, new: dict) -> tuple[dict, dict[str, bytes]]:
     rename = planned.manifest.renames[0]
+    stamped_new = _result_object(planned, new["id"])
     return (
         _journal_manifest(planned.manifest),
-        {rename["new_path"]: BrainStore.object_bytes(new)},
+        {rename["new_path"]: BrainStore.object_bytes(stamped_new)},
     )
 
 
@@ -318,7 +328,7 @@ def _case_only_multi_migration(tmp_path, *, count: int = 3):
         objects=tuple(new_objects),
         delete_ids=tuple(obj["id"] for obj in old_objects),
     )
-    planned = MutationService().plan(tuple(new_objects), request=request)
+    planned = _service().plan(tuple(new_objects), request=request)
     assert planned.ok and planned.manifest is not None
     assert len(planned.manifest.renames) == count
     pairs = tuple(
@@ -710,7 +720,7 @@ def test_manifest_always_contains_canonical_repair_binding(tmp_path):
     before, after = _changed_context()
     _write_object(brain_root, before)
 
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
@@ -749,7 +759,7 @@ def test_invalid_canonical_repair_binding_is_rejected_before_journal_publish(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
@@ -778,7 +788,7 @@ def test_manifest_missing_canonical_repair_binding_is_rejected_before_publish(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
@@ -797,7 +807,7 @@ def test_manifest_missing_canonical_repair_binding_is_rejected_before_publish(
 
 def test_direct_canonical_repair_apply_revalidates_current_source(tmp_path):
     request = _mapping_repair_request(tmp_path)
-    initially_valid = MutationService().plan(
+    initially_valid = _service().plan(
         request.objects,
         request=request,
     )
@@ -808,7 +818,7 @@ def test_direct_canonical_repair_apply_revalidates_current_source(tmp_path):
     current_source["title"] = "concurrent drift"
     _write_object(request.brain_root, current_source)
 
-    result = MutationService().apply(request.objects, request=request)
+    result = _service().apply(request.objects, request=request)
 
     assert result.error_code == "canonical_repair_payload_changed"
     store = BrainStore.load(request.brain_root)
@@ -826,7 +836,7 @@ def test_canonical_repair_rolls_back_every_transaction_failure_point(
     before_fingerprint = _state_fingerprint(request.brain_root)
 
     with pytest.raises(InjectedCrash, match=failure_point):
-        MutationService().apply(
+        _service().apply(
             request.objects,
             request=request,
             failure_injector=_crash_at(failure_point),
@@ -837,7 +847,7 @@ def test_canonical_repair_rolls_back_every_transaction_failure_point(
         (),
         operation=MutationOperation.PROJECTION,
     )
-    assert MutationService().apply((), request=recovery_request).ok is True
+    assert _service().apply((), request=recovery_request).ok is True
     assert _state_fingerprint(request.brain_root) == before_fingerprint
     store = BrainStore.load(request.brain_root)
     assert store.has(request.delete_ids[0])
@@ -852,7 +862,7 @@ def test_canonical_merge_rolls_back_every_transaction_failure_point(
     request = _collision_merge_request(tmp_path)
     brain_root = request.brain_root
     _seed_derived_files(brain_root)
-    service = MutationService()
+    service = _service()
     planned = service.plan(request.objects, request=request)
     assert planned.ok and planned.manifest is not None
     manifest = planned.manifest
@@ -969,7 +979,7 @@ def test_legacy_nonbatch_committed_journal_without_binding_remains_readable(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    result = MutationService().apply(
+    result = _service().apply(
         (after,),
         request=_request(brain_root, (after,)),
     )
@@ -992,7 +1002,7 @@ def test_legacy_nonbatch_committed_journal_without_binding_remains_readable(
     assert BrainStore.load(brain_root).get(after["id"]) == after
     newer = dict(after)
     newer["title"] = "legacy followup"
-    followup = MutationService().apply(
+    followup = _service().apply(
         (newer,),
         request=_request(brain_root, (newer,)),
     )
@@ -1013,7 +1023,7 @@ def _historical_context_replace_journal(
         (after,),
         operation=MutationOperation.CONTEXT_REPLACE,
     )
-    result = MutationService().apply((after,), request=request)
+    result = _service().apply((after,), request=request)
     assert result.ok and result.manifest is not None
     journal_path = (
         brain_root
@@ -1088,7 +1098,7 @@ def test_historical_nonterminal_manifest_without_canonical_binding_is_rejected(
 
 def test_terminal_canonical_repair_manifest_missing_binding_is_rejected(tmp_path):
     request = _mapping_repair_request(tmp_path)
-    result = MutationService().apply(request.objects, request=request)
+    result = _service().apply(request.objects, request=request)
     assert result.ok and result.manifest is not None
     journal_path = (
         request.brain_root
@@ -1174,7 +1184,7 @@ def test_current_noncanonical_journal_writes_explicit_null_canonical_binding(
         operation=MutationOperation.CONTEXT_REPLACE,
     )
 
-    result = MutationService().apply((after,), request=request)
+    result = _service().apply((after,), request=request)
 
     assert result.ok and result.manifest is not None
     journal_path = (
@@ -1205,7 +1215,7 @@ def test_legacy_nonbatch_terminal_and_unfinished_journals_recover_then_write_nul
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    result = MutationService().apply(
+    result = _service().apply(
         (after,),
         request=_request(brain_root, (after,)),
     )
@@ -1237,7 +1247,7 @@ def test_legacy_nonbatch_terminal_and_unfinished_journals_recover_then_write_nul
 
     newer = dict(before)
     newer["title"] = f"after legacy {legacy_state}"
-    followup = MutationService().apply(
+    followup = _service().apply(
         (newer,),
         request=_request(brain_root, (newer,)),
     )
@@ -1261,7 +1271,7 @@ def test_legacy_batch_binding_partial_presence_is_rejected(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    result = MutationService().apply(
+    result = _service().apply(
         (after,),
         request=_request(brain_root, (after,)),
     )
@@ -1290,7 +1300,7 @@ def test_batch_intent_is_durable_before_commit_and_noncommitted_is_rejected(
     binding = _batch_binding(brain_root=brain_root)
 
     with pytest.raises(InjectedCrash, match="after_batch_intent_fsync"):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(
                 brain_root,
@@ -1325,7 +1335,7 @@ def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
     binding = _batch_binding(brain_root=brain_root)
 
     with pytest.raises(InjectedCrash, match="after_journal_committed"):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(
                 brain_root,
@@ -1360,7 +1370,7 @@ def test_historical_committed_batch_receipt_preserves_original_manifest_sha(
     before, after = _changed_context()
     _write_object(brain_root, before)
     binding = _batch_binding(brain_root=brain_root)
-    result = MutationService().apply(
+    result = _service().apply(
         (after,),
         request=_request(brain_root, (after,), batch_binding=binding),
     )
@@ -1428,7 +1438,7 @@ def test_committed_receipt_rejects_forged_envelope_and_intent(tmp_path):
     before, after = _changed_context()
     _write_object(brain_root, before)
     binding = _batch_binding(brain_root=brain_root)
-    result = MutationService().apply(
+    result = _service().apply(
         (after,),
         request=_request(brain_root, (after,), batch_binding=binding),
     )
@@ -1462,7 +1472,7 @@ def test_existing_batch_intent_never_overwrites_mismatched_plan(tmp_path):
     before, after = _changed_context()
     _write_object(brain_root, before)
     binding = _batch_binding(brain_root=brain_root)
-    service = MutationService()
+    service = _service()
 
     with pytest.raises(InjectedCrash):
         service.apply(
@@ -1501,7 +1511,7 @@ def test_committed_receipt_chain_verifies_all_items_and_current_tail(
     _write_object(brain_root, original)
     first_binding = _batch_binding(brain_root=brain_root, item_key="one")
     second_binding = _batch_binding(brain_root=brain_root, item_key="two")
-    service = MutationService()
+    service = _service()
     service.apply(
         (first_after,),
         request=_request(
@@ -1536,7 +1546,7 @@ def test_post_gate_receipt_mode_allows_derived_index_output(tmp_path):
     original, after = _changed_context()
     _write_object(brain_root, original)
     binding = _batch_binding(brain_root=brain_root)
-    MutationService().apply(
+    _service().apply(
         (after,),
         request=_request(
             brain_root,
@@ -1578,7 +1588,7 @@ def test_post_gate_receipt_mode_rejects_any_object_corpus_drift(
     original, after = _changed_context()
     _write_object(brain_root, original)
     binding = _batch_binding(brain_root=brain_root)
-    MutationService().apply(
+    _service().apply(
         (after,),
         request=_request(
             brain_root,
@@ -1610,7 +1620,7 @@ def test_committed_receipt_chain_allows_missing_tail_but_not_gaps(tmp_path):
     _write_object(brain_root, original)
     first_binding = _batch_binding(brain_root=brain_root, item_key="one")
     missing_binding = _batch_binding(brain_root=brain_root, item_key="two")
-    MutationService().apply(
+    _service().apply(
         (first_after,),
         request=_request(
             brain_root,
@@ -1696,7 +1706,7 @@ def test_local_binding_swap_before_live_fails_without_mutating_corpus(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     live_path = _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
     planned = service.plan((after,), request=_request(brain_root, (after,)))
     assert planned.manifest is not None
     local_root = brain_root / ".brain-local"
@@ -1726,7 +1736,7 @@ def test_local_swap_after_first_live_replace_rolls_back_on_pinned_scope(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
     planned = service.plan((after,), request=_request(brain_root, (after,)))
     assert planned.manifest is not None
     local_root = brain_root / ".brain-local"
@@ -1787,7 +1797,7 @@ def test_root_binding_swap_never_mutates_replacement_and_rolls_back_pinned_root(
         replacement_fingerprint = _state_fingerprint(brain_root)
 
     with pytest.raises(RuntimeError) as caught:
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=swap_root,
@@ -1808,7 +1818,7 @@ def test_apply_uses_the_required_stage_order_and_invalidates_derived_files(
     _seed_derived_files(brain_root)
     observed: list[str] = []
 
-    result = MutationService().apply(
+    result = _service().apply(
         (after,),
         request=_request(brain_root, (after,)),
         failure_injector=observed.append,
@@ -1845,7 +1855,7 @@ def test_noop_apply_preserves_derived_files_and_creates_no_transaction(
     _seed_derived_files(brain_root)
     fingerprint = _state_fingerprint(brain_root)
 
-    result = MutationService().apply(
+    result = _service().apply(
         (before,),
         request=_request(brain_root, (before,)),
     )
@@ -1861,7 +1871,7 @@ def test_identical_committed_manifest_can_run_again_after_later_reversion(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
 
     first = service.apply(
         (after,),
@@ -1911,7 +1921,7 @@ def test_rolled_back_evidence_is_preserved_when_same_mutation_is_retried(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
     planned = service.plan((after,), request=_request(brain_root, (after,)))
     transaction_id = planned.manifest.transaction_id
     journal_path = (
@@ -2027,7 +2037,7 @@ def test_preparation_validation_failure_leaves_no_active_poison(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     live_path = _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
     planned = service.plan((after,), request=_request(brain_root, (after,)))
     manifest = _journal_manifest(planned.manifest)
     relative_path = live_path.relative_to(brain_root).as_posix()
@@ -2073,7 +2083,7 @@ def test_private_preparation_interruption_never_publishes_partial_active(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     live_path = _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
     planned = service.plan((after,), request=_request(brain_root, (after,)))
     relative_path = live_path.relative_to(brain_root).as_posix()
 
@@ -2109,7 +2119,7 @@ def test_different_private_attempt_ids_do_not_accumulate_and_reader_ignores_them
     brain_root = tmp_path / "brain"
     before = context()
     _write_object(brain_root, before)
-    service = MutationService()
+    service = _service()
     transaction_ids: list[str] = []
 
     for title in ("first attempt", "second attempt"):
@@ -2196,7 +2206,7 @@ def test_parent_symlink_swap_after_temp_fsync_never_mutates_outside(
         live_parent.symlink_to(outside_parent, target_is_directory=True)
 
     with pytest.raises(RuntimeError):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=swap_parent,
@@ -2242,7 +2252,7 @@ def test_symlink_action_path_is_rejected_before_transaction_prepare(
     before_fingerprint = _state_fingerprint(brain_root)
 
     with pytest.raises(RuntimeError) as caught:
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
         )
@@ -2309,7 +2319,7 @@ def test_device_mismatch_is_rejected_before_transaction_prepare(
     )
 
     with pytest.raises(RuntimeError) as caught:
-        MutationService().apply(
+        _service().apply(
             objects,
             request=_request(brain_root, objects),
         )
@@ -2323,7 +2333,7 @@ def test_device_mismatch_is_rejected_before_transaction_prepare(
 
 
 def test_apply_handles_create_update_delete_and_rename_actions(tmp_path):
-    service = MutationService()
+    service = _service()
     brain_root = tmp_path / "brain"
     old_term = candidate_term("g.neutral.old")
     old_context = context(glossary_term_ids=[old_term["id"]])
@@ -2387,7 +2397,7 @@ def test_case_only_rename_commits_exact_new_spelling_on_apfs(tmp_path):
     ) = _case_only_migration(tmp_path)
     before_fingerprint = _state_fingerprint(brain_root)
 
-    result = MutationService().apply((new,), request=request)
+    result = _service().apply((new,), request=request)
 
     assert result.ok is True
     assert _state_fingerprint(brain_root) != before_fingerprint
@@ -2420,7 +2430,7 @@ def test_case_only_rename_recovery_restores_old_exact_spelling(tmp_path, failure
     before_fingerprint = _state_fingerprint(brain_root)
 
     with pytest.raises(InjectedCrash, match=failure_point):
-        MutationService().apply(
+        _service().apply(
             (new,),
             request=request,
             failure_injector=_crash_at(failure_point),
@@ -2460,13 +2470,13 @@ def test_next_mutation_recovers_case_only_rename_without_roll_forward(tmp_path):
     before_fingerprint = _state_fingerprint(brain_root)
 
     with pytest.raises(InjectedCrash, match="after_first_live_replace"):
-        MutationService().apply(
+        _service().apply(
             (new,),
             request=request,
             failure_injector=_crash_at("after_first_live_replace"),
         )
 
-    assert MutationService().apply(
+    assert _service().apply(
         (),
         request=_request(
             brain_root,
@@ -2546,7 +2556,7 @@ def test_three_case_only_renames_commit_exact_new_spellings(tmp_path):
     """Treating a three-pair transaction as one alias loses a Jira-like rename."""
     brain_root, request, planned, pairs = _case_only_multi_migration(tmp_path)
 
-    result = MutationService().apply(
+    result = _service().apply(
         tuple(new for _old_path, _new_path, _old, new in pairs),
         request=request,
     )
@@ -2571,7 +2581,7 @@ def test_three_case_only_renames_recover_major_crashes(tmp_path, failure_point):
     before_fingerprint = _state_fingerprint(brain_root)
 
     with pytest.raises(InjectedCrash, match=failure_point):
-        MutationService().apply(
+        _service().apply(
             tuple(new for _old_path, _new_path, _old, new in pairs),
             request=request,
             failure_injector=_crash_at(failure_point),
@@ -2697,7 +2707,7 @@ def test_case_only_rename_rejects_exact_new_entry_collision(tmp_path):
             lambda _fd, name: name == new_path.name or name == old_path.name,
         )
         with pytest.raises(CorpusIOError, match="case_only_rename_collision"):
-            MutationService().apply((new,), request=request)
+            _service().apply((new,), request=request)
 
     assert old_path.read_bytes() == old_payload
 
@@ -2772,7 +2782,7 @@ def test_case_only_rename_rejects_normalization_equivalent_entry_set(tmp_path):
             lambda _fd: (old_path.name, new_path.name.swapcase()),
         )
         with pytest.raises(CorpusIOError, match="case_only_rename_ambiguous"):
-            MutationService().apply((new,), request=request)
+            _service().apply((new,), request=request)
 
     assert old_path.name in _exact_child_names(old_path.parent)
 
@@ -2865,13 +2875,13 @@ def test_next_mutation_rolls_back_every_injected_crash_without_roll_forward(
     _write_object(brain_root, before)
     _seed_derived_files(brain_root)
     before_fingerprint = _state_fingerprint(brain_root)
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
 
     with pytest.raises(InjectedCrash, match=failure_point):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=_crash_at(failure_point),
@@ -2882,7 +2892,7 @@ def test_next_mutation_rolls_back_every_injected_crash_without_roll_forward(
         (),
         operation=MutationOperation.PROJECTION,
     )
-    result = MutationService().apply((), request=empty_request)
+    result = _service().apply((), request=empty_request)
 
     assert result.ok is True
     assert _state_fingerprint(brain_root) == before_fingerprint
@@ -2934,7 +2944,7 @@ def test_id_migration_rolls_object_eval_and_derived_back_together(
     before_fingerprint = _state_fingerprint(brain_root)
 
     with pytest.raises(InjectedCrash, match=failure_point):
-        MutationService().apply(
+        _service().apply(
             (new,),
             request=request,
             failure_injector=_crash_at(failure_point),
@@ -2945,7 +2955,7 @@ def test_id_migration_rolls_object_eval_and_derived_back_together(
         (),
         operation=MutationOperation.PROJECTION,
     )
-    assert MutationService().apply((), request=recovery_request).ok is True
+    assert _service().apply((), request=recovery_request).ok is True
     assert _state_fingerprint(brain_root) == before_fingerprint
     assert BrainStore.load(brain_root).has(old["id"])
     assert not BrainStore.load(brain_root).has(new["id"])
@@ -2977,7 +2987,7 @@ def test_id_migration_commits_object_eval_and_derived_together(tmp_path):
         auxiliary_updates=(update,),
     )
 
-    result = MutationService().apply((new,), request=request)
+    result = _service().apply((new,), request=request)
 
     assert result.ok is True
     assert BrainStore.load(brain_root).has(new["id"])
@@ -3004,7 +3014,7 @@ def test_transaction_rejects_missing_or_unexpected_auxiliary_after_bytes(
         objects=(),
         auxiliary_updates=(update,),
     )
-    planned = MutationService().plan((), request=request)
+    planned = _service().plan((), request=request)
     assert planned.ok is True
 
     with pytest.raises(corpus_io.CorpusIOError) as missing:
@@ -3074,7 +3084,7 @@ def test_low_level_manifest_auxiliary_allowlist_fails_closed(
         objects=(),
         auxiliary_updates=(update,),
     )
-    planned = MutationService().plan((), request=request)
+    planned = _service().plan((), request=request)
     manifest = _journal_manifest(planned.manifest)
     mutation(manifest)
 
@@ -3108,7 +3118,7 @@ def test_low_level_manifest_rejects_auxiliary_noop_without_invalidation(
         objects=(),
         auxiliary_updates=(update,),
     )
-    planned = MutationService().plan((), request=request)
+    planned = _service().plan((), request=request)
     manifest = _journal_manifest(planned.manifest)
     action = manifest["auxiliary_updates"][0]
     action["after_sha256"] = action["before_sha256"]
@@ -3137,7 +3147,7 @@ def test_reader_fails_closed_while_unfinished_journal_exists(tmp_path):
     _write_object(brain_root, before)
 
     with pytest.raises(InjectedCrash):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=_crash_at("after_first_live_replace"),
@@ -3166,7 +3176,7 @@ def test_reader_waits_for_writer_and_never_observes_partial_corpus(tmp_path):
 
     def run_writer() -> None:
         try:
-            MutationService().apply(
+            _service().apply(
                 (after,),
                 request=_request(brain_root, (after,)),
                 failure_injector=inject,
@@ -3235,13 +3245,13 @@ def test_transaction_temp_and_before_images_share_live_filesystem(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
 
     with pytest.raises(InjectedCrash):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=_crash_at("after_journal_prepared"),
@@ -3269,13 +3279,13 @@ def test_recovery_failure_is_persisted_and_requires_manual_intervention(
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
 
     with pytest.raises(InjectedCrash):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=_crash_at("after_first_live_replace"),
@@ -3305,12 +3315,12 @@ def test_explicit_recovery_reports_all_rolled_back_transactions(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    planned = MutationService().plan(
+    planned = _service().plan(
         (after,),
         request=_request(brain_root, (after,)),
     )
     with pytest.raises(InjectedCrash):
-        MutationService().apply(
+        _service().apply(
             (after,),
             request=_request(brain_root, (after,)),
             failure_injector=_crash_at("after_state_committing"),

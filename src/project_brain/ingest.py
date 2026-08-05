@@ -38,6 +38,11 @@ class IngestError(RuntimeError):
         }
 
 
+def _new_mutation_service() -> MutationService:
+    """테스트가 transaction clock을 고정할 수 있는 private seam."""
+    return MutationService()
+
+
 def ingest(
     brain_root: Path,
     objects: Sequence[dict],
@@ -65,7 +70,7 @@ def ingest(
         coverage=coverage,
         build_binding=build_binding,
     )
-    result = MutationService().apply(inputs, request=request)
+    result = _new_mutation_service().apply(inputs, request=request)
     if not result.ok:
         raise IngestError(
             result.error_code or "mutation_failed",

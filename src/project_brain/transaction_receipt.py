@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Mapping
 
@@ -30,6 +31,11 @@ _BATCH_BINDING_FIELDS = {
     "engine_root",
     "engine_sha",
 }
+
+
+class MutationOutcome(StrEnum):
+    COMMITTED = "committed"
+    NO_CHANGES = "no_changes"
 
 
 @dataclass(frozen=True)
