@@ -409,6 +409,47 @@ def test_context_replace_rewrites_declared_external_backreference(tmp_path):
     }
 
 
+def test_context_replace_artifact_rejects_removed_external_binding_exactly(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    old = candidate_term("g.neutral.old", term="이전")
+    new = candidate_term("g.neutral.new", term="새 값")
+    ctx = context(glossary_term_ids=[old["id"]])
+    external = context("context.other", glossary_term_ids=[old["id"]])
+    external["context_key"] = "other"
+    for obj in (ctx, old, external):
+        _write_raw(brain_root, obj)
+    request = _plan(
+        brain_root,
+        desired_objects=[
+            {**ctx, "glossary_term_ids": [new["id"]]},
+            new,
+        ],
+        expected_moves={old["id"]: new["id"]},
+        external_reference_rewrites={old["id"]: new["id"]},
+    )
+    artifact = create_context_replace_artifact(request)
+    tampered = json.loads(artifact.manifest_bytes)
+    tampered["intent"]["request"]["external_reference_rewrites"] = {}
+    tampered["intent"]["preview"]["external_reference_bindings"] = []
+    tampered_bytes = (
+        json.dumps(tampered, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+    with pytest.raises(ContextReplaceError) as caught:
+        apply_context_replace_artifact(
+            manifest_bytes=tampered_bytes,
+            expected_manifest_sha256=hashlib.sha256(tampered_bytes).hexdigest(),
+            brain_root=brain_root,
+            repo_context=None,
+            engine_sha=ENGINE_SHA,
+        )
+
+    assert caught.value.code == "reference_rewrite_binding_mismatch"
+    assert BrainStore.load(brain_root).get(external["id"]) == external
+
+
 def test_context_replace_artifact_is_unstamped_intent(tmp_path):
     brain_root = tmp_path / "brain"
     before = context()

@@ -19,6 +19,7 @@ from project_brain.mutation import (
 from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
 from project_brain.repo_context import RepoContext
 from project_brain.store import BrainStore
+from project_brain.write_semantics import VerifiedReferenceRewrite
 
 
 @dataclass(frozen=True)
@@ -225,7 +226,18 @@ def plan_context_replace(
         )
 
     rewritten_external: list[dict] = []
+    external_bindings: list[VerifiedReferenceRewrite] = []
     for object_id in sorted(external_objects):
+        external_bindings.extend(
+            VerifiedReferenceRewrite(
+                object_id=object_id,
+                pointer=ref.pointer,
+                before_id=ref.object_id,
+                after_id=external_rewrites[ref.object_id],
+            )
+            for ref in iter_object_refs(external_objects[object_id])
+            if ref.object_id in external_rewrites
+        )
         rewritten, changed = rewrite_object_refs(
             external_objects[object_id],
             external_rewrites,
@@ -265,7 +277,9 @@ def plan_context_replace(
         renames=moves,
         preconditions=preconditions,
         expected_corpus_fingerprint=corpus_fingerprint(existing),
+        context_id=context_id,
         external_reference_rewrites=external_rewrites,
+        external_reference_rewrite_bindings=tuple(sorted(external_bindings)),
     )
 
 
@@ -420,8 +434,15 @@ def apply_context_replace_artifact(
             expected_corpus_fingerprint=request_payload[
                 "expected_corpus_fingerprint"
             ],
+            context_id=request_payload["context_id"],
             external_reference_rewrites=dict(
                 request_payload["external_reference_rewrites"]
+            ),
+            external_reference_rewrite_bindings=tuple(
+                VerifiedReferenceRewrite(**binding)
+                for binding in request_payload[
+                    "external_reference_rewrite_bindings"
+                ]
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:

@@ -15,6 +15,7 @@ from project_brain.canonical_merge import (
     ReferenceCollapse,
     project_collision_merges,
 )
+from project_brain.code_verify import VerifiedLocator
 from project_brain.coverage import BuildArtifactBinding, ObjectIdentity
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
@@ -22,6 +23,7 @@ from project_brain.mutation import (
     MutationOperation,
     MutationRequest,
     MutationService,
+    canonical_unstamped_intent,
     corpus_fingerprint,
 )
 from project_brain.objbase import base
@@ -1048,7 +1050,9 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "canonical_repair_binding",
         "coverage",
         "build_binding",
+        "context_id",
         "external_reference_rewrites",
+        "external_reference_rewrite_bindings",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
@@ -3857,6 +3861,52 @@ def test_apply_with_internal_preflight_calls_clock_once(tmp_path):
 
     assert result.ok
     assert calls == [FIXED_TIME]
+
+
+def test_apply_bound_intent_finalizes_one_verified_transform(
+    tmp_path,
+    monkeypatch,
+):
+    repo_context, sha = _git_repo(tmp_path)
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(commit_sha=sha)
+    request = _request(
+        brain_root,
+        (locator,),
+        repo_context=repo_context,
+    )
+    preview = MutationService().preview(request.objects, request=request)
+    intent, _, intent_sha256 = canonical_unstamped_intent(request, preview)
+    verified = dict(preview.after_objects[0])
+    drifted = {**verified, "verified_quote": "second planning drift"}
+    verifier_calls: list[int] = []
+    clock_calls: list[str] = []
+
+    def drifting_verifier(*args, **kwargs):
+        verifier_calls.append(len(verifier_calls) + 1)
+        transformed = verified if len(verifier_calls) == 1 else drifted
+        return VerifiedLocator(
+            locator=dict(transformed),
+            quote_sha256="a" * 64,
+            symbol_status="verified",
+        )
+
+    monkeypatch.setattr(mutation, "verify_locator_for_write", drifting_verifier)
+
+    result = MutationService(
+        clock=lambda: clock_calls.append(FIXED_TIME) or FIXED_TIME
+    ).apply_bound_intent(
+        request=request,
+        artifact_intent=intent,
+        expected_intent_sha256=intent_sha256,
+    )
+
+    assert result.ok
+    assert verifier_calls == [1]
+    assert clock_calls == [FIXED_TIME]
+    assert BrainStore.load(brain_root).get(locator["id"])["verified_quote"] == (
+        verified["verified_quote"]
+    )
 
 
 def test_valid_caller_event_time_change_is_substantive_and_bumps_updated(
