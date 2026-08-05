@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import fields, replace
 from pathlib import Path
@@ -659,7 +660,7 @@ def test_id_plan_renames_unknown_grammar_review_and_rewrites_reference(
             rewrite["before_id"],
             rewrite["after_id"],
         )
-        for rewrite in plan.mutation_plan.manifest.reference_rewrites
+        for rewrite in plan.mutation_plan.reference_rewrites
     } == {
         (
             "review.code.neutral.legacy",
@@ -1183,7 +1184,8 @@ def test_id_apply_commits_exact_object_eval_and_invalidates_derived(tmp_path):
 
     result = _apply(artifact, brain_root)
 
-    assert result.transaction_id == plan.mutation_plan.manifest.transaction_id
+    assert plan.mutation_plan.manifest is None
+    assert re.fullmatch(r"[0-9a-f]{64}", result.transaction_id)
     store = BrainStore.load(brain_root)
     assert not store.has(old["id"])
     assert store.has("code.neutral.legacy")

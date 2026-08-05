@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -10,14 +9,11 @@ import project_brain.transaction_receipt as transaction_receipt
 
 from project_brain.context_replace import (
     ContextReplaceError,
-    _corpus_journal_manifest,
     apply_context_replace_artifact,
     create_context_replace_artifact,
     plan_context_replace,
 )
-from project_brain.corpus_io import CorpusIOError, apply_transaction
 from project_brain.mutation import (
-    MutationManifest,
     MutationOperation,
     MutationService,
 )
@@ -84,7 +80,7 @@ def _apply_artifact(brain_root: Path, request):
     return artifact, result
 
 
-def test_context_replace_projects_expanded_manifest_before_journal_apply(tmp_path):
+def test_context_replace_rejects_expanded_artifact_keys(tmp_path):
     brain_root = tmp_path / "brain"
     before = context()
     _write_raw(brain_root, before)
@@ -103,19 +99,17 @@ def test_context_replace_projects_expanded_manifest_before_journal_apply(tmp_pat
         json.dumps(expanded, ensure_ascii=False, separators=(",", ":")) + "\n"
     ).encode("utf-8")
 
-    result = apply_context_replace_artifact(
-        manifest_bytes=manifest_bytes,
-        expected_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
-        brain_root=brain_root,
-        repo_context=None,
-        engine_sha=ENGINE_SHA,
-    )
+    with pytest.raises(ContextReplaceError) as caught:
+        apply_context_replace_artifact(
+            manifest_bytes=manifest_bytes,
+            expected_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            brain_root=brain_root,
+            repo_context=None,
+            engine_sha=ENGINE_SHA,
+        )
 
-    assert result.action_count == 1
-    stamped_after = next(
-        obj for obj in artifact.manifest["objects"] if obj["id"] == after["id"]
-    )
-    assert BrainStore.load(brain_root).get(after["id"]) == stamped_after
+    assert caught.value.code == "manifest_invalid"
+    assert BrainStore.load(brain_root).get(after["id"]) == before
 
 
 def test_context_replace_does_not_force_old_and_new_counts_to_match(tmp_path):
@@ -261,6 +255,65 @@ def test_context_replace_preserve_actions_share_one_transaction_clock(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "action",
+    ["exact_move", "semantic_move", "reference_only", "standalone_create"],
+)
+def test_context_replace_action_timestamp_matrix(tmp_path, action):
+    brain_root = tmp_path / action
+    old = candidate_term("g.neutral.old", term="같은 값")
+    ctx = context(glossary_term_ids=[old["id"]])
+    external = context("context.other", glossary_term_ids=[old["id"]])
+    external["context_key"] = "other"
+    for obj in (ctx, old):
+        _write_raw(brain_root, obj)
+    calls: list[str] = []
+
+    if action == "standalone_create":
+        created = candidate_term("g.neutral.created", term="신규")
+        desired_context = {**ctx, "glossary_term_ids": [old["id"], created["id"]]}
+        request = _plan(
+            brain_root,
+            desired_objects=[desired_context, old, created],
+        )
+        target_id = created["id"]
+    else:
+        new = {**old, "id": "g.neutral.new"}
+        if action == "semantic_move":
+            new["term"] = "바뀐 의미"
+        desired_context = {**ctx, "glossary_term_ids": [new["id"]]}
+        rewrites = {}
+        if action == "reference_only":
+            _write_raw(brain_root, external)
+            rewrites = {old["id"]: new["id"]}
+        request = _plan(
+            brain_root,
+            desired_objects=[desired_context, new],
+            expected_moves={old["id"]: new["id"]},
+            external_reference_rewrites=rewrites,
+        )
+        target_id = external["id"] if action == "reference_only" else new["id"]
+
+    result = MutationService(
+        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME
+    ).apply(request.objects, request=request)
+
+    assert result.ok
+    assert calls == [FIXED_TIME]
+    stored = BrainStore.load(brain_root).get(target_id)
+    if action in {"exact_move", "reference_only"}:
+        source = old if action == "exact_move" else external
+        assert (stored["created_at"], stored["updated_at"]) == (
+            source["created_at"], source["updated_at"]
+        )
+    elif action == "semantic_move":
+        assert (stored["created_at"], stored["updated_at"]) == (
+            old["created_at"], FIXED_TIME
+        )
+    else:
+        assert stored["created_at"] == stored["updated_at"] == FIXED_TIME
+
+
+@pytest.mark.parametrize(
     ("drops", "moves", "expected_code"),
     [
         ((), {}, "drop_set_mismatch"),
@@ -343,6 +396,9 @@ def test_context_replace_rewrites_declared_external_backreference(tmp_path):
         new["id"],
     ]
     assert request.preconditions[external["id"]] == _hash(external)
+    assert getattr(request, "external_reference_rewrites", {}) == {
+        old["id"]: new["id"],
+    }
     assert result.ok is True
     assert {
         (row["object_id"], row["before_id"], row["after_id"])
@@ -351,6 +407,39 @@ def test_context_replace_rewrites_declared_external_backreference(tmp_path):
         (ctx["id"], old["id"], new["id"]),
         (external["id"], old["id"], new["id"]),
     }
+
+
+def test_context_replace_artifact_is_unstamped_intent(tmp_path):
+    brain_root = tmp_path / "brain"
+    before = context()
+    _write_raw(brain_root, before)
+    request = _plan(
+        brain_root,
+        desired_objects=[{**before, "title": "새 제목"}],
+    )
+
+    artifact = create_context_replace_artifact(request)
+
+    assert "intent" in artifact.manifest
+    assert "transaction_id" not in artifact.manifest
+    assert "creates" not in artifact.manifest
+    assert "updates" not in artifact.manifest
+
+
+def test_production_artifact_paths_use_preview_and_central_bound_apply():
+    project = Path(__file__).resolve().parents[1]
+    sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (
+            project / "src/project_brain/context_replace.py",
+            project / "src/project_brain/migration.py",
+            project / "src/project_brain/canonical_repair.py",
+        )
+    }
+
+    assert all(".plan(" not in text for text in sources.values())
+    assert "apply_transaction(" not in sources["context_replace.py"]
+    assert all("apply_bound_intent(" in text for text in sources.values())
 
 
 def test_context_replace_update_uses_legacy_raw_before_receipt_and_applies(
@@ -364,18 +453,16 @@ def test_context_replace_update_uses_legacy_raw_before_receipt_and_applies(
 
     request = _plan(brain_root, desired_objects=[replacement])
     artifact, _ = _apply_artifact(brain_root, request)
-    update = artifact.manifest["updates"][0]
-    stamped_replacement = next(
-        obj
-        for obj in artifact.manifest["objects"]
-        if obj["id"] == replacement["id"]
-    )
+    source_sha256_by_id = artifact.manifest["intent"]["preview"][
+        "source_sha256_by_id"
+    ]
+    stored = BrainStore.load(brain_root).get(replacement["id"])
 
-    assert update["before_sha256"] == hashlib.sha256(
+    assert source_sha256_by_id[old["id"]] == hashlib.sha256(
         json.dumps(old, ensure_ascii=False, indent=2).encode("utf-8")
     ).hexdigest()
-    assert update["after_sha256"] == _hash(stamped_replacement)
-    assert old_path.read_bytes() == BrainStore.object_bytes(stamped_replacement)
+    assert stored["title"] == "legacy update"
+    assert old_path.read_bytes() == BrainStore.object_bytes(stored)
 
 
 def test_context_replace_delete_uses_legacy_raw_before_receipt_and_applies(
@@ -395,12 +482,13 @@ def test_context_replace_delete_uses_legacy_raw_before_receipt_and_applies(
         expected_drop_ids=(old["id"],),
     )
     artifact, _ = _apply_artifact(brain_root, request)
-    delete = artifact.manifest["deletes"][0]
+    source_sha256_by_id = artifact.manifest["intent"]["preview"][
+        "source_sha256_by_id"
+    ]
 
-    assert delete["before_sha256"] == hashlib.sha256(
+    assert source_sha256_by_id[old["id"]] == hashlib.sha256(
         json.dumps(old, ensure_ascii=False, indent=2).encode("utf-8")
     ).hexdigest()
-    assert delete["after_sha256"] is None
     assert not old_path.exists()
 
 
@@ -422,18 +510,17 @@ def test_context_replace_rename_uses_legacy_raw_before_receipt_and_applies(
         expected_moves={old["id"]: new["id"]},
     )
     artifact, _ = _apply_artifact(brain_root, request)
-    rename = artifact.manifest["renames"][0]
     new_path = BrainStore.object_path(brain_root, new)
-    stamped_new = next(
-        obj for obj in artifact.manifest["objects"] if obj["id"] == new["id"]
-    )
+    source_sha256_by_id = artifact.manifest["intent"]["preview"][
+        "source_sha256_by_id"
+    ]
+    stored = BrainStore.load(brain_root).get(new["id"])
 
-    assert rename["before_sha256"] == hashlib.sha256(
+    assert source_sha256_by_id[old["id"]] == hashlib.sha256(
         json.dumps(old, ensure_ascii=False, indent=2).encode("utf-8")
     ).hexdigest()
-    assert rename["after_sha256"] == _hash(stamped_new)
     assert not old_path.exists()
-    assert new_path.read_bytes() == BrainStore.object_bytes(stamped_new)
+    assert new_path.read_bytes() == BrainStore.object_bytes(stored)
 
 
 def test_context_replace_case_only_rename_keeps_legacy_raw_receipt(tmp_path):
@@ -453,19 +540,19 @@ def test_context_replace_case_only_rename_keeps_legacy_raw_receipt(tmp_path):
         expected_moves={old["id"]: new["id"]},
     )
     artifact, result = _apply_artifact(brain_root, request)
-    rename = artifact.manifest["renames"][0]
     new_path = BrainStore.object_path(brain_root, new)
-    stamped_new = next(
-        obj for obj in artifact.manifest["objects"] if obj["id"] == new["id"]
-    )
+    source_sha256_by_id = artifact.manifest["intent"]["preview"][
+        "source_sha256_by_id"
+    ]
+    stored = BrainStore.load(brain_root).get(new["id"])
 
     assert result.action_count == 2
-    assert rename["before_sha256"] == hashlib.sha256(
+    assert source_sha256_by_id[old["id"]] == hashlib.sha256(
         json.dumps(old, ensure_ascii=False, indent=2).encode("utf-8")
     ).hexdigest()
     assert new_path.name in {path.name for path in new_path.parent.iterdir()}
     assert old_path.name not in {path.name for path in old_path.parent.iterdir()}
-    assert new_path.read_bytes() == BrainStore.object_bytes(stamped_new)
+    assert new_path.read_bytes() == BrainStore.object_bytes(stored)
 
 
 def test_context_replace_rejects_post_plan_legacy_whitespace_change_before_write(
@@ -488,20 +575,16 @@ def test_context_replace_rejects_post_plan_legacy_whitespace_change_before_write
     )
     old_path.write_bytes(changed_raw)
 
-    with pytest.raises(CorpusIOError, match="before_hash_mismatch"):
-        apply_transaction(
-            brain_root,
-            manifest=_corpus_journal_manifest({
-                field.name: artifact.manifest[field.name]
-                for field in fields(MutationManifest)
-            }),
-            after_files={
-                artifact.manifest["updates"][0]["path"]: BrainStore.object_bytes(
-                    replacement
-                )
-            },
+    with pytest.raises(ContextReplaceError) as caught:
+        apply_context_replace_artifact(
+            manifest_bytes=artifact.manifest_bytes,
+            expected_manifest_sha256=artifact.manifest_sha256,
+            brain_root=brain_root,
+            repo_context=None,
+            engine_sha=ENGINE_SHA,
         )
 
+    assert caught.value.code == "intent_revalidation_failed"
     assert old_path.read_bytes() == changed_raw
     assert index_path.read_bytes() == b"index before\n"
     assert stale_path.read_bytes() == b'{"stale":["before"]}\n'
@@ -519,7 +602,6 @@ def test_context_replace_canonical_before_receipts_still_apply(tmp_path, operati
         replacement = dict(ctx)
         replacement["title"] = "canonical update"
         request = _plan(brain_root, desired_objects=[replacement, old])
-        action_name = "updates"
     elif operation == "delete":
         replacement = dict(ctx)
         replacement["glossary_term_ids"] = []
@@ -528,7 +610,6 @@ def test_context_replace_canonical_before_receipts_still_apply(tmp_path, operati
             desired_objects=[replacement],
             expected_drop_ids=(old["id"],),
         )
-        action_name = "deletes"
     else:
         new = candidate_term("g.neutral.new", term="새 값")
         replacement = dict(ctx)
@@ -538,7 +619,6 @@ def test_context_replace_canonical_before_receipts_still_apply(tmp_path, operati
             desired_objects=[replacement, new],
             expected_moves={old["id"]: new["id"]},
         )
-        action_name = "renames"
 
     before_path = BrainStore.object_path(
         brain_root,
@@ -546,8 +626,12 @@ def test_context_replace_canonical_before_receipts_still_apply(tmp_path, operati
     )
     raw_before = before_path.read_bytes()
     artifact, _ = _apply_artifact(brain_root, request)
-    action = artifact.manifest[action_name][0]
     before_obj = old if operation != "update" else ctx
 
-    assert action["before_sha256"] == _hash(before_obj)
-    assert action["before_sha256"] == hashlib.sha256(raw_before).hexdigest()
+    source_sha256_by_id = artifact.manifest["intent"]["preview"][
+        "source_sha256_by_id"
+    ]
+    assert source_sha256_by_id[before_obj["id"]] == _hash(before_obj)
+    assert source_sha256_by_id[before_obj["id"]] == hashlib.sha256(
+        raw_before
+    ).hexdigest()

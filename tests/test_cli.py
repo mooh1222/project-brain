@@ -3168,7 +3168,7 @@ class TestCliShow(unittest.TestCase):
         fixture, common_args, manifest_file, snapshot_result = (
             self._canonical_cli_fixture("canonical-cli")
         )
-        success_keys = {
+        apply_success_keys = {
             "ok",
             "migration_kind",
             "manifest",
@@ -3181,6 +3181,7 @@ class TestCliShow(unittest.TestCase):
             "snapshot_id",
             "snapshot_manifest_sha256",
         }
+        plan_success_keys = apply_success_keys - {"transaction_id"}
         before = corpus_fingerprint(BrainStore.load(fixture.brain_root))
 
         plan_out = io.StringIO()
@@ -3190,7 +3191,7 @@ class TestCliShow(unittest.TestCase):
         ]), redirect_stdout(plan_out), redirect_stderr(plan_err):
             self.assertEqual(cli.main(), 0, plan_out.getvalue())
         planned = json.loads(plan_out.getvalue())
-        self.assertEqual(set(planned), success_keys)
+        self.assertEqual(set(planned), plan_success_keys)
         self.assertEqual(planned["migration_kind"], "canonical_repair")
         self.assertEqual(planned["row_count"], 7)
         self.assertEqual(
@@ -3238,7 +3239,7 @@ class TestCliShow(unittest.TestCase):
         ]), redirect_stdout(apply_out), redirect_stderr(apply_err):
             self.assertEqual(cli.main(), 0, apply_out.getvalue())
         applied = json.loads(apply_out.getvalue())
-        self.assertEqual(set(applied), success_keys)
+        self.assertEqual(set(applied), apply_success_keys)
         self.assertEqual(applied["migration_kind"], "canonical_repair")
         self.assertEqual(applied["row_count"], 7)
         self.assertEqual(

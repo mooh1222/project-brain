@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 
 from project_brain.mutation import (
@@ -13,6 +13,7 @@ from project_brain.mutation import (
     MutationOperation,
     MutationRequest,
     MutationService,
+    canonical_unstamped_intent,
     corpus_fingerprint,
 )
 from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
@@ -264,6 +265,7 @@ def plan_context_replace(
         renames=moves,
         preconditions=preconditions,
         expected_corpus_fingerprint=corpus_fingerprint(existing),
+        external_reference_rewrites=external_rewrites,
     )
 
 
@@ -287,16 +289,16 @@ def create_context_replace_artifact(
         or request.operation is not MutationOperation.CONTEXT_REPLACE
     ):
         _fail("request_invalid", "context replace request is required")
-    planned = MutationService().plan(request.objects, request=request)
-    if not planned.ok or planned.manifest is None:
+    preview = MutationService().preview(request.objects, request=request)
+    if not preview.ok:
         _fail(
-            planned.error_code or "mutation_plan_failed",
-            planned.detail or "context replace mutation preflight failed",
+            preview.error_code or "mutation_plan_failed",
+            preview.detail or "context replace mutation preflight failed",
         )
+    intent, _, _ = canonical_unstamped_intent(request, preview)
     artifact = {
-        **asdict(planned.manifest),
-        "context_replace_version": 1,
-        "objects": list(planned.after_objects),
+        "context_replace_version": 2,
+        "intent": intent,
         "repo_context": _repo_context_payload(request.repo_context),
     }
     payload = (
@@ -318,7 +320,7 @@ def _parse_artifact(
     manifest_bytes: bytes,
     *,
     expected_manifest_sha256: str,
-) -> tuple[dict, dict]:
+) -> dict:
     actual_sha = hashlib.sha256(manifest_bytes).hexdigest()
     if actual_sha != expected_manifest_sha256:
         _fail(
@@ -329,25 +331,17 @@ def _parse_artifact(
         artifact = json.loads(manifest_bytes)
     except (UnicodeError, json.JSONDecodeError) as exc:
         _fail("manifest_invalid", str(exc))
-    core_keys = {field.name for field in fields(MutationManifest)}
-    expected_keys = core_keys | {
-        "context_replace_version",
-        "objects",
-        "repo_context",
-    }
+    expected_keys = {"context_replace_version", "intent", "repo_context"}
     if not isinstance(artifact, dict) or set(artifact) != expected_keys:
         _fail("manifest_invalid", "context replace manifest keys are invalid")
     if (
-        artifact["context_replace_version"] != 1
-        or artifact["operation"] != MutationOperation.CONTEXT_REPLACE.value
-        or not isinstance(artifact["objects"], list)
-        or not all(isinstance(obj, dict) for obj in artifact["objects"])
+        artifact["context_replace_version"] != 2
+        or not isinstance(artifact["intent"], dict)
+        or artifact["intent"].get("operation")
+        != MutationOperation.CONTEXT_REPLACE.value
     ):
         _fail("manifest_invalid", "context replace manifest payload is invalid")
-    return artifact, {
-        key: artifact[key]
-        for key in core_keys
-    }
+    return artifact
 
 
 def _verify_repo_context(
@@ -396,101 +390,68 @@ def apply_context_replace_artifact(
     brain_root: Path,
     repo_context: RepoContext | None,
     engine_sha: str,
+    failure_injector=None,
 ) -> ContextReplaceApplyResult:
-    """Apply only the exact planned bytes through journaled corpus I/O."""
-    from project_brain.corpus_io import (
-        CorpusIOError,
-        apply_transaction,
-        corpus_lock,
-        recover_unfinished_transaction_unlocked,
-    )
-
-    artifact, core = _parse_artifact(
+    """Live intent 재검증 뒤 shared mutation 경계에서 적용한다."""
+    artifact = _parse_artifact(
         manifest_bytes,
         expected_manifest_sha256=expected_manifest_sha256,
     )
-    if artifact["engine_sha"] != engine_sha:
+    intent = artifact["intent"]
+    if intent.get("engine_sha") != engine_sha:
         _fail(
             "engine_sha_mismatch",
             "apply engine SHA differs from the planned engine SHA",
         )
     _verify_repo_context(artifact["repo_context"], repo_context)
-    object_by_id: dict[str, dict] = {}
-    for obj in artifact["objects"]:
-        object_id = obj.get("id")
-        if not isinstance(object_id, str) or object_id in object_by_id:
-            _fail("manifest_invalid", "manifest object IDs are invalid or duplicated")
-        object_by_id[object_id] = obj
-
-    writable: list[tuple[str, str, str]] = []
-    for field_name in ("creates", "updates"):
-        actions = artifact.get(field_name)
-        if not isinstance(actions, list):
-            _fail("manifest_invalid", f"{field_name} must be a list")
-        writable.extend(
-            (
-                str(action.get("object_id")),
-                str(action.get("path")),
-                str(action.get("after_sha256")),
-            )
-            for action in actions
-            if isinstance(action, dict)
+    request_payload = intent.get("request")
+    if not isinstance(request_payload, dict):
+        _fail("manifest_invalid", "context replace request intent is invalid")
+    try:
+        request = MutationRequest(
+            operation=MutationOperation.CONTEXT_REPLACE,
+            brain_root=brain_root,
+            repo_context=repo_context,
+            engine_sha=engine_sha,
+            objects=tuple(dict(obj) for obj in request_payload["objects"]),
+            delete_ids=tuple(request_payload["delete_ids"]),
+            renames=dict(request_payload["renames"]),
+            preconditions=dict(request_payload["preconditions"]),
+            expected_corpus_fingerprint=request_payload[
+                "expected_corpus_fingerprint"
+            ],
+            external_reference_rewrites=dict(
+                request_payload["external_reference_rewrites"]
+            ),
         )
-    renames = artifact.get("renames")
-    if not isinstance(renames, list):
-        _fail("manifest_invalid", "renames must be a list")
-    writable.extend(
-        (
-            str(action.get("new_id")),
-            str(action.get("new_path")),
-            str(action.get("after_sha256")),
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail("manifest_invalid", str(exc))
+    intent_payload = (
+        json.dumps(
+            intent,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        for action in renames
-        if isinstance(action, dict)
+        + "\n"
+    ).encode("utf-8")
+    result = MutationService().apply_bound_intent(
+        request=request,
+        artifact_intent=intent,
+        expected_intent_sha256=hashlib.sha256(intent_payload).hexdigest(),
+        failure_injector=failure_injector,
     )
-    after_files: dict[str, bytes] = {}
-    for object_id, relative_path, expected_sha in writable:
-        obj = object_by_id.get(object_id)
-        if obj is None:
-            _fail("manifest_invalid", f"missing after object: {object_id}")
-        expected_path = (
-            BrainStore.object_path(brain_root, obj)
-            .relative_to(brain_root)
-            .as_posix()
+    if not result.ok or result.manifest is None:
+        _fail(
+            result.error_code or "mutation_apply_failed",
+            result.detail or "context replace mutation failed",
         )
-        payload = BrainStore.object_bytes(obj)
-        if (
-            expected_path != relative_path
-            or hashlib.sha256(payload).hexdigest() != expected_sha
-        ):
-            _fail(
-                "manifest_invalid",
-                f"after payload does not match action: {object_id}",
-            )
-        after_files[relative_path] = payload
-
-    with corpus_lock(brain_root, exclusive=True):
-        recover_unfinished_transaction_unlocked(brain_root)
-        current = BrainStore.load_unlocked(brain_root)
-        if corpus_fingerprint(current) != artifact["before_fingerprint"]:
-            _fail(
-                "corpus_fingerprint_mismatch",
-                "live corpus differs from the planned before fingerprint",
-            )
-        try:
-            apply_transaction(
-                brain_root,
-                manifest=_corpus_journal_manifest(core),
-                after_files=after_files,
-            )
-        except (CorpusIOError, ValueError, OSError) as exc:
-            _fail("mutation_apply_failed", str(exc))
     return ContextReplaceApplyResult(
-        transaction_id=str(artifact["transaction_id"]),
+        transaction_id=result.manifest.transaction_id,
         action_count=(
-            len(artifact["creates"])
-            + len(artifact["updates"])
-            + len(artifact["deletes"])
-            + len(artifact["renames"])
+            len(result.manifest.creates)
+            + len(result.manifest.updates)
+            + len(result.manifest.deletes)
+            + len(result.manifest.renames)
         ),
     )

@@ -20,11 +20,11 @@ from project_brain.hash_utils import stable_json
 from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
-    MutationManifest,
     MutationOperation,
     MutationPlanResult,
     MutationRequest,
     MutationService,
+    canonical_unstamped_intent,
     corpus_fingerprint,
     is_target_derived_single_review_rename,
 )
@@ -718,8 +718,8 @@ def plan_id_migration(
         expected_corpus_fingerprint=corpus_fingerprint(existing),
         auxiliary_updates=auxiliary_updates,
     )
-    mutation_plan = MutationService().plan(request.objects, request=request)
-    if not mutation_plan.ok or mutation_plan.manifest is None:
+    mutation_plan = MutationService().preview(request.objects, request=request)
+    if not mutation_plan.ok:
         _fail(
             mutation_plan.error_code or "mutation_plan_failed",
             mutation_plan.detail or "ID-only mutation preflight failed",
@@ -746,7 +746,7 @@ def plan_id_migration(
         )
         row_rewrites = tuple(
             dict(rewrite)
-            for rewrite in mutation_plan.manifest.reference_rewrites
+            for rewrite in mutation_plan.reference_rewrites
             if (
                 rewrite["before_id"] == old_id
                 and rewrite["after_id"] == new_id
@@ -832,8 +832,8 @@ def plan_display_migration(
         },
         expected_corpus_fingerprint=corpus_fingerprint(existing),
     )
-    mutation_plan = MutationService().plan(inputs, request=request)
-    if not mutation_plan.ok or mutation_plan.manifest is None:
+    mutation_plan = MutationService().preview(inputs, request=request)
+    if not mutation_plan.ok:
         _fail(
             mutation_plan.error_code or "mutation_plan_failed",
             mutation_plan.detail or "display mutation preflight failed",
@@ -856,20 +856,15 @@ def plan_display_migration(
 
 
 def create_migration_artifact(plan: MigrationPlan) -> MigrationArtifact:
-    if plan.mutation_plan.manifest is None:
-        _fail("mutation_plan_missing", "migration plan has no mutation manifest")
+    intent, _, _ = canonical_unstamped_intent(
+        plan.request,
+        plan.mutation_plan,
+    )
     artifact = {
-        **asdict(plan.mutation_plan.manifest),
-        "migration_version": 1,
+        "migration_version": 2,
         "migration_kind": plan.migration_kind,
         "rows": [asdict(row) for row in plan.rows],
-        "objects": list(plan.mutation_plan.after_objects),
-        "auxiliary_after_files": {
-            path: payload.decode("utf-8")
-            for path, payload in sorted(
-                plan.mutation_plan.auxiliary_after_files.items()
-            )
-        },
+        "intent": intent,
         "snapshot_id": plan.snapshot_id,
         "snapshot_manifest_sha256": plan.snapshot_manifest_sha256,
     }
@@ -899,23 +894,21 @@ def _parse_artifact(
         artifact = json.loads(manifest_bytes)
     except (UnicodeError, json.JSONDecodeError) as exc:
         _fail("manifest_invalid", str(exc))
-    expected_keys = {field.name for field in fields(MutationManifest)} | {
+    expected_keys = {
         "migration_version",
         "migration_kind",
         "rows",
-        "objects",
-        "auxiliary_after_files",
+        "intent",
         "snapshot_id",
         "snapshot_manifest_sha256",
     }
     if not isinstance(artifact, dict) or set(artifact) != expected_keys:
         _fail("manifest_invalid", "migration artifact keys are invalid")
     if (
-        artifact["migration_version"] != 1
+        artifact["migration_version"] != 2
         or artifact["migration_kind"] not in {"id_only", "display_only"}
         or not isinstance(artifact["rows"], list)
-        or not isinstance(artifact["objects"], list)
-        or not isinstance(artifact["auxiliary_after_files"], dict)
+        or not isinstance(artifact["intent"], dict)
     ):
         _fail("manifest_invalid", "migration artifact payload is invalid")
     return artifact
@@ -957,7 +950,7 @@ def apply_migration_artifact(
             "snapshot_binding_mismatch",
             "apply snapshot differs from the planned trusted snapshot",
         )
-    if artifact["engine_sha"] != engine_sha:
+    if artifact["intent"].get("engine_sha") != engine_sha:
         _fail("engine_sha_mismatch", "apply engine SHA differs from the plan")
     trusted_migration_context(
         brain_root=brain_root,
@@ -1002,9 +995,11 @@ def apply_migration_artifact(
             "manifest_revalidation_failed",
             "live replan differs from the supplied migration artifact",
         )
-    result = MutationService().apply(
-        replanned.request.objects,
+    intent_payload = _canonical_json_bytes(artifact["intent"])
+    result = MutationService().apply_bound_intent(
         request=replanned.request,
+        artifact_intent=artifact["intent"],
+        expected_intent_sha256=hashlib.sha256(intent_payload).hexdigest(),
     )
     if not result.ok or result.manifest is None:
         _fail(

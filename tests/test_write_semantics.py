@@ -352,6 +352,83 @@ def test_canonical_collision_rename_uses_existing_target_as_timestamp_source():
     assert stamped["created_at"] == survivor["created_at"]
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "projection_repair",
+        "id_only_migration",
+        "display_migration",
+        "canonical_repair",
+    ],
+)
+def test_preserve_operation_matrix_keeps_source_temporal_values_exact(operation):
+    if operation == "projection_repair":
+        before = {
+            "id": "projection.neutral.reuse",
+            "kind": "ContextProjection",
+            "source_content_hash": "old",
+            "created_at": "2020-01-01T00:00:00Z",
+            "updated_at": "2020-01-02T00:00:00Z",
+            "generated_at": "2020-01-03T00:00:00Z",
+        }
+        after = {**before, "source_content_hash": "new"}
+        temporal_fields = ("created_at", "updated_at", "generated_at")
+        rename_pairs = ()
+    elif operation == "id_only_migration":
+        before = {
+            "id": "slack.neutral.old",
+            "kind": "SlackThread",
+            "created_at": "2021-01-01T00:00:00Z",
+            "updated_at": "2021-01-02T00:00:00Z",
+            "thread_ts": "1712345678.123456",
+        }
+        after = {**before, "id": "slack.neutral.new"}
+        temporal_fields = ("created_at", "updated_at", "thread_ts")
+        rename_pairs = ((before["id"], after["id"]),)
+    elif operation == "display_migration":
+        before = {
+            "id": "code.neutral.locator",
+            "kind": "CodeLocator",
+            "title": "old",
+            "created_at": "2022-01-01T00:00:00Z",
+            "updated_at": "2022-01-02T00:00:00Z",
+            "verified_at": "2022-01-03T00:00:00Z",
+        }
+        after = {**before, "title": "new"}
+        temporal_fields = ("created_at", "updated_at", "verified_at")
+        rename_pairs = ()
+    else:
+        before = event(happened_at="2023-01-03T00:00:00Z")
+        after = {**before, "summary": "검증된 canonical 변경"}
+        temporal_fields = ("created_at", "updated_at", "happened_at")
+        rename_pairs = ()
+
+    for field in temporal_fields:
+        after[field] = f"tampered-{field}"
+    actions = classify_object_actions(
+        operation=operation,
+        existing_by_id={before["id"]: before},
+        transformed_by_id={after["id"]: after},
+        delete_ids=((before["id"],) if rename_pairs else ()),
+        rename_pairs=rename_pairs,
+        verified_reference_rewrites=(),
+    )
+
+    stamped = apply_timestamp_policy(
+        [after],
+        actions=actions,
+        existing_by_id={before["id"]: before},
+        operation=operation,
+        verified_object_ids=(),
+        event_time=EVENT_TIME,
+    )[0]
+
+    assert actions[0].timestamp_policy is TimestampPolicy.PRESERVE
+    assert {field: stamped[field] for field in temporal_fields} == {
+        field: before[field] for field in temporal_fields
+    }
+
+
 @pytest.mark.parametrize("operation", ["ingest", "promote", "promote_auto"])
 def test_live_operations_reject_verified_reference_rewrite_action(operation):
     before = mapping(evidence_refs=["evref.neutral.old"])

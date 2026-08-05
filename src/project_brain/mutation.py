@@ -169,6 +169,7 @@ class MutationRequest:
     canonical_repair_binding: Mapping[str, str] | None = None
     coverage: Mapping[str, object] | None = None
     build_binding: BuildArtifactBinding | Mapping[str, object] | None = None
+    external_reference_rewrites: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,107 @@ class MutationPlanResult:
     auxiliary_after_files: Mapping[str, bytes] = field(default_factory=dict)
     error_details: Mapping[str, object] = field(default_factory=dict)
     outcome: MutationOutcome | None = None
+    object_actions: tuple[ObjectWriteAction, ...] = ()
+    reference_rewrites: tuple[dict, ...] = ()
+    before_fingerprint: str | None = None
+    expected_after_fingerprint: str | None = None
+    source_sha256_by_id: Mapping[str, str] = field(default_factory=dict)
+
+
+def _canonical_intent_bytes(intent: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            dict(intent),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def canonical_unstamped_intent(
+    request: MutationRequest,
+    preview: MutationPlanResult,
+) -> tuple[dict[str, object], bytes, str]:
+    """Artifact가 결속할 clock 이전 request/action/source intent."""
+    if not preview.ok:
+        raise ValueError("preview must be successful")
+    external_mapping = dict(sorted(request.external_reference_rewrites.items()))
+    reference_rewrites = [dict(row) for row in preview.reference_rewrites]
+    intent: dict[str, object] = {
+        "intent_version": 1,
+        "operation": request.operation.value,
+        "engine_sha": request.engine_sha,
+        "request": {
+            "objects": [dict(obj) for obj in request.objects],
+            "delete_ids": list(request.delete_ids),
+            "renames": dict(sorted(request.renames.items())),
+            "preconditions": dict(sorted(request.preconditions.items())),
+            "expected_corpus_fingerprint": request.expected_corpus_fingerprint,
+            "external_reference_rewrites": external_mapping,
+            "auxiliary_updates": [
+                {
+                    "path": update.path,
+                    "before_sha256": update.before_sha256,
+                    "after_sha256": update.after_sha256,
+                    "after_bytes_sha256": hashlib.sha256(
+                        update.after_bytes
+                    ).hexdigest(),
+                }
+                for update in request.auxiliary_updates
+            ],
+            "canonical_repair_intents": [
+                asdict(intent) for intent in request.canonical_repair_intents
+            ],
+            "canonical_repair_reference_collapses": [
+                asdict(collapse)
+                for collapse in request.canonical_repair_reference_collapses
+            ],
+            "canonical_repair_binding": (
+                dict(sorted(request.canonical_repair_binding.items()))
+                if request.canonical_repair_binding is not None
+                else None
+            ),
+        },
+        "preview": {
+            "after_objects": [dict(obj) for obj in preview.after_objects],
+            "after_sha256_by_id": {
+                str(obj["id"]): hashlib.sha256(
+                    BrainStore.object_bytes(obj)
+                ).hexdigest()
+                for obj in preview.after_objects
+            },
+            "actions": [
+                {
+                    "action": action.action.value,
+                    "object_id": action.object_id,
+                    "object_kind": action.object_kind,
+                    "source_id": action.source_id,
+                    "timestamp_policy": (
+                        action.timestamp_policy.value
+                        if action.timestamp_policy is not None
+                        else None
+                    ),
+                }
+                for action in preview.object_actions
+            ],
+            "reference_rewrites": reference_rewrites,
+            "external_reference_bindings": [
+                row
+                for row in reference_rewrites
+                if external_mapping.get(str(row["before_id"]))
+                == row["after_id"]
+            ],
+            "before_fingerprint": preview.before_fingerprint,
+            "expected_after_fingerprint": preview.expected_after_fingerprint,
+            "source_sha256_by_id": dict(
+                sorted(preview.source_sha256_by_id.items())
+            ),
+        },
+    }
+    payload = _canonical_intent_bytes(intent)
+    return intent, payload, hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -277,43 +379,117 @@ class MutationService:
             )
             if not result.ok or result.manifest is None:
                 return result
-            writable_actions = (
-                result.manifest.creates + result.manifest.updates
-            )
-            actions = (
-                writable_actions
-                + result.manifest.deletes
-                + result.manifest.renames
-                + result.manifest.auxiliary_updates
-            )
-            if not actions:
-                return replace(result, outcome=MutationOutcome.NO_CHANGES)
-            after_paths = {
-                str(action["path"])
-                for action in writable_actions
-            }
-            after_paths.update(
-                str(action["new_path"])
-                for action in result.manifest.renames
-            )
-            after_files = {
-                relative_path: BrainStore.object_bytes(obj)
-                for obj in result.after_objects
-                if (
-                    relative_path := BrainStore.object_path(
-                        request.brain_root,
-                        obj,
-                    ).relative_to(request.brain_root).as_posix()
-                ) in after_paths
-            }
-            after_files.update(result.auxiliary_after_files)
-            apply_transaction(
-                request.brain_root,
-                manifest=_transaction_manifest(result.manifest),
-                after_files=after_files,
+            return self._commit_planned(
+                request=request,
+                result=result,
                 failure_injector=failure_injector,
             )
-            return replace(result, outcome=MutationOutcome.COMMITTED)
+
+    def apply_bound_intent(
+        self,
+        *,
+        request: MutationRequest,
+        artifact_intent: Mapping[str, object],
+        expected_intent_sha256: str,
+        failure_injector: Callable[[str], None] | None = None,
+    ) -> MutationPlanResult:
+        """Live unstamped intent를 exact 재검증한 뒤 한 clock으로 적용한다."""
+        if not isinstance(artifact_intent, Mapping):
+            return _failure("intent_invalid", "artifact intent must be a mapping")
+        supplied_bytes = _canonical_intent_bytes(artifact_intent)
+        if hashlib.sha256(supplied_bytes).hexdigest() != expected_intent_sha256:
+            return _failure(
+                "intent_sha256_mismatch",
+                "artifact intent does not match its trusted receipt",
+            )
+        inputs, request_error = _validate_request_shape(request.objects, request)
+        if request_error is not None:
+            return request_error
+        assert inputs is not None
+        _, _, pre_store_error = _validate_pre_store_contract(inputs, request)
+        if pre_store_error is not None:
+            return pre_store_error
+
+        with corpus_lock(request.brain_root, exclusive=True):
+            recover_unfinished_transaction_unlocked(request.brain_root)
+            try:
+                existing_store = BrainStore.load_unlocked(request.brain_root)
+            except StoreLoadError as exc:
+                if isinstance(exc.__cause__, CorpusIOError):
+                    raise exc.__cause__
+                return _store_load_failure(exc)
+            preview = self._plan(
+                inputs,
+                request=request,
+                _existing_store=existing_store,
+                _preview_only=True,
+            )
+            if not preview.ok:
+                return preview
+            live_intent, live_bytes, live_sha256 = canonical_unstamped_intent(
+                request,
+                preview,
+            )
+            if (
+                live_sha256 != expected_intent_sha256
+                or live_bytes != supplied_bytes
+            ):
+                return _failure(
+                    "intent_revalidation_failed",
+                    "live unstamped mutation intent differs from the artifact",
+                )
+            result = self._plan(
+                inputs,
+                request=request,
+                _existing_store=existing_store,
+            )
+            if not result.ok or result.manifest is None:
+                return result
+            return self._commit_planned(
+                request=request,
+                result=result,
+                failure_injector=failure_injector,
+            )
+
+    @staticmethod
+    def _commit_planned(
+        *,
+        request: MutationRequest,
+        result: MutationPlanResult,
+        failure_injector: Callable[[str], None] | None,
+    ) -> MutationPlanResult:
+        writable_actions = result.manifest.creates + result.manifest.updates
+        actions = (
+            writable_actions
+            + result.manifest.deletes
+            + result.manifest.renames
+            + result.manifest.auxiliary_updates
+        )
+        if not actions:
+            return replace(result, outcome=MutationOutcome.NO_CHANGES)
+        after_paths = {str(action["path"]) for action in writable_actions}
+        after_paths.update(
+            str(action["new_path"]) for action in result.manifest.renames
+        )
+        after_files = {
+            relative_path: BrainStore.object_bytes(obj)
+            for obj in result.after_objects
+            if (
+                relative_path := BrainStore.object_path(
+                    request.brain_root,
+                    obj,
+                ).relative_to(request.brain_root).as_posix()
+            )
+            in after_paths
+        }
+        after_files.update(result.auxiliary_after_files)
+        apply_transaction(
+            request.brain_root,
+            manifest=_transaction_manifest(result.manifest),
+            after_files=after_files,
+            failure_injector=failure_injector,
+        )
+        return replace(result, outcome=MutationOutcome.COMMITTED)
 
     def _plan(
         self,
@@ -348,6 +524,22 @@ class MutationService:
         else:
             existing_store = _existing_store
         existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
+
+        if request.operation in {
+            MutationOperation.INGEST,
+            MutationOperation.CONTEXT_REPLACE,
+        }:
+            invalid_projection_ids = sorted(
+                str(obj.get("id", ""))
+                for obj in inputs
+                if obj.get("kind") == "ContextProjection"
+            )
+            if invalid_projection_ids:
+                return _failure(
+                    "operation_kind_invalid",
+                    "ContextProjection create/update requires projection operation: "
+                    + ", ".join(invalid_projection_ids),
+                )
 
         batch_root_error = _validate_batch_binding_brain_root(request)
         if batch_root_error is not None:
@@ -614,14 +806,8 @@ class MutationService:
                 )
 
         replacements = dict(rename_pairs)
-        verified_reference_rewrites = tuple(
-            VerifiedReferenceRewrite(
-                object_id=str(row["object_id"]),
-                pointer=str(row["pointer"]),
-                before_id=str(row["before_id"]),
-                after_id=str(row["after_id"]),
-            )
-            for row in _reference_rewrites(
+        reference_rewrite_rows = tuple(
+            _reference_rewrites(
                 existing_by_id,
                 planned_by_id,
                 rename_pairs,
@@ -629,6 +815,39 @@ class MutationService:
                     canonical_validation.suppressed_reference_fields
                 ),
             )
+        )
+        external_rewrites = dict(request.external_reference_rewrites)
+        if request.operation is MutationOperation.CONTEXT_REPLACE:
+            used_external = {
+                str(row["before_id"])
+                for row in reference_rewrite_rows
+                if external_rewrites.get(str(row["before_id"]))
+                == row["after_id"]
+            }
+            if used_external != set(external_rewrites):
+                return _failure(
+                    "reference_rewrite_binding_mismatch",
+                    "external reference rewrite mapping does not exactly bind live deltas",
+                )
+            conflicts = {
+                old_id
+                for old_id, new_id in external_rewrites.items()
+                if old_id in replacements and replacements[old_id] != new_id
+            }
+            if conflicts:
+                return _failure(
+                    "reference_rewrite_binding_mismatch",
+                    "external reference rewrite target conflicts with an expected move",
+                )
+            replacements.update(external_rewrites)
+        verified_reference_rewrites = tuple(
+            VerifiedReferenceRewrite(
+                object_id=str(row["object_id"]),
+                pointer=str(row["pointer"]),
+                before_id=str(row["before_id"]),
+                after_id=str(row["after_id"]),
+            )
+            for row in reference_rewrite_rows
             if replacements.get(str(row["before_id"])) == row["after_id"]
         )
         try:
@@ -642,23 +861,6 @@ class MutationService:
             )
         except ValueError as exc:
             return _failure("timestamp_policy_missing", str(exc))
-
-        if request.operation is MutationOperation.INGEST:
-            invalid_projection_ids = sorted(
-                action.object_id
-                for action in object_actions
-                if (
-                    action.object_kind == "ContextProjection"
-                    and action.action
-                    in {ObjectActionKind.CREATE, ObjectActionKind.UPDATE}
-                )
-            )
-            if invalid_projection_ids:
-                return _failure(
-                    "operation_kind_invalid",
-                    "ContextProjection create/update requires projection operation: "
-                    + ", ".join(invalid_projection_ids),
-                )
 
         if request.operation is MutationOperation.MARK_CHECKED:
             object_actions = tuple(
@@ -677,12 +879,47 @@ class MutationService:
                 for action in object_actions
             )
 
-        if _preview_only:
+        preserve_preview = request.operation in {
+            MutationOperation.PROJECTION_REPAIR,
+            MutationOperation.ID_ONLY_MIGRATION,
+            MutationOperation.DISPLAY_MIGRATION,
+            MutationOperation.CANONICAL_REPAIR,
+        }
+        if _preview_only and not preserve_preview:
+            required_source_receipt_ids = _required_source_receipt_ids(
+                existing_by_id=existing_by_id,
+                planned_by_id=planned_by_id,
+                delete_ids=delete_ids,
+                rename_pairs=rename_pairs,
+            )
+            source_sha256_by_id: dict[str, str] = {}
+            for object_id in required_source_receipt_ids:
+                source_sha256 = existing_store.source_sha256(object_id)
+                if source_sha256 is None:
+                    return _failure(
+                        "source_receipt_missing",
+                        f"{object_id}: loaded source receipt is missing",
+                    )
+                if (
+                    not isinstance(source_sha256, str)
+                    or _SHA256.fullmatch(source_sha256) is None
+                ):
+                    return _failure(
+                        "source_receipt_invalid",
+                        f"{object_id}: loaded source receipt is invalid",
+                    )
+                source_sha256_by_id[object_id] = source_sha256
             after = planned_inputs[0] if len(planned_inputs) == 1 else None
             return MutationPlanResult(
                 ok=True,
                 after=after,
                 after_objects=tuple(planned_inputs),
+                object_actions=object_actions,
+                reference_rewrites=tuple(
+                    dict(row) for row in reference_rewrite_rows
+                ),
+                before_fingerprint=before_fingerprint,
+                source_sha256_by_id=source_sha256_by_id,
             )
 
         has_action = bool(request.auxiliary_updates) or any(
@@ -690,7 +927,7 @@ class MutationService:
             for action in object_actions
         )
         event_time: str | None = None
-        if has_action:
+        if has_action and not _preview_only:
             event_time = self._clock()
             timestamp_error = _transaction_time_error(event_time)
             if timestamp_error is not None:
@@ -744,10 +981,17 @@ class MutationService:
                 event_time=event_time,
             ))
         except ValueError as exc:
-            code = (
-                "timestamp_invalid"
-                if str(exc).startswith("timestamp_invalid")
-                else "timestamp_policy_missing"
+            message = str(exc)
+            code = next(
+                (
+                    candidate
+                    for candidate in (
+                        "timestamp_invalid",
+                        "timestamp_source_invalid",
+                    )
+                    if message.startswith(candidate)
+                ),
+                "timestamp_policy_missing",
             )
             return _failure(code, str(exc))
         planned_by_id = {obj["id"]: obj for obj in planned_inputs}
@@ -908,6 +1152,24 @@ class MutationService:
                     f"{object_id}: loaded source receipt is invalid",
                 )
             source_sha256_by_id[object_id] = source_sha256
+        if _preview_only:
+            after = planned_inputs[0] if len(planned_inputs) == 1 else None
+            return MutationPlanResult(
+                ok=True,
+                after=after,
+                after_objects=tuple(planned_inputs),
+                auxiliary_after_files={
+                    update.path: update.after_bytes
+                    for update in request.auxiliary_updates
+                },
+                object_actions=object_actions,
+                reference_rewrites=tuple(
+                    dict(row) for row in reference_rewrite_rows
+                ),
+                before_fingerprint=before_fingerprint,
+                expected_after_fingerprint=expected_after_fingerprint,
+                source_sha256_by_id=source_sha256_by_id,
+            )
         manifest = _build_manifest(
             request=request,
             coverage_binding=coverage_binding,
@@ -938,6 +1200,13 @@ class MutationService:
                 update.path: update.after_bytes
                 for update in request.auxiliary_updates
             },
+            object_actions=object_actions,
+            reference_rewrites=tuple(
+                dict(row) for row in reference_rewrite_rows
+            ),
+            before_fingerprint=before_fingerprint,
+            expected_after_fingerprint=expected_after_fingerprint,
+            source_sha256_by_id=source_sha256_by_id,
         )
 
 
@@ -1506,6 +1775,23 @@ def _validate_request_shape(
             for old_id, new_id in request.renames.items()
         ):
             raise ValueError("renames must be Mapping[str, str]")
+        if not isinstance(request.external_reference_rewrites, Mapping) or not all(
+            isinstance(old_id, str)
+            and bool(old_id)
+            and isinstance(new_id, str)
+            and bool(new_id)
+            for old_id, new_id in request.external_reference_rewrites.items()
+        ):
+            raise ValueError(
+                "external_reference_rewrites must be Mapping[str, str]"
+            )
+        if (
+            request.external_reference_rewrites
+            and request.operation is not MutationOperation.CONTEXT_REPLACE
+        ):
+            raise ValueError(
+                "external_reference_rewrites are allowed only for context_replace"
+            )
         if not isinstance(request.preconditions, Mapping) or not all(
             isinstance(object_id, str) and isinstance(expected_hash, str)
             for object_id, expected_hash in request.preconditions.items()

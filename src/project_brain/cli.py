@@ -1704,15 +1704,24 @@ def _run_context_replace(argv) -> int:
             artifact = create_context_replace_artifact(request)
             manifest_path = Path(args.manifest)
             _atomic_write_bytes(manifest_path, artifact.manifest_bytes)
+            actions = artifact.manifest["intent"]["preview"]["actions"]
             print(json.dumps({
                 "ok": True,
                 "manifest": str(manifest_path),
                 "manifest_sha256": artifact.manifest_sha256,
-                "transaction_id": artifact.manifest["transaction_id"],
-                "creates": len(artifact.manifest["creates"]),
-                "updates": len(artifact.manifest["updates"]),
-                "deletes": len(artifact.manifest["deletes"]),
-                "renames": len(artifact.manifest["renames"]),
+                "creates": sum(
+                    action["action"] == "create" for action in actions
+                ),
+                "updates": sum(
+                    action["action"] in {"update", "reference_rewrite"}
+                    for action in actions
+                ),
+                "deletes": sum(
+                    action["action"] == "delete" for action in actions
+                ),
+                "renames": sum(
+                    action["action"] == "rename" for action in actions
+                ),
             }, ensure_ascii=False, indent=2))
             return 0
 
@@ -1722,7 +1731,11 @@ def _run_context_replace(argv) -> int:
             preview = json.loads(manifest_bytes)
         except (UnicodeError, json.JSONDecodeError):
             preview = {}
-        objects = preview.get("objects", []) if isinstance(preview, dict) else []
+        objects = (
+            preview.get("intent", {}).get("request", {}).get("objects", [])
+            if isinstance(preview, dict)
+            else []
+        )
         repo_context = _resolve_mutation_context(
             args,
             brain_root,
@@ -1892,16 +1905,13 @@ def _run_migration(argv) -> int:
                     "migration_kind": "canonical_repair",
                     "manifest": str(manifest_path),
                     "manifest_sha256": artifact.manifest_sha256,
-                    "transaction_id": (
-                        plan.mutation_plan.manifest.transaction_id
-                    ),
                     "row_count": len(plan.rows),
                     "action_count": (
-                        len(plan.mutation_plan.manifest.creates)
-                        + len(plan.mutation_plan.manifest.updates)
-                        + len(plan.mutation_plan.manifest.deletes)
-                        + len(plan.mutation_plan.manifest.renames)
-                        + len(plan.mutation_plan.manifest.auxiliary_updates)
+                        sum(
+                            action.action.value != "no_change"
+                            for action in plan.mutation_plan.object_actions
+                        )
+                        + len(plan.request.auxiliary_updates)
                     ),
                     "decision_ledger_sha256": ledger.sha256,
                     "phase_a_classification_sha256": (
@@ -1939,14 +1949,13 @@ def _run_migration(argv) -> int:
                 "migration_kind": plan.migration_kind,
                 "manifest": str(manifest_path),
                 "manifest_sha256": artifact.manifest_sha256,
-                "transaction_id": plan.mutation_plan.manifest.transaction_id,
                 "row_count": len(plan.rows),
                 "action_count": (
-                    len(plan.mutation_plan.manifest.creates)
-                    + len(plan.mutation_plan.manifest.updates)
-                    + len(plan.mutation_plan.manifest.deletes)
-                    + len(plan.mutation_plan.manifest.renames)
-                    + len(plan.mutation_plan.manifest.auxiliary_updates)
+                    sum(
+                        action.action.value != "no_change"
+                        for action in plan.mutation_plan.object_actions
+                    )
+                    + len(plan.request.auxiliary_updates)
                 ),
                 "snapshot_id": snapshot.snapshot_id,
                 "snapshot_manifest_sha256": snapshot.manifest_sha256,

@@ -4,7 +4,7 @@ import hashlib
 import json
 import subprocess
 from copy import deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -29,7 +29,6 @@ from project_brain.canonical_merge import project_collision_merges
 from project_brain.mutation import (
     CanonicalFieldChange,
     CanonicalRepairIntent,
-    MutationManifest,
     MutationOperation,
     MutationService,
     corpus_fingerprint,
@@ -1369,7 +1368,7 @@ def test_plan_merge_uses_delete_update_and_exact_reference_projection(
 
     reference_rewrites = plan_canonical_repair(
         **canonical_fixture.plan_args
-    ).mutation_plan.manifest.reference_rewrites
+    ).mutation_plan.reference_rewrites
     assert not any(
         rewrite["object_id"] in merge_bundle_ids
         and rewrite["pointer"].startswith("/target_object_ids/")
@@ -1628,11 +1627,10 @@ def test_artifact_has_exact_outer_keys_and_receipt_bindings(canonical_fixture):
     artifact = create_canonical_repair_artifact(plan)
 
     assert set(artifact.manifest) == {
-        *(field.name for field in fields(MutationManifest)),
         "canonical_repair_version",
         "migration_kind",
         "rows",
-        "objects",
+        "intent",
         "decision_ledger_sha256",
         "phase_a_classification_sha256",
         "id_renames",
@@ -1649,12 +1647,14 @@ def test_artifact_has_exact_outer_keys_and_receipt_bindings(canonical_fixture):
     assert artifact.manifest["snapshot_manifest_sha256"] == (
         canonical_fixture.snapshot.manifest_sha256
     )
-    assert artifact.manifest["before_fingerprint"] == corpus_fingerprint(
+    intent = artifact.manifest["intent"]
+    assert intent["preview"]["before_fingerprint"] == corpus_fingerprint(
         canonical_fixture.existing
     )
-    assert artifact.manifest["expected_after_fingerprint"] == (
-        plan.mutation_plan.manifest.expected_after_fingerprint
-    )
+    assert intent["operation"] == MutationOperation.CANONICAL_REPAIR.value
+    assert intent["engine_sha"] == canonical_fixture.engine_sha
+    assert "transaction_id" not in intent
+    assert "expected_after_fingerprint" not in intent
     assert artifact.manifest["engine_receipt"] == {
         "root": str(canonical_fixture.engine_root),
         "head": canonical_fixture.engine_sha,
@@ -2179,24 +2179,32 @@ def test_apply_rejects_fresh_replan_byte_mismatch_before_mutation(
     assert exc.value.code == "manifest_revalidation_failed"
 
 
-def test_apply_fresh_replans_then_calls_mutation_apply_exactly_once(
+def test_apply_fresh_replans_then_calls_bound_mutation_exactly_once(
     canonical_fixture,
     monkeypatch,
 ):
     plan, artifact = _artifact_for(canonical_fixture)
-    original_apply = MutationService.apply
+    original_apply = MutationService.apply_bound_intent
     calls: list[str] = []
 
-    def tracked_apply(self, objects, *, request, failure_injector=None):
+    def tracked_apply(
+        self,
+        *,
+        request,
+        artifact_intent,
+        expected_intent_sha256,
+        failure_injector=None,
+    ):
         calls.append(request.operation.value)
         return original_apply(
             self,
-            objects,
             request=request,
+            artifact_intent=artifact_intent,
+            expected_intent_sha256=expected_intent_sha256,
             failure_injector=failure_injector,
         )
 
-    monkeypatch.setattr(MutationService, "apply", tracked_apply)
+    monkeypatch.setattr(MutationService, "apply_bound_intent", tracked_apply)
     monkeypatch.setattr(
         "project_brain.canonical_repair.verify_snapshot",
         lambda *args, **kwargs: canonical_fixture.snapshot,
@@ -2211,7 +2219,9 @@ def test_apply_fresh_replans_then_calls_mutation_apply_exactly_once(
     )
 
     assert calls == ["canonical_repair"]
-    assert result.transaction_id == plan.mutation_plan.manifest.transaction_id
+    assert plan.mutation_plan.manifest is None
+    assert len(result.transaction_id) == 64
+    assert set(result.transaction_id) <= set("0123456789abcdef")
     assert result.snapshot_id == canonical_fixture.snapshot.snapshot_id
     assert result.decision_ledger_sha256 == canonical_fixture.ledger.sha256
     after = BrainStore.load(canonical_fixture.brain_root)
@@ -2282,10 +2292,11 @@ def test_trusted_intermediate_receipt_rejects_missing_merge_survivor_update(
 ):
     args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
     manifest = json.loads(args["canonical_manifest_bytes"])
-    manifest["updates"] = [
-        update
-        for update in manifest["updates"]
-        if update["object_id"] != DRONE_MERGE_TARGET
+    actions = manifest["intent"]["preview"]["actions"]
+    manifest["intent"]["preview"]["actions"] = [
+        action
+        for action in actions
+        if action["object_id"] != DRONE_MERGE_TARGET
     ]
     _replace_trusted_manifest(args, manifest)
 
@@ -2391,7 +2402,7 @@ def test_trusted_intermediate_receipt_rejects_unprojected_live_after_ids(
         file_count=len(intermediate.all()),
         corpus_fingerprint=fingerprint,
     )
-    manifest["expected_after_fingerprint"] = fingerprint
+    manifest["intent"]["preview"]["expected_after_fingerprint"] = fingerprint
     _replace_trusted_manifest(args, manifest)
 
     with pytest.raises(CanonicalRepairError) as exc:
@@ -2420,8 +2431,9 @@ def test_trusted_intermediate_receipt_accepts_noop_merge_survivor_without_update
         merge_receipt["target_after_sha256"]
     )
     assert all(
-        update["object_id"] != HEDGEHOG_MERGE_TARGET
-        for update in manifest["updates"]
+        action["object_id"] != HEDGEHOG_MERGE_TARGET
+        or action["action"] == "no_change"
+        for action in manifest["intent"]["preview"]["actions"]
     )
     assert id_renames_from_trusted_repair_receipt(**args) == (
         id_renames_from_ledger(canonical_fixture.ledger)
@@ -2441,16 +2453,20 @@ def test_trusted_intermediate_receipt_rejects_noop_merge_survivor_update(
     )
     merge_receipt = merge_row["merge_receipt"]
     target = args["existing"].get(HEDGEHOG_MERGE_TARGET)
-    target_path = BrainStore.object_path(
-        canonical_fixture.brain_root,
-        target,
-    ).relative_to(canonical_fixture.brain_root)
-    manifest["updates"].append({
+    manifest["intent"]["preview"]["actions"].append({
+        "action": "update",
         "object_id": HEDGEHOG_MERGE_TARGET,
-        "path": target_path.as_posix(),
-        "before_sha256": merge_receipt["target_before_sha256"],
-        "after_sha256": merge_receipt["target_after_sha256"],
+        "object_kind": target["kind"],
+        "source_id": HEDGEHOG_MERGE_TARGET,
+        "timestamp_policy": "preserve",
     })
+    manifest["intent"]["preview"]["after_objects"].append(target)
+    manifest["intent"]["preview"]["after_sha256_by_id"][
+        HEDGEHOG_MERGE_TARGET
+    ] = merge_receipt["target_after_sha256"]
+    manifest["intent"]["preview"]["source_sha256_by_id"][
+        HEDGEHOG_MERGE_TARGET
+    ] = merge_receipt["target_before_sha256"]
     _replace_trusted_manifest(args, manifest)
 
     with pytest.raises(CanonicalRepairError) as exc:
@@ -2491,16 +2507,12 @@ def test_trusted_intermediate_receipt_rejects_each_merge_tamper_axis(
     )
     merge_receipt = merge_row["merge_receipt"]
     collapse = merge_receipt["reference_collapses"][0]
-    survivor_update = next(
-        update
-        for update in manifest["updates"]
-        if update["object_id"] == DRONE_MERGE_TARGET
-    )
+    preview = manifest["intent"]["preview"]
 
     if axis == "survivor_before_sha":
-        survivor_update["before_sha256"] = "0" * 64
+        preview["source_sha256_by_id"][DRONE_MERGE_TARGET] = "0" * 64
     elif axis == "survivor_after_sha":
-        survivor_update["after_sha256"] = "0" * 64
+        preview["after_sha256_by_id"][DRONE_MERGE_TARGET] = "0" * 64
     elif axis == "row_canonical_payload_hash":
         merge_row["canonical_payload_hash"] = "0" * 64
         merge_receipt["target_after_sha256"] = "0" * 64
@@ -2533,7 +2545,7 @@ def test_trusted_intermediate_receipt_rejects_each_merge_tamper_axis(
             file_count=len(intermediate.all()),
             corpus_fingerprint=fingerprint,
         )
-        manifest["expected_after_fingerprint"] = fingerprint
+        manifest["intent"]["preview"]["expected_after_fingerprint"] = fingerprint
     _replace_trusted_manifest(args, manifest)
 
     with pytest.raises(CanonicalRepairError) as exc:
@@ -2551,16 +2563,19 @@ def test_trusted_intermediate_receipt_rejects_merge_delete_drift(
     args = _trusted_intermediate_args(canonical_fixture, monkeypatch)
     merge_source = DRONE_MERGE_SOURCE
     manifest = json.loads(args["canonical_manifest_bytes"])
+    actions = manifest["intent"]["preview"]["actions"]
     delete_row = next(
         row
-        for row in manifest["deletes"]
-        if row["object_id"] == merge_source
+        for row in actions
+        if row["action"] == "delete" and row["object_id"] == merge_source
     )
     if tamper == "delete_missing":
-        manifest["deletes"].remove(delete_row)
+        actions.remove(delete_row)
         expected_detail = f"{merge_source}: merge delete receipt is missing"
     else:
-        delete_row["before_sha256"] = "0" * 64
+        manifest["intent"]["preview"]["source_sha256_by_id"][merge_source] = (
+            "0" * 64
+        )
         expected_detail = f"{merge_source}: merge delete receipt is invalid"
     _replace_trusted_manifest(args, manifest)
 
@@ -2591,7 +2606,9 @@ def test_trusted_intermediate_receipt_rejects_retained_merge_source(
         corpus_fingerprint=retained_fingerprint,
     )
     manifest = json.loads(args["canonical_manifest_bytes"])
-    manifest["expected_after_fingerprint"] = retained_fingerprint
+    manifest["intent"]["preview"]["expected_after_fingerprint"] = (
+        retained_fingerprint
+    )
     _replace_trusted_manifest(args, manifest)
 
     with pytest.raises(CanonicalRepairError) as exc:
@@ -2606,11 +2623,25 @@ def test_trusted_intermediate_receipt_rejects_retained_merge_source(
 def _tamper_trusted_manifest(args: dict, axis: str) -> None:
     manifest = json.loads(args["canonical_manifest_bytes"])
     if axis == "expected_after_fingerprint":
-        manifest["expected_after_fingerprint"] = "0" * 64
+        manifest["intent"]["preview"]["expected_after_fingerprint"] = "0" * 64
     elif axis == "source_before_receipt":
-        manifest["renames"][0]["before_sha256"] = "0" * 64
+        rename = next(
+            action
+            for action in manifest["intent"]["preview"]["actions"]
+            if action["action"] == "rename"
+        )
+        manifest["intent"]["preview"]["source_sha256_by_id"][
+            rename["source_id"]
+        ] = "0" * 64
     else:
-        manifest["renames"][0]["after_sha256"] = "0" * 64
+        rename = next(
+            action
+            for action in manifest["intent"]["preview"]["actions"]
+            if action["action"] == "rename"
+        )
+        manifest["intent"]["preview"]["after_sha256_by_id"][
+            rename["object_id"]
+        ] = "0" * 64
     manifest_bytes = _json_bytes(manifest)
     args["canonical_manifest_bytes"] = manifest_bytes
     args["expected_canonical_manifest_sha256"] = hashlib.sha256(

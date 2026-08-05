@@ -26,11 +26,11 @@ from project_brain.migration import (
 from project_brain.mutation import (
     CanonicalFieldChange,
     CanonicalRepairIntent,
-    MutationManifest,
     MutationOperation,
     MutationPlanResult,
     MutationRequest,
     MutationService,
+    canonical_unstamped_intent,
     corpus_fingerprint,
 )
 from project_brain.reference_fields import rewrite_object_refs
@@ -908,8 +908,8 @@ def plan_canonical_repair(
             ),
         },
     )
-    mutation_plan = MutationService().plan(request.objects, request=request)
-    if not mutation_plan.ok or mutation_plan.manifest is None:
+    mutation_plan = MutationService().preview(request.objects, request=request)
+    if not mutation_plan.ok:
         _fail(
             mutation_plan.error_code or "mutation_plan_failed",
             mutation_plan.detail or "canonical repair preflight failed",
@@ -924,7 +924,7 @@ def plan_canonical_repair(
         after = after_by_id[new_id]
         row_rewrites = tuple(
             dict(rewrite)
-            for rewrite in mutation_plan.manifest.reference_rewrites
+            for rewrite in mutation_plan.reference_rewrites
             if (
                 rewrite["before_id"] == decision.source_id
                 and rewrite["after_id"] == new_id
@@ -946,7 +946,7 @@ def plan_canonical_repair(
         after = after_by_id[target_id]
         row_rewrites = tuple(
             dict(rewrite)
-            for rewrite in mutation_plan.manifest.reference_rewrites
+            for rewrite in mutation_plan.reference_rewrites
             if (
                 rewrite["before_id"] == decision.source_id
                 and rewrite["after_id"] == target_id
@@ -995,14 +995,15 @@ def plan_canonical_repair(
 def create_canonical_repair_artifact(
     plan: CanonicalRepairPlan,
 ) -> CanonicalRepairArtifact:
-    if plan.mutation_plan.manifest is None:
-        _fail("mutation_plan_missing", "canonical repair plan has no manifest")
+    intent, _, _ = canonical_unstamped_intent(
+        plan.request,
+        plan.mutation_plan,
+    )
     artifact = {
-        **asdict(plan.mutation_plan.manifest),
-        "canonical_repair_version": 1,
+        "canonical_repair_version": 2,
         "migration_kind": "canonical_repair",
         "rows": [asdict(row) for row in plan.rows],
-        "objects": list(plan.mutation_plan.after_objects),
+        "intent": intent,
         "decision_ledger_sha256": plan.decision_ledger_sha256,
         "phase_a_classification_sha256": (
             plan.phase_a_classification_sha256
@@ -1028,7 +1029,7 @@ _CANONICAL_ARTIFACT_EXTRA_KEYS = {
     "canonical_repair_version",
     "migration_kind",
     "rows",
-    "objects",
+    "intent",
     "decision_ledger_sha256",
     "phase_a_classification_sha256",
     "id_renames",
@@ -1276,19 +1277,16 @@ def _parse_canonical_artifact(
         label="canonical repair manifest",
     )
     artifact = _load_json(manifest_bytes, code="manifest_invalid")
-    expected_keys = {
-        *(field.name for field in fields(MutationManifest)),
-        *_CANONICAL_ARTIFACT_EXTRA_KEYS,
-    }
+    expected_keys = set(_CANONICAL_ARTIFACT_EXTRA_KEYS)
     if not isinstance(artifact, dict) or set(artifact) != expected_keys:
         _fail("manifest_invalid", "canonical repair artifact keys are invalid")
     engine_receipt = artifact["engine_receipt"]
     if (
         type(artifact["canonical_repair_version"]) is not int
-        or artifact["canonical_repair_version"] != 1
+        or artifact["canonical_repair_version"] != 2
         or artifact["migration_kind"] != "canonical_repair"
         or not isinstance(artifact["rows"], list)
-        or not isinstance(artifact["objects"], list)
+        or not isinstance(artifact["intent"], dict)
         or not isinstance(artifact["id_renames"], dict)
         or not isinstance(engine_receipt, dict)
         or set(engine_receipt) != {"root", "head", "status_sha256"}
@@ -1335,7 +1333,7 @@ def _validate_artifact_trust_bindings(
             "manifest_binding_mismatch",
             "canonical artifact decision bindings differ from trusted inputs",
         )
-    if artifact["engine_sha"] != engine_sha:
+    if artifact["intent"].get("engine_sha") != engine_sha:
         _fail("engine_sha_mismatch", "artifact engine SHA differs from apply input")
     receipt = artifact["engine_receipt"]
     assert isinstance(receipt, dict)
@@ -1426,9 +1424,11 @@ def apply_canonical_repair_artifact(
             "manifest_revalidation_failed",
             "live replan differs from the supplied canonical repair artifact",
         )
-    result = MutationService().apply(
-        replanned.request.objects,
+    intent_payload = _canonical_json_bytes(artifact["intent"])
+    result = MutationService().apply_bound_intent(
         request=replanned.request,
+        artifact_intent=artifact["intent"],
+        expected_intent_sha256=hashlib.sha256(intent_payload).hexdigest(),
         failure_injector=failure_injector,
     )
     if not result.ok or result.manifest is None:
@@ -1501,94 +1501,90 @@ def _validate_classification_receipt_for_ledger(
 def _artifact_transition_receipts(
     artifact: Mapping[str, object],
 ) -> _ArtifactTransitions:
+    intent = artifact.get("intent")
+    if not isinstance(intent, dict):
+        _fail("manifest_invalid", "artifact intent is invalid")
+    preview = intent.get("preview")
+    request = intent.get("request")
+    if not isinstance(preview, dict) or not isinstance(request, dict):
+        _fail("manifest_invalid", "artifact intent bindings are invalid")
+    actions = preview.get("actions")
+    after_objects = preview.get("after_objects")
+    source_sha256_by_id = preview.get("source_sha256_by_id")
+    after_sha256_by_id = preview.get("after_sha256_by_id")
+    if (
+        not isinstance(actions, list)
+        or not isinstance(after_objects, list)
+        or not all(isinstance(obj, dict) for obj in after_objects)
+        or not isinstance(source_sha256_by_id, dict)
+        or not isinstance(after_sha256_by_id, dict)
+    ):
+        _fail("manifest_invalid", "artifact transition intent is invalid")
+    after_by_id = {
+        str(obj.get("id")): obj
+        for obj in after_objects
+        if isinstance(obj.get("id"), str)
+    }
     updates: dict[str, tuple[str, str]] = {}
-    update_actions = artifact["updates"]
-    if not isinstance(update_actions, list):
-        _fail("manifest_invalid", "artifact updates must be a list")
-    for action in update_actions:
+    renames: dict[str, tuple[str, str, str]] = {}
+    deletes: dict[str, str] = {}
+    for action in actions:
         if not isinstance(action, dict) or set(action) != {
+            "action",
             "object_id",
-            "path",
-            "before_sha256",
-            "after_sha256",
+            "object_kind",
+            "source_id",
+            "timestamp_policy",
         }:
-            _fail("manifest_invalid", "artifact updates row is invalid")
+            _fail("manifest_invalid", "artifact transition action is invalid")
+        action_kind = action["action"]
         object_id = action["object_id"]
-        before_sha256 = action["before_sha256"]
-        after_sha256 = action["after_sha256"]
+        source_id = action["source_id"]
         if (
             not _exact_nonempty_string(object_id)
-            or not _exact_nonempty_string(action["path"])
-            or not isinstance(before_sha256, str)
-            or _SHA256.fullmatch(before_sha256) is None
-            or not isinstance(after_sha256, str)
-            or _SHA256.fullmatch(after_sha256) is None
-            or object_id in updates
+            or action_kind not in {
+                "update",
+                "reference_rewrite",
+                "rename",
+                "delete",
+                "no_change",
+            }
         ):
-            _fail("manifest_invalid", "artifact updates receipt is invalid")
+            _fail("manifest_invalid", "artifact transition action is invalid")
+        if action_kind == "no_change":
+            continue
+        if not _exact_nonempty_string(source_id):
+            _fail("manifest_invalid", "artifact transition source is invalid")
         assert isinstance(object_id, str)
-        updates[object_id] = (before_sha256, after_sha256)
-
-    renames: dict[str, tuple[str, str, str]] = {}
-    rename_actions = artifact["renames"]
-    if not isinstance(rename_actions, list):
-        _fail("manifest_invalid", "artifact renames must be a list")
-    for action in rename_actions:
-        if not isinstance(action, dict) or set(action) != {
-            "old_id",
-            "new_id",
-            "old_path",
-            "new_path",
-            "before_sha256",
-            "after_sha256",
-        }:
-            _fail("manifest_invalid", "artifact renames row is invalid")
-        source_id = action["old_id"]
-        target_id = action["new_id"]
-        before_sha256 = action["before_sha256"]
-        after_sha256 = action["after_sha256"]
+        assert isinstance(source_id, str)
+        before_sha256 = source_sha256_by_id.get(source_id)
         if (
-            not _exact_nonempty_string(source_id)
-            or not _exact_nonempty_string(target_id)
-            or source_id == target_id
-            or not _exact_nonempty_string(action["old_path"])
-            or not _exact_nonempty_string(action["new_path"])
-            or not isinstance(before_sha256, str)
+            not isinstance(before_sha256, str)
             or _SHA256.fullmatch(before_sha256) is None
-            or not isinstance(after_sha256, str)
+        ):
+            _fail("manifest_invalid", "artifact source receipt is invalid")
+        if action_kind == "delete":
+            if source_id in deletes:
+                _fail("manifest_invalid", "artifact delete is duplicated")
+            deletes[source_id] = before_sha256
+            continue
+        after = after_by_id.get(object_id)
+        if after is None:
+            _fail("manifest_invalid", "artifact after object is missing")
+        after_sha256 = after_sha256_by_id.get(object_id)
+        if (
+            not isinstance(after_sha256, str)
             or _SHA256.fullmatch(after_sha256) is None
-            or source_id in renames
         ):
-            _fail("manifest_invalid", "artifact renames receipt is invalid")
-        assert isinstance(source_id, str)
-        assert isinstance(target_id, str)
-        renames[source_id] = (target_id, before_sha256, after_sha256)
-
-    deletes: dict[str, str] = {}
-    delete_actions = artifact["deletes"]
-    if not isinstance(delete_actions, list):
-        _fail("manifest_invalid", "artifact deletes must be a list")
-    for action in delete_actions:
-        if not isinstance(action, dict) or set(action) != {
-            "object_id",
-            "path",
-            "before_sha256",
-            "after_sha256",
-        }:
-            _fail("manifest_invalid", "artifact deletes row is invalid")
-        source_id = action["object_id"]
-        before_sha256 = action["before_sha256"]
-        if (
-            not _exact_nonempty_string(source_id)
-            or not _exact_nonempty_string(action["path"])
-            or not isinstance(before_sha256, str)
-            or _SHA256.fullmatch(before_sha256) is None
-            or action["after_sha256"] is not None
-            or source_id in deletes
-        ):
-            _fail("manifest_invalid", "artifact deletes receipt is invalid")
-        assert isinstance(source_id, str)
-        deletes[source_id] = before_sha256
+            _fail("manifest_invalid", "artifact after receipt is invalid")
+        if action_kind == "rename":
+            if source_id in renames or source_id == object_id:
+                _fail("manifest_invalid", "artifact rename is invalid")
+            renames[source_id] = (object_id, before_sha256, after_sha256)
+        else:
+            if object_id in updates:
+                _fail("manifest_invalid", "artifact update is duplicated")
+            updates[object_id] = (before_sha256, after_sha256)
     if (
         set(updates) & set(renames)
         or set(updates) & set(deletes)
@@ -1674,10 +1670,11 @@ def id_renames_from_trusted_repair_receipt(
         artifact["decision_ledger_sha256"] != expected_decisions_sha256
         or artifact["phase_a_classification_sha256"]
         != expected_classification_sha256
-        or artifact["before_fingerprint"] != ledger.corpus_fingerprint
-        or artifact["expected_after_fingerprint"]
+        or artifact["intent"]["preview"]["before_fingerprint"]
+        != ledger.corpus_fingerprint
+        or artifact["intent"]["preview"]["expected_after_fingerprint"]
         != intermediate_snapshot.corpus_fingerprint
-        or artifact["engine_sha"] != ledger.engine_sha
+        or artifact["intent"]["engine_sha"] != ledger.engine_sha
         or ledger.engine_sha != intermediate_snapshot.engine_head
         or ledger.repo_head != intermediate_snapshot.repo_head
     ):

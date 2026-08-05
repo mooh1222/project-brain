@@ -1048,6 +1048,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "canonical_repair_binding",
         "coverage",
         "build_binding",
+        "external_reference_rewrites",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
@@ -3590,6 +3591,7 @@ def test_live_pre_schema_allows_engine_fields_omission_before_final_stamp(
     [
         (MutationOperation.PROJECTION, True, None),
         (MutationOperation.INGEST, False, "operation_kind_invalid"),
+        (MutationOperation.CONTEXT_REPLACE, False, "operation_kind_invalid"),
     ],
 )
 def test_context_projection_writes_require_projection_operation(
@@ -3623,6 +3625,24 @@ def test_context_projection_writes_require_projection_operation(
             stored["updated_at"],
             stored["generated_at"],
         ) == (FIXED_TIME, FIXED_TIME, FIXED_TIME)
+
+
+def test_external_reference_rewrites_are_context_replace_only(tmp_path):
+    obj = context()
+    request = _request(
+        tmp_path / "brain",
+        (obj,),
+        operation=MutationOperation.PROJECTION,
+    )
+    object.__setattr__(
+        request,
+        "external_reference_rewrites",
+        {"g.neutral.old": "g.neutral.new"},
+    )
+
+    result = MutationService().preview(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (False, "request_invalid")
 
 
 def test_projection_apply_update_and_noop_use_clock_only_for_change(tmp_path):
