@@ -684,6 +684,84 @@ def scan_tree_entries(
     return _capture_safe_tree(root, None, excluded_paths=excluded_paths)
 
 
+def verify_tree_path_absent(path: Path) -> None:
+    """Verify one exact absolute path is absent without creating ancestors."""
+
+    path = Path(path)
+    if not path.is_absolute() or path != Path(os.path.abspath(path)):
+        _fail("tree_path_invalid", f"tree path must be exact absolute: {path}")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    existing_parts: list[str] = []
+    try:
+        for index, part in enumerate(path.parts[1:]):
+            try:
+                inspected = os.stat(
+                    part,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                existing_path = Path("/").joinpath(*existing_parts)
+                pinned = os.fstat(descriptor)
+                verified_fd = _open_absolute_directory(
+                    existing_path,
+                    create=False,
+                )
+                try:
+                    verified = os.fstat(verified_fd)
+                finally:
+                    os.close(verified_fd)
+                if not _same_stat(pinned, verified):
+                    _fail(
+                        "source_fingerprint_changed",
+                        f"tree path changed while checking absence: {path}",
+                        paths=(path,),
+                    )
+                return
+            except OSError as exc:
+                _fail(
+                    "source_unavailable",
+                    f"cannot inspect absent tree path {path}: {exc}",
+                    paths=(path,),
+                )
+            if stat.S_ISLNK(inspected.st_mode):
+                _fail(
+                    "symlink_forbidden",
+                    f"symlink in absent tree path: {path}",
+                    paths=(path,),
+                )
+            if index == len(path.parts[1:]) - 1:
+                _fail(
+                    "source_exists",
+                    f"tree path already exists: {path}",
+                    paths=(path,),
+                )
+            if not stat.S_ISDIR(inspected.st_mode):
+                _fail(
+                    "source_type_invalid",
+                    f"non-directory in absent tree path: {path}",
+                    paths=(path,),
+                )
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            opened = os.fstat(child)
+            if not _same_stat(inspected, opened):
+                os.close(child)
+                _fail(
+                    "source_fingerprint_changed",
+                    f"tree path changed while checking absence: {path}",
+                    paths=(path,),
+                )
+            os.close(descriptor)
+            descriptor = child
+            existing_parts.append(part)
+    finally:
+        os.close(descriptor)
+
+
 def _scan_tree(
     root: Path,
     *,

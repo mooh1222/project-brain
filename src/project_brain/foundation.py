@@ -179,6 +179,7 @@ def verify_artifact_inventory(
     verified_snapshot_root: Path | None = None,
 ) -> TreeReceipt:
     artifact_root = Path(artifact_root)
+    verified_entries: dict[str, TreeEntryReceipt] = {}
     allowed_regular = {
         _absolute_relative(artifact_root, Path(path), label="allowed artifact")
         for path in allowed_files
@@ -191,17 +192,33 @@ def verify_artifact_inventory(
             label="verified snapshot root",
         )
         try:
-            manifest = capture_tree_receipt(
-                verified_snapshot_root,
-                ["manifest.json"],
+            verified_before = capture_tree_receipt(
+                artifact_root,
+                [snapshot_relative],
             )
-            manifest_sha = manifest.entries[0].sha256
+            manifest_entry = next(
+                entry
+                for entry in verified_before.entries
+                if entry.path == f"{snapshot_relative}/manifest.json"
+            )
             snapshot.verify_snapshot(
                 verified_snapshot_root,
-                expected_manifest_sha256=manifest_sha,
+                expected_manifest_sha256=manifest_entry.sha256,
             )
-            verified_tree = _scan_tree_receipt(verified_snapshot_root)
-        except (FoundationError, SnapshotError) as exc:
+            verified_after = capture_tree_receipt(
+                artifact_root,
+                [snapshot_relative],
+            )
+            if verified_after != verified_before:
+                _fail(
+                    "artifact_inventory_invalid",
+                    "verified snapshot changed during verification",
+                    paths=(verified_snapshot_root,),
+                )
+            verified_entries = {
+                entry.path: entry for entry in verified_after.entries
+            }
+        except (FoundationError, SnapshotError, StopIteration) as exc:
             cause = exc.code if isinstance(exc, (FoundationError, SnapshotError)) else None
             paths = getattr(exc, "paths", ())
             _fail(
@@ -211,10 +228,11 @@ def verify_artifact_inventory(
                 cause_code=cause,
             )
         allowed_regular.update(
-            f"{snapshot_relative}/{entry.path}"
-            for entry in verified_tree.entries
+            entry.path
+            for entry in verified_entries.values()
             if entry.entry_type == "regular"
         )
+    _after_verified_snapshot_receipt_hook()
     try:
         receipt = _scan_tree_receipt(artifact_root)
     except FoundationError as exc:
@@ -236,6 +254,22 @@ def verify_artifact_inventory(
     actual_directories = {
         entry.path for entry in receipt.entries if entry.entry_type == "directory"
     }
+    actual_entries = {entry.path: entry for entry in receipt.entries}
+    if any(
+        actual_entries.get(path) != expected
+        for path, expected in verified_entries.items()
+    ):
+        _fail(
+            "artifact_inventory_invalid",
+            "verified snapshot metadata changed before final artifact scan",
+            paths=(verified_snapshot_root,) if verified_snapshot_root else (),
+        )
+    expected_snapshot_directories = {
+        entry.path
+        for entry in verified_entries.values()
+        if entry.entry_type == "directory"
+    }
+    expected_directories.update(expected_snapshot_directories)
     if actual_regular != allowed_regular or actual_directories != expected_directories:
         unexpected = sorted(
             (actual_regular - allowed_regular)
@@ -251,6 +285,10 @@ def verify_artifact_inventory(
             paths=tuple(artifact_root / path for path in unexpected),
         )
     return receipt
+
+
+def _after_verified_snapshot_receipt_hook() -> None:
+    """Deterministic test seam before the final task artifact scan."""
 
 
 def resolved_project_brain_file() -> Path:
@@ -493,7 +531,16 @@ def capture_foundation_baseline(
     })
     corpus, index = _capture_corpus(brain_root)
     runtime = _runtime_inventory(repo_root)
-    artifact = _scan_tree_receipt(artifact_root)
+    try:
+        artifact = _scan_tree_receipt(artifact_root)
+    except FoundationError as exc:
+        if (exc.cause_code or exc.code) != "source_unavailable":
+            raise
+        try:
+            snapshot.verify_tree_path_absent(artifact_root)
+        except SnapshotError as absent_exc:
+            raise _from_snapshot(absent_exc) from absent_exc
+        artifact = _tree_receipt(artifact_root, ())
     ignored = _scan_tree_receipt(
         ignored_snapshots_root,
         excluded_paths=(artifact_root,),
@@ -578,7 +625,13 @@ def verify_foundation_invariants(
     allowed_artifact_files: Collection[Path],
     verified_snapshot_root: Path | None,
 ) -> dict[str, object]:
-    if not isinstance(baseline, Mapping) or set(baseline) != _BASELINE_KEYS or baseline.get("purpose") != "p0-foundation-baseline":
+    if (
+        not isinstance(baseline, Mapping)
+        or set(baseline) != _BASELINE_KEYS
+        or type(baseline.get("version")) is not int
+        or baseline.get("version") != 1
+        or baseline.get("purpose") != "p0-foundation-baseline"
+    ):
         _fail("baseline_invalid", "foundation baseline top-level shape or purpose is invalid")
     errors: list[str] = []
     observed = {"expected_local_mutation": [], "bb2_commit_paths": []}
@@ -813,20 +866,14 @@ def _create_at(parent_fd: int, name: str, data: bytes, *, label: str) -> os.stat
 
 def _unlink_if_owned(parent_fd: int, name: str, owned: os.stat_result) -> bool:
     try:
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return True
+        cli._remove_linked_target_if_unchanged(
+            parent_fd,
+            target_name=name,
+            linked_stat=owned,
+        )
     except OSError:
         return False
-    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
-        return False
-    try:
-        os.unlink(name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-    except OSError:
-        return False
-    else:
-        return True
+    return True
 
 
 def atomic_create_receipt(path: Path, value: Mapping[str, object]) -> str:
@@ -846,6 +893,8 @@ def _binding_value(
     receipt_sha: str,
     value: Mapping[str, object],
 ) -> dict[str, object]:
+    if type(value.get("version")) is not int or value.get("version") != 1:
+        _fail("binding_version_invalid", "receipt version must be integer 1")
     purpose = value.get("purpose")
     try:
         if purpose == "p0-foundation-baseline":
@@ -890,29 +939,50 @@ def atomic_create_bound_receipt(
     binding = _binding_value(receipt_path, receipt_sha, value)
     binding_data = canonical_receipt_bytes(binding)
     binding_sha = hashlib.sha256(binding_data).hexdigest()
-    receipt_parent, receipt_name = _validate_output_path(receipt_path, label="receipt")
-    binding_parent, binding_name = _validate_output_path(binding_path, label="binding")
-    created: os.stat_result | None = None
+    receipt_parent, receipt_name = _validate_output_path(
+        receipt_path,
+        label="receipt",
+    )
     try:
-        _preflight_absent(receipt_parent, receipt_name, label="receipt")
-        _preflight_absent(binding_parent, binding_name, label="binding")
-        created = _create_at(receipt_parent, receipt_name, receipt_data, label="receipt")
+        binding_parent, binding_name = _validate_output_path(
+            binding_path,
+            label="binding",
+        )
         try:
-            _before_binding_create_hook()
-            _create_at(binding_parent, binding_name, binding_data, label="binding")
-        except (FoundationError, OSError) as exc:
-            removed = _unlink_if_owned(receipt_parent, receipt_name, created)
-            detail = f"binding_create_failed: {getattr(exc, 'detail', exc)}"
-            if not removed:
-                detail += "; owned receipt could not be safely rolled back"
-            raise FoundationError(
-                "binding_create_failed",
-                detail,
-                paths=(receipt_path, binding_path),
-                cause_code=getattr(exc, "code", type(exc).__name__),
-            ) from exc
+            _preflight_absent(receipt_parent, receipt_name, label="receipt")
+            _preflight_absent(binding_parent, binding_name, label="binding")
+            created = _create_at(
+                receipt_parent,
+                receipt_name,
+                receipt_data,
+                label="receipt",
+            )
+            try:
+                _before_binding_create_hook()
+                _create_at(
+                    binding_parent,
+                    binding_name,
+                    binding_data,
+                    label="binding",
+                )
+            except (FoundationError, OSError) as exc:
+                removed = _unlink_if_owned(
+                    receipt_parent,
+                    receipt_name,
+                    created,
+                )
+                detail = f"binding_create_failed: {getattr(exc, 'detail', exc)}"
+                if not removed:
+                    detail += "; owned receipt could not be safely rolled back"
+                raise FoundationError(
+                    "binding_create_failed",
+                    detail,
+                    paths=(receipt_path, binding_path),
+                    cause_code=getattr(exc, "code", type(exc).__name__),
+                ) from exc
+        finally:
+            os.close(binding_parent)
     finally:
-        os.close(binding_parent)
         os.close(receipt_parent)
     return receipt_sha, binding_sha
 
@@ -968,7 +1038,11 @@ def verify_bound_receipt(
         "engine_head",
         "bb2_head",
     }
-    if set(binding) != expected_keys or binding.get("version") != 1:
+    if (
+        set(binding) != expected_keys
+        or type(binding.get("version")) is not int
+        or binding.get("version") != 1
+    ):
         _fail("binding_invalid", "binding exact shape is invalid")
     if binding["purpose"] != expected_purpose:
         _fail("binding_invalid", "purpose mismatch")

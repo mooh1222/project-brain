@@ -222,6 +222,16 @@ def test_baseline_has_exact_top_level_shape(foundation_fixture):
     assert baseline["bb2"]["status_porcelain_v1_z_base64"]
 
 
+def test_baseline_verifier_rejects_boolean_version(foundation_fixture):
+    baseline = _capture(foundation_fixture)
+    baseline["version"] = True
+
+    with pytest.raises(FoundationError) as exc:
+        foundation_fixture.verify(baseline)
+
+    assert exc.value.code == "baseline_invalid"
+
+
 def test_baseline_rejects_engine_core_dirt(foundation_fixture):
     _write(foundation_fixture.engine / "src/project_brain/new_untracked.py", b"x=1\n")
 
@@ -454,6 +464,70 @@ def test_artifact_inventory_allows_only_manifest_verified_snapshot_subtree(
     assert any(entry.path == "verified-snapshot/manifest.json" for entry in receipt.entries)
 
 
+@pytest.mark.parametrize("mutation_point", ["after_verify", "before_final_scan"])
+def test_artifact_inventory_binds_verified_snapshot_before_and_after_scan(
+    foundation_fixture,
+    monkeypatch,
+    mutation_point,
+):
+    result = create_snapshot(
+        SnapshotRequest(
+            brain_root=foundation_fixture.brain,
+            repo_root=foundation_fixture.repo,
+            engine_root=foundation_fixture.engine,
+            output_root=foundation_fixture.artifact_root,
+            snapshot_id="verified-snapshot",
+        )
+    )
+    rogue = result.snapshot_root / "rogue.json"
+    if mutation_point == "after_verify":
+        original_verify = foundation.snapshot.verify_snapshot
+
+        def verify_then_mutate(*args, **kwargs):
+            verification = original_verify(*args, **kwargs)
+            _write(rogue, b"{}\n")
+            return verification
+
+        monkeypatch.setattr(
+            foundation.snapshot,
+            "verify_snapshot",
+            verify_then_mutate,
+        )
+    else:
+        monkeypatch.setattr(
+            foundation,
+            "_after_verified_snapshot_receipt_hook",
+            lambda: _write(rogue, b"{}\n"),
+            raising=False,
+        )
+
+    with pytest.raises(FoundationError) as exc:
+        verify_artifact_inventory(
+            foundation_fixture.artifact_root,
+            allowed_files=(),
+            verified_snapshot_root=result.snapshot_root,
+        )
+
+    assert exc.value.code == "artifact_inventory_invalid"
+
+
+def test_baseline_records_absent_artifact_root_without_creating_it(
+    foundation_fixture,
+):
+    foundation_fixture.artifact_root.rmdir()
+    foundation_fixture.artifact_root.parent.rmdir()
+
+    baseline = _capture(foundation_fixture)
+
+    assert baseline["artifact_inventory"] == {
+        "root": str(foundation_fixture.artifact_root),
+        "entries": [],
+        "sha256": hashlib.sha256(b'{"entries":[]}\n').hexdigest(),
+    }
+    assert not foundation_fixture.artifact_root.exists()
+    assert not foundation_fixture.artifact_root.parent.exists()
+
+
 def _receipt_fixture(*, purpose="p0-foundation-baseline"):
     if purpose == "p0-foundation-gate":
         return {
@@ -538,6 +612,48 @@ def test_atomic_create_receipt_removes_partial_file_on_raw_write_failure(
 
     assert exc.value.code == "receipt_create_failed"
     assert not receipt.exists()
+
+
+def test_atomic_cleanup_never_deletes_competing_winner_between_stat_and_unlink(
+    tmp_path,
+    monkeypatch,
+):
+    receipt = (tmp_path / "receipt.json").resolve()
+    original_stat = foundation.os.stat
+    original_write = foundation.os.write
+    raced = False
+
+    def race_after_stat(name, *args, **kwargs):
+        nonlocal raced
+        current = original_stat(name, *args, **kwargs)
+        if name == receipt.name and not raced:
+            raced = True
+            parent_fd = kwargs["dir_fd"]
+            os.unlink(name, dir_fd=parent_fd)
+            winner_fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                original_write(winner_fd, b"winner\n")
+            finally:
+                os.close(winner_fd)
+        return current
+
+    monkeypatch.setattr(foundation.os, "stat", race_after_stat)
+    monkeypatch.setattr(
+        foundation.os,
+        "write",
+        lambda _descriptor, _data: (_ for _ in ()).throw(OSError("fail")),
+    )
+
+    with pytest.raises(FoundationError):
+        atomic_create_receipt(receipt, _receipt_fixture())
+
+    assert raced is True
+    assert receipt.read_bytes() == b"winner\n"
 
 
 def test_bound_second_raw_write_failure_rolls_back_both_owned_files(
@@ -629,3 +745,73 @@ def test_gate_binding_uses_only_gate_head_fields(tmp_path):
         binding_path=binding,
         expected_purpose="p0-foundation-gate-binding",
     ) == value
+
+
+def test_bound_receipt_creator_and_verifier_reject_boolean_version(tmp_path):
+    receipt = (tmp_path / "receipt.json").resolve()
+    binding = (tmp_path / "binding.json").resolve()
+    invalid = _receipt_fixture()
+    invalid["version"] = True
+
+    with pytest.raises(FoundationError) as exc:
+        atomic_create_bound_receipt(
+            receipt_path=receipt,
+            binding_path=binding,
+            value=invalid,
+        )
+    assert exc.value.code == "binding_version_invalid"
+    assert not receipt.exists()
+    assert not binding.exists()
+
+    atomic_create_bound_receipt(
+        receipt_path=receipt,
+        binding_path=binding,
+        value=_receipt_fixture(),
+    )
+    bound = json.loads(binding.read_bytes())
+    bound["version"] = True
+    binding.write_bytes(canonical_receipt_bytes(bound))
+
+    with pytest.raises(FoundationError) as exc:
+        verify_bound_receipt(
+            receipt_path=receipt,
+            binding_path=binding,
+            expected_purpose="p0-foundation-baseline-binding",
+        )
+    assert exc.value.code == "binding_invalid"
+
+
+def test_bound_receipt_closes_first_parent_if_second_parent_validation_fails(
+    tmp_path,
+    monkeypatch,
+):
+    receipt = (tmp_path / "receipt.json").resolve()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(outside, target_is_directory=True)
+    binding = linked_parent / "binding.json"
+    opened: list[int] = []
+    original_open = foundation.snapshot._open_absolute_directory
+
+    def capture_open(path, *, create):
+        descriptor = original_open(path, create=create)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(
+        foundation.snapshot,
+        "_open_absolute_directory",
+        capture_open,
+    )
+
+    with pytest.raises(FoundationError):
+        atomic_create_bound_receipt(
+            receipt_path=receipt,
+            binding_path=binding,
+            value=_receipt_fixture(),
+        )
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
