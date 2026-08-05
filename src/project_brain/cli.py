@@ -239,6 +239,49 @@ def _index_rebuild_error_report(exc: Exception) -> dict:
     }
 
 
+_INGEST_BUILD_REPORT_FIELDS = frozenset({
+    "ok",
+    "built",
+    "objects_file",
+    "diff",
+    "resolved_refs",
+    "preconditions",
+    "warnings",
+    "coverage_sha256",
+    "expected_objects",
+    "actual_objects",
+    "objects_sha256",
+    "build_binding",
+})
+
+
+def _coverage_error_details(exc) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in exc.as_dict().items()
+        if key not in {"code", "detail"}
+        and value is not None
+        and value != ()
+        and value != []
+    }
+
+
+def _print_ingest_error(
+    code: str,
+    detail: str,
+    error_details: Mapping[str, object] | None = None,
+) -> int:
+    print(json.dumps(
+        {
+            "ok": False,
+            **IngestError(code, detail, error_details).as_dict(),
+        },
+        ensure_ascii=False,
+        indent=2,
+    ))
+    return 1
+
+
 def _run_ingest(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli ingest")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
@@ -263,21 +306,30 @@ def _run_ingest(argv) -> int:
     try:
         coverage_binding = read_coverage(Path(args.coverage_file))
     except CoverageError as exc:
-        print(json.dumps(
-            {"ok": False, "error_code": exc.code, **exc.as_dict()},
-            ensure_ascii=False,
-            indent=2,
-        ))
-        return 1
+        return _print_ingest_error(
+            exc.code,
+            exc.detail,
+            _coverage_error_details(exc),
+        )
     if coverage_binding.mode == "assembled":
         if args.build_report is None:
-            parser.error("assembled coverage에는 --build-report가 필요합니다")
+            return _print_ingest_error(
+                "coverage_binding_mismatch",
+                "assembled coverage requires a build report",
+                {"missing": ["build_report"]},
+            )
         if args.preconditions_file is not None:
-            parser.error(
-                "assembled coverage는 --preconditions-file을 받지 않습니다"
+            return _print_ingest_error(
+                "coverage_binding_mismatch",
+                "assembled coverage does not accept a preconditions file",
+                {"unexpected": ["preconditions_file"]},
             )
     elif args.build_report is not None:
-        parser.error("direct coverage는 --build-report를 받지 않습니다")
+        return _print_ingest_error(
+            "coverage_binding_mismatch",
+            "direct coverage does not accept a build report",
+            {"unexpected": ["build_report"]},
+        )
 
     brain_root = resolve_brain_root(args.brain_root).resolve()
     objects = json.loads(Path(args.objects_file).read_text(encoding="utf-8"))
@@ -290,18 +342,17 @@ def _run_ingest(argv) -> int:
             )
             if not isinstance(report, Mapping):
                 raise ValueError("build report must contain an object")
-            required = {
-                "coverage_sha256",
-                "expected_objects",
-                "actual_objects",
-                "objects_sha256",
-                "build_binding",
-                "preconditions",
-            }
-            missing = sorted(required - set(report))
-            if missing:
-                raise ValueError(
-                    "build report is missing fields: " + ", ".join(missing)
+            missing = sorted(_INGEST_BUILD_REPORT_FIELDS - set(report))
+            unexpected = sorted(set(report) - _INGEST_BUILD_REPORT_FIELDS)
+            if missing or unexpected:
+                return _print_ingest_error(
+                    "coverage_binding_mismatch",
+                    "build report keys do not match the contract",
+                    {
+                        "section": "build_report",
+                        "missing": missing,
+                        "unexpected": unexpected,
+                    },
                 )
             if not isinstance(report["build_binding"], Mapping):
                 raise ValueError("build_binding must contain an object")
@@ -345,24 +396,20 @@ def _run_ingest(argv) -> int:
             raise ValueError("preconditions must be a pure ID→SHA-256 object")
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, CoverageError) as exc:
         if isinstance(exc, CoverageError):
-            payload = {
-                "ok": False,
-                "error_code": exc.code,
-                **exc.as_dict(),
-            }
-        else:
-            payload = {
-                "ok": False,
-                "error_code": "coverage_binding_mismatch",
-                "error": str(exc),
-                "error_details": {
-                    "section": "build_report"
-                    if args.build_report is not None
-                    else "preconditions"
-                },
-            }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 1
+            return _print_ingest_error(
+                exc.code,
+                exc.detail,
+                _coverage_error_details(exc),
+            )
+        return _print_ingest_error(
+            "coverage_binding_mismatch",
+            str(exc),
+            {
+                "section": "build_report"
+                if args.build_report is not None
+                else "preconditions"
+            },
+        )
     batch_binding = None
     batch_paths = (
         args.batch_binding_file,

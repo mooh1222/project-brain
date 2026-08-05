@@ -97,6 +97,48 @@ class TestCli(unittest.TestCase):
         )
         return path
 
+    def _assembled_ingest_files(self):
+        from tests.test_mutation import _assembled_artifacts
+
+        coverage, objects, build_binding = _assembled_artifacts(
+            self.root,
+            context_mode="create",
+        )
+        objects_file = self.input_dir / "assembled-objects.json"
+        coverage_file = self.input_dir / "assembled-coverage.json"
+        report_file = self.input_dir / "assembled-build-report.json"
+        objects_file.write_text(json.dumps(list(objects)), encoding="utf-8")
+        coverage_file.write_text(json.dumps(coverage), encoding="utf-8")
+        report = {
+            "ok": True,
+            "built": len(objects),
+            "objects_file": str(objects_file),
+            "diff": {},
+            "resolved_refs": [],
+            "preconditions": {},
+            "warnings": [],
+            "coverage_sha256": build_binding["coverage_sha256"],
+            "expected_objects": build_binding["expected_objects"],
+            "actual_objects": build_binding["actual_objects"],
+            "objects_sha256": build_binding["objects_sha256"],
+            "build_binding": build_binding,
+        }
+        report_file.write_text(json.dumps(report), encoding="utf-8")
+        return objects_file, coverage_file, report_file, report
+
+    def _run_ingest_error(self, *args):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli._run_ingest(list(args))
+        self.assertEqual(rc, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(
+            set(payload),
+            {"ok", "error_code", "error", "error_details"},
+        )
+        self.assertFalse(payload["ok"])
+        return payload
+
     def test_cli_query_path_unchanged(self):
         # tempfile store에 새 중립 객체 적재(query 경로가 회수할 대상)
         for obj in (manifest(), evidence_ref(), candidate_term()):
@@ -427,18 +469,129 @@ class TestCli(unittest.TestCase):
         report_file = self.input_dir / "direct-report.json"
         report_file.write_text("{}", encoding="utf-8")
 
-        with self.assertRaises(SystemExit):
-            cli._run_ingest([
-                "--brain-root",
-                str(self.root),
-                "--objects-file",
-                str(objects_file),
-                "--coverage-file",
-                str(coverage_file),
-                "--build-report",
-                str(report_file),
-                *ENGINE_ARGS,
-            ])
+        payload = self._run_ingest_error(
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            "--build-report",
+            str(report_file),
+            *ENGINE_ARGS,
+        )
+
+        self.assertEqual(payload["error_code"], "coverage_binding_mismatch")
+        self.assertEqual(payload["error_details"]["unexpected"], ["build_report"])
+
+    def test_cli_assembled_coverage_requires_build_report_as_json_error(self):
+        objects_file, coverage_file, _, _ = self._assembled_ingest_files()
+
+        payload = self._run_ingest_error(
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            *ENGINE_ARGS,
+        )
+
+        self.assertEqual(payload["error_code"], "coverage_binding_mismatch")
+        self.assertEqual(payload["error_details"]["missing"], ["build_report"])
+
+    def test_cli_assembled_coverage_rejects_preconditions_as_json_error(self):
+        objects_file, coverage_file, report_file, _ = (
+            self._assembled_ingest_files()
+        )
+        preconditions_file = self.input_dir / "assembled-preconditions.json"
+        preconditions_file.write_text("{}", encoding="utf-8")
+
+        payload = self._run_ingest_error(
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            "--build-report",
+            str(report_file),
+            "--preconditions-file",
+            str(preconditions_file),
+            *ENGINE_ARGS,
+        )
+
+        self.assertEqual(payload["error_code"], "coverage_binding_mismatch")
+        self.assertEqual(
+            payload["error_details"]["unexpected"],
+            ["preconditions_file"],
+        )
+
+    def test_cli_invalid_coverage_uses_ingest_error_json_shape(self):
+        objects_file = self.input_dir / "invalid-coverage-objects.json"
+        coverage_file = self.input_dir / "invalid-coverage.json"
+        objects_file.write_text("[]", encoding="utf-8")
+        coverage_file.write_text("{", encoding="utf-8")
+
+        payload = self._run_ingest_error(
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            *ENGINE_ARGS,
+        )
+
+        self.assertEqual(payload["error_code"], "coverage_invalid")
+        self.assertIsInstance(payload["error"], str)
+        self.assertIsInstance(payload["error_details"], dict)
+
+    def test_cli_recomputed_object_sha_uses_ingest_error_json_shape(self):
+        objects_file, coverage_file, report_file, _ = (
+            self._assembled_ingest_files()
+        )
+        objects = json.loads(objects_file.read_text(encoding="utf-8"))
+        objects[0]["title"] = "build 뒤 변조"
+        objects_file.write_text(json.dumps(objects), encoding="utf-8")
+
+        payload = self._run_ingest_error(
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            "--build-report",
+            str(report_file),
+            *ENGINE_ARGS,
+        )
+
+        self.assertEqual(payload["error_code"], "coverage_binding_mismatch")
+        self.assertEqual(payload["error_details"]["section"], "objects")
+
+    def test_cli_assembled_build_report_rejects_unknown_top_level_key(self):
+        objects_file, coverage_file, report_file, report = (
+            self._assembled_ingest_files()
+        )
+        report["future_field"] = True
+        report_file.write_text(json.dumps(report), encoding="utf-8")
+
+        payload = self._run_ingest_error(
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            "--build-report",
+            str(report_file),
+            *ENGINE_ARGS,
+        )
+
+        self.assertEqual(payload["error_code"], "coverage_binding_mismatch")
+        self.assertEqual(payload["error_details"]["section"], "build_report")
+        self.assertEqual(payload["error_details"]["unexpected"], ["future_field"])
 
     def test_cli_preserves_structured_coverage_failure(self):
         obj = context()

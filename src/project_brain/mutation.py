@@ -812,10 +812,13 @@ def _validate_pre_store_contract(
             )
         else:
             try:
-                build_binding = (
-                    request.build_binding
+                raw_build_binding = (
+                    request.build_binding.as_dict()
                     if isinstance(request.build_binding, BuildArtifactBinding)
-                    else normalize_build_artifact_binding(request.build_binding)
+                    else request.build_binding
+                )
+                build_binding = normalize_build_artifact_binding(
+                    raw_build_binding
                 )
             except (CoverageError, TypeError) as exc:
                 if isinstance(exc, CoverageError):

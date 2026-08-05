@@ -14,6 +14,7 @@ from project_brain.canonical_merge import (
     ReferenceCollapse,
     project_collision_merges,
 )
+from project_brain.coverage import BuildArtifactBinding, ObjectIdentity
 from project_brain.mutation import (
     AuxiliaryFileUpdate,
     MutationManifest,
@@ -301,6 +302,40 @@ def test_assembled_coverage_requires_build_binding(tmp_path):
         "coverage_binding_mismatch",
     )
     assert result.error_details["missing"] == ["build_binding"]
+
+
+def test_assembled_revalidates_build_binding_dataclass_version(tmp_path):
+    brain_root = tmp_path / "brain"
+    coverage, objects, raw_binding = _assembled_artifacts(
+        brain_root,
+        context_mode="create",
+    )
+    expected = tuple(
+        ObjectIdentity(item["id"], item["kind"])
+        for item in raw_binding["expected_objects"]
+    )
+    build_binding = BuildArtifactBinding(
+        version=2,
+        coverage_sha256=raw_binding["coverage_sha256"],
+        expected_objects=expected,
+        actual_objects=expected,
+        objects_sha256=raw_binding["objects_sha256"],
+    )
+    request = _request(
+        brain_root,
+        objects,
+        coverage=coverage,
+        build_binding=build_binding,
+    )
+
+    result = MutationService().plan(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (
+        False,
+        "coverage_binding_mismatch",
+    )
+    assert result.error_details["field"] == "version"
+    assert result.error_details["coverage_sha256"] == _canonical_sha(coverage)
 
 
 @pytest.mark.parametrize(
