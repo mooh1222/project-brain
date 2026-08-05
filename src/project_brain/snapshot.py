@@ -111,6 +111,17 @@ class GitDirtReceipt:
     content_manifest_sha256: str
 
 
+@dataclass(frozen=True)
+class SafeTreeEntry:
+    """One no-follow entry captured through a pinned absolute tree root."""
+
+    path: str
+    entry_type: str
+    mode: int
+    size: int
+    sha256: str
+
+
 def _fail(
     code: str,
     detail: str,
@@ -287,6 +298,390 @@ def _hash_regular(root: Path, relative: str) -> tuple[str, int]:
 def _hash_file(path: Path) -> tuple[str, int]:
     path = Path(path)
     return _hash_regular(path.parent, path.name)
+
+
+def _after_tree_read_hook(path: Path) -> None:
+    """Deterministic test seam for a replacement after an opened-file read."""
+
+
+def _tree_relative(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        _fail("tree_path_invalid", "tree path must be a non-empty relative path")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(
+        part in {"", ".", ".."} for part in value.split("/")
+    ):
+        _fail("tree_path_invalid", f"unsafe relative tree path: {value!r}")
+    return path.as_posix()
+
+
+def _tree_exclusions(root: Path, excluded_paths: Collection[Path]) -> set[str]:
+    excluded: set[str] = set()
+    for raw_path in excluded_paths:
+        path = Path(raw_path)
+        if not path.is_absolute() or path != Path(os.path.abspath(path)):
+            _fail(
+                "tree_path_invalid",
+                f"excluded tree path must be exact absolute: {path}",
+                paths=(path,),
+            )
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            _fail(
+                "tree_path_invalid",
+                f"excluded tree path escapes root: {path}",
+                paths=(path,),
+            )
+        if relative in {"", "."}:
+            _fail("tree_path_invalid", "cannot exclude the tree root", paths=(path,))
+        excluded.add(_tree_relative(relative))
+    return excluded
+
+
+def _excluded_tree_path(relative: str, excluded: set[str]) -> bool:
+    return any(
+        relative == candidate or relative.startswith(candidate + "/")
+        for candidate in excluded
+    )
+
+
+def _capture_tree_entry(
+    *,
+    root: Path,
+    root_device: int,
+    parent_fd: int,
+    name: str,
+    relative: str,
+    recursive: bool,
+    excluded: set[str],
+    entries: dict[str, SafeTreeEntry],
+) -> None:
+    if _excluded_tree_path(relative, excluded):
+        return
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        _fail(
+            "source_unavailable",
+            f"cannot inspect tree entry {root / relative}: {exc}",
+            paths=(root / relative,),
+        )
+    if stat.S_ISLNK(before.st_mode):
+        _fail(
+            "symlink_forbidden",
+            f"symlink tree entry is forbidden: {root / relative}",
+            paths=(root / relative,),
+        )
+    if before.st_dev != root_device:
+        _fail(
+            "filesystem_mismatch",
+            f"tree entry crosses a filesystem boundary: {root / relative}",
+            paths=(root / relative,),
+        )
+    mode = stat.S_IMODE(before.st_mode)
+    if stat.S_ISDIR(before.st_mode):
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            _fail(
+                "symlink_forbidden" if exc.errno in {errno.ELOOP, errno.ENOTDIR} else "source_unavailable",
+                f"cannot pin tree directory {root / relative}: {exc}",
+                paths=(root / relative,),
+            )
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode) or not _same_stat(before, opened):
+                _fail(
+                    "source_fingerprint_changed",
+                    f"tree directory changed while opening: {root / relative}",
+                    paths=(root / relative,),
+                )
+            entries.setdefault(
+                relative,
+                SafeTreeEntry(
+                    path=relative,
+                    entry_type="directory",
+                    mode=mode,
+                    size=0,
+                    sha256=hashlib.sha256(b"").hexdigest(),
+                ),
+            )
+            if recursive:
+                try:
+                    names = sorted(os.listdir(descriptor))
+                except OSError as exc:
+                    _fail(
+                        "source_unavailable",
+                        f"cannot list tree directory {root / relative}: {exc}",
+                        paths=(root / relative,),
+                    )
+                for child_name in names:
+                    child_relative = f"{relative}/{child_name}"
+                    _capture_tree_entry(
+                        root=root,
+                        root_device=root_device,
+                        parent_fd=descriptor,
+                        name=child_name,
+                        relative=child_relative,
+                        recursive=True,
+                        excluded=excluded,
+                        entries=entries,
+                    )
+            after = os.fstat(descriptor)
+            try:
+                rebound = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError as exc:
+                _fail(
+                    "source_fingerprint_changed",
+                    f"tree directory changed while reading: {root / relative}: {exc}",
+                    paths=(root / relative,),
+                )
+            if not _same_stat(opened, after) or not _same_stat(opened, rebound):
+                _fail(
+                    "source_fingerprint_changed",
+                    f"tree directory changed while reading: {root / relative}",
+                    paths=(root / relative,),
+                )
+        finally:
+            os.close(descriptor)
+        return
+    if not stat.S_ISREG(before.st_mode):
+        _fail(
+            "source_type_invalid",
+            f"unsupported tree entry: {root / relative}",
+            paths=(root / relative,),
+        )
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        _fail(
+            "symlink_forbidden" if exc.errno in {errno.ELOOP, errno.ENOTDIR} else "source_unavailable",
+            f"cannot open tree file {root / relative}: {exc}",
+            paths=(root / relative,),
+        )
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not _same_stat(before, opened):
+            _fail(
+                "source_fingerprint_changed",
+                f"tree file changed while opening: {root / relative}",
+                paths=(root / relative,),
+            )
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+        _after_tree_read_hook(root / relative)
+        after = os.fstat(descriptor)
+        try:
+            rebound = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            _fail(
+                "source_fingerprint_changed",
+                f"tree file changed while reading: {root / relative}: {exc}",
+                paths=(root / relative,),
+            )
+        if (
+            not _same_stat(opened, after)
+            or not _same_stat(opened, rebound)
+            or size != after.st_size
+        ):
+            _fail(
+                "source_fingerprint_changed",
+                f"tree file changed while reading: {root / relative}",
+                paths=(root / relative,),
+            )
+        entries.setdefault(
+            relative,
+            SafeTreeEntry(
+                path=relative,
+                entry_type="regular",
+                mode=mode,
+                size=size,
+                sha256=digest.hexdigest(),
+            ),
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _capture_safe_tree(
+    root: Path,
+    relative_paths: Collection[str] | None,
+    *,
+    excluded_paths: Collection[Path] = (),
+) -> tuple[SafeTreeEntry, ...]:
+    root = Path(root)
+    if not root.is_absolute() or root != Path(os.path.abspath(root)):
+        _fail("tree_path_invalid", f"tree root must be exact absolute: {root}")
+    excluded = _tree_exclusions(root, excluded_paths)
+    scan_all = relative_paths is None
+    root_fd = _open_absolute_directory(root, create=False)
+    entries: dict[str, SafeTreeEntry] = {}
+    try:
+        root_stat = os.fstat(root_fd)
+        requested = (
+            sorted(os.listdir(root_fd))
+            if relative_paths is None
+            else sorted({_tree_relative(value) for value in relative_paths})
+        )
+        for relative in requested:
+            parts = PurePosixPath(relative).parts
+            descriptor = os.dup(root_fd)
+            directory_bindings: list[tuple[int, str, os.stat_result, str]] = []
+            try:
+                prefix = ""
+                for part in parts[:-1]:
+                    prefix = f"{prefix}/{part}" if prefix else part
+                    if _excluded_tree_path(prefix, excluded):
+                        break
+                    try:
+                        before = os.stat(
+                            part,
+                            dir_fd=descriptor,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        _fail(
+                            "source_unavailable",
+                            f"cannot inspect tree path {root / relative}: {exc}",
+                            paths=(root / relative,),
+                        )
+                    if stat.S_ISLNK(before.st_mode):
+                        _fail(
+                            "symlink_forbidden",
+                            f"cannot traverse symlink tree path: {root / relative}",
+                            paths=(root / relative,),
+                        )
+                    try:
+                        child = os.open(
+                            part,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=descriptor,
+                        )
+                    except OSError as exc:
+                        _fail(
+                            "symlink_forbidden" if exc.errno in {errno.ELOOP, errno.ENOTDIR} else "source_unavailable",
+                            f"cannot traverse tree path {root / relative}: {exc}",
+                            paths=(root / relative,),
+                        )
+                    child_stat = os.fstat(child)
+                    if (
+                        not stat.S_ISDIR(child_stat.st_mode)
+                        or not _same_stat(before, child_stat)
+                    ):
+                        os.close(child)
+                        _fail(
+                            "source_fingerprint_changed",
+                            f"tree directory changed while opening: {root / prefix}",
+                            paths=(root / prefix,),
+                        )
+                    if child_stat.st_dev != root_stat.st_dev:
+                        os.close(child)
+                        _fail(
+                            "filesystem_mismatch",
+                            f"tree path crosses a filesystem boundary: {root / relative}",
+                            paths=(root / relative,),
+                        )
+                    directory_bindings.append(
+                        (os.dup(descriptor), part, child_stat, prefix)
+                    )
+                    os.close(descriptor)
+                    descriptor = child
+                else:
+                    _capture_tree_entry(
+                        root=root,
+                        root_device=root_stat.st_dev,
+                        parent_fd=descriptor,
+                        name=parts[-1],
+                        relative=relative,
+                        recursive=True,
+                        excluded=excluded,
+                        entries=entries,
+                    )
+                    for parent_guard, part, opened, bound_relative in reversed(
+                        directory_bindings
+                    ):
+                        try:
+                            rebound = os.stat(
+                                part,
+                                dir_fd=parent_guard,
+                                follow_symlinks=False,
+                            )
+                        except OSError as exc:
+                            _fail(
+                                "source_fingerprint_changed",
+                                (
+                                    "tree directory changed while reading: "
+                                    f"{root / bound_relative}: {exc}"
+                                ),
+                                paths=(root / bound_relative,),
+                            )
+                        if not _same_stat(opened, rebound):
+                            _fail(
+                                "source_fingerprint_changed",
+                                (
+                                    "tree directory changed while reading: "
+                                    f"{root / bound_relative}"
+                                ),
+                                paths=(root / bound_relative,),
+                            )
+            finally:
+                os.close(descriptor)
+                for parent_guard, _, _, _ in directory_bindings:
+                    os.close(parent_guard)
+        current_fd = _open_absolute_directory(root, create=False)
+        try:
+            current = os.fstat(current_fd)
+        finally:
+            os.close(current_fd)
+        if (
+            (root_stat.st_dev, root_stat.st_ino)
+            != (current.st_dev, current.st_ino)
+            or (scan_all and not _same_stat(root_stat, current))
+        ):
+            _fail(
+                "source_fingerprint_changed",
+                f"tree root changed while reading: {root}",
+                paths=(root,),
+            )
+    finally:
+        os.close(root_fd)
+    return tuple(entries[path] for path in sorted(entries))
+
+
+def capture_tree_entries(
+    root: Path,
+    relative_paths: Collection[str],
+    *,
+    excluded_paths: Collection[Path] = (),
+) -> tuple[SafeTreeEntry, ...]:
+    """Capture named regular files/directories below one pinned tree root."""
+
+    return _capture_safe_tree(root, relative_paths, excluded_paths=excluded_paths)
+
+
+def scan_tree_entries(
+    root: Path,
+    *,
+    excluded_paths: Collection[Path] = (),
+) -> tuple[SafeTreeEntry, ...]:
+    """Capture every entry below one pinned tree root without following links."""
+
+    return _capture_safe_tree(root, None, excluded_paths=excluded_paths)
 
 
 def _scan_tree(

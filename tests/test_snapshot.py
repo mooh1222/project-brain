@@ -475,6 +475,106 @@ def test_git_dirt_capture_keeps_one_root_fd_for_both_passes_during_replacement(
     assert len(set(root_inodes)) == 1
 
 
+def test_safe_tree_entries_reject_parent_escape_symlink_and_special_file(tmp_path):
+    root = tmp_path / "tree"
+    root.mkdir()
+    _write(root / "safe.txt", b"safe\n")
+    (root / "link.txt").symlink_to(root / "safe.txt")
+    os.mkfifo(root / "pipe")
+
+    for relative, code in [
+        ("../outside", "tree_path_invalid"),
+        ("link.txt", "symlink_forbidden"),
+        ("pipe", "source_type_invalid"),
+    ]:
+        with pytest.raises(SnapshotError) as exc:
+            snapshot.capture_tree_entries(root.resolve(), [relative])
+        assert exc.value.code == code
+
+
+def test_safe_tree_entries_detect_file_replacement_during_read(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "tree"
+    root.mkdir()
+    target = root / "object.json"
+    _write(target, b"before\n")
+    replacement = tmp_path / "replacement"
+    _write(replacement, b"replacement\n")
+
+    def replace_after_read(path):
+        if path == target:
+            os.replace(replacement, target)
+
+    monkeypatch.setattr(snapshot, "_after_tree_read_hook", replace_after_read)
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.capture_tree_entries(root.resolve(), ["object.json"])
+
+    assert exc.value.code == "source_fingerprint_changed"
+    assert "changed while reading" in exc.value.detail
+
+
+def test_safe_tree_entries_detect_intermediate_directory_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    root = (tmp_path / "tree").resolve()
+    root.mkdir()
+    target = root / "nested/object.json"
+    _write(target, b"before\n")
+    moved = tmp_path / "moved-nested"
+
+    def replace_parent_after_read(path):
+        if path == target:
+            (root / "nested").rename(moved)
+            _write(root / "nested/object.json", b"replacement\n")
+
+    monkeypatch.setattr(snapshot, "_after_tree_read_hook", replace_parent_after_read)
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.capture_tree_entries(root, ["nested/object.json"])
+
+    assert exc.value.code == "source_fingerprint_changed"
+    assert "directory changed while reading" in exc.value.detail
+
+
+def test_safe_tree_scan_uses_exact_subtree_exclusion(tmp_path):
+    root = tmp_path / "tree"
+    root.mkdir()
+    _write(root / "outside.json", b"outside\n")
+    _write(root / "task" / "receipt.json", b"receipt\n")
+
+    entries = snapshot.scan_tree_entries(
+        root.resolve(),
+        excluded_paths=[(root / "task").resolve()],
+    )
+
+    assert [entry.path for entry in entries] == ["outside.json"]
+
+
+def test_safe_tree_scan_detects_root_inventory_change_after_file_read(
+    tmp_path,
+    monkeypatch,
+):
+    root = (tmp_path / "tree").resolve()
+    root.mkdir()
+    _write(root / "first.json", b"first\n")
+
+    def add_late_sibling(path):
+        if path == root / "first.json":
+            _write(root / "late.json", b"late\n")
+
+    monkeypatch.setattr(snapshot, "_after_tree_read_hook", add_late_sibling)
+
+    with pytest.raises(SnapshotError) as exc:
+        snapshot.scan_tree_entries(root)
+
+    assert exc.value.code == "source_fingerprint_changed"
+    assert "root changed while reading" in exc.value.detail
+
+
 def test_verify_git_root_clean_rejects_dirty_submodule_before_content_scan(
     tmp_path,
 ):
