@@ -130,6 +130,15 @@ _MUTATION_MANIFEST_FIELDS = frozenset({
     "batch_binding",
     "canonical_repair_binding",
 })
+_RECEIPT_MANIFEST_FIELDS = frozenset({
+    "coverage_sha256",
+    "expected_objects",
+    "verified_objects",
+    "changed_objects",
+})
+_LEGACY_V1_MUTATION_MANIFEST_FIELDS = (
+    _MUTATION_MANIFEST_FIELDS - _RECEIPT_MANIFEST_FIELDS
+)
 
 
 @dataclass(frozen=True)
@@ -1329,8 +1338,16 @@ def _read_journal_at(
         payload["manifest"]["batch_binding"] = None
     if not uses_historical_manifest_compatibility:
         validation_payload = payload
+    legacy_manifest_read = _is_legacy_v1_terminal_journal(
+        validation_payload,
+        transaction_id,
+    )
     try:
-        _validate_journal_model(validation_payload, transaction_id)
+        _validate_journal_model(
+            validation_payload,
+            transaction_id,
+            legacy_manifest_read=legacy_manifest_read,
+        )
     except (TypeError, ValueError) as exc:
         raise RecoveryRequiredError(
             f"{transaction_id}: journal structure is invalid: {exc}",
@@ -1358,15 +1375,31 @@ def _with_historical_terminal_manifest_compatibility(
         _MUTATION_OPERATIONS - {"canonical_repair"}
     ):
         return payload
-    historical_fields = _MUTATION_MANIFEST_FIELDS - {
-        "canonical_repair_binding"
+    historical_field_sets = {
+        _MUTATION_MANIFEST_FIELDS - {"canonical_repair_binding"},
+        _LEGACY_V1_MUTATION_MANIFEST_FIELDS
+        - {"canonical_repair_binding"},
     }
-    if set(manifest) != historical_fields:
+    if set(manifest) not in historical_field_sets:
         return payload
     compatible = dict(payload)
     compatible["manifest"] = dict(manifest)
     compatible["manifest"]["canonical_repair_binding"] = None
     return compatible
+
+
+def _is_legacy_v1_terminal_journal(
+    payload: Mapping[str, object],
+    transaction_id: str,
+) -> bool:
+    manifest = payload.get("manifest")
+    return (
+        payload.get("version") == 1
+        and payload.get("transaction_id") == transaction_id
+        and payload.get("state") in _TERMINAL_STATES
+        and isinstance(manifest, Mapping)
+        and set(manifest) == _LEGACY_V1_MUTATION_MANIFEST_FIELDS
+    )
 
 
 def _remove_tree_at(parent_fd: int, name: str, *, expected_device: int) -> None:
@@ -1883,6 +1916,7 @@ def record_no_change_receipt(
         receipt=normalized_receipt,
         verified_source_sha256_by_id=verified_source_sha256_by_id,
     )
+    scope.verify_lexical_bindings()
 
 
 def _read_batch_intent_anchored(
@@ -2055,6 +2089,78 @@ def _receipt_from_committed_manifest(
         ) from exc
 
 
+def _manifest_action_object_ids(
+    manifest: Mapping[str, object],
+) -> list[str]:
+    object_ids: set[str] = set()
+    for field_name in ("creates", "updates", "deletes"):
+        actions = manifest.get(field_name)
+        if not isinstance(actions, list):
+            raise CorpusIOError(
+                "committed_receipt_invalid",
+                f"manifest.{field_name} is invalid",
+            )
+        for action in actions:
+            if not isinstance(action, Mapping):
+                raise CorpusIOError(
+                    "committed_receipt_invalid",
+                    f"manifest.{field_name} action is invalid",
+                )
+            object_id = action.get("object_id")
+            if not isinstance(object_id, str) or not object_id:
+                raise CorpusIOError(
+                    "committed_receipt_invalid",
+                    f"manifest.{field_name} object id is invalid",
+                )
+            object_ids.add(object_id)
+    renames = manifest.get("renames")
+    if not isinstance(renames, list):
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            "manifest.renames is invalid",
+        )
+    for action in renames:
+        if not isinstance(action, Mapping):
+            raise CorpusIOError(
+                "committed_receipt_invalid",
+                "manifest rename action is invalid",
+            )
+        for field_name in ("old_id", "new_id"):
+            object_id = action.get(field_name)
+            if not isinstance(object_id, str) or not object_id:
+                raise CorpusIOError(
+                    "committed_receipt_invalid",
+                    f"manifest rename {field_name} is invalid",
+                )
+            object_ids.add(object_id)
+    return sorted(object_ids)
+
+
+def _legacy_v1_receipt_from_committed_manifest(
+    manifest: Mapping[str, object],
+    *,
+    transaction_id: str,
+    manifest_sha256: str,
+) -> dict[str, object]:
+    object_ids = _manifest_action_object_ids(manifest)
+    if not object_ids:
+        raise CorpusIOError(
+            "committed_receipt_invalid",
+            f"{transaction_id}: committed transaction has no object actions",
+        )
+    return {
+        "ok": True,
+        "transaction_id": transaction_id,
+        "operation": "ingest",
+        "committed": True,
+        "manifest_sha256": manifest_sha256,
+        "before_fingerprint": manifest["before_fingerprint"],
+        "after_fingerprint": manifest["expected_after_fingerprint"],
+        "ingested_ids": object_ids,
+        "ingested_count": len(object_ids),
+    }
+
+
 def _recover_committed_receipt_anchored(
     anchored: _AnchoredRoot,
     normalized: BatchBinding,
@@ -2134,20 +2240,38 @@ def _recover_committed_receipt_anchored(
                 "committed_receipt_state_mismatch",
                 f"{transaction_id}: {exc}",
             ) from exc
-    receipt = _receipt_from_committed_manifest(
-        manifest,
-        manifest_sha256=manifest_sha256,
+    is_legacy_v1 = (
+        set(manifest) == _LEGACY_V1_MUTATION_MANIFEST_FIELDS
+        or set(manifest)
+        == _LEGACY_V1_MUTATION_MANIFEST_FIELDS
+        - {"canonical_repair_binding"}
     )
-    if expected_receipt is not None:
-        try:
-            normalized_expected = mutation_receipt_dict(expected_receipt)
-        except ValueError as exc:
-            raise CorpusIOError(
-                "receipt_mismatch",
-                f"{transaction_id}: supplied receipt is invalid: {exc}",
-            ) from exc
+    if is_legacy_v1:
+        receipt = _legacy_v1_receipt_from_committed_manifest(
+            manifest,
+            transaction_id=transaction_id,
+            manifest_sha256=manifest_sha256,
+        )
+        normalized_expected = (
+            dict(expected_receipt)
+            if expected_receipt is not None
+            else None
+        )
     else:
-        normalized_expected = None
+        receipt = _receipt_from_committed_manifest(
+            manifest,
+            manifest_sha256=manifest_sha256,
+        )
+        if expected_receipt is not None:
+            try:
+                normalized_expected = mutation_receipt_dict(expected_receipt)
+            except ValueError as exc:
+                raise CorpusIOError(
+                    "receipt_mismatch",
+                    f"{transaction_id}: supplied receipt is invalid: {exc}",
+                ) from exc
+        else:
+            normalized_expected = None
     if normalized_expected is not None and normalized_expected != receipt:
         raise CorpusIOError(
             "receipt_mismatch",
@@ -3523,6 +3647,8 @@ def _unfinished_transaction_ids(brain_root: Path) -> tuple[str, ...]:
 def _validate_journal_model(
     journal: Mapping[str, object],
     transaction_id: str,
+    *,
+    legacy_manifest_read: bool = False,
 ) -> None:
     required_fields = {
         "version",
@@ -3551,7 +3677,11 @@ def _validate_journal_model(
         raise ValueError("manifest must be an object")
     if "batch_binding" not in journal:
         raise ValueError("journal batch_binding field is missing")
-    expected_entries = _validate_manifest_model(manifest, transaction_id)
+    expected_entries = (
+        _validate_legacy_v1_manifest_model(manifest, transaction_id)
+        if legacy_manifest_read
+        else _validate_manifest_model(manifest, transaction_id)
+    )
     try:
         manifest_binding = normalize_batch_binding(
             manifest.get("batch_binding")
@@ -3653,6 +3783,32 @@ def _validate_manifest_model(
 ) -> list[dict[str, object]]:
     if set(manifest) != _MUTATION_MANIFEST_FIELDS:
         raise ValueError("manifest keys do not match the contract")
+    return _validate_manifest_contents(
+        manifest,
+        transaction_id,
+        validate_receipt_fields=True,
+    )
+
+
+def _validate_legacy_v1_manifest_model(
+    manifest: Mapping[str, object],
+    transaction_id: str,
+) -> list[dict[str, object]]:
+    if set(manifest) != _LEGACY_V1_MUTATION_MANIFEST_FIELDS:
+        raise ValueError("legacy v1 manifest keys do not match the contract")
+    return _validate_manifest_contents(
+        manifest,
+        transaction_id,
+        validate_receipt_fields=False,
+    )
+
+
+def _validate_manifest_contents(
+    manifest: Mapping[str, object],
+    transaction_id: str,
+    *,
+    validate_receipt_fields: bool,
+) -> list[dict[str, object]]:
     if manifest.get("transaction_id") != transaction_id:
         raise ValueError("manifest transaction_id mismatch")
     if manifest.get("operation") not in _MUTATION_OPERATIONS:
@@ -3666,15 +3822,18 @@ def _validate_manifest_model(
         raise ValueError("manifest before_fingerprint is invalid")
     if not _is_sha256(manifest.get("expected_after_fingerprint")):
         raise ValueError("manifest expected_after_fingerprint is invalid")
-    try:
-        _receipt_from_committed_manifest(
-            manifest,
-            manifest_sha256=hashlib.sha256(
-                _canonical_manifest_bytes(manifest)
-            ).hexdigest(),
-        )
-    except CorpusIOError as exc:
-        raise ValueError(f"manifest receipt fields are invalid: {exc.detail}") from exc
+    if validate_receipt_fields:
+        try:
+            _receipt_from_committed_manifest(
+                manifest,
+                manifest_sha256=hashlib.sha256(
+                    _canonical_manifest_bytes(manifest)
+                ).hexdigest(),
+            )
+        except CorpusIOError as exc:
+            raise ValueError(
+                f"manifest receipt fields are invalid: {exc.detail}"
+            ) from exc
     try:
         batch_binding = normalize_batch_binding(
             manifest.get("batch_binding")

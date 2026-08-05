@@ -88,6 +88,18 @@ def _journal_manifest(manifest) -> dict[str, object]:
     return asdict(manifest)
 
 
+def _canonical_test_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def _hold_stable_lock_in_child(brain_root, ready, release) -> None:
     with corpus_io.stable_corpus_lock(
         Path(brain_root),
@@ -166,6 +178,63 @@ def _batch_binding(
         engine_root="/engine",
         engine_sha="e" * 40,
     )
+
+
+def _downgrade_committed_batch_to_legacy_v1(
+    brain_root: Path,
+    binding: BatchBinding,
+    transaction_id: str,
+) -> tuple[dict[str, object], Path, Path]:
+    """Rewrite one test artifact to the exact pre-receipt v1 contract."""
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / transaction_id
+        / "journal.json"
+    )
+    intent_path = brain_root / batch_intent_relative_path(binding)
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    manifest = journal["manifest"]
+    for field_name in (
+        "coverage_sha256",
+        "expected_objects",
+        "verified_objects",
+        "changed_objects",
+    ):
+        assert field_name in manifest
+        manifest.pop(field_name)
+    manifest_sha256 = hashlib.sha256(
+        _canonical_test_json_bytes(manifest)
+    ).hexdigest()
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert intent["version"] == 1
+    intent["manifest_sha256"] = manifest_sha256
+    journal_path.write_bytes(_canonical_test_json_bytes(journal))
+    intent_path.write_bytes(_canonical_test_json_bytes(intent))
+
+    object_ids = {
+        action["object_id"]
+        for field_name in ("creates", "updates", "deletes")
+        for action in manifest[field_name]
+    }
+    object_ids.update(
+        object_id
+        for action in manifest["renames"]
+        for object_id in (action["old_id"], action["new_id"])
+    )
+    receipt = {
+        "ok": True,
+        "transaction_id": transaction_id,
+        "operation": "ingest",
+        "committed": True,
+        "manifest_sha256": manifest_sha256,
+        "before_fingerprint": manifest["before_fingerprint"],
+        "after_fingerprint": manifest["expected_after_fingerprint"],
+        "ingested_ids": sorted(object_ids),
+        "ingested_count": len(object_ids),
+    }
+    return receipt, journal_path, intent_path
 
 
 def _request(
@@ -1410,6 +1479,80 @@ def test_batch_no_change_receipt_detects_verified_object_tamper(tmp_path):
     assert exc.value.code == "receipt_state_mismatch"
 
 
+@pytest.mark.parametrize("swap_target", ("brain_root", "local_root"))
+def test_no_change_intent_publish_rechecks_lexical_binding(
+    tmp_path,
+    monkeypatch,
+    swap_target,
+):
+    brain_root = tmp_path / "brain"
+    obj = context("context.noop-binding-swap")
+    obj["context_key"] = "noop-binding-swap"
+    _write_object(brain_root, obj)
+    binding = _batch_binding(
+        brain_root=brain_root,
+        item_key=f"noop-{swap_target}",
+    )
+    original_publish = corpus_io._publish_no_change_intent_anchored
+    detached_root = tmp_path / "detached-brain"
+    detached_local = brain_root / ".brain-local-detached"
+
+    def publish_then_swap(*args, **kwargs):
+        original_publish(*args, **kwargs)
+        if swap_target == "brain_root":
+            brain_root.rename(detached_root)
+            brain_root.mkdir()
+        else:
+            (brain_root / ".brain-local").rename(detached_local)
+            (brain_root / ".brain-local").mkdir()
+
+    monkeypatch.setattr(
+        corpus_io,
+        "_publish_no_change_intent_anchored",
+        publish_then_swap,
+    )
+
+    with pytest.raises(CorpusIOError) as caught:
+        _service().apply(
+            (obj,),
+            request=_request(brain_root, (obj,), batch_binding=binding),
+        )
+
+    assert caught.value.code == "path_binding_changed"
+    detached_proof = (
+        detached_root / batch_intent_relative_path(binding)
+        if swap_target == "brain_root"
+        else detached_local
+        / "batch-intents"
+        / f"{batch_intent_id(binding)}.json"
+    )
+    assert detached_proof.is_file()
+    assert not (brain_root / batch_intent_relative_path(binding)).exists()
+
+
+def test_no_change_intent_replay_mismatch_preserves_original_proof(tmp_path):
+    brain_root = tmp_path / "brain"
+    binding, receipt, _obj = _record_existing_batch_noop(brain_root)
+    intent_path = brain_root / batch_intent_relative_path(binding)
+    original = intent_path.read_bytes()
+    normalized = corpus_io.normalize_mutation_receipt(receipt)
+
+    with pytest.raises(CorpusIOError) as caught:
+        corpus_io.record_no_change_receipt(
+            brain_root,
+            binding=binding,
+            receipt=normalized,
+            verified_source_sha256_by_id={
+                identity.id: "f" * 64
+                for identity in normalized.verified_objects
+            },
+        )
+
+    assert caught.value.code == "batch_intent_mismatch"
+    assert intent_path.read_bytes() == original
+    assert corpus_io.recover_batch_receipt(brain_root, binding) == receipt
+
+
 def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
@@ -1512,6 +1655,110 @@ def test_historical_committed_batch_receipt_preserves_original_manifest_sha(
     ]
     assert journal_path.read_bytes() == journal_before
     assert intent_path.read_bytes() == intent_before
+
+
+def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
+    brain_root = tmp_path / "brain"
+    original = context()
+    first_after = dict(original, title="first legacy commit")
+    second_after = dict(original, title="second legacy commit")
+    _write_object(brain_root, original)
+    first_binding = _batch_binding(brain_root=brain_root, item_key="legacy-one")
+    second_binding = _batch_binding(
+        brain_root=brain_root,
+        item_key="legacy-two",
+        item_input_fingerprint="2" * 64,
+    )
+
+    first_result = _service().apply(
+        (first_after,),
+        request=_request(
+            brain_root,
+            (first_after,),
+            batch_binding=first_binding,
+        ),
+    )
+    assert first_result.manifest is not None
+    first_receipt, first_journal, first_intent = (
+        _downgrade_committed_batch_to_legacy_v1(
+            brain_root,
+            first_binding,
+            first_result.manifest.transaction_id,
+        )
+    )
+    first_bytes = (first_journal.read_bytes(), first_intent.read_bytes())
+
+    assert recover_committed_receipt(brain_root, first_binding) == first_receipt
+    assert corpus_io.recover_batch_receipt(
+        brain_root,
+        first_binding,
+    ) == first_receipt
+    assert (first_journal.read_bytes(), first_intent.read_bytes()) == first_bytes
+
+    second_result = _service().apply(
+        (second_after,),
+        request=_request(
+            brain_root,
+            (second_after,),
+            batch_binding=second_binding,
+        ),
+    )
+    assert second_result.manifest is not None
+    second_receipt, second_journal, second_intent = (
+        _downgrade_committed_batch_to_legacy_v1(
+            brain_root,
+            second_binding,
+            second_result.manifest.transaction_id,
+        )
+    )
+    second_bytes = (second_journal.read_bytes(), second_intent.read_bytes())
+
+    receipts = recover_committed_receipts(
+        brain_root,
+        (first_binding, second_binding),
+        expected_receipts=(first_receipt, second_receipt),
+    )
+
+    assert receipts == (first_receipt, second_receipt)
+    assert first_receipt["after_fingerprint"] == second_receipt[
+        "before_fingerprint"
+    ]
+    assert (first_journal.read_bytes(), first_intent.read_bytes()) == first_bytes
+    assert (second_journal.read_bytes(), second_intent.read_bytes()) == second_bytes
+
+
+@pytest.mark.parametrize("tamper", ("expected_receipt", "object_state"))
+def test_legacy_v1_receipt_recovery_remains_fail_closed(tmp_path, tamper):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding(brain_root=brain_root, item_key="legacy-tamper")
+    result = _service().apply(
+        (after,),
+        request=_request(brain_root, (after,), batch_binding=binding),
+    )
+    assert result.manifest is not None
+    receipt, _journal_path, _intent_path = (
+        _downgrade_committed_batch_to_legacy_v1(
+            brain_root,
+            binding,
+            result.manifest.transaction_id,
+        )
+    )
+
+    if tamper == "expected_receipt":
+        with pytest.raises(CorpusIOError) as caught:
+            recover_committed_receipt(
+                brain_root,
+                binding,
+                expected_receipt={**receipt, "ingested_count": 0},
+            )
+        assert caught.value.code == "receipt_mismatch"
+    else:
+        _write_object(brain_root, dict(after, title="tampered legacy tail"))
+        with pytest.raises(CorpusIOError) as caught:
+            recover_committed_receipt(brain_root, binding)
+        assert caught.value.code == "committed_receipt_state_mismatch"
 
 
 def test_committed_receipt_rejects_forged_envelope_and_intent(tmp_path):

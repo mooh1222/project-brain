@@ -227,7 +227,7 @@ def normalize_mutation_receipt(value: object) -> MutationReceipt:
     raw = _receipt_payload(value) if isinstance(value, MutationReceipt) else value
     if not isinstance(raw, Mapping) or set(raw) != _MUTATION_RECEIPT_FIELDS:
         raise ValueError("mutation receipt fields do not match the contract")
-    if raw.get("version") != 1:
+    if type(raw.get("version")) is not int or raw.get("version") != 1:
         raise ValueError("mutation receipt version is invalid")
     receipt_id = raw.get("receipt_id")
     if not isinstance(receipt_id, str) or _SHA256.fullmatch(receipt_id) is None:

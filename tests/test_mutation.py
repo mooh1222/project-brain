@@ -3629,6 +3629,24 @@ def test_no_change_receipt_rejects_invariant_tampering(tmp_path, mutation):
         transaction_receipt.normalize_mutation_receipt(mutation(receipt))
 
 
+def test_mutation_receipt_version_rejects_bool_even_though_true_equals_one(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    old = _event()
+    _write_raw(brain_root, old)
+    request = _request(brain_root, (old,))
+    result = MutationService().apply(request.objects, request=request)
+    receipt = transaction_receipt.mutation_receipt_dict(
+        transaction_receipt.receipt_from_result(result, committed=False)
+    )
+
+    with pytest.raises(ValueError, match="version"):
+        transaction_receipt.normalize_mutation_receipt(
+            {**receipt, "version": True}
+        )
+
+
 def test_changed_object_projection_has_fixed_action_order_and_receipt_id(
     tmp_path,
 ):
