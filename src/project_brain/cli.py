@@ -260,6 +260,75 @@ def _exchange_directory_entries(parent_fd: int, left: str, right: str) -> None:
         )
 
 
+def _rename_directory_entry_no_replace(
+    parent_fd: int,
+    source: str,
+    destination: str,
+) -> None:
+    """같은 고정 dirfd 안에서 destination을 덮어쓰지 않고 이름을 옮긴다."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(libc, "renameatx_np", None)
+    flags = 0x00000004  # macOS RENAME_EXCL
+    if rename is None:
+        rename = getattr(libc, "renameat2", None)
+        flags = 0x00000001  # Linux RENAME_NOREPLACE
+    if rename is None:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace rename is not supported",
+        )
+    rename.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = rename(
+        parent_fd,
+        os.fsencode(source),
+        parent_fd,
+        os.fsencode(destination),
+        flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno() or errno.EIO
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            f"{source} -> {destination}",
+        )
+
+
+def _capture_timestamp_target(
+    parent_fd: int,
+    target_name: str,
+) -> tuple[str, os.stat_result]:
+    """공개 target을 충돌 없는 private recovery 이름으로 원자 이동한다."""
+    for _ in range(100):
+        recovery_name = (
+            f".{target_name}.{secrets.token_hex(8)}.recovery"
+        )
+        try:
+            _rename_directory_entry_no_replace(
+                parent_fd,
+                target_name,
+                recovery_name,
+            )
+        except FileExistsError:
+            continue
+        captured = _directory_entry_stat(parent_fd, recovery_name)
+        if captured is None:
+            raise OSError(
+                f"timestamp details captured recovery disappeared: "
+                f"{recovery_name}"
+            )
+        return recovery_name, captured
+    raise OSError("could not allocate timestamp details recovery entry")
+
+
 def _create_timestamp_entry(
     parent_fd: int,
     target_name: str,
@@ -400,9 +469,45 @@ def _remove_linked_target_if_unchanged(
             _same_inode(marker_at_target, marker_stat)
             and _same_inode(displaced, linked_stat)
         ):
-            _remove_directory_entry(parent_fd, target_name)
-            _remove_directory_entry(parent_fd, marker_name)
+            try:
+                recovery_name, captured = _capture_timestamp_target(
+                    parent_fd,
+                    target_name,
+                )
+            except FileNotFoundError:
+                # 비교 뒤 다른 writer가 공개 이름을 지웠다. 그 상태를 보존한다.
+                exchanged = False
+                _remove_directory_entry(parent_fd, marker_name)
+                os.fsync(parent_fd)
+                return
+
+            # 이 시점부터 공개 이름은 이미 원자적으로 비어 있다. 공개 이름을
+            # stat한 뒤 unlink하는 경로로 되돌아가면 winner를 지울 수 있다.
             exchanged = False
+            if _same_inode(captured, marker_stat):
+                _remove_directory_entry(parent_fd, recovery_name)
+            else:
+                try:
+                    _rename_directory_entry_no_replace(
+                        parent_fd,
+                        recovery_name,
+                        target_name,
+                    )
+                except FileExistsError as exc:
+                    raise OSError(
+                        errno.EBUSY,
+                        "timestamp details target changed again; "
+                        f"captured winner retained at {recovery_name}",
+                        recovery_name,
+                    ) from exc
+                except OSError as exc:
+                    raise OSError(
+                        exc.errno or errno.EIO,
+                        "timestamp details captured winner restore failed; "
+                        f"recovery retained at {recovery_name}",
+                        recovery_name,
+                    ) from exc
+            _remove_directory_entry(parent_fd, marker_name)
             os.fsync(parent_fd)
             return
 
@@ -430,6 +535,7 @@ def _remove_linked_target_if_unchanged(
             ):
                 _exchange_directory_entries(parent_fd, marker_name, target_name)
         _remove_directory_entry(parent_fd, marker_name)
+        os.fsync(parent_fd)
 
 
 def _publish_timestamp_details_to_absent(

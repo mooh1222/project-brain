@@ -2064,7 +2064,9 @@ class TestCliSearch(unittest.TestCase):
                 self.assertEqual(victim.read_bytes(), b"victim\n")
                 self.assertFalse(
                     any(
-                        path.name.endswith((".guard", ".tmp", ".cleanup"))
+                        path.name.endswith(
+                            (".guard", ".tmp", ".cleanup", ".recovery")
+                        )
                         for path in case_dir.iterdir()
                     )
                 )
@@ -2148,7 +2150,9 @@ class TestCliSearch(unittest.TestCase):
                 self.assertEqual(victim.read_bytes(), b"victim\n")
                 self.assertFalse(
                     any(
-                        path.name.endswith((".guard", ".tmp", ".cleanup"))
+                        path.name.endswith(
+                            (".guard", ".tmp", ".cleanup", ".recovery")
+                        )
                         for path in case_dir.iterdir()
                     )
                 )
@@ -2237,6 +2241,183 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(
             sorted(path.name for path in case_dir.iterdir()),
             ["details.json"],
+        )
+
+    def test_timestamp_details_cleanup_capture_preserves_post_compare_winner(self):
+        case_dir = Path(self._tmp.name) / "cleanup-post-compare-winner"
+        case_dir.mkdir()
+        target = case_dir / "details.json"
+        target.write_bytes(b"linked-by-loser\n")
+        linked_stat = target.lstat()
+        parent_fd = os.open(
+            case_dir,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        real_same_inode = cli._same_inode
+        comparisons = 0
+
+        def publish_winner_after_ownership_compare(left, right):
+            nonlocal comparisons
+            result = real_same_inode(left, right)
+            comparisons += 1
+            if comparisons == 2:
+                os.unlink(target.name, dir_fd=parent_fd)
+                descriptor = os.open(
+                    target.name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    os.write(descriptor, b"winner\n")
+                finally:
+                    os.close(descriptor)
+            return result
+
+        try:
+            with mock.patch.object(
+                cli,
+                "_same_inode",
+                side_effect=publish_winner_after_ownership_compare,
+            ):
+                cli._remove_linked_target_if_unchanged(
+                    parent_fd,
+                    target_name=target.name,
+                    linked_stat=linked_stat,
+                )
+        finally:
+            os.close(parent_fd)
+
+        self.assertEqual(target.read_bytes(), b"winner\n")
+        self.assertEqual(
+            sorted(path.name for path in case_dir.iterdir()),
+            ["details.json"],
+        )
+
+    def test_timestamp_details_cleanup_retains_recovery_on_continuous_race(self):
+        case_dir = Path(self._tmp.name) / "cleanup-continuous-race"
+        case_dir.mkdir()
+        target = case_dir / "details.json"
+        real_link = os.link
+        real_cleanup = cli._remove_linked_target_if_unchanged
+        real_no_replace = cli._rename_directory_entry_no_replace
+
+        def link_then_substitute_temp(
+            source,
+            destination,
+            *,
+            src_dir_fd=None,
+            dst_dir_fd=None,
+            follow_symlinks=True,
+        ):
+            result = real_link(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+            if destination == target.name and str(source).endswith(".tmp"):
+                os.unlink(source, dir_fd=src_dir_fd)
+                descriptor = os.open(
+                    source,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=src_dir_fd,
+                )
+                try:
+                    os.write(descriptor, b"substituted\n")
+                finally:
+                    os.close(descriptor)
+            return result
+
+        def cleanup_under_continuous_race(
+            parent_fd,
+            *,
+            target_name,
+            linked_stat,
+        ):
+            real_same_inode = cli._same_inode
+            comparisons = 0
+            moves = 0
+
+            def publish_winner_after_ownership_compare(left, right):
+                nonlocal comparisons
+                result = real_same_inode(left, right)
+                comparisons += 1
+                if comparisons == 2:
+                    os.unlink(target_name, dir_fd=parent_fd)
+                    descriptor = os.open(
+                        target_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        os.write(descriptor, b"winner\n")
+                    finally:
+                        os.close(descriptor)
+                return result
+
+            def publish_later_target_after_capture(
+                parent,
+                source,
+                destination,
+            ):
+                nonlocal moves
+                moves += 1
+                result = real_no_replace(parent, source, destination)
+                if moves == 1:
+                    descriptor = os.open(
+                        target_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        os.write(descriptor, b"later\n")
+                    finally:
+                        os.close(descriptor)
+                return result
+
+            with mock.patch.object(
+                cli,
+                "_same_inode",
+                side_effect=publish_winner_after_ownership_compare,
+            ), mock.patch.object(
+                cli,
+                "_rename_directory_entry_no_replace",
+                side_effect=publish_later_target_after_capture,
+            ):
+                return real_cleanup(
+                    parent_fd,
+                    target_name=target_name,
+                    linked_stat=linked_stat,
+                )
+
+        with mock.patch.object(
+            os,
+            "link",
+            side_effect=link_then_substitute_temp,
+        ), mock.patch.object(
+            cli,
+            "_remove_linked_target_if_unchanged",
+            side_effect=cleanup_under_continuous_race,
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "captured winner retained at .*\\.recovery",
+            ) as raised:
+                cli._atomic_write_timestamp_details(target, b"loser\n")
+
+        self.assertEqual(target.read_bytes(), b"later\n")
+        recovery_paths = list(case_dir.glob(".*.recovery"))
+        self.assertEqual(len(recovery_paths), 1)
+        self.assertEqual(recovery_paths[0].read_bytes(), b"winner\n")
+        self.assertEqual(raised.exception.filename, recovery_paths[0].name)
+        self.assertEqual(
+            sorted(path.name for path in case_dir.iterdir()),
+            sorted(["details.json", recovery_paths[0].name]),
         )
 
     def test_audit_succeeds_when_stale_and_exact_quote_checks_pass(self):
