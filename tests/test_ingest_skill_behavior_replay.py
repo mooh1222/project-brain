@@ -60,7 +60,7 @@ class RawReplayDriverTest(unittest.TestCase):
             "resume_contract_mismatch",
             "--validate-transaction",
             "item_records",
-            "recover_committed_receipts",
+            "recover_batch_receipts",
             "target_revision_sha",
             "batch-binding.json",
             "--brain-root",

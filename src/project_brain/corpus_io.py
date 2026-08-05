@@ -20,6 +20,7 @@ from typing import Any
 
 from project_brain.transaction_receipt import (
     BatchBinding,
+    LegacyBatchBindingV1,
     MutationOutcome,
     MutationReceipt,
     batch_binding_dict,
@@ -1751,11 +1752,13 @@ def recover_unfinished_transaction_unlocked(
 
 
 def batch_intent_relative_path(
-    binding: BatchBinding | Mapping[str, object],
+    binding: BatchBinding | LegacyBatchBindingV1 | Mapping[str, object],
+    *,
+    allow_legacy_v1: bool = False,
 ) -> Path:
     """Return the stable root-relative intent path for one batch item."""
     return Path(".brain-local") / "batch-intents" / (
-        f"{batch_intent_id(binding)}.json"
+        f"{batch_intent_id(binding, allow_legacy_v1=allow_legacy_v1)}.json"
     )
 
 
@@ -1921,9 +1924,16 @@ def record_no_change_receipt(
 
 def _read_batch_intent_anchored(
     anchored: _AnchoredRoot,
-    binding: BatchBinding,
+    binding: BatchBinding | LegacyBatchBindingV1,
 ) -> dict[str, object]:
-    relative = batch_intent_relative_path(binding)
+    legacy_read = isinstance(binding, LegacyBatchBindingV1) and not isinstance(
+        binding,
+        BatchBinding,
+    )
+    relative = batch_intent_relative_path(
+        binding,
+        allow_legacy_v1=legacy_read,
+    )
     try:
         intents = anchored.pin_directory(
             relative.parent.as_posix(),
@@ -1951,6 +1961,12 @@ def _read_batch_intent_anchored(
             paths=(anchored.path / relative,),
         )
     if value.get("version") == 2:
+        if legacy_read:
+            raise CorpusIOError(
+                "batch_intent_invalid",
+                "legacy batch binding cannot identify a no-change receipt",
+                paths=(anchored.path / relative,),
+            )
         expected_fields = {
             "version",
             "intent_id",
@@ -2017,14 +2033,20 @@ def _read_batch_intent_anchored(
             "batch intent fields do not match the contract",
             paths=(anchored.path / relative,),
         )
-    if value.get("intent_id") != batch_intent_id(binding):
+    if value.get("intent_id") != batch_intent_id(
+        binding,
+        allow_legacy_v1=legacy_read,
+    ):
         raise CorpusIOError(
             "batch_intent_mismatch",
             "batch intent identity does not match the requested item",
             paths=(anchored.path / relative,),
         )
     try:
-        stored_binding = normalize_batch_binding(value.get("batch_binding"))
+        stored_binding = normalize_batch_binding(
+            value.get("batch_binding"),
+            allow_legacy_v1=legacy_read,
+        )
     except ValueError as exc:
         raise CorpusIOError(
             "batch_intent_invalid",
@@ -2163,7 +2185,7 @@ def _legacy_v1_receipt_from_committed_manifest(
 
 def _recover_committed_receipt_anchored(
     anchored: _AnchoredRoot,
-    normalized: BatchBinding,
+    normalized: BatchBinding | LegacyBatchBindingV1,
     *,
     expected_receipt: Mapping[str, object] | None,
     verification_mode: ReceiptVerificationMode | None,
@@ -2200,7 +2222,15 @@ def _recover_committed_receipt_anchored(
             "receipt_not_committed",
             f"{transaction_id}: journal is not COMMITTED",
         )
-    if journal.get("batch_binding") != batch_binding_dict(normalized):
+    legacy_read = isinstance(normalized, LegacyBatchBindingV1) and not isinstance(
+        normalized,
+        BatchBinding,
+    )
+    normalized_binding_payload = batch_binding_dict(
+        normalized,
+        allow_legacy_v1=legacy_read,
+    )
+    if journal.get("batch_binding") != normalized_binding_payload:
         raise CorpusIOError(
             "committed_receipt_invalid",
             f"{transaction_id}: journal batch binding mismatch",
@@ -2223,7 +2253,11 @@ def _recover_committed_receipt_anchored(
         manifest.get("transaction_id") != transaction_id
         or manifest.get("operation") != "ingest"
         or manifest.get("engine_sha") != normalized.engine_sha
-        or manifest.get("batch_binding") != batch_binding_dict(normalized)
+        or manifest.get("batch_binding") != normalized_binding_payload
+        or (
+            isinstance(normalized, BatchBinding)
+            and manifest.get("coverage_sha256") != normalized.coverage_sha256
+        )
     ):
         raise CorpusIOError(
             "committed_receipt_invalid",
@@ -2288,6 +2322,11 @@ def _recover_no_change_receipt_anchored(
     expected_receipt: Mapping[str, object] | None,
 ) -> dict[str, object]:
     receipt = mutation_receipt_dict(intent["receipt"])
+    if receipt.get("coverage_sha256") != binding.coverage_sha256:
+        raise CorpusIOError(
+            "receipt_mismatch",
+            "no-change receipt coverage does not match the batch binding",
+        )
     if expected_receipt is not None:
         try:
             normalized_expected = mutation_receipt_dict(expected_receipt)
@@ -2324,13 +2363,18 @@ def _recover_no_change_receipt_anchored(
 
 def _recover_batch_receipt_anchored(
     anchored: _AnchoredRoot,
-    binding: BatchBinding,
+    binding: BatchBinding | LegacyBatchBindingV1,
     *,
     expected_receipt: Mapping[str, object] | None,
     verification_mode: ReceiptVerificationMode | None,
 ) -> dict[str, object]:
     intent = _read_batch_intent_anchored(anchored, binding)
     if intent.get("version") == 2:
+        if not isinstance(binding, BatchBinding):
+            raise CorpusIOError(
+                "batch_intent_invalid",
+                "legacy binding cannot recover a no-change receipt",
+            )
         return _recover_no_change_receipt_anchored(
             anchored,
             binding,
@@ -2347,7 +2391,7 @@ def _recover_batch_receipt_anchored(
 
 def recover_batch_receipt(
     brain_root: Path,
-    binding: BatchBinding | Mapping[str, object],
+    binding: BatchBinding | LegacyBatchBindingV1 | Mapping[str, object],
     *,
     expected_receipt: Mapping[str, object] | None = None,
     verification_mode: str = "strict_commit",
@@ -2360,7 +2404,7 @@ def recover_batch_receipt(
             "receipt verification_mode must be strict_commit or "
             "post_gate_object_tail"
         ) from exc
-    normalized = normalize_batch_binding(binding)
+    normalized = normalize_batch_binding(binding, allow_legacy_v1=True)
     assert normalized is not None
     active = _CORPUS_LOCK_SCOPE.get()
     if active is None:
@@ -2383,7 +2427,9 @@ def recover_batch_receipt(
 
 def recover_batch_receipts(
     brain_root: Path,
-    bindings: Iterable[BatchBinding | Mapping[str, object]],
+    bindings: Iterable[
+        BatchBinding | LegacyBatchBindingV1 | Mapping[str, object]
+    ],
     *,
     expected_receipts: Iterable[Mapping[str, object] | None],
     verification_mode: str = "strict_commit",
@@ -2396,7 +2442,10 @@ def recover_batch_receipts(
             "receipt verification_mode must be strict_commit or "
             "post_gate_object_tail"
         ) from exc
-    normalized_bindings = tuple(normalize_batch_binding(item) for item in bindings)
+    normalized_bindings = tuple(
+        normalize_batch_binding(item, allow_legacy_v1=True)
+        for item in bindings
+    )
     if any(item is None for item in normalized_bindings):
         raise ValueError("batch receipt bindings cannot contain None")
     expected = tuple(expected_receipts)
@@ -2465,7 +2514,9 @@ def recover_batch_receipts(
 
 def recover_committed_receipts(
     brain_root: Path,
-    bindings: Iterable[BatchBinding | Mapping[str, object]],
+    bindings: Iterable[
+        BatchBinding | LegacyBatchBindingV1 | Mapping[str, object]
+    ],
     *,
     expected_receipts: Iterable[Mapping[str, object] | None],
     verification_mode: ReceiptVerificationMode | str = (
@@ -2481,7 +2532,7 @@ def recover_committed_receipts(
             "post_gate_object_tail"
         ) from exc
     normalized_bindings = tuple(
-        normalize_batch_binding(binding)
+        normalize_batch_binding(binding, allow_legacy_v1=True)
         for binding in bindings
     )
     if any(binding is None for binding in normalized_bindings):
@@ -2569,12 +2620,12 @@ def recover_committed_receipts(
 
 def recover_committed_receipt(
     brain_root: Path,
-    binding: BatchBinding | Mapping[str, object],
+    binding: BatchBinding | LegacyBatchBindingV1 | Mapping[str, object],
     *,
     expected_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Recover and verify the exact receipt for one durably committed item."""
-    normalized = normalize_batch_binding(binding)
+    normalized = normalize_batch_binding(binding, allow_legacy_v1=True)
     assert normalized is not None
     active = _CORPUS_LOCK_SCOPE.get()
     if active is None:
@@ -3677,17 +3728,42 @@ def _validate_journal_model(
         raise ValueError("manifest must be an object")
     if "batch_binding" not in journal:
         raise ValueError("journal batch_binding field is missing")
+    legacy_binding_read = False
+    if state.value in _TERMINAL_STATES:
+        try:
+            legacy_manifest_binding = normalize_batch_binding(
+                manifest.get("batch_binding"),
+                allow_legacy_v1=True,
+            )
+            legacy_journal_binding = normalize_batch_binding(
+                journal.get("batch_binding"),
+                allow_legacy_v1=True,
+            )
+            legacy_binding_read = (
+                isinstance(legacy_manifest_binding, LegacyBatchBindingV1)
+                and not isinstance(legacy_manifest_binding, BatchBinding)
+                and isinstance(legacy_journal_binding, LegacyBatchBindingV1)
+                and not isinstance(legacy_journal_binding, BatchBinding)
+            )
+        except ValueError:
+            legacy_binding_read = False
     expected_entries = (
         _validate_legacy_v1_manifest_model(manifest, transaction_id)
         if legacy_manifest_read
-        else _validate_manifest_model(manifest, transaction_id)
+        else _validate_manifest_model(
+            manifest,
+            transaction_id,
+            allow_legacy_binding=legacy_binding_read,
+        )
     )
     try:
         manifest_binding = normalize_batch_binding(
-            manifest.get("batch_binding")
+            manifest.get("batch_binding"),
+            allow_legacy_v1=legacy_binding_read,
         )
         journal_binding = normalize_batch_binding(
-            journal.get("batch_binding")
+            journal.get("batch_binding"),
+            allow_legacy_v1=legacy_binding_read,
         )
     except ValueError as exc:
         raise ValueError(f"batch binding is invalid: {exc}") from exc
@@ -3780,6 +3856,8 @@ def _validate_journal_model(
 def _validate_manifest_model(
     manifest: Mapping[str, object],
     transaction_id: str,
+    *,
+    allow_legacy_binding: bool = False,
 ) -> list[dict[str, object]]:
     if set(manifest) != _MUTATION_MANIFEST_FIELDS:
         raise ValueError("manifest keys do not match the contract")
@@ -3787,6 +3865,7 @@ def _validate_manifest_model(
         manifest,
         transaction_id,
         validate_receipt_fields=True,
+        allow_legacy_binding=allow_legacy_binding,
     )
 
 
@@ -3800,6 +3879,7 @@ def _validate_legacy_v1_manifest_model(
         manifest,
         transaction_id,
         validate_receipt_fields=False,
+        allow_legacy_binding=True,
     )
 
 
@@ -3808,6 +3888,7 @@ def _validate_manifest_contents(
     transaction_id: str,
     *,
     validate_receipt_fields: bool,
+    allow_legacy_binding: bool = False,
 ) -> list[dict[str, object]]:
     if manifest.get("transaction_id") != transaction_id:
         raise ValueError("manifest transaction_id mismatch")
@@ -3836,7 +3917,8 @@ def _validate_manifest_contents(
             ) from exc
     try:
         batch_binding = normalize_batch_binding(
-            manifest.get("batch_binding")
+            manifest.get("batch_binding"),
+            allow_legacy_v1=allow_legacy_binding,
         )
     except ValueError as exc:
         raise ValueError(f"manifest batch_binding is invalid: {exc}") from exc

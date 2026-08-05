@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-_BATCH_BINDING_FIELDS = {
+_LEGACY_BATCH_BINDING_FIELDS = {
     "batch_manifest_sha256",
     "item_key",
     "item_input_fingerprint",
@@ -36,6 +36,7 @@ _BATCH_BINDING_FIELDS = {
     "engine_root",
     "engine_sha",
 }
+_BATCH_BINDING_FIELDS = _LEGACY_BATCH_BINDING_FIELDS | {"coverage_sha256"}
 _MUTATION_RECEIPT_FIELDS = {
     "version",
     "receipt_id",
@@ -66,8 +67,8 @@ class MutationOutcome(StrEnum):
 
 
 @dataclass(frozen=True)
-class BatchBinding:
-    """Immutable identity joining one batch item to one mutation."""
+class LegacyBatchBindingV1:
+    """Exact pre-coverage binding, accepted only for historical recovery."""
 
     batch_manifest_sha256: str
     item_key: str
@@ -83,6 +84,13 @@ class BatchBinding:
     target_revision_sha: str
     engine_root: str
     engine_sha: str
+
+
+@dataclass(frozen=True)
+class BatchBinding(LegacyBatchBindingV1):
+    """Immutable identity joining one batch item and its coverage to a mutation."""
+
+    coverage_sha256: str
 
 
 @dataclass(frozen=True)
@@ -375,26 +383,27 @@ def mutation_receipt_dict(
     return _receipt_payload(normalize_mutation_receipt(value))
 
 
-def normalize_batch_binding(
-    value: BatchBinding | Mapping[str, object] | None,
-) -> BatchBinding | None:
-    """Return an exact validated binding; ``None`` is the non-batch contract."""
-    if value is None:
-        return None
-    if isinstance(value, BatchBinding):
-        raw: Mapping[str, object] = asdict(value)
-    elif isinstance(value, Mapping):
-        raw = value
-    else:
-        raise ValueError("batch_binding must be BatchBinding, mapping, or None")
-    if set(raw) != _BATCH_BINDING_FIELDS:
+def _normalize_binding_fields(
+    raw: Mapping[str, object],
+    *,
+    binding_type: type[BatchBinding] | type[LegacyBatchBindingV1],
+) -> BatchBinding | LegacyBatchBindingV1:
+    expected_fields = (
+        _BATCH_BINDING_FIELDS
+        if binding_type is BatchBinding
+        else _LEGACY_BATCH_BINDING_FIELDS
+    )
+    if set(raw) != expected_fields:
         raise ValueError("batch_binding fields do not match the contract")
-    for field_name in (
+    sha_fields = [
         "batch_manifest_sha256",
         "item_input_fingerprint",
         "verify_json_sha256",
         "domain_spec_py_sha256",
-    ):
+    ]
+    if binding_type is BatchBinding:
+        sha_fields.append("coverage_sha256")
+    for field_name in sha_fields:
         value_ = raw.get(field_name)
         if not isinstance(value_, str) or _SHA256.fullmatch(value_) is None:
             raise ValueError(f"batch_binding.{field_name} must be lowercase SHA-256")
@@ -430,34 +439,96 @@ def normalize_batch_binding(
             or value_ < 0
         ):
             raise ValueError(f"batch_binding.{field_name} must be a non-negative int")
-    return BatchBinding(**{
+    return binding_type(**{
         field_name: (
             raw[field_name]
             if field_name in {"brain_root_device", "brain_root_inode"}
             else str(raw[field_name])
         )
-        for field_name in BatchBinding.__dataclass_fields__
+        for field_name in binding_type.__dataclass_fields__
     })
 
 
+def normalize_legacy_batch_binding_v1(
+    value: Mapping[str, object],
+) -> LegacyBatchBindingV1:
+    """Validate the exact historical bytes shape without upgrading it."""
+    return _normalize_binding_fields(
+        value,
+        binding_type=LegacyBatchBindingV1,
+    )
+
+
+def normalize_batch_binding(
+    value: (
+        BatchBinding
+        | LegacyBatchBindingV1
+        | Mapping[str, object]
+        | None
+    ),
+    *,
+    allow_legacy_v1: bool = False,
+) -> BatchBinding | LegacyBatchBindingV1 | None:
+    """Return an exact binding; legacy is an explicit recovery-only mode."""
+    if value is None:
+        return None
+    if isinstance(value, BatchBinding):
+        raw: Mapping[str, object] = asdict(value)
+        binding_type = BatchBinding
+    elif isinstance(value, LegacyBatchBindingV1):
+        if not allow_legacy_v1:
+            raise ValueError("legacy batch_binding requires explicit legacy read mode")
+        raw = asdict(value)
+        binding_type = LegacyBatchBindingV1
+    elif isinstance(value, Mapping):
+        raw = value
+        if set(raw) == _BATCH_BINDING_FIELDS:
+            binding_type = BatchBinding
+        elif set(raw) == _LEGACY_BATCH_BINDING_FIELDS:
+            if not allow_legacy_v1:
+                raise ValueError(
+                    "legacy batch_binding requires explicit legacy read mode"
+                )
+            binding_type = LegacyBatchBindingV1
+        else:
+            raise ValueError("batch_binding fields do not match the contract")
+    else:
+        raise ValueError(
+            "batch_binding must be BatchBinding, legacy binding, mapping, or None"
+        )
+    return _normalize_binding_fields(raw, binding_type=binding_type)
+
+
 def batch_binding_dict(
-    value: BatchBinding | Mapping[str, object] | None,
+    value: BatchBinding | LegacyBatchBindingV1 | Mapping[str, object] | None,
+    *,
+    allow_legacy_v1: bool = False,
 ) -> dict[str, object] | None:
-    normalized = normalize_batch_binding(value)
+    normalized = normalize_batch_binding(
+        value,
+        allow_legacy_v1=allow_legacy_v1,
+    )
     return None if normalized is None else asdict(normalized)
 
 
 def batch_intent_id(
-    value: BatchBinding | Mapping[str, object],
+    value: BatchBinding | LegacyBatchBindingV1 | Mapping[str, object],
+    *,
+    allow_legacy_v1: bool = False,
 ) -> str:
     """Canonical identity includes batch, item key, and immutable input."""
-    binding = normalize_batch_binding(value)
+    binding = normalize_batch_binding(
+        value,
+        allow_legacy_v1=allow_legacy_v1,
+    )
     assert binding is not None
     identity = {
         "batch_manifest_sha256": binding.batch_manifest_sha256,
         "item_key": binding.item_key,
         "item_input_fingerprint": binding.item_input_fingerprint,
     }
+    if isinstance(binding, BatchBinding):
+        identity["coverage_sha256"] = binding.coverage_sha256
     canonical = json.dumps(
         identity,
         ensure_ascii=True,
@@ -515,7 +586,7 @@ def read_batch_binding(path: Path) -> BatchBinding:
     return normalized
 
 
-def _file_sha256_nofollow(path: Path, *, field: str) -> str:
+def _file_bytes_nofollow(path: Path, *, field: str) -> bytes:
     candidate = Path(path)
     if not candidate.is_absolute():
         raise ValueError(f"{field} path must be absolute")
@@ -527,13 +598,13 @@ def _file_sha256_nofollow(path: Path, *, field: str) -> str:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError(f"{field} must be a regular file")
-        digest = hashlib.sha256()
+        chunks: list[bytes] = []
         total = 0
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
-            digest.update(chunk)
+            chunks.append(chunk)
             total += len(chunk)
         after = os.fstat(descriptor)
     finally:
@@ -544,7 +615,13 @@ def _file_sha256_nofollow(path: Path, *, field: str) -> str:
         or total != before.st_size
     ):
         raise ValueError(f"{field} changed while reading")
-    return digest.hexdigest()
+    return b"".join(chunks)
+
+
+def _file_sha256_nofollow(path: Path, *, field: str) -> str:
+    return hashlib.sha256(
+        _file_bytes_nofollow(path, field=field)
+    ).hexdigest()
 
 
 def verify_batch_input_files(
@@ -556,16 +633,35 @@ def verify_batch_input_files(
     """Recheck immutable staged input bytes immediately around mutation."""
     normalized = normalize_batch_binding(binding)
     assert normalized is not None
+    domain_spec_payload = _file_bytes_nofollow(
+        domain_spec_py,
+        field="domain_spec_py",
+    )
     observed = {
         "verify_json_sha256": _file_sha256_nofollow(
             verify_json,
             field="verify_json",
         ),
-        "domain_spec_py_sha256": _file_sha256_nofollow(
-            domain_spec_py,
-            field="domain_spec_py",
-        ),
+        "domain_spec_py_sha256": hashlib.sha256(
+            domain_spec_payload
+        ).hexdigest(),
     }
+    try:
+        from project_brain.coverage import normalize_coverage
+        from project_brain.templates.ingest.scripts.assemble_notes import (
+            _load_spec_bytes,
+        )
+
+        spec = _load_spec_bytes(
+            domain_spec_payload,
+            filename=str(domain_spec_py),
+        )
+        coverage = spec.get("COVERAGE")
+        if not isinstance(coverage, Mapping):
+            raise ValueError("domain_spec_py.COVERAGE is missing")
+        observed["coverage_sha256"] = normalize_coverage(coverage).sha256
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"domain_spec_py coverage is invalid: {exc}") from exc
     for field_name, actual in observed.items():
         if actual != getattr(normalized, field_name):
             raise ValueError(f"{field_name} does not match batch binding")

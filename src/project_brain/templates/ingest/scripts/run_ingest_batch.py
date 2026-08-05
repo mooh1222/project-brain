@@ -106,6 +106,19 @@ def _finalizer_module():
     return module
 
 
+def _assemble_module():
+    script = Path(__file__).resolve().with_name("assemble_notes.py")
+    spec = importlib.util.spec_from_file_location(
+        "project_brain_batch_assemble_notes",
+        script,
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("assemble_notes를 불러올 수 없습니다")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _has_symlink_component(path: Path) -> bool:
     # macOS의 /var -> /private/var 같은 시스템 경로 별칭은 허용하되,
     # 호출자가 지정한 마지막 경로 자체가 link인 경우는 거부한다.
@@ -304,6 +317,20 @@ def _canonical_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _coverage_from_domain_snapshot(snapshot: _FileSnapshot):
+    """Build coverage only from the already pinned domain-spec payload."""
+    from project_brain.coverage import normalize_coverage
+
+    spec = _assemble_module()._load_spec_bytes(
+        snapshot.payload,
+        filename=str(snapshot.path),
+    )
+    coverage = spec.get("COVERAGE")
+    if not isinstance(coverage, dict):
+        raise ValueError(f"{snapshot.relative_path}.COVERAGE가 없습니다")
+    return normalize_coverage(coverage)
+
+
 @contextmanager
 def _stage_item_inputs(items: list[dict[str, Any]]):
     stage_root = Path(tempfile.mkdtemp(prefix="project-brain-batch-inputs-"))
@@ -398,6 +425,19 @@ def _verify_item_inputs(
         item["_staged_binding_snapshot"],
         field=f"{item['key']}.staged.batch_binding",
     )
+    source_coverage = _coverage_from_domain_snapshot(item["_domain_snapshot"])
+    staged_coverage = _coverage_from_domain_snapshot(
+        item["_staged_domain_snapshot"]
+    )
+    expected_sha = item["batch_binding"]["coverage_sha256"]
+    if (
+        source_coverage.sha256 != expected_sha
+        or staged_coverage.sha256 != expected_sha
+        or source_coverage.canonical_bytes != staged_coverage.canonical_bytes
+    ):
+        raise ValueError(
+            f"input_binding_changed: {item['key']}.coverage_sha256"
+        )
 
 
 def _repo_contract(payload: dict[str, Any]) -> dict[str, Any]:
@@ -577,6 +617,9 @@ def _load_manifest(
                 if field == "verify_json"
                 else "_domain_snapshot"
             ] = source_snapshot
+        resolved["_coverage_binding"] = _coverage_from_domain_snapshot(
+            resolved["_domain_snapshot"]
+        )
         items.append(resolved)
     try:
         finalization = _finalizer_module().validate_contract(payload.get("finalization"))
@@ -599,6 +642,7 @@ def _manifest_fingerprint(items: list[dict[str, Any]], finalization: dict[str, A
             "verify_json_sha256": item["_verify_snapshot"].sha256,
             "domain_spec_py_path": str(item["domain_spec_py"]),
             "domain_spec_py_sha256": item["_domain_snapshot"].sha256,
+            "coverage_sha256": item["_coverage_binding"].sha256,
         })
     canonical = json.dumps({"items": fingerprint_items, "finalization": finalization},
                            ensure_ascii=True, sort_keys=True,
@@ -613,6 +657,7 @@ def _item_input_fingerprint(item: dict[str, Any]) -> str:
         "verify_json_sha256": item["_verify_snapshot"].sha256,
         "domain_spec_py_path": item["_domain_snapshot"].relative_path,
         "domain_spec_py_sha256": item["_domain_snapshot"].sha256,
+        "coverage_sha256": item["_coverage_binding"].sha256,
     }
     return hashlib.sha256(_canonical_bytes(identity)).hexdigest()
 
@@ -636,6 +681,7 @@ def _bind_items(
             item_input_fingerprint=_item_input_fingerprint(item),
             verify_json_sha256=item["_verify_snapshot"].sha256,
             domain_spec_py_sha256=item["_domain_snapshot"].sha256,
+            coverage_sha256=item["_coverage_binding"].sha256,
             repo_root=execution_state["repo_root"],
             brain_root=execution_state["brain_root"],
             brain_root_device=execution_state["brain_root_device"],
@@ -657,12 +703,74 @@ def _bind_items(
     return bound
 
 
-def _new_item_record(item: dict[str, Any]) -> dict[str, Any]:
+def _identity_rows(values) -> list[dict[str, str]]:
+    return [
+        {"id": identity.id, "kind": identity.kind}
+        for identity in sorted(values)
+    ]
+
+
+def _preflight_expected_objects(
+    items: list[dict[str, Any]],
+    *,
+    brain_root: Path,
+) -> dict[str, list[dict[str, str]]]:
+    """Plan every item against one initial store before any baseline artifact."""
+    from project_brain.coverage import plan_expected_objects
+    from project_brain.store import BrainStore
+
+    initial_store = BrainStore.load(brain_root)
+    created_contexts: dict[str, str] = {}
+    for item in items:
+        contract = item["_coverage_binding"].contract
+        context = contract.get("context")
+        if isinstance(context, dict) and context.get("mode") == "create":
+            created_contexts[str(context.get("key"))] = item["key"]
+    for item in items:
+        contract = item["_coverage_binding"].contract
+        context = contract.get("context")
+        if (
+            isinstance(context, dict)
+            and context.get("mode") == "reuse"
+            and str(context.get("key")) in created_contexts
+        ):
+            raise ValueError(
+                "batch_cross_item_context_reuse: "
+                f"{item['key']} depends on context created by "
+                f"{created_contexts[str(context.get('key'))]}"
+            )
+
+    planned_by_key: dict[str, list[dict[str, str]]] = {}
+    owner_by_id: dict[str, str] = {}
+    for item in items:
+        planned = plan_expected_objects(
+            item["_coverage_binding"],
+            initial_store,
+        )
+        for identity in planned:
+            previous = owner_by_id.get(identity.id)
+            if previous is not None:
+                raise ValueError(
+                    "batch_expected_object_overlap: "
+                    f"{identity.id} is expected by {previous} and {item['key']}"
+                )
+            owner_by_id[identity.id] = item["key"]
+        planned_by_key[item["key"]] = _identity_rows(planned)
+    return planned_by_key
+
+
+def _new_item_record(
+    item: dict[str, Any],
+    expected_objects: list[dict[str, str]],
+) -> dict[str, Any]:
     return {
         "binding": dict(item["batch_binding"]),
         "status": "pending",
         "failure": None,
-        "transaction": None,
+        "expected_objects": [dict(row) for row in expected_objects],
+        "verified_objects": [],
+        "changed_objects": [],
+        "receipt": None,
     }
 
 
@@ -671,7 +779,7 @@ def _sync_compatibility_fields(report: dict[str, Any]) -> None:
     report["succeeded"] = [
         record["binding"]["item_key"]
         for record in records
-        if record["status"] == "committed"
+        if record["status"] in {"committed", "no_changes"}
     ]
     report["failed"] = [
         {
@@ -682,9 +790,9 @@ def _sync_compatibility_fields(report: dict[str, Any]) -> None:
         if record["status"] == "failed"
     ]
     report["transactions"] = [
-        record["transaction"]
+        record["receipt"]
         for record in records
-        if record["status"] == "committed"
+        if record["status"] in {"committed", "no_changes"}
     ]
 
 
@@ -696,7 +804,7 @@ def _default_receipt_recoverer(
     verification_mode: str,
 ) -> tuple[dict[str, Any] | None, ...]:
     from project_brain.config import load_config
-    from project_brain.corpus_io import recover_committed_receipts
+    from project_brain.corpus_io import recover_batch_receipts
 
     configured = load_config(start=repo_root)
     if not bindings:
@@ -720,7 +828,7 @@ def _default_receipt_recoverer(
         )
     ):
         raise ValueError("receipt verification config is unavailable")
-    return recover_committed_receipts(
+    return recover_batch_receipts(
         brain_root,
         bindings,
         expected_receipts=expected_receipts,
@@ -737,8 +845,8 @@ def _recover_item_records(
 ) -> None:
     bindings = tuple(record["binding"] for record in records)
     expected = tuple(
-        record["transaction"]
-        if record["status"] == "committed"
+        record["receipt"]
+        if record["status"] in {"committed", "no_changes"}
         else None
         for record in records
     )
@@ -752,14 +860,64 @@ def _recover_item_records(
         raise ValueError("receipt verifier result length mismatch")
     for record, receipt in zip(records, receipts):
         if receipt is None:
-            if record["status"] == "committed":
+            if record["status"] in {"committed", "no_changes"}:
                 raise ValueError(
-                    "committed item record has no durable receipt"
+                    "terminal item record has no durable receipt"
                 )
             continue
-        record["status"] = "committed"
+        normalized = _finalizer_module().validate_transaction_results(
+            [receipt]
+        )[0]
+        if normalized["coverage_sha256"] != record["binding"]["coverage_sha256"]:
+            raise ValueError("item receipt coverage_sha256 mismatch")
+        if normalized["expected_objects"] != record["expected_objects"]:
+            raise ValueError("item receipt expected_objects mismatch")
+        if record["status"] in {"committed", "no_changes"} and (
+            record["receipt"] != normalized
+            or record["verified_objects"] != normalized["verified_objects"]
+            or record["changed_objects"] != normalized["changed_objects"]
+            or record["status"] != normalized["outcome"]
+        ):
+            raise ValueError("terminal item record receipt mismatch")
+        record["status"] = normalized["outcome"]
         record["failure"] = None
-        record["transaction"] = dict(receipt)
+        record["verified_objects"] = [
+            dict(row) for row in normalized["verified_objects"]
+        ]
+        record["changed_objects"] = [
+            dict(row) for row in normalized["changed_objects"]
+        ]
+        record["receipt"] = dict(normalized)
+
+
+def _replan_saved_expected(
+    item: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    brain_root: Path,
+) -> None:
+    """Re-plan only a non-terminal item against the current durable store."""
+    from project_brain.coverage import plan_expected_objects
+    from project_brain.id_grammar import format_id
+    from project_brain.store import BrainStore
+
+    store = BrainStore.load(brain_root)
+    contract = item["_coverage_binding"].contract
+    context = contract.get("context")
+    if isinstance(context, dict) and context.get("mode") == "create":
+        context_id = format_id("DomainContext", ctx=str(context.get("key")))
+        if store.has(context_id):
+            raise ValueError(
+                f"context external drift: create target {context_id} exists "
+                "without a durable receipt"
+            )
+    planned = _identity_rows(
+        plan_expected_objects(item["_coverage_binding"], store)
+    )
+    if planned != record["expected_objects"]:
+        raise ValueError(
+            f"pending_expected_objects mismatch for {item['key']}"
+        )
 
 
 def _reject_report_input_collision(report_path: Path, manifest_path: Path,
@@ -961,10 +1119,34 @@ def _finalization_details(result: Any) -> tuple[dict[str, Any], int, str]:
     return payload, exit_code, stderr
 
 
+def _saved_identity_rows(value: Any, *, field: str) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array")
+    rows: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(value):
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"id", "kind"}
+            or not isinstance(raw.get("id"), str)
+            or not raw["id"]
+            or not isinstance(raw.get("kind"), str)
+            or not raw["kind"]
+            or raw["id"] in seen_ids
+        ):
+            raise ValueError(f"{field}[{index}] is invalid")
+        seen_ids.add(raw["id"])
+        rows.append({"id": raw["id"], "kind": raw["kind"]})
+    normalized = sorted(rows, key=lambda row: (row["id"], row["kind"]))
+    if rows != normalized:
+        raise ValueError(f"{field} must be canonically sorted")
+    return rows
+
+
 def _load_resume_state(
     path: Path,
     *,
-    expected_records: list[dict[str, Any]],
+    expected_items: list[dict[str, Any]],
     manifest_fingerprint: str,
     manifest_sha256: str,
     repo_contract: dict[str, Any],
@@ -1008,43 +1190,87 @@ def _load_resume_state(
     expected_contract = {
         **repo_contract,
         "manifest_sha256": manifest_sha256,
-        "manifest_fingerprint": manifest_fingerprint,
     }
     for field, expected_value in expected_contract.items():
         if previous.get(field) != expected_value:
             raise ValueError(f"resume_contract_mismatch: {field}")
     if (not isinstance(previous["expected"], int)
             or isinstance(previous["expected"], bool)
-            or previous["expected"] != len(expected_records)):
+            or previous["expected"] != len(expected_items)):
         raise ValueError("resume_contract_mismatch: expected")
     raw_records = previous["item_records"]
     if (
         not isinstance(raw_records, list)
-        or len(raw_records) != len(expected_records)
+        or len(raw_records) != len(expected_items)
     ):
         raise ValueError("resume_contract_mismatch: item_records")
     records: list[dict[str, Any]] = []
-    for index, (raw, expected_record) in enumerate(
-        zip(raw_records, expected_records)
+    nonterminal_seen = False
+    for index, (raw, expected_item) in enumerate(
+        zip(raw_records, expected_items)
     ):
         if not isinstance(raw, dict) or set(raw) != {
             "binding",
             "status",
             "failure",
-            "transaction",
+            "expected_objects",
+            "verified_objects",
+            "changed_objects",
+            "receipt",
         }:
             raise ValueError(
                 f"resume_contract_mismatch: item_records[{index}]"
             )
-        if raw.get("binding") != expected_record["binding"]:
+        raw_binding = raw.get("binding")
+        expected_binding = expected_item["batch_binding"]
+        if not isinstance(raw_binding, dict):
             raise ValueError(
                 f"resume_contract_mismatch: item_records[{index}].binding"
             )
+        binding_field_order = (
+            "item_input_fingerprint",
+            "coverage_sha256",
+            *sorted(
+                set(expected_binding)
+                - {"item_input_fingerprint", "coverage_sha256"}
+            ),
+        )
+        for field_name in binding_field_order:
+            if raw_binding.get(field_name) != expected_binding.get(field_name):
+                raise ValueError(
+                    "resume_contract_mismatch: "
+                    f"item_records[{index}].binding.{field_name}"
+                )
+        if set(raw_binding) != set(expected_binding):
+            raise ValueError(
+                f"resume_contract_mismatch: item_records[{index}].binding.fields"
+            )
         status = raw.get("status")
         failure = raw.get("failure")
-        transaction = raw.get("transaction")
+        receipt = raw.get("receipt")
+        try:
+            expected_objects = _saved_identity_rows(
+                raw.get("expected_objects"),
+                field=f"item_records[{index}].expected_objects",
+            )
+            verified_objects = _saved_identity_rows(
+                raw.get("verified_objects"),
+                field=f"item_records[{index}].verified_objects",
+            )
+        except ValueError as exc:
+            raise ValueError(f"resume_contract_mismatch: {exc}") from exc
+        changed_objects = raw.get("changed_objects")
+        if not isinstance(changed_objects, list):
+            raise ValueError(
+                f"resume_contract_mismatch: item_records[{index}].changed_objects"
+            )
         if status == "pending":
-            valid_state = failure is None and transaction is None
+            valid_state = (
+                failure is None
+                and receipt is None
+                and verified_objects == []
+                and changed_objects == []
+            )
         elif status == "failed":
             valid_state = (
                 isinstance(failure, dict)
@@ -1052,15 +1278,36 @@ def _load_resume_state(
                 and isinstance(failure.get("exit_code"), int)
                 and not isinstance(failure.get("exit_code"), bool)
                 and isinstance(failure.get("stderr"), str)
-                and transaction is None
+                and receipt is None
+                and verified_objects == []
+                and changed_objects == []
             )
-        elif status == "committed":
-            valid_state = failure is None and isinstance(
-                transaction,
-                dict,
+        elif status in {"committed", "no_changes"}:
+            try:
+                normalized_receipt = _finalizer_module().validate_transaction_results(
+                    [receipt]
+                )[0]
+            except ValueError:
+                normalized_receipt = None
+            valid_state = (
+                failure is None
+                and normalized_receipt is not None
+                and normalized_receipt["outcome"] == status
+                and normalized_receipt["expected_objects"] == expected_objects
+                and normalized_receipt["verified_objects"] == verified_objects
+                and normalized_receipt["changed_objects"] == changed_objects
+                and normalized_receipt["coverage_sha256"]
+                == raw["binding"].get("coverage_sha256")
             )
         else:
             valid_state = False
+        terminal = status in {"committed", "no_changes"}
+        if terminal and nonterminal_seen:
+            raise ValueError(
+                "resume_contract_mismatch: non-terminal item precedes terminal item"
+            )
+        if not terminal:
+            nonterminal_seen = True
         if not valid_state:
             raise ValueError(
                 f"resume_contract_mismatch: item_records[{index}].status"
@@ -1071,10 +1318,13 @@ def _load_resume_state(
             "failure": (
                 None if failure is None else dict(failure)
             ),
-            "transaction": (
-                None if transaction is None else dict(transaction)
-            ),
+            "expected_objects": [dict(row) for row in expected_objects],
+            "verified_objects": [dict(row) for row in verified_objects],
+            "changed_objects": [dict(row) for row in changed_objects],
+            "receipt": None if receipt is None else dict(receipt),
         })
+    if previous.get("manifest_fingerprint") != manifest_fingerprint:
+        raise ValueError("resume_contract_mismatch: manifest_fingerprint")
     compatibility = {"item_records": records}
     _sync_compatibility_fields(compatibility)
     for field_name in ("succeeded", "failed", "transactions"):
@@ -1148,10 +1398,6 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
         manifest_sha256=manifest_sha256,
         execution_state=repo_contract,
     )
-    expected_records = [
-        _new_item_record(item)
-        for item in items
-    ]
     recoverer: ReceiptRecoverer = (
         _default_receipt_recoverer
         if receipt_recoverer is None
@@ -1163,7 +1409,7 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
     if resume_path is not None:
         item_records, isolation_baseline = _load_resume_state(
             Path(resume_path),
-            expected_records=expected_records,
+            expected_items=items,
             manifest_fingerprint=manifest_fingerprint,
             manifest_sha256=manifest_sha256,
             repo_contract=repo_contract,
@@ -1173,7 +1419,14 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
             recoverer=recoverer,
         )
     else:
-        item_records = expected_records
+        planned_by_key = _preflight_expected_objects(
+            items,
+            brain_root=Path(repo_contract["brain_root"]),
+        )
+        item_records = [
+            _new_item_record(item, planned_by_key[item["key"]])
+            for item in items
+        ]
         collect: BaselineCollector = (_default_baseline_collector if baseline_collector is None
                                       else baseline_collector)
         try:
@@ -1212,14 +1465,21 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
         }
         for item in staged_items:
             record = records_by_key[item["key"]]
-            if record["status"] == "committed":
+            if record["status"] in {"committed", "no_changes"}:
                 continue
-            record["status"] = "pending"
-            record["failure"] = None
-            record["transaction"] = None
-            _sync_compatibility_fields(report)
-            _write_report(report_file, report)
             try:
+                _replan_saved_expected(
+                    item,
+                    record,
+                    brain_root=Path(repo_contract["brain_root"]),
+                )
+                record["status"] = "pending"
+                record["failure"] = None
+                record["verified_objects"] = []
+                record["changed_objects"] = []
+                record["receipt"] = None
+                _sync_compatibility_fields(report)
+                _write_report(report_file, report)
                 _revalidate_execution_state(
                     resolver,
                     declared_contract,
@@ -1227,18 +1487,29 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
                 )
                 _verify_item_inputs(manifest_snapshot, item)
                 item_input = {**item, **repo_contract}
-                transaction, exit_code, stderr = _run_item(
+                receipt, exit_code, stderr = _run_item(
                     runner,
                     item_input,
                 )
                 _verify_item_inputs(manifest_snapshot, item)
             except ValueError as exc:
-                transaction = None
+                if resume_path is not None and (
+                    "context external drift" in str(exc)
+                    or "pending_expected_objects" in str(exc)
+                ):
+                    raise
+                receipt = None
                 exit_code = 1
                 stderr = str(exc)
-            if exit_code == 0 and transaction is not None:
-                record["status"] = "committed"
-                record["transaction"] = transaction
+            if exit_code == 0 and receipt is not None:
+                record["status"] = receipt["outcome"]
+                record["verified_objects"] = [
+                    dict(row) for row in receipt["verified_objects"]
+                ]
+                record["changed_objects"] = [
+                    dict(row) for row in receipt["changed_objects"]
+                ]
+                record["receipt"] = receipt
                 try:
                     _recover_item_records(
                         item_records,
@@ -1247,7 +1518,9 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
                     )
                 except Exception as exc:
                     record["status"] = "failed"
-                    record["transaction"] = None
+                    record["verified_objects"] = []
+                    record["changed_objects"] = []
+                    record["receipt"] = None
                     record["failure"] = {
                         "exit_code": 1,
                         "stderr": str(exc)[-2000:],
@@ -1261,13 +1534,15 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
                     )
                 except Exception as exc:
                     stderr = f"{stderr}; receipt verification: {exc}"
-                if record["status"] != "committed":
+                if record["status"] not in {"committed", "no_changes"}:
                     record["status"] = "failed"
                     record["failure"] = {
                         "exit_code": exit_code,
                         "stderr": stderr[-2000:],
                     }
-                    record["transaction"] = None
+                    record["verified_objects"] = []
+                    record["changed_objects"] = []
+                    record["receipt"] = None
             _sync_compatibility_fields(report)
             _write_report(report_file, report)
             if record["status"] == "failed":
@@ -1291,11 +1566,11 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
             )
             _sync_compatibility_fields(report)
             if any(
-                record["status"] != "committed"
+                record["status"] not in {"committed", "no_changes"}
                 for record in report["item_records"]
             ):
                 raise ValueError(
-                    "finalizer 전에 모든 item record가 committed여야 합니다"
+                    "finalizer 전에 모든 item record가 terminal이어야 합니다"
                 )
         except Exception as exc:
             report["finalize_failure"] = {
@@ -1372,7 +1647,7 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
             final_exit_code == 0
             and finalization["ok"] is True
             and transactions_match
-            and bool(report["transactions"])
+            and len(report["transactions"]) == len(report["item_records"])
         )
         if not report["finalized"]:
             report["finalize_failure"] = {

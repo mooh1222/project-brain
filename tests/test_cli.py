@@ -728,7 +728,15 @@ class TestCli(unittest.TestCase):
         verify = self.input_dir / "batch-verify.json"
         domain = self.input_dir / "batch-domain.py"
         verify.write_text("{}\n", encoding="utf-8")
-        domain.write_text("# domain\n", encoding="utf-8")
+        obj = context()
+        coverage_file = self._coverage_file("batch.coverage.json", [obj])
+        coverage_contract = direct_coverage(obj)
+        domain.write_text(
+            f"COVERAGE = {coverage_contract!r}\n",
+            encoding="utf-8",
+        )
+        from project_brain.coverage import read_coverage
+
         binding = BatchBinding(
             batch_manifest_sha256="a" * 64,
             item_key="one",
@@ -739,6 +747,7 @@ class TestCli(unittest.TestCase):
             domain_spec_py_sha256=hashlib.sha256(
                 domain.read_bytes()
             ).hexdigest(),
+            coverage_sha256=read_coverage(coverage_file).sha256,
             repo_root=str(project.resolve()),
             brain_root=str(brain.resolve()),
             brain_root_device=brain_stat.st_dev,
@@ -761,12 +770,10 @@ class TestCli(unittest.TestCase):
             encoding="utf-8",
         )
         objects_file = self.input_dir / "batch-objects.json"
-        obj = context()
         objects_file.write_text(
             json.dumps([obj], ensure_ascii=False),
             encoding="utf-8",
         )
-        coverage_file = self._coverage_file("batch.coverage.json", [obj])
         wrong_project = self.input_dir / "wrong-batch-project"
         wrong_brain = wrong_project / "brain"
         wrong_brain.mkdir(parents=True)

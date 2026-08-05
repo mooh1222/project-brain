@@ -953,7 +953,7 @@ class InstallTest(unittest.TestCase):
             "item_records",
             "target_revision_sha",
             "batch-binding.json",
-            "recover_committed_receipts",
+            "recover_batch_receipts",
             "brain_root_inode",
             "post-finalizer verification",
             "post_gate_object_tail",

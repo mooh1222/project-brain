@@ -30,6 +30,79 @@ _TRANSACTION_FIELDS = {
     "before_fingerprint",
     "after_fingerprint",
 }
+_CHANGED_ACTION_ORDER = {
+    "create": 0,
+    "update": 1,
+    "delete": 2,
+    "rename": 3,
+}
+
+
+def _normalize_identity_rows(value: Any, field: str) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field}는 배열이어야 합니다")
+    rows: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(value):
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"id", "kind"}
+            or not isinstance(raw.get("id"), str)
+            or not raw["id"]
+            or not isinstance(raw.get("kind"), str)
+            or not raw["kind"]
+            or raw["id"] in seen_ids
+        ):
+            raise ValueError(f"{field}[{index}]가 올바르지 않습니다")
+        seen_ids.add(raw["id"])
+        rows.append({"id": raw["id"], "kind": raw["kind"]})
+    canonical = sorted(rows, key=lambda row: (row["id"], row["kind"]))
+    if rows != canonical:
+        raise ValueError(f"{field}가 canonical 순서가 아닙니다")
+    return rows
+
+
+def _normalize_changed_rows(value: Any, field: str) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field}는 배열이어야 합니다")
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise ValueError(f"{field}[{index}]가 올바르지 않습니다")
+        action = raw.get("action")
+        expected_fields = (
+            {"action", "old_id", "new_id", "kind"}
+            if action == "rename"
+            else {"action", "id", "kind"}
+        )
+        if action not in _CHANGED_ACTION_ORDER or set(raw) != expected_fields:
+            raise ValueError(f"{field}[{index}] 필드가 올바르지 않습니다")
+        if any(
+            not isinstance(raw.get(name), str) or not raw[name]
+            for name in expected_fields
+        ):
+            raise ValueError(f"{field}[{index}] 값이 올바르지 않습니다")
+        row = {name: raw[name] for name in raw}
+        identity = tuple(sorted(row.items()))
+        if identity in seen:
+            raise ValueError(f"{field}에 중복 행이 있습니다")
+        seen.add(identity)
+        rows.append(row)
+
+    def sort_key(row: dict[str, str]) -> tuple[object, ...]:
+        action = row["action"]
+        suffix = (
+            (row["old_id"], row["new_id"], row["kind"])
+            if action == "rename"
+            else (row["id"], row["kind"])
+        )
+        return (_CHANGED_ACTION_ORDER[action], *suffix)
+
+    canonical = sorted(rows, key=sort_key)
+    if rows != canonical:
+        raise ValueError(f"{field}가 canonical 순서가 아닙니다")
+    return rows
 
 
 def _string_list(value: Any, field: str, *, nonempty: bool = False) -> list[str]:
@@ -125,7 +198,15 @@ def validate_item_records(value: Any) -> list[dict[str, Any]]:
         prefix = f"item records[{index}]"
         if (
             not isinstance(raw, dict)
-            or set(raw) != {"binding", "status", "failure", "transaction"}
+            or set(raw) != {
+                "binding",
+                "status",
+                "failure",
+                "expected_objects",
+                "verified_objects",
+                "changed_objects",
+                "receipt",
+            }
         ):
             raise ValueError(f"{prefix} 필드가 정확하지 않습니다")
         binding = normalize_batch_binding(raw.get("binding"))
@@ -135,16 +216,69 @@ def validate_item_records(value: Any) -> list[dict[str, Any]]:
         if binding.item_key in item_keys:
             raise ValueError(f"{prefix}.binding.item_key가 중복입니다")
         item_keys.add(binding.item_key)
-        if raw.get("status") != "committed":
-            raise ValueError(f"{prefix}.status는 committed여야 합니다")
-        if raw.get("failure") is not None:
-            raise ValueError(f"{prefix}.failure는 null이어야 합니다")
-        transaction = validate_transaction_results([raw.get("transaction")])[0]
+        status = raw.get("status")
+        if status not in {"pending", "failed", "committed", "no_changes"}:
+            raise ValueError(f"{prefix}.status가 올바르지 않습니다")
+        expected_objects = _normalize_identity_rows(
+            raw.get("expected_objects"),
+            f"{prefix}.expected_objects",
+        )
+        verified_objects = _normalize_identity_rows(
+            raw.get("verified_objects"),
+            f"{prefix}.verified_objects",
+        )
+        changed_objects = _normalize_changed_rows(
+            raw.get("changed_objects"),
+            f"{prefix}.changed_objects",
+        )
+        failure = raw.get("failure")
+        receipt = raw.get("receipt")
+        normalized_receipt: dict[str, Any] | None = None
+        if status == "pending":
+            valid_state = (
+                failure is None
+                and receipt is None
+                and verified_objects == []
+                and changed_objects == []
+            )
+        elif status == "failed":
+            valid_state = (
+                isinstance(failure, dict)
+                and set(failure) == {"exit_code", "stderr"}
+                and isinstance(failure.get("exit_code"), int)
+                and not isinstance(failure.get("exit_code"), bool)
+                and isinstance(failure.get("stderr"), str)
+                and receipt is None
+                and verified_objects == []
+                and changed_objects == []
+            )
+        else:
+            try:
+                normalized_receipt = validate_transaction_results([receipt])[0]
+            except ValueError as exc:
+                raise ValueError(f"{prefix}.receipt가 올바르지 않습니다: {exc}") from exc
+            valid_state = (
+                failure is None
+                and normalized_receipt["outcome"] == status
+                and normalized_receipt["coverage_sha256"]
+                == binding_payload["coverage_sha256"]
+                and normalized_receipt["expected_objects"] == expected_objects
+                and normalized_receipt["verified_objects"] == verified_objects
+                and normalized_receipt["changed_objects"] == changed_objects
+            )
+        if not valid_state:
+            raise ValueError(
+                f"{prefix} status/expected_objects/verified_objects/"
+                "changed_objects/receipt invariant가 맞지 않습니다"
+            )
         normalized.append({
             "binding": binding_payload,
-            "status": "committed",
-            "failure": None,
-            "transaction": transaction,
+            "status": status,
+            "failure": None if failure is None else dict(failure),
+            "expected_objects": [dict(row) for row in expected_objects],
+            "verified_objects": [dict(row) for row in verified_objects],
+            "changed_objects": [dict(row) for row in changed_objects],
+            "receipt": normalized_receipt,
         })
     return normalized
 
@@ -182,6 +316,11 @@ def recover_item_record_transactions(
 ) -> list[dict[str, Any]]:
     """Resolve exact committed receipts from the durable intent/journal chain."""
     records = validate_item_records(value)
+    if any(
+        record["status"] not in {"committed", "no_changes"}
+        for record in records
+    ):
+        raise ValueError("item records에는 terminal receipt만 허용됩니다")
     root = Path(repo_root).resolve()
     try:
         configured = config_loader(root)
@@ -220,7 +359,7 @@ def recover_item_record_transactions(
         for binding in bindings
     ):
         raise ValueError("item record brain_root identity does not match config")
-    expected = tuple(record["transaction"] for record in records)
+    expected = tuple(record["receipt"] for record in records)
     try:
         recovered = receipt_recoverer(
             brain_root,

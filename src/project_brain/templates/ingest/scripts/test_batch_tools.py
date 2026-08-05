@@ -53,32 +53,43 @@ REPO_CONTRACT = {
 }
 
 
-def transaction_result(key: str = "one") -> dict:
+def transaction_result(key: str = "one", *, outcome: str = "committed") -> dict:
+    from project_brain.coverage import normalize_coverage
+
+    committed = outcome == "committed"
+    coverage_sha256 = normalize_coverage({
+        "version": 1,
+        "mode": "direct",
+        "objects": [{
+            "id": f"mapping.fixture.{key}",
+            "kind": "DomainMapping",
+        }],
+    }).sha256
     payload = {
         "version": 1,
         "receipt_id": "0" * 64,
         "ok": True,
-        "outcome": "committed",
-        "transaction_id": ("a" * 63) + key[-1].lower(),
+        "outcome": outcome,
+        "transaction_id": (("a" * 63) + key[-1].lower()) if committed else None,
         "operation": "ingest",
-        "committed": True,
+        "committed": committed,
         "manifest_sha256": "b" * 64,
-        "coverage_sha256": "e" * 64,
+        "coverage_sha256": coverage_sha256,
         "expected_objects": [
-            {"id": f"mapping.{key}", "kind": "DomainMapping"}
+            {"id": f"mapping.fixture.{key}", "kind": "DomainMapping"}
         ],
         "verified_objects": [
-            {"id": f"mapping.{key}", "kind": "DomainMapping"}
+            {"id": f"mapping.fixture.{key}", "kind": "DomainMapping"}
         ],
         "changed_objects": [
             {
                 "action": "create",
-                "id": f"mapping.{key}",
+                "id": f"mapping.fixture.{key}",
                 "kind": "DomainMapping",
             }
-        ],
+        ] if committed else [],
         "before_fingerprint": "c" * 64,
-        "after_fingerprint": "d" * 64,
+        "after_fingerprint": "d" * 64 if committed else "c" * 64,
     }
     payload["receipt_id"] = hashlib.sha256(
         json.dumps(
@@ -93,11 +104,52 @@ def transaction_result(key: str = "one") -> dict:
 
 def finalization_result(values: list[dict]) -> dict:
     transactions = (
-        [record["transaction"] for record in values]
+        [record["receipt"] for record in values]
         if values and "binding" in values[0]
         else values
     )
     return {**FINALIZATION_RESULT, "transactions": transactions}
+
+
+def direct_coverage_source(object_id: str, kind: str = "DomainMapping") -> str:
+    return (
+        "COVERAGE = "
+        + repr({
+            "version": 1,
+            "mode": "direct",
+            "objects": [{"id": object_id, "kind": kind}],
+        })
+        + "\n"
+    )
+
+
+def assembled_context_coverage_source(mode: str) -> str:
+    empty = {"empty_reason": "fixture에 선언 항목 없음"}
+    coverage = {
+        "version": 1,
+        "mode": "assembled",
+        "verify_groups": {"names": [], **empty},
+        "context": {"key": "ctx", "mode": mode},
+        "sections": {
+            "sources": {"ids": [], **empty},
+            "glossary": {"keys": [], **empty},
+            "code_anchors": {"keys": [], **empty},
+            "mappings": {"keys": ["one"]},
+            "decisions": {"items": [], **empty},
+            "refs": {"items": [], **empty},
+            "updates": {"ids": [], **empty},
+            "extra_objects": {"objects": [], **empty},
+        },
+        "expected_objects": [
+            {"id": "mapping.ctx.one", "kind": "DomainMapping"},
+        ],
+    }
+    if mode == "create":
+        coverage["expected_objects"].insert(
+            0,
+            {"id": "context.ctx", "kind": "DomainContext"},
+        )
+    return "COVERAGE = " + repr(coverage) + "\n"
 
 
 def load_script(path: Path, module_name: str):
@@ -163,6 +215,7 @@ class BatchRunnerCliTest(unittest.TestCase):
         self.assertTrue(VALIDATOR_SCRIPT.is_file(), "Task 5 workflow validator is missing")
         shutil.copy2(BATCH_SCRIPT, self.runtime / BATCH_SCRIPT.name)
         shutil.copy2(VALIDATOR_SCRIPT, self.runtime / VALIDATOR_SCRIPT.name)
+        shutil.copy2(SCRIPTS / "assemble_notes.py", self.runtime / "assemble_notes.py")
         shutil.copy2(SCRIPTS / "finalize_ingest.py", self.runtime / "finalize_ingest.py")
         self._write_executable(
             "run_ingest.sh",
@@ -260,7 +313,7 @@ if os.environ.get("FAKE_FINALIZER_FAIL") == "1":
     print("finalizer failed", file=sys.stderr)
     raise SystemExit(23)
 records = json.loads(Path(sys.argv[sys.argv.index("--item-records") + 1]).read_text())
-transactions = [record["transaction"] for record in records]
+transactions = [record["receipt"] for record in records]
 print(json.dumps({"ok": True, "transactions": transactions, "commands": {},
                   "isolation": {}, "unmerged": {},
                   "recall_checks": [], "errors": []}))
@@ -275,7 +328,10 @@ print(json.dumps({"ok": True, "transactions": transactions, "commands": {},
             verify = inputs / f"{key}.json"
             domain_spec = inputs / f"{key}.py"
             verify.write_text("{}\n", encoding="utf-8")
-            domain_spec.write_text("# fixture\n", encoding="utf-8")
+            domain_spec.write_text(
+                direct_coverage_source(f"context.{key}", "DomainContext"),
+                encoding="utf-8",
+            )
             items.append({
                 "key": key,
                 "verify_json": str(verify.relative_to(self.manifest_dir)),
@@ -341,7 +397,7 @@ print(json.dumps({"ok": True, "transactions": transactions, "commands": {},
                 sources = self._source_item_inputs(manifest, key)
                 self.assertEqual(
                     [entry["content"] for entry in call["inputs"]],
-                    ["{}\n", "# fixture\n"],
+                    [source.read_text(encoding="utf-8") for source in sources],
                 )
                 self.assertTrue(all(
                     entry["exists"]
@@ -661,7 +717,10 @@ class BatchRunnerApiTest(unittest.TestCase):
         self.manifest_dir = self.root / "manifest"
         self.manifest_dir.mkdir()
         (self.manifest_dir / "verify.json").write_text("{}\n", encoding="utf-8")
-        (self.manifest_dir / "domain.py").write_text("# fixture\n", encoding="utf-8")
+        (self.manifest_dir / "domain.py").write_text(
+            direct_coverage_source("mapping.fixture.one"),
+            encoding="utf-8",
+        )
         self.manifest = self.manifest_dir / "batch.json"
         self.manifest.write_text(json.dumps({
             **REPO_CONTRACT,
@@ -752,13 +811,26 @@ class BatchRunnerApiTest(unittest.TestCase):
             report["brain_root_inode"],
         )
         self.assertEqual(set(record), {
-            "binding", "status", "failure", "transaction",
+            "binding", "status", "failure", "expected_objects",
+            "verified_objects", "changed_objects", "receipt",
         })
         self.assertEqual(record["status"], "committed")
         self.assertIsNone(record["failure"])
         self.assertEqual(
-            record["transaction"],
+            record["receipt"],
             transaction_result("one"),
+        )
+        self.assertEqual(
+            record["expected_objects"],
+            transaction_result("one")["expected_objects"],
+        )
+        self.assertEqual(
+            record["verified_objects"],
+            transaction_result("one")["verified_objects"],
+        )
+        self.assertEqual(
+            record["changed_objects"],
+            transaction_result("one")["changed_objects"],
         )
         self.assertEqual(
             record["binding"]["item_key"],
@@ -790,6 +862,184 @@ class BatchRunnerApiTest(unittest.TestCase):
         self.assertNotIsInstance(report["repo_root_device"], bool)
         self.assertIsInstance(report["repo_root_inode"], int)
         self.assertNotIsInstance(report["repo_root_inode"], bool)
+
+    def test_batch_accepts_mixed_no_changes_and_committed_item_receipts(self):
+        module = self._module()
+        second_verify = self.manifest_dir / "two.json"
+        second_domain = self.manifest_dir / "two.py"
+        second_verify.write_text("{}\n", encoding="utf-8")
+        second_domain.write_text(
+            direct_coverage_source("mapping.fixture.two2"),
+            encoding="utf-8",
+        )
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["items"].append({
+            "key": "two2",
+            "verify_json": "two.json",
+            "domain_spec_py": "two.py",
+        })
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+        report = module.run_batch(
+            self.manifest,
+            self.root / "mixed-report.json",
+            item_runner=lambda item: transaction_result(
+                item["key"],
+                outcome="no_changes" if item["key"] == "one" else "committed",
+            ),
+            finalizer=lambda _contract, _baseline, records: (
+                finalization_result(records)
+            ),
+        )
+
+        self.assertTrue(report["finalized"])
+        self.assertEqual(
+            [record["status"] for record in report["item_records"]],
+            ["no_changes", "committed"],
+        )
+        self.assertEqual(report["failed"], [])
+
+    def test_all_item_preflight_rejects_id_overlap_before_baseline(self):
+        module = self._module()
+        (self.manifest_dir / "domain.py").write_text(
+            direct_coverage_source("mapping.fixture.shared"),
+            encoding="utf-8",
+        )
+        second_verify = self.manifest_dir / "two.json"
+        second_domain = self.manifest_dir / "two.py"
+        second_verify.write_text("{}\n", encoding="utf-8")
+        second_domain.write_text(
+            direct_coverage_source("mapping.fixture.shared"),
+            encoding="utf-8",
+        )
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["items"].append({
+            "key": "two2",
+            "verify_json": "two.json",
+            "domain_spec_py": "two.py",
+        })
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        baseline_calls: list[str] = []
+
+        with self.assertRaisesRegex(ValueError, "batch_expected_object_overlap"):
+            module.run_batch(
+                self.manifest,
+                self.root / "overlap-report.json",
+                baseline_collector=lambda: baseline_calls.append("baseline"),
+            )
+
+        self.assertEqual(baseline_calls, [])
+        self.assertFalse((self.root / "overlap-report.json").exists())
+
+    def test_all_item_preflight_rejects_cross_item_context_reuse(self):
+        module = self._module()
+        (self.manifest_dir / "domain.py").write_text(
+            assembled_context_coverage_source("create"),
+            encoding="utf-8",
+        )
+        second_verify = self.manifest_dir / "two.json"
+        second_domain = self.manifest_dir / "two.py"
+        second_verify.write_text("{}\n", encoding="utf-8")
+        second_domain.write_text(
+            assembled_context_coverage_source("reuse"),
+            encoding="utf-8",
+        )
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["items"].append({
+            "key": "two2",
+            "verify_json": "two.json",
+            "domain_spec_py": "two.py",
+        })
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "cross_item_context_reuse"):
+            module.run_batch(
+                self.manifest,
+                self.root / "context-reuse-report.json",
+            )
+
+    def test_coverage_is_loaded_from_the_pinned_domain_snapshot_payload(self):
+        module = self._module()
+        source = self.manifest_dir / "domain.py"
+        snapshot = module._read_relative_snapshot(
+            self.manifest_dir,
+            "domain.py",
+            field="domain",
+        )
+        source.write_text(
+            "raise AssertionError('live domain spec reopened')\n",
+            encoding="utf-8",
+        )
+
+        coverage = module._coverage_from_domain_snapshot(snapshot)
+
+        self.assertEqual(coverage.expected_objects[0].id, "mapping.fixture.one")
+
+    def test_item_input_verification_rejects_binding_coverage_sha_mismatch(self):
+        module = self._module()
+        manifest_snapshot = module._snapshot_manifest(self.manifest)
+        items, _finalization, _declared, manifest_sha256 = (
+            module._load_manifest(manifest_snapshot)
+        )
+        bound = module._bind_items(
+            items,
+            manifest_sha256=manifest_sha256,
+            execution_state=self._execution_state(),
+        )
+        bound[0]["batch_binding"]["coverage_sha256"] = "0" * 64
+
+        with module._stage_item_inputs(bound) as staged:
+            with self.assertRaisesRegex(ValueError, "coverage_sha256"):
+                module._verify_item_inputs(manifest_snapshot, staged[0])
+
+    def test_resume_rejects_changed_coverage_identity_with_same_expected_objects(self):
+        module = self._module()
+        domain = self.manifest_dir / "domain.py"
+        domain.write_text(
+            assembled_context_coverage_source("create"),
+            encoding="utf-8",
+        )
+        before_snapshot = module._read_relative_snapshot(
+            self.manifest_dir,
+            "domain.py",
+            field="domain.before",
+        )
+        before_coverage = module._coverage_from_domain_snapshot(before_snapshot)
+        report_path = self.root / "coverage-resume.json"
+        module.run_batch(
+            self.manifest,
+            report_path,
+            item_runner=lambda _item: (9, "failed"),
+        )
+        domain.write_text(
+            assembled_context_coverage_source("create").replace(
+                "fixture에 선언 항목 없음",
+                "동일 expected를 유지한 다른 coverage 설명",
+            ),
+            encoding="utf-8",
+        )
+        after_snapshot = module._read_relative_snapshot(
+            self.manifest_dir,
+            "domain.py",
+            field="domain.after",
+        )
+        after_coverage = module._coverage_from_domain_snapshot(after_snapshot)
+        self.assertEqual(
+            before_coverage.expected_objects,
+            after_coverage.expected_objects,
+        )
+        self.assertNotEqual(before_coverage.sha256, after_coverage.sha256)
+        calls: list[str] = []
+
+        with self.assertRaisesRegex(ValueError, "item_input_fingerprint"):
+            module.run_batch(
+                self.manifest,
+                self.root / "coverage-resume-out.json",
+                resume_path=report_path,
+                item_runner=lambda item: calls.append(item["key"]),
+            )
+
+        self.assertEqual(calls, [])
 
     def test_receipt_recovery_uses_post_gate_mode_only_after_finalizer(self):
         module = self._module()
@@ -985,7 +1235,10 @@ class BatchRunnerApiTest(unittest.TestCase):
         second_verify = self.manifest_dir / "two.json"
         second_domain = self.manifest_dir / "two.py"
         second_verify.write_text("{}\n", encoding="utf-8")
-        second_domain.write_text("# two\n", encoding="utf-8")
+        second_domain.write_text(
+            direct_coverage_source("mapping.fixture.two2"),
+            encoding="utf-8",
+        )
         payload = json.loads(self.manifest.read_text(encoding="utf-8"))
         payload["items"].append({
             "key": "two2",
@@ -1024,6 +1277,93 @@ class BatchRunnerApiTest(unittest.TestCase):
             ["committed", "committed"],
         )
         self.assertTrue(resumed["finalized"])
+
+    def test_resume_rejects_terminal_item_after_first_nonterminal(self):
+        module = self._module()
+        second_verify = self.manifest_dir / "two.json"
+        second_domain = self.manifest_dir / "two.py"
+        second_verify.write_text("{}\n", encoding="utf-8")
+        second_domain.write_text(
+            direct_coverage_source("mapping.fixture.two2"),
+            encoding="utf-8",
+        )
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        payload["items"].append({
+            "key": "two2",
+            "verify_json": "two.json",
+            "domain_spec_py": "two.py",
+        })
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        report_path = self.root / "terminal-gap.json"
+        module.run_batch(
+            self.manifest,
+            report_path,
+            item_runner=lambda _item: (9, "failed"),
+        )
+        state = json.loads(report_path.read_text(encoding="utf-8"))
+        receipt = transaction_result("two2")
+        state["item_records"][1].update({
+            "status": "committed",
+            "failure": None,
+            "verified_objects": receipt["verified_objects"],
+            "changed_objects": receipt["changed_objects"],
+            "receipt": receipt,
+        })
+        report_path.write_text(json.dumps(state), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "non-terminal.*terminal"):
+            module.run_batch(
+                self.manifest,
+                self.root / "terminal-gap-out.json",
+                resume_path=report_path,
+            )
+
+    def test_resume_rejects_existing_context_create_without_durable_receipt(self):
+        from project_brain.store import BrainStore
+
+        module = self._module()
+        (self.manifest_dir / "domain.py").write_text(
+            assembled_context_coverage_source("create"),
+            encoding="utf-8",
+        )
+        report_path = self.root / "context-drift.json"
+        module.run_batch(
+            self.manifest,
+            report_path,
+            item_runner=lambda _item: (9, "failed"),
+        )
+        context_object = {"id": "context.ctx", "kind": "DomainContext"}
+        context_path = BrainStore.object_path(self.brain_root, context_object)
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_bytes(BrainStore.object_bytes(context_object))
+
+        with self.assertRaisesRegex(ValueError, "context external drift"):
+            module.run_batch(
+                self.manifest,
+                self.root / "context-drift-out.json",
+                resume_path=report_path,
+            )
+
+    def test_resume_replans_pending_item_and_compares_saved_expected(self):
+        module = self._module()
+        report_path = self.root / "pending-plan-drift.json"
+        module.run_batch(
+            self.manifest,
+            report_path,
+            item_runner=lambda _item: (9, "failed"),
+        )
+        state = json.loads(report_path.read_text(encoding="utf-8"))
+        state["item_records"][0]["expected_objects"] = [
+            {"id": "mapping.fixture.other", "kind": "DomainMapping"}
+        ]
+        report_path.write_text(json.dumps(state), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "pending_expected_objects"):
+            module.run_batch(
+                self.manifest,
+                self.root / "pending-plan-drift-out.json",
+                resume_path=report_path,
+            )
 
     def test_resume_recovers_commit_after_report_gap_without_rerun(self):
         module = self._module()
@@ -1169,7 +1509,10 @@ class BatchRunnerApiTest(unittest.TestCase):
             self.manifest_dir / "domain.py",
         )
         self.assertEqual(observed[0]["verify_bytes"], b"{}\n")
-        self.assertEqual(observed[0]["domain_bytes"], b"# fixture\n")
+        self.assertEqual(
+            observed[0]["domain_bytes"],
+            (self.manifest_dir / "domain.py").read_bytes(),
+        )
         self.assertEqual(observed[0]["verify_mode"] & 0o222, 0)
         self.assertEqual(observed[0]["domain_mode"] & 0o222, 0)
 

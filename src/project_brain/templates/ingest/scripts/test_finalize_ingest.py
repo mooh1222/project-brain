@@ -56,6 +56,7 @@ BINDING = {
     "item_input_fingerprint": "6" * 64,
     "verify_json_sha256": "7" * 64,
     "domain_spec_py_sha256": "8" * 64,
+    "coverage_sha256": "5" * 64,
     "repo_root": "/tmp/project-brain-consumer",
     "brain_root": "/tmp/project-brain-consumer/brain",
     "brain_root_device": 101,
@@ -70,7 +71,10 @@ ITEM_RECORD = {
     "binding": BINDING,
     "status": "committed",
     "failure": None,
-    "transaction": TRANSACTION,
+    "expected_objects": TRANSACTION["expected_objects"],
+    "verified_objects": TRANSACTION["verified_objects"],
+    "changed_objects": TRANSACTION["changed_objects"],
+    "receipt": TRANSACTION,
 }
 
 
@@ -306,7 +310,6 @@ class SemanticFinalizerTest(unittest.TestCase):
             "{}\n",
             encoding="utf-8",
         )
-        binding = BatchBinding(**self.binding)
         stamp = "2026-07-29T00:00:00+09:00"
         obj = base({
             "id": "context.post-gate-index",
@@ -323,6 +326,17 @@ class SemanticFinalizerTest(unittest.TestCase):
             "injection_profile": {"default_audience": "coding-agent"},
             "glossary_term_ids": [],
         }, tags=["fixture"], created_at=stamp, updated_at=stamp)
+        from project_brain.coverage import normalize_coverage
+
+        coverage = {
+            "version": 1,
+            "mode": "direct",
+            "objects": [{"id": obj["id"], "kind": obj["kind"]}],
+        }
+        binding = BatchBinding(**{
+            **self.binding,
+            "coverage_sha256": normalize_coverage(coverage).sha256,
+        })
         result = MutationService().apply(
             (obj,),
             request=MutationRequest(
@@ -332,11 +346,7 @@ class SemanticFinalizerTest(unittest.TestCase):
                 engine_sha=binding.engine_sha,
                 objects=(obj,),
                 batch_binding=binding,
-                coverage={
-                    "version": 1,
-                    "mode": "direct",
-                    "objects": [{"id": obj["id"], "kind": obj["kind"]}],
-                },
+                coverage=coverage,
             ),
         )
         self.assertTrue(result.ok, result.detail)
@@ -345,7 +355,10 @@ class SemanticFinalizerTest(unittest.TestCase):
             "binding": asdict(binding),
             "status": "committed",
             "failure": None,
-            "transaction": receipt,
+            "expected_objects": receipt["expected_objects"],
+            "verified_objects": receipt["verified_objects"],
+            "changed_objects": receipt["changed_objects"],
+            "receipt": receipt,
         }
         runner = self._runner()
 
@@ -452,8 +465,17 @@ class SemanticFinalizerTest(unittest.TestCase):
     def test_item_record_forgery_or_noncommitted_state_blocks_before_commands(self):
         module = load_module()
         cases = (
-            [{**self.item_record, "status": "pending", "transaction": None}],
-            [{**self.item_record, "transaction": {**TRANSACTION, "manifest_sha256": "f" * 64}}],
+            [{
+                **self.item_record,
+                "status": "pending",
+                "verified_objects": [],
+                "changed_objects": [],
+                "receipt": None,
+            }],
+            [{
+                **self.item_record,
+                "receipt": {**TRANSACTION, "manifest_sha256": "f" * 64},
+            }],
         )
         for records in cases:
             calls = []
@@ -473,6 +495,33 @@ class SemanticFinalizerTest(unittest.TestCase):
                     runner=lambda command: calls.append(command),
                 )
             self.assertEqual(calls, [])
+
+    def test_item_record_rejects_per_item_expected_mismatch(self):
+        module = load_module()
+        forged = {
+            **self.item_record,
+            "expected_objects": [
+                {"id": "mapping.other", "kind": "DomainMapping"}
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, r"item records\[0\].*expected_objects"):
+            module.validate_item_records([forged])
+
+    def test_pending_item_record_rejects_malformed_saved_expected_as_value_error(self):
+        module = load_module()
+        malformed = {
+            **self.item_record,
+            "status": "pending",
+            "failure": None,
+            "expected_objects": [{"id": "mapping.a"}],
+            "verified_objects": [],
+            "changed_objects": [],
+            "receipt": None,
+        }
+
+        with self.assertRaisesRegex(ValueError, "expected_objects"):
+            module.validate_item_records([malformed])
 
     def test_receipt_chain_is_revalidated_after_semantic_commands(self):
         module = load_module()

@@ -37,10 +37,14 @@ from project_brain.mutation import (
     MutationService,
 )
 from project_brain.store import BrainStore
+from project_brain.coverage import normalize_coverage
 from project_brain.transaction_receipt import (
     BatchBinding,
+    LegacyBatchBindingV1,
+    batch_binding_dict,
     batch_intent_id,
     mutation_receipt_dict,
+    normalize_batch_binding,
     receipt_from_result,
 )
 from tests.coverage_helpers import direct_coverage
@@ -160,14 +164,20 @@ def _batch_binding(
     brain_root: Path,
     item_key: str = "one",
     item_input_fingerprint: str = "1" * 64,
+    coverage_sha256: str | None = None,
 ) -> BatchBinding:
     brain_stat = brain_root.stat()
+    if coverage_sha256 is None:
+        coverage_sha256 = normalize_coverage(
+            direct_coverage(context())
+        ).sha256
     return BatchBinding(
         batch_manifest_sha256="a" * 64,
         item_key=item_key,
         item_input_fingerprint=item_input_fingerprint,
         verify_json_sha256="b" * 64,
         domain_spec_py_sha256="c" * 64,
+        coverage_sha256=coverage_sha256,
         repo_root="/repo",
         brain_root=str(brain_root.resolve()),
         brain_root_device=brain_stat.st_dev,
@@ -180,11 +190,52 @@ def _batch_binding(
     )
 
 
+def test_batch_binding_v2_requires_coverage_and_legacy_is_explicit_only(tmp_path):
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    current = _batch_binding(brain_root=brain_root)
+    legacy_payload = {
+        key: value
+        for key, value in asdict(current).items()
+        if key != "coverage_sha256"
+    }
+
+    assert normalize_batch_binding(current) == current
+    assert batch_binding_dict(None) is None
+    with pytest.raises(ValueError, match="legacy"):
+        normalize_batch_binding(legacy_payload)
+    legacy = normalize_batch_binding(legacy_payload, allow_legacy_v1=True)
+    assert isinstance(legacy, LegacyBatchBindingV1)
+    with pytest.raises(ValueError, match="legacy"):
+        batch_binding_dict(legacy)
+    with pytest.raises(ValueError, match="legacy"):
+        batch_intent_id(legacy)
+    assert batch_binding_dict(legacy, allow_legacy_v1=True) == legacy_payload
+    legacy_identity = {
+        "batch_manifest_sha256": legacy.batch_manifest_sha256,
+        "item_key": legacy.item_key,
+        "item_input_fingerprint": legacy.item_input_fingerprint,
+    }
+    legacy_intent_id = hashlib.sha256(
+        json.dumps(
+            legacy_identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert batch_intent_id(
+        legacy,
+        allow_legacy_v1=True,
+    ) == legacy_intent_id
+    assert batch_intent_id(current) != legacy_intent_id
+
+
 def _downgrade_committed_batch_to_legacy_v1(
     brain_root: Path,
     binding: BatchBinding,
     transaction_id: str,
-) -> tuple[dict[str, object], Path, Path]:
+) -> tuple[dict[str, object], Path, Path, LegacyBatchBindingV1]:
     """Rewrite one test artifact to the exact pre-receipt v1 contract."""
     journal_path = (
         brain_root
@@ -193,7 +244,21 @@ def _downgrade_committed_batch_to_legacy_v1(
         / transaction_id
         / "journal.json"
     )
-    intent_path = brain_root / batch_intent_relative_path(binding)
+    current_intent_path = brain_root / batch_intent_relative_path(binding)
+    legacy_binding = LegacyBatchBindingV1(**{
+        key: value
+        for key, value in asdict(binding).items()
+        if key != "coverage_sha256"
+    })
+    legacy_binding_payload = batch_binding_dict(
+        legacy_binding,
+        allow_legacy_v1=True,
+    )
+    assert legacy_binding_payload is not None
+    intent_path = brain_root / batch_intent_relative_path(
+        legacy_binding,
+        allow_legacy_v1=True,
+    )
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
     manifest = journal["manifest"]
     for field_name in (
@@ -204,13 +269,21 @@ def _downgrade_committed_batch_to_legacy_v1(
     ):
         assert field_name in manifest
         manifest.pop(field_name)
+    manifest["batch_binding"] = legacy_binding_payload
+    journal["batch_binding"] = legacy_binding_payload
     manifest_sha256 = hashlib.sha256(
         _canonical_test_json_bytes(manifest)
     ).hexdigest()
-    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent = json.loads(current_intent_path.read_text(encoding="utf-8"))
     assert intent["version"] == 1
+    intent["intent_id"] = batch_intent_id(
+        legacy_binding,
+        allow_legacy_v1=True,
+    )
+    intent["batch_binding"] = legacy_binding_payload
     intent["manifest_sha256"] = manifest_sha256
     journal_path.write_bytes(_canonical_test_json_bytes(journal))
+    current_intent_path.unlink()
     intent_path.write_bytes(_canonical_test_json_bytes(intent))
 
     object_ids = {
@@ -234,7 +307,54 @@ def _downgrade_committed_batch_to_legacy_v1(
         "ingested_ids": sorted(object_ids),
         "ingested_count": len(object_ids),
     }
-    return receipt, journal_path, intent_path
+    return receipt, journal_path, intent_path, legacy_binding
+
+
+def _downgrade_binding_only_to_task8_v1(
+    brain_root: Path,
+    binding: BatchBinding,
+    transaction_id: str,
+) -> tuple[LegacyBatchBindingV1, Path, Path]:
+    """Keep the Task 8 receipt manifest but restore its 14-field binding."""
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / transaction_id
+        / "journal.json"
+    )
+    current_intent_path = brain_root / batch_intent_relative_path(binding)
+    legacy_binding = LegacyBatchBindingV1(**{
+        key: value
+        for key, value in asdict(binding).items()
+        if key != "coverage_sha256"
+    })
+    legacy_payload = batch_binding_dict(
+        legacy_binding,
+        allow_legacy_v1=True,
+    )
+    assert legacy_payload is not None
+    legacy_intent_path = brain_root / batch_intent_relative_path(
+        legacy_binding,
+        allow_legacy_v1=True,
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["batch_binding"] = legacy_payload
+    journal["manifest"]["batch_binding"] = legacy_payload
+    manifest_sha256 = hashlib.sha256(
+        _canonical_test_json_bytes(journal["manifest"])
+    ).hexdigest()
+    intent = json.loads(current_intent_path.read_text(encoding="utf-8"))
+    intent["intent_id"] = batch_intent_id(
+        legacy_binding,
+        allow_legacy_v1=True,
+    )
+    intent["batch_binding"] = legacy_payload
+    intent["manifest_sha256"] = manifest_sha256
+    journal_path.write_bytes(_canonical_test_json_bytes(journal))
+    current_intent_path.unlink()
+    legacy_intent_path.write_bytes(_canonical_test_json_bytes(intent))
+    return legacy_binding, journal_path, legacy_intent_path
 
 
 def _request(
@@ -1027,9 +1147,10 @@ def test_batch_intent_identity_binds_key_even_when_input_bytes_match(tmp_path):
     assert batch_intent_id(first) != batch_intent_id(second)
     assert batch_intent_id(first) == hashlib.sha256(
         json.dumps(
-            {
-                "batch_manifest_sha256": first.batch_manifest_sha256,
-                "item_input_fingerprint": first.item_input_fingerprint,
+                {
+                    "batch_manifest_sha256": first.batch_manifest_sha256,
+                    "coverage_sha256": first.coverage_sha256,
+                    "item_input_fingerprint": first.item_input_fingerprint,
                 "item_key": first.item_key,
             },
             ensure_ascii=True,
@@ -1402,7 +1523,11 @@ def _record_existing_batch_noop(
     obj = context(object_id)
     obj["context_key"] = object_id.removeprefix("context.")
     _write_object(brain_root, obj)
-    binding = _batch_binding(brain_root=brain_root, item_key=object_id)
+    binding = _batch_binding(
+        brain_root=brain_root,
+        item_key=object_id,
+        coverage_sha256=normalize_coverage(direct_coverage(obj)).sha256,
+    )
     result = _service().apply(
         (obj,),
         request=_request(brain_root, (obj,), batch_binding=binding),
@@ -1424,6 +1549,7 @@ def test_batch_no_change_receipt_survives_later_disjoint_commit(tmp_path):
         brain_root=brain_root,
         item_key="two",
         item_input_fingerprint="2" * 64,
+        coverage_sha256=normalize_coverage(direct_coverage(second)).sha256,
     )
     committed = _service().apply(
         (second,),
@@ -1492,6 +1618,7 @@ def test_no_change_intent_publish_rechecks_lexical_binding(
     binding = _batch_binding(
         brain_root=brain_root,
         item_key=f"noop-{swap_target}",
+        coverage_sha256=normalize_coverage(direct_coverage(obj)).sha256,
     )
     original_publish = corpus_io._publish_no_change_intent_anchored
     detached_root = tmp_path / "detached-brain"
@@ -1657,6 +1784,33 @@ def test_historical_committed_batch_receipt_preserves_original_manifest_sha(
     assert intent_path.read_bytes() == intent_before
 
 
+def test_task8_v1_receipt_manifest_with_legacy_binding_remains_readable(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    binding = _batch_binding(brain_root=brain_root, item_key="task8-v1")
+    result = _service().apply(
+        (after,),
+        request=_request(brain_root, (after,), batch_binding=binding),
+    )
+    assert result.manifest is not None
+    legacy_binding, journal_path, intent_path = (
+        _downgrade_binding_only_to_task8_v1(
+            brain_root,
+            binding,
+            result.manifest.transaction_id,
+        )
+    )
+    before_bytes = (journal_path.read_bytes(), intent_path.read_bytes())
+
+    receipt = corpus_io.recover_batch_receipt(brain_root, legacy_binding)
+
+    assert receipt["committed"] is True
+    assert receipt["outcome"] == "committed"
+    assert receipt["coverage_sha256"] == result.manifest.coverage_sha256
+    assert (journal_path.read_bytes(), intent_path.read_bytes()) == before_bytes
+
+
 def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
     brain_root = tmp_path / "brain"
     original = context()
@@ -1679,7 +1833,7 @@ def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
         ),
     )
     assert first_result.manifest is not None
-    first_receipt, first_journal, first_intent = (
+    first_receipt, first_journal, first_intent, first_legacy_binding = (
         _downgrade_committed_batch_to_legacy_v1(
             brain_root,
             first_binding,
@@ -1688,10 +1842,13 @@ def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
     )
     first_bytes = (first_journal.read_bytes(), first_intent.read_bytes())
 
-    assert recover_committed_receipt(brain_root, first_binding) == first_receipt
+    assert recover_committed_receipt(
+        brain_root,
+        first_legacy_binding,
+    ) == first_receipt
     assert corpus_io.recover_batch_receipt(
         brain_root,
-        first_binding,
+        first_legacy_binding,
     ) == first_receipt
     assert (first_journal.read_bytes(), first_intent.read_bytes()) == first_bytes
 
@@ -1704,7 +1861,7 @@ def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
         ),
     )
     assert second_result.manifest is not None
-    second_receipt, second_journal, second_intent = (
+    second_receipt, second_journal, second_intent, second_legacy_binding = (
         _downgrade_committed_batch_to_legacy_v1(
             brain_root,
             second_binding,
@@ -1715,7 +1872,7 @@ def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
 
     receipts = recover_committed_receipts(
         brain_root,
-        (first_binding, second_binding),
+        (first_legacy_binding, second_legacy_binding),
         expected_receipts=(first_receipt, second_receipt),
     )
 
@@ -1738,7 +1895,7 @@ def test_legacy_v1_receipt_recovery_remains_fail_closed(tmp_path, tamper):
         request=_request(brain_root, (after,), batch_binding=binding),
     )
     assert result.manifest is not None
-    receipt, _journal_path, _intent_path = (
+    receipt, _journal_path, _intent_path, legacy_binding = (
         _downgrade_committed_batch_to_legacy_v1(
             brain_root,
             binding,
@@ -1750,14 +1907,14 @@ def test_legacy_v1_receipt_recovery_remains_fail_closed(tmp_path, tamper):
         with pytest.raises(CorpusIOError) as caught:
             recover_committed_receipt(
                 brain_root,
-                binding,
+                legacy_binding,
                 expected_receipt={**receipt, "ingested_count": 0},
             )
         assert caught.value.code == "receipt_mismatch"
     else:
         _write_object(brain_root, dict(after, title="tampered legacy tail"))
         with pytest.raises(CorpusIOError) as caught:
-            recover_committed_receipt(brain_root, binding)
+            recover_committed_receipt(brain_root, legacy_binding)
         assert caught.value.code == "committed_receipt_state_mismatch"
 
 
