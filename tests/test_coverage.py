@@ -222,6 +222,45 @@ def test_ref_alias_is_unique_across_categories():
     assert exc.value.field == "sections.refs.items.alias"
 
 
+def test_ref_expect_rejects_non_string_key_before_canonical_sha_collision():
+    valid = assembled_coverage_fixture()
+    valid["sections"]["refs"]["items"][0]["expect"] = {"1": "x"}
+    valid_binding = normalize_coverage(valid)
+    assert json.loads(valid_binding.canonical_bytes) == valid_binding.contract
+
+    invalid = assembled_coverage_fixture()
+    invalid["sections"]["refs"]["items"][0]["expect"] = {1: "x"}
+    with pytest.raises(CoverageError) as exc:
+        normalize_coverage(invalid)
+    assert exc.value.field == "refs.items.expect"
+
+
+def test_ref_expect_accepts_json_array_but_rejects_tuple():
+    valid = assembled_coverage_fixture()
+    valid["sections"]["refs"]["items"][0]["expect"] = {
+        "status": ["reviewed", "candidate"]
+    }
+    binding = normalize_coverage(valid)
+    assert json.loads(binding.canonical_bytes) == binding.contract
+
+    invalid = assembled_coverage_fixture()
+    invalid["sections"]["refs"]["items"][0]["expect"] = {
+        "status": ("reviewed", "candidate")
+    }
+    with pytest.raises(CoverageError) as exc:
+        normalize_coverage(invalid)
+    assert exc.value.field == "refs.items.expect"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_ref_expect_rejects_non_finite_float(value):
+    raw = assembled_coverage_fixture()
+    raw["sections"]["refs"]["items"][0]["expect"] = {"score": value}
+    with pytest.raises(CoverageError) as exc:
+        normalize_coverage(raw)
+    assert exc.value.field == "refs.items.expect"
+
+
 def test_duplicate_evidence_in_one_decision_is_rejected():
     raw = assembled_coverage_fixture()
     raw["sections"]["decisions"]["items"][0]["evidence"].append(

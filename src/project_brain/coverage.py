@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -166,6 +167,7 @@ def _canonical_json_bytes(value: object) -> bytes:
     try:
         text = json.dumps(
             value,
+            allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -173,6 +175,49 @@ def _canonical_json_bytes(value: object) -> bytes:
     except (TypeError, ValueError) as exc:
         raise _invalid(f"must contain JSON values: {exc}") from exc
     return (text + "\n").encode("utf-8")
+
+
+def _normalize_json_value(
+    value: object,
+    *,
+    section: str | None,
+    field: str,
+) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _invalid(
+                "must not contain a non-finite float",
+                section=section,
+                field=field,
+            )
+        return value
+    if isinstance(value, list):
+        return [
+            _normalize_json_value(item, section=section, field=field)
+            for item in value
+        ]
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _invalid(
+                    "JSON object keys must be strings",
+                    section=section,
+                    field=field,
+                )
+            normalized[key] = _normalize_json_value(
+                item,
+                section=section,
+                field=field,
+            )
+        return normalized
+    raise _invalid(
+        "must contain only JSON values",
+        section=section,
+        field=field,
+    )
 
 
 def _identity_text(identity: ObjectIdentity) -> str:
@@ -464,10 +509,15 @@ def _normalize_refs(raw: object) -> list[dict[str, object]]:
             parse_id(object_id)
         except IdGrammarError as exc:
             raise _invalid(str(exc), section="sections", field="refs.items.id") from exc
-        expect = dict(
-            _mapping(item["expect"], section="sections", field="refs.items.expect")
+        expect_raw = _mapping(
+            item["expect"], section="sections", field="refs.items.expect"
         )
-        _canonical_json_bytes(expect)
+        expect = _normalize_json_value(
+            expect_raw,
+            section="sections",
+            field="refs.items.expect",
+        )
+        assert isinstance(expect, dict)
         normalized.append(
             {
                 "category": category,
