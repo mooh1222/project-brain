@@ -15,6 +15,11 @@ production 파일 하나만 보고 검증 범위를 줄이지 않는다. 먼저 
 5. 색인에 들어가는 텍스트·청크·토큰·벡터·DB 계약이 바뀐 경우에만 실모델 index를 한 번
    rebuild한다.
 
+P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **focused** 테스트와 fresh
+**full** pytest, 설치 runtime unittest를 함께 돈다. 실제 저장·검색 표면을 바꾸는 변경이면
+소비 데이터의 `brain/checks`와 eval까지 확인한다. 문서·template·검증 코드만 바뀌고 index 입력과
+실제 corpus가 그대로면 **rebuild 불필요**다.
+
 문서의 과거 통과 수치나 다른 checkout의 bare `project-brain` 실행은 현재 변경의 영수증이 아니다.
 검증할 checkout의 `PYTHONPATH`와 `.venv/bin/python`을 같이 고정한다.
 
@@ -24,6 +29,7 @@ production 파일 하나만 보고 검증 범위를 줄이지 않는다. 먼저 
 |---|---|---|---|---|---|---|---|
 | schema·ID·reference·store | `schema.py`, `id_grammar.py`, `reference_fields.py`, `store.py`, `lint.py` | `test_schema.py`, `test_id_grammar.py`, `test_reference_fields.py`, `test_store.py`, `test_lint.py`, `test_mutation.py` | 설치 JSON·적재 안내가 바뀌면 runtime + `test_installer.py` | `brain/checks` + `lint` + `audit` | 검색·라우팅 표면 영향이 있으면 필요 | required/ID만 바뀌고 indexed surface가 같으면 불필요. surface·fingerprint 입력 또는 실제 corpus가 바뀌면 필요 | 19종 kind 집합, legacy read와 신규 write, graph/lint/rewrite registry |
 | assembly·ingest | `assembly.py`, `ingest.py`, `mutation.py`, `templates/ingest/**` | `test_assembly.py`, `test_ingest.py`, `test_mutation.py`, `test_universal_ingest_e2e.py` | 항상 runtime unittest, 템플릿 변경이면 `test_installer.py`와 두 번째 install 무변경 확인 | `brain/checks` + 실제 `lint`/`audit` | 새 객체가 회수돼야 하거나 표면이 바뀌면 필요 | 코드·템플릿만 바뀌고 색인 입력이 같으면 불필요. 실제 ingest action 뒤에는 DB가 무효화되므로 후속 search/eval 전 필요 | build는 corpus를 쓰지 않음, precondition, CodeLocator verifier, semantic finalization |
+| coverage·timestamp·receipt | `coverage.py`, `assembly.py`, `write_semantics.py`, `mutation.py`, `transaction_receipt.py`, `cli.py` | `test_coverage.py`, `test_assembly.py`, `test_write_semantics.py`, `test_mutation.py`, `test_transaction_receipt.py`, `test_cli.py` | coverage 전파·finalizer가 바뀌면 runtime unittest + installer 2회 | `brain/checks` + 실제 `audit`; corpus를 썼다면 lint/eval | 저장 객체나 회수 결과가 바뀌면 필요 | 계약·문서·receipt 코드만 바뀌고 실제 corpus/index 입력이 같으면 rebuild 불필요. action이 있으면 후속 search 전 필요 | exact expected planner, MutationService 단일 clock, mutation/no-op receipt, foundation gate |
 | mutation·transaction | `mutation.py`, `corpus_io.py`, `transaction_receipt.py`, `ingest.py` | `test_mutation.py`, `test_corpus_io.py`, `test_ingest.py` | ingest 호출·영수증 계약이 바뀌면 runtime | `brain/checks` + `lint`/`audit`; 적용·rollback smoke | 검색 가능한 객체 결과가 바뀌면 필요 | 코드만 바뀌고 index 계약이 같으면 불필요. 실제 action이 있는 mutation은 DB를 무효화하므로 후속 search/eval 전 필요 | plan/apply 결속, lock, rollback, 파생물 무효화, batch receipt |
 | 한국어 tokenizer | `tokenize_ko.py` | `test_tokenize_ko.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | **필요** | index/query tokenizer 대칭, 정규식 fallback 결정론 |
 | surface·raw chunk·index schema | `surface.py`, `raw_chunks.py`, `search_index.py` | `test_surface.py`, `test_raw_chunks.py`, `test_search_index.py`, `test_search.py` | 적재 finalizer의 기대 행·결과가 바뀌면 runtime | `brain/checks` + `eval` | 필요 | **필요** | 객체 lane과 raw lane 분리, corpus fingerprint, 원자 DB 교체 |

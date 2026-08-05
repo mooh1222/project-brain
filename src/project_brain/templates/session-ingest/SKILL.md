@@ -23,7 +23,7 @@ description: |
 
 ## 공통 불변 규칙
 
-- 적재와 최종화는 `{{PROJECT}}-brain-ingest/references/ingest-tools.md` 및 `{{PROJECT}}-brain-ingest/references/completeness-checklist.md`를 직접 따른다. 단계 수를 여기 복제하지 않는다.
+- 적재와 최종화는 `{{PROJECT}}-brain-ingest/references/ingest-tools.md` 및 `{{PROJECT}}-brain-ingest/references/completeness-checklist.md`를 직접 따른다. direct/assembled 모두 coverage 없는 쓰기를 허용하지 않고 단계 수는 여기 복제하지 않는다.
 - 적재로 raw 청크 수가 변하면 실코퍼스 가드의 `EXPECTED_RAW_CHUNKS`(`{{BRAIN_ROOT}}/checks/test_real_corpus.py`)를 **의식적으로 갱신**하고 같은 커밋에 포함한다(객체 색인 행은 디스크의 색인 대상 `.json` 수로 자동 대조되니 손갱신 불필요).
 - 파괴 작업(promote·일괄 수정) 전 "커밋 먼저".
 - 검수 상태: 사용자 명시 지시 = reviewed(reviewer=user-statement) / 작업자 판단 = candidate. reviewed 의미 변경은 `{{PROJECT}}-brain-ingest/references/update-rules.md`를 따른다.

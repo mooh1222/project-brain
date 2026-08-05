@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "mode": "assembled",
+  "verify_groups": {
+    "names": ["build-contract"]
+  },
+  "context": {
+    "key": "ctx-build",
+    "mode": "create"
+  },
+  "sections": {
+    "sources": {
+      "ids": [
+        "manifest.ctx-build.code",
+        "manifest.ctx-build.commit"
+      ]
+    },
+    "glossary": {
+      "keys": ["term"]
+    },
+    "code_anchors": {
+      "keys": ["handler"]
+    },
+    "mappings": {
+      "keys": ["behavior"]
+    },
+    "decisions": {
+      "items": [
+        {
+          "key": "change",
+          "evidence": [
+            {
+              "type": "commit",
+              "ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        }
+      ]
+    },
+    "refs": {
+      "items": [
+        {
+          "category": "glossary",
+          "alias": "existing-term",
+          "id": "g.ctx.term",
+          "expect": {
+            "kind": "GlossaryTerm",
+            "status": "reviewed"
+          }
+        }
+      ]
+    },
+    "updates": {
+      "ids": ["mapping.ctx.behavior"]
+    },
+    "extra_objects": {
+      "objects": [
+        {
+          "id": "ledger.ctx-build.note",
+          "kind": "EventLedgerRecord"
+        }
+      ]
+    }
+  },
+  "expected_objects": [
+    {
+      "id": "code.ctx-build.handler",
+      "kind": "CodeLocator"
+    },
+    {
+      "id": "context.ctx-build",
+      "kind": "DomainContext"
+    },
+    {
+      "id": "decision.ctx-build.change",
+      "kind": "DecisionRecord"
+    },
+    {
+      "id": "evref.ctx-build.commit-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "kind": "EvidenceRef"
+    },
+    {
+      "id": "evref.ctx-build.handler",
+      "kind": "EvidenceRef"
+    },
+    {
+      "id": "g.ctx-build.term",
+      "kind": "GlossaryTerm"
+    },
+    {
+      "id": "ledger.ctx-build.note",
+      "kind": "EventLedgerRecord"
+    },
+    {
+      "id": "manifest.ctx-build.code",
+      "kind": "EvidenceManifest"
+    },
+    {
+      "id": "manifest.ctx-build.commit",
+      "kind": "EvidenceManifest"
+    },
+    {
+      "id": "mapping.ctx-build.behavior",
+      "kind": "DomainMapping"
+    },
+    {
+      "id": "mapping.ctx.behavior",
+      "kind": "DomainMapping"
+    }
+  ]
+}

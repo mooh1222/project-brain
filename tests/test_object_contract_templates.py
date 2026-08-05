@@ -12,7 +12,8 @@ import subprocess
 from copy import deepcopy
 from pathlib import Path
 
-from project_brain.assembly import build, validate_notes
+from project_brain.assembly import build, validate_assembled_inputs, validate_notes
+from project_brain.coverage import normalize_coverage, plan_expected_objects
 from project_brain.context_projection import build_context_projection
 from project_brain.lint import lint_store_report
 from project_brain.mutation import (
@@ -33,6 +34,7 @@ from project_brain.schema import (
     validate_object_id,
 )
 from project_brain.store import BrainStore
+from project_brain.write_semantics import validate_write_semantics
 from tests.coverage_helpers import direct_coverage
 
 
@@ -167,6 +169,39 @@ def test_each_kind_template_has_required_keys_valid_shape_id_and_no_placeholder(
         assert "{{" not in text and "}}" not in text
         assert validate_object(obj) == [], path.name
         assert validate_object_id(obj) == [], path.name
+        assert validate_write_semantics(
+            before_by_id={},
+            after_by_id={obj["id"]: obj},
+            source_id_by_after_id={},
+        ).errors == (), path.name
+
+
+def test_coverage_templates_bind_both_modes_to_canonical_object_identities():
+    assembled_raw = _load_json(
+        TEMPLATES / "build-coverage.complete.template.json"
+    )
+    direct_raw = _load_json(TEMPLATES / "direct-coverage.template.json")
+    assembled = normalize_coverage(assembled_raw)
+    direct = normalize_coverage(direct_raw)
+
+    assert assembled.mode == "assembled"
+    assert direct.mode == "direct"
+    assert assembled.contract == assembled_raw
+    assert direct.contract == direct_raw
+
+    notes = _load_json(TEMPLATES / "build-notes.complete.template.json")
+    verify_data = {"groups": [{"group": "build-contract"}]}
+    seed = BrainStore({obj["id"]: obj for obj in _core_graph_objects()})
+    validate_assembled_inputs(
+        binding=assembled,
+        verify_data=verify_data,
+        notes=notes,
+        store=seed,
+    )
+    assert plan_expected_objects(assembled, seed) == assembled.expected_objects
+    assert [(item.id, item.kind) for item in direct.expected_objects] == [
+        ("mapping.ctx.behavior", "DomainMapping")
+    ]
 
 
 def test_code_locator_template_passes_official_write_gate_and_links_code_edges(
@@ -389,7 +424,6 @@ def test_complete_build_notes_exercises_all_sections_and_builds_clean_bundle():
         "updates",
         "extra_objects",
     }
-    notes["context"].pop("now")
     assert validate_notes(notes) == []
     assert all("decision_keys" not in mapping for mapping in notes["mappings"])
     assert notes["decisions"][0]["affects"] == ["behavior"]

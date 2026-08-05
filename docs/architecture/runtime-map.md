@@ -65,14 +65,19 @@ flowchart LR
     Agent[에이전트와 설치 스킬] --> CLI[project-brain CLI]
     CLI --> Config[config 해석]
 
-    Config --> Build[build: 검토용 객체 묶음]
+    Config --> Coverage[CoverageContract]
+    Coverage --> Planner[expected planner]
+    Planner --> Build[build: 검토용 객체 묶음]
     Build --> File[objects file]
     Build --> BuildStdout[diff · refs · preconditions stdout JSON]
-    File --> Ingest[ingest]
+    File --> Ingest[coverage-bound ingest]
     Config --> CorpusCommands[promote · mark-checked · projection · migration]
     Ingest --> Mutation[MutationService]
     CorpusCommands --> Mutation
-    Mutation --> CorpusIO[corpus_io transaction]
+    Mutation --> Clock[MutationService 단일 clock]
+    Clock --> CorpusIO[corpus_io transaction 또는 no-op receipt]
+    CorpusIO --> Receipt[canonical receipt]
+    Receipt --> Foundation[foundation gate]
     CorpusIO --> Objects[데이터 레포 BrainStore kind 디렉터리]
     CorpusIO -. 무효화 .-> Derived[.brain-local index와 stale cache]
 
@@ -125,16 +130,26 @@ raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르�
 
 ### build와 ingest
 
-1. `build`가 notes를 `assembly.build()`에 넘겨 객체 묶음, diff, precondition, 경고를 만든다.
-2. **build는 저장하지 않는다**. 정확히는 `BrainStore.object_path()`가 정하는 객체 코퍼스를
+1. `CoverageContract`가 assembled의 verify group·context mode·8개 notes section과
+   `expected_objects`, 또는 direct의 exact `(id, kind)` 목록을 canonical JSON으로 고정한다.
+2. 독립 `expected planner`와 `validate_assembled_inputs()`가 coverage, notes, 현재 store를 비교한다.
+3. `build`가 notes를 `assembly.build()`에 넘겨 객체 묶음, diff, precondition, 경고를 만들고
+   산출물 identity가 coverage와 같은지 다시 확인한다.
+4. **build는 저장하지 않는다**. 정확히는 `BrainStore.object_path()`가 정하는 객체 코퍼스를
    바꾸지 않는다. 다만 CLI가
    `--objects-file`로 지정한 검토용 결과 파일은 쓴다.
-3. `ingest`가 그 묶음과 precondition을 받아 `MutationService`로 넘긴다.
-4. `MutationService.plan()`이 schema·ID·상태 전이·CodeLocator 쓰기 검증과 합쳐진 store lint를
+5. `ingest`가 같은 coverage, build binding 또는 direct precondition과 묶음을 `MutationService`로 넘긴다.
+6. `MutationService.plan()`이 schema·ID·쓰기 의미·상태 전이·CodeLocator 검증과 합쳐진 store lint를
    확인하고 고정 manifest를 만든다.
-5. `MutationService.apply()`가 배타 lock 아래 미완료 transaction을 복구한 뒤
+7. `MutationService.apply()`가 배타 lock 아래 미완료 transaction을 복구하고 단일 clock event로
+   lifecycle·검증 시각을 확정한 뒤
    `corpus_io.apply_transaction()`으로 객체 파일을 원자 적용한다. 실제 action이 있는 transaction은
    파생 index DB와 sidecar, stale cache를 무효화하며 자동 rebuild하지 않는다.
+8. 변경이 있으면 canonical mutation receipt, 없으면 `expected_objects == verified_objects`인
+   no-op receipt를 만든다. receipt와 현재 corpus를 재검증한 `foundation gate` 뒤에만 finalize한다.
+
+coverage는 선언한 identity와 실제 산출물을 결속할 뿐 원문 의미가 완전하다고 추론하지 않는다.
+coverage가 없거나 mode/build binding이 맞지 않으면 objects/raw/index 쓰기 전에 실패한다.
 
 **코퍼스 객체 변경만 MutationService**를 거친다는 원칙은 정상적인 의미 변경이 적어도
 `MutationService.plan()`의 검증과 고정 manifest를 거친다는 뜻이다. 대부분은
@@ -246,8 +261,10 @@ snapshot 범위도 분리해 본다.
 - `snapshot restore`의 범위는 `brain_only`다. repo payload는 복원하지 않는다.
 - session marker와 corpus transaction journal은 snapshot 캡처·복원 범위가 아니다.
 
-no-op manifest, 적격 대상이 없는 `promote-auto`, 바뀔 hash가 없는 `projection refresh`, 실제
-update가 없는 `mark-checked`는 transaction을 열거나 index/cache를 무효화하지 않는다.
+no-op manifest, 적격 대상이 없는 `promote-auto`, 바뀔 hash가 없는 `projection refresh`는 실제
+transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-checked`는 좌표가 같아도
+검증한 event 자체를 `verified_at`으로 남기는 **같은 좌표 재검증** update다. 적격 locator가 전혀
+없는 경우와 같은 no-op만 receipt로 증명하고 코퍼스를 바꾸지 않는다.
 
 ## 전체 CLI 분류
 

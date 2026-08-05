@@ -18,13 +18,17 @@
 - Jira/Slack 등의 변경 흔적은 있는데 DecisionRecord가 없는 의미상 고아가 없는지 확인한다.
 - 메모리나 이전 서사의 claim-bearing field는 원문·코드로 독립 재구성하고 실제 반박을 시도한다. 근거 개수가 아니라 내용이 주장을 뒷받침하는지 본다.
 - lint는 형식과 끊긴 참조를 잡지만 통째로 빠진 규칙은 찾지 못하므로 수동 의미 검사가 필요하다.
+- coverage는 verify/notes/build/ingest의 identity를 결속하지만 원문 의미가 완전한지는 추론하지 않는다.
+- assembled는 `COVERAGE`와 `--coverage-out`, direct/assembled build·ingest는 같은 `--coverage-file`을 쓴다. coverage 없는 single/batch가 objects·raw·index를 쓰기 전에 실패했는지 확인한다.
 
 ## 실행 후 일곱 게이트
 
 1. 동적 workflow 결과가 있으면 `scripts/validate_workflow_result.py <결과.json>`이 통과했다. 직접 단건 실행이면 `해당 없음`으로 기록한다.
 2. batch 모드면 `batch-report.json`에서 `expected == len(item_records)`, 모든 record의
-   `status=committed`, `failed=[]`, `finalized=true`, `finalization.ok=true`다. authoritative
-   `item_records` 각각에 item/input binding과 exact transaction이 한 객체로 묶였고, root-anchored
+   `status=committed|no_changes`, `failed=[]`, `finalized=true`, `finalization.ok=true`다. authoritative
+   `item_records` 각각에 item/input binding과 canonical mutation receipt가 한 객체로 묶였고,
+   receipt의 `expected_objects == verified_objects`다. `no_changes`도 transaction ID를 꾸미지 않은
+   no-op receipt가 있어야 한다. root-anchored
    intent/journal의 `durable receipt`와 일치한다. canonical `manifest_sha256`, operation, engine SHA,
    action object IDs, before/after/current corpus fingerprint, ingest ID/count가 확인됐다. receipt가
    없거나 불일치하거나 noncommitted면 `finalized=false`여야 한다. 최초 `isolation_baseline`이
@@ -47,5 +51,8 @@
 6. `python3 -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"`가 통과했다.
 7. 모든 recall check의 `missing_object_ids=[]`, `missing_code_locator_object_ids=[]`다. 즉 manifest에
    선언한 도메인 질문이 기대 객체를 회수하고, 요구한 mapping에는 연결된 code locator가 함께 나온다.
+
+수기 JSON 편집은 write boundary를 우회하므로 즉시 탐지를 보장하지 않는다. 다음 audit에서야
+전수 검사되는 문제도 있으며, 수기 편집을 정상 ingest 완료로 기록하지 않는다.
 
 하나라도 실패하면 완료로 처리하지 말고 실패 항목, 근거, 같은 입력으로 재개할 절차를 보고한다.

@@ -16,11 +16,11 @@
 ## 큰 그림 (B+C 검수, design-hub §8)
 
 ```
-검증된 근거 + 적대검증 통과 + lint clean ──ingest(status:reviewed)──▶ store 저장                          ← B (자동, 사람 0)
-근거 약함/충돌/검증 실패 ──ingest(status:candidate)──▶ store 저장 ──질의 시 "확인 필요" 노출──▶ project-brain promote(사용 시점) ──▶ reviewed   ← C
+검증된 근거 + coverage 결속 + lint clean ──MutationService──▶ canonical receipt ──▶ store 저장             ← B (자동, 사람 0)
+근거 약함/충돌/검증 실패 ──coverage-bound ingest(status:candidate)──▶ store ──사용 시점 promote──▶ reviewed ← C
 ```
 
-- `ingest`: 묶음을 받아 **per-object 스키마 검증 → 병합 store 연결무결성 lint → mutation
+- `ingest`: coverage가 선언한 exact `(id, kind)` 묶음을 받아 **독립 expected planner → per-object 스키마 검증 → 병합 store 연결무결성 lint → mutation
   transaction** 순서로 처리한다. 저장 전 게이트가 실패하면 파일 쓰기를 시작하지 않고, 쓰기 중
   실패는 transaction journal로 rollback한다. status는 호출자가 박는다 — 검증 통과 매핑을
   `reviewed`로 넣으면 그대로 검수됨(B), 후퇴(reviewed→candidate)만 거부한다. §6.4로 reviewed `DomainMapping`·
@@ -35,17 +35,19 @@
 변환한다. build는 **저장하지 않는다** — 묶음과 diff만 만들고, 저장은 ingest가 한다.
 
 ```bash
-# 1) 노트(JSON) 작성: context / sources / glossary / code_anchors / mappings / decisions / refs / updates / extra_objects
-#    context는 key·commit 필수. now는 선택 — 생략하면 엔진이 현재 KST(+09:00)를
-#    created_at/updated_at/verified_at에 자동으로 박는다(적으면 그 값으로 override = 소급·테스트용).
+# 1) domain spec의 COVERAGE와 노트(JSON) identity 작성
+#    context는 key·commit 필수. lifecycle timestamp는 노트에서 받지 않고 MutationService 단일 clock이 찍는다.
 #    (decisions[]는 build_decisions가 DecisionRecord + commit/jira/pr EvidenceRef로 조립하고
 #     affects 역채움까지 한다. 노트 입력은 scripts/domain_spec.template.py와
 #     project-brain build --help에서 확인한다.)
-# 2) build — 묶음(out.json) 생성. 리포트(diff·resolved_refs·preconditions)는 stdout → 파일로 저장
-project-brain build --notes notes.json --objects-file out.json > report.json
-# 3) report.json의 diff 확인 (특히 updates의 기존 객체 before/after 값)
-# 4) ingest — build 리포트를 --preconditions-file로 넘겨 저장 직전 낙관적 잠금 재검사 후 저장
-project-brain ingest --objects-file out.json --preconditions-file report.json
+# 2) assemble — notes와 canonical coverage를 함께 출력
+python3 scripts/assemble_notes.py verify.json domain_spec.py -o notes.json --coverage-out coverage.json
+# 3) build — 같은 coverage로 묶음(out.json)과 coverage-bound report 생성
+project-brain build --notes notes.json --coverage-file coverage.json --objects-file out.json > report.json
+# 4) ingest — 같은 coverage와 build report를 넘겨 저장 직전 결속을 재검사
+project-brain ingest --objects-file out.json --coverage-file coverage.json --build-report report.json \
+  --repo-root <absolute-project-root> --expected-repo-id <repo-id> \
+  --expected-revision-ref <git-ref> --engine-sha <exact-engine-sha>
 # 5) 색인·골든셋·회상
 project-brain index rebuild && project-brain eval && project-brain search "..."
 ```
@@ -62,6 +64,11 @@ project-brain index rebuild && project-brain eval && project-brain search "..."
   commit은 locator={repo,sha}를 자동으로 채우고, jira/pr은 노트 evidence의 `locator`(인스턴스 URL)를 그대로 쓴다.
   **노트로 못 담는 완성 객체**(session 등 비-code EvidenceRef)는 `extra_objects[]`에 직접 넣는다 —
   build가 검증·끊긴 참조 검사에 함께 태운다.
+- **coverage가 하는 것**: `verify_groups`, context mode, 8개 notes section identity,
+  `expected_objects`를 canonical JSON으로 고정하고 독립 planner·notes·build 결과와 exact 비교한다.
+  coverage는 원문 의미가 완전하다고 추론하지 않는다.
+- **시간 소유권**: build의 lifecycle 값은 preview일 뿐 저장 증거가 아니다. 실제 ingest는
+  MutationService가 한 번 읽은 clock으로 `created_at`·`updated_at`과 해당 검증 시각을 다시 찍는다.
 
 ## ingest — CLI로 부르기
 
@@ -70,7 +77,8 @@ project-brain index rebuild && project-brain eval && project-brain search "..."
 ```bash
 project-brain ingest \
   --objects-file <묶음.json> \
-  [--preconditions-file <build리포트.json>] \
+  --coverage-file <coverage.json> \
+  [--build-report <assembled-build-report.json> | --preconditions-file <direct-ID-hash.json>] \
   --repo-root <absolute-project-root> \
   --expected-repo-id <repo-id> \
   --expected-revision-ref <git-ref> \
@@ -78,27 +86,30 @@ project-brain ingest \
 ```
 
 - `--objects-file`: 객체 dict들의 **JSON 배열** 한 파일.
-- `--preconditions-file`: build 리포트 JSON(선택). 저장 직전 `expected_updated_at`를 다시 확인해
-  build 이후 store가 바뀌었으면 거부한다(검사–저장 시점차 방지, build의 updates를 쓸 때만 의미 있음).
-- 성공 JSON은 `transaction_id`, `operation=ingest`, `committed`, `manifest_sha256`,
-  `before_fingerprint`, `after_fingerprint`, `ingested_ids`, `ingested_count`를 정확히 담는다.
-  `committed=true`와 lowercase SHA-256 형식의 `manifest_sha256`이 없으면 성공 증거가 아니다.
+- `--coverage-file`: 항상 필수다. assembled는 `--build-report`, direct는 필요할 때 순수 ID→SHA-256
+  `--preconditions-file`을 쓰며 서로 바꾸어 넘기지 않는다. coverage가 없거나 mode와 report가
+  맞지 않으면 objects/raw/index 쓰기 전에 실패한다.
+- 성공 JSON은 canonical mutation receipt를 담는다. 실제 변경은 `outcome=committed`,
+  `committed=true`와 transaction
+  필드가 있고, 변경이 없으면 transaction ID를 꾸미지 않은 `outcome=no_changes` no-op receipt다.
+  둘 다 `coverage_sha256`, `expected_objects`, `verified_objects`를 담으며 두 객체 집합이 exact 같아야 한다.
   실패 시 `{"ok": false, ...}`와 종료코드 1이다.
 - 레포 안 어느 디렉토리에서든 실행 가능 — 루트 `.project-brain.json` config가 brain root를
   해석한다(`--brain-root`로 덮어쓸 수 있음).
 
-## ingest가 거는 3개 게이트 (ingest.py)
+## ingest가 거는 4개 게이트 (ingest.py)
 
-1. **per-object 스키마 검증.** 묶음 전체에 `validate_object`. 하나라도 위반이면 전체 중단(아무것도 안 씀).
-2. **병합 store 연결무결성 lint.** on-disk 기존 객체 + 묶음을 합쳐 `lint_store` 실행. 없는 id를
+1. **coverage 결속.** direct는 objects identity, assembled는 build binding과 독립 planner 결과를 exact 비교한다.
+2. **per-object 스키마·쓰기 의미 검증.** 하나라도 위반이면 전체 중단(아무것도 안 씀).
+3. **병합 store 연결무결성 lint.** on-disk 기존 객체 + 묶음을 합쳐 `lint_store` 실행. 없는 id를
    가리키는 링크(dangling)가 있으면 전체 중단. 가리키는 객체는 같은 묶음 안이나 이미 store에 있어야 한다.
    (이때 `workspace_root` 미전달 = 참조 무결성만, 생성파일 projection 검사는 안 함.)
-3. **저장.** 1·2 통과 후에만 kind별 디렉토리에 `<id>.json`으로 쓴다.
+4. **단일 쓰기.** 1~3 통과 뒤 MutationService가 같은 clock·manifest로 transaction을 적용하고 receipt를 낸다.
 
 ## ingest 가드 — 멱등 / 후퇴 금지
 
-- **멱등 갱신 허용.** 같은 id를 다시 ingest하면 덮어쓴다(`save_object`가 `write_text`로 overwrite).
-  끊어 적재하거나 같은 의미 객체에 연결을 추가할 때 이 동작에 기댄다.
+- **변경 없음도 검증.** 같은 bytes라도 coverage의 모든 `expected_objects`를 재검증하고
+  `verified_objects`가 같은 no-op receipt를 남긴다. receipt 없는 성공으로 취급하지 않는다.
 - **reviewed→candidate 후퇴 거부.** on-disk가 `reviewed`인데 같은 id를 `candidate`로 덮으려 하면
   `IngestError`. 이건 ingest 진입점의 유일한 신규 로직이다. 승격된 걸 실수로 후퇴시키지 마라.
 
@@ -111,6 +122,7 @@ project-brain ingest \
 ```python
 from project_brain.promote import promote
 from project_brain.ingest import ingest
+from project_brain.coverage import normalize_coverage
 from pathlib import Path
 
 # objects = 적재된 candidate 매핑들(또는 그 dict 목록)
@@ -119,7 +131,16 @@ promoted, reviews = promote(
     bundle_key="bundle.<도메인>.domain-mapping",
     reviewer="user-confirmed", reviewed_at="2026-06-04T00:00:00Z",
 )
-ingest(Path("<brain 디렉토리>"), promoted + reviews)  # 승격 결과를 다시 검증·저장
+objects = promoted + reviews
+coverage = normalize_coverage({
+    "version": 1,
+    "mode": "direct",
+    "objects": [{"id": obj["id"], "kind": obj["kind"]} for obj in objects],
+})
+ingest(
+    Path("<brain 디렉토리>"), objects,
+    engine_sha="<exact-engine-sha>", coverage=coverage.contract,
+)  # 승격 결과도 exact direct coverage로 다시 검증·저장
 ```
 
 **사용 시점 단건 확정**(C 루프 — 답하다 사람이 "맞다")은 `project-brain promote`가 한다. 승격 객체 + 검토 기록을 둘 다 저장하고,
@@ -226,13 +247,18 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 
 손으로 조립 스크립트를 새로 짜지 않는다. 적재마다:
 1. `scripts/domain_spec.template.py`를 복사해 의미 데이터와 `FINALIZATION`을 채운다. 조립 로직은 넣지 않는다.
+   `COVERAGE`에는 verify group 순서, context mode, 8개 section identity, 독립 계산한
+   `expected_objects`를 채운다. 빈 coverage나 coverage 없는 item은 실행하지 않는다.
    `FINALIZATION.recall_checks[]`마다 중복 없는 `key`, 실제 도메인 `query`, 비어 있지 않은
    `expected_object_ids`, `require_code_locators`를 선언한다. 새 고립 중 근거를 남긴 의도적 종착점만
    `intentional_terminal_ids`에 넣는다. 고정 샘플 질의나 결과 개수만으로 완료를 판정하지 않는다.
 2. 추출은 `scripts/extract_template.js`(채워넣기)로 group별 extract→verify → verify.json.
-3. 단건 기본 실행은 FINALIZATION schema를 먼저 검사하고 build 뒤 ingest 전에 `isolation_baseline`을
-   수집한다. ingest가 성공하면 같은 baseline과 config로 semantic finalizer를 실행한다. config가
-   없거나 틀리면 build·ingest 전에 실패한다. 중간 비파괴 검증은 `--dry`를 쓴다.
+3. 단건 기본 실행은 FINALIZATION schema를 먼저 검사하고 `COVERAGE`를 canonical 파일로 만든 뒤,
+   assemble의 `--coverage-out` → build·ingest의 `--coverage-file`로 그대로 전달한다. build 뒤 ingest
+   전에 `isolation_baseline`을 수집한다. ingest가 성공하면 같은 baseline과 config로 semantic
+   finalizer를 실행한다. config가 없거나 틀리면 build·ingest 전에 실패한다. 중간 `--dry`는
+   assemble/build와 결속 검사까지만 하고 `objects/`, `raw/`, index를 쓰지 않는다. direct plan도
+   exact coverage로 MutationService의 pre-write 검증까지만 실행하면 같은 비파괴 경계를 지킨다.
 
    ```bash
    scripts/run_ingest.sh \
@@ -282,8 +308,8 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    `brain_root_device`/`brain_root_inode`, `expected_repo_id`, `expected_revision_ref`, resolved
    `target_revision_sha`, actual `engine_root`와 `engine_sha`, 양쪽 root의 device/inode, batch 파일
    자체의 `manifest_sha256`, resolved 입력의 `manifest_fingerprint`, authoritative
-   `item_records`가 기록된다. 각 record는 full binding, `pending|failed|committed` status, failure,
-   exact transaction을 한 객체에 묶는다. `transactions`는 `item_records`에서 파생되는 호환
+   `item_records`가 기록된다. 각 record는 full binding, `pending|failed|committed|no_changes` status,
+   failure, canonical mutation/no-op receipt를 한 객체에 묶는다. `transactions`는 `item_records`에서 파생되는 호환
    출력이며 독립 resume/finalization 근거가 아니다.
 
    재개는 같은 report의 최초 baseline을 재사용하되 실제 Git toplevel/repo identity, ref가 가리키는
@@ -296,7 +322,9 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    `durable receipt`를 복구한다. 이때 canonical manifest SHA, operation, engine SHA, action object
    IDs, before/after fingerprint, 현재 corpus fingerprint, item/input identity를 모두 확인한다.
    receipt가 없는 suffix만 재실행하며 첫 failed/pending record에서 tail 실행을 멈춘다.
-   `needs_user`, 누락·불일치 transaction, `committed=false`, durable receipt 불일치는 성공이나
+   no-op item도 `status=no_changes`와 exact `expected_objects == verified_objects` receipt가 있어야
+   terminal이다. `status=committed`는 실제 action이 있는 item에만 쓴다.
+   `needs_user`, 누락·불일치 receipt, `committed=false`, durable receipt 불일치는 성공이나
    `finalized`로 승격하지 않는다. 완료 증거는 `finalized=true` 하나가 아니라 모든 `item_records`의
    exact durable 계약과 `finalization.ok=true`, `finalization.isolation.unexpected_new_ids=[]`,
    각 recall check의 누락 목록이 빈 상태까지 포함한다.
@@ -334,16 +362,19 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
 
 ## 적재 후 확인 — semantic finalization
 
-`scripts/finalize_ingest.py`는 authoritative `item_records`의 binding과 exact transaction을
+`scripts/finalize_ingest.py`는 authoritative `item_records`의 binding과 canonical mutation/no-op receipt를
 root-anchored durable intent/journal의 `COMMITTED` receipt chain으로 다시 검증한다. record가 모두
-`committed=true`이고 canonical manifest SHA, before/after fingerprint, operation, engine SHA,
-action object IDs, 현재 corpus fingerprint가 일치할 때만 아래 게이트를 실행하고 `transactions`, `commands`,
+`status=committed|no_changes`이고 canonical manifest SHA, coverage SHA, `expected_objects`,
+`verified_objects`, 현재 corpus fingerprint가 일치할 때만 아래 게이트를 실행하고 `transactions`, `commands`,
 `isolation`, `unmerged`, `recall_checks`, `errors`를
 가진 JSON 한 개를 낸다. runner는 종료 코드만 보지 않고 이 schema와 `ok`를 함께 확인한다.
 모든 command와 recall check 뒤에도 같은 durable receipt/current object tail을
 `post_gate_object_tail` mode로 다시 검증한다. 정상 index/audit derived 출력은 허용하지만
 action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치로 거부하며, 이 두 번째
 검증 실패도 `ok=false`다.
+
+수기 JSON 편집은 MutationService write boundary를 우회하므로 즉시 탐지를 보장하지 않는다.
+다음 `project-brain audit` 전수 검사 전까지는 검증된 receipt와 같은 증거로 취급하지 않는다.
 
 1. **lint clean** — ingest가 성공했으면 연결무결성은 통과한 것. 별도 일괄 작업을 했다면
    `lint_store` 문제 0건 재확인.

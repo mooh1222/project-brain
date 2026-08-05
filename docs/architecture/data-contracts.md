@@ -7,27 +7,33 @@
 - ID 문법과 ID-필드 결속: `src/project_brain/id_grammar.py`
 - 참조로 인정하는 필드: `src/project_brain/reference_fields.py`
 - build 입력과 자동 조립: `src/project_brain/assembly.py`
-- 신규·변경 쓰기 관문: `src/project_brain/mutation.py`, `src/project_brain/code_verify.py`
+- coverage·독립 expected planner: `src/project_brain/coverage.py`, `src/project_brain/assembly.py`
+- 신규·변경 쓰기 관문: `src/project_brain/mutation.py`, `src/project_brain/write_semantics.py`,
+  `src/project_brain/code_verify.py`
 - 합쳐진 store의 관계 점검: `src/project_brain/lint.py`
 - 실제 검색 입력과 소비: `src/project_brain/surface.py`, `src/project_brain/router.py`,
   `src/project_brain/search.py`, `src/project_brain/audit.py`
 
 실행 가능한 JSON 원본은
 `src/project_brain/templates/ingest/references/object-templates/`에 있다. kind별 파일은 shape,
-정상 graph는 관계, build notes는 조립 입력, invalid manifest는 실패 층을 각각 검증한다.
+정상 graph는 관계, 두 coverage template은 assembled/direct binding, build notes는 조립 입력,
+invalid manifest는 실패 층을 각각 검증한다. 이 `object-templates` 디렉터리가 설치 JSON의 단일 원본이다.
 
 ## 한 객체가 저장되기까지
 
 ```text
-build notes
-  └─ validate_notes
+CoverageContract
+  └─ independent expected planner + notes identity comparison
+      └─ build notes
+        └─ validate_notes
       └─ assembly.build (저장하지 않음)
           └─ 완성 객체 묶음
               └─ MutationService.plan
-                  ├─ 입력 schema·ID
+                  ├─ coverage/build binding + 입력 schema·ID·write semantics
                   ├─ 상태 전환·CodeLocator 검증
                   └─ 합쳐진 store lint
-                      └─ MutationService.apply → corpus_io transaction
+                      └─ MutationService 단일 clock
+                          └─ corpus_io transaction 또는 no-op receipt
 ```
 
 `BASE_REQUIRED`나 `KIND_REQUIRED`만 읽고 신규 쓰기 계약 전체를 판단하면 안 된다. schema는 객체 한
@@ -55,6 +61,11 @@ ISO-8601인지, 자유 객체의 내부 구조가 무엇인지는 별도 조건�
 
 ### build 입력과 완성 저장 객체
 
+assembled coverage는 `verify_groups`, context mode, 아래 8개 notes section identity,
+`expected_objects`를 선언한다. direct coverage는 완성 객체의 exact `(id, kind)`만 선언한다.
+coverage가 없거나 notes/planner/build 결과와 다르면 pre-write 실패한다. coverage는 원문 의미가
+완전하다고 추론하지 않는다.
+
 `build-notes.complete.template.json`의 9개 section은 책임이 다르다.
 
 | section | 책임과 결과 |
@@ -72,6 +83,24 @@ ISO-8601인지, 자유 객체의 내부 구조가 무엇인지는 별도 조건�
 일반 section에서는 적재 에이전트가 의미·출처·경계를 쓰고 build가 ID, `truth_role`, 공통 metadata를
 조립한다. `extra_objects[]`에는 build가 빠진 필드를 채워 주지 않는다. CodeLocator의
 `verified_at`와 표준 `title`은 최종 write verifier가 실제 repo를 확인한 뒤 확정한다.
+
+### 신규·변경 write semantics와 timestamp owner map
+
+신규 또는 값이 바뀐 객체는 required 문자열이 비어 있지 않고 timestamp가 timezone-aware ISO인지
+`write_semantics.py`에서 검사한다. 같은 source field/value의 legacy 문제는 읽기·무변경 보존만
+허용되며 신규 쓰기의 완화로 전파하지 않는다.
+
+| 필드 | 소유자 | 쓰기 의미 |
+|---|---|---|
+| `created_at`, `updated_at` | MutationService 단일 clock | live create/update에서 caller 값을 믿지 않고 같은 event time으로 stamp |
+| `verified_at` | CodeLocator verifier + MutationService clock | 새 좌표·좌표 변경·mark-checked 검증 성공 시 기록 |
+| `generated_at` | projection builder + MutationService clock | live projection 생성·갱신 event |
+| `reviewed_at` | reviewer 명시 입력, 없으면 promote clock | 검토 사건 시각이며 lifecycle과 별도 의미 |
+| `captured_at`, `happened_at`, `valid_from`, `valid_until`, `as_of`, `indexed_at` | caller/source | 원문·도메인 사건 시각이므로 실제 근거에서 가져옴 |
+
+template에 든 고정 timestamp는 JSON shape fixture이지 실제 생성 시각의 증거가 아니다. 수기 JSON
+편집은 이 write boundary를 우회하므로 즉시 탐지를 보장하지 않으며 **다음 audit** 전수 검사에서야
+드러나는 문제가 있을 수 있다.
 
 ## ID와 참조 공통 규칙
 

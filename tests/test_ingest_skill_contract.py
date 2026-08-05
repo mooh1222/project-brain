@@ -58,6 +58,18 @@ RAW_SANITIZATION_TOKENS = (
     "64 hex 글자까지",
     "비어 있지 않으면 fail-closed",
 )
+COVERAGE_WORKFLOW_TOKENS = (
+    "COVERAGE",
+    "--coverage-out",
+    "--coverage-file",
+    "expected_objects",
+    "verified_objects",
+    "no_changes",
+    "MutationService",
+    "coverage 없는",
+    "원문 의미",
+    "다음 audit",
+)
 
 
 def _raw_policy_section(text: str) -> str:
@@ -67,6 +79,43 @@ def _raw_policy_section(text: str) -> str:
 
 
 class IngestSkillContractTest(unittest.TestCase):
+    def test_coverage_workflow_contract_survives_install_without_legacy_clock_owners(self):
+        canonical_paths = (
+            SKILL,
+            REFERENCES / "object-model.md",
+            REFERENCES / "ingest-tools.md",
+            REFERENCES / "completeness-checklist.md",
+            REFERENCES / "worked-example.md",
+            SESSION_TEMPLATE_ROOT / "SKILL.md",
+            SESSION_TEMPLATE_ROOT / "references" / "dev-ingest.md",
+        )
+        canonical = "\n".join(
+            path.read_text(encoding="utf-8") for path in canonical_paths
+        )
+
+        with TemporaryDirectory() as td:
+            target = Path(td)
+            install(target, project="demo")
+            skills = target / ".agents" / "skills"
+            installed_paths = (
+                skills / "demo-brain-ingest" / "SKILL.md",
+                skills / "demo-brain-ingest" / "references" / "object-model.md",
+                skills / "demo-brain-ingest" / "references" / "ingest-tools.md",
+                skills / "demo-brain-ingest" / "references" / "completeness-checklist.md",
+                skills / "demo-brain-ingest" / "references" / "worked-example.md",
+                skills / "demo-brain-session-ingest" / "SKILL.md",
+                skills / "demo-brain-session-ingest" / "references" / "dev-ingest.md",
+            )
+            installed = "\n".join(
+                path.read_text(encoding="utf-8") for path in installed_paths
+            )
+
+        for text in (canonical, installed):
+            for token in COVERAGE_WORKFLOW_TOKENS:
+                self.assertIn(token, text)
+            for legacy in ("GROUP_ORDER", "context.now", "NOW ="):
+                self.assertNotIn(legacy, text)
+
     def test_skill_is_a_compact_router(self):
         text = SKILL.read_text(encoding="utf-8")
         for reference in REQUIRED_REFERENCES:

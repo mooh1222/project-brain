@@ -36,12 +36,23 @@
 
 ## 진행 중
 
-진행 중인 항목이 없다. Task 17 canonical ID 복구는 2026-08-04에 실코퍼스 적용까지
-끝나 완료 단계로 옮겼다.
+### P0 ingest integrity foundation — 구현 중
 
-다음에 손댈 후보는 아래 "미뤄둔 작업"에 착수 트리거와 함께 있다. 특히 7번(Task 17
-복구 번들 소속과 엔진 흡수)과 8번(옛 앵커 수정을 막는 읽기/쓰기 비대칭)은 이번
-작업에서 새로 드러난 것이다.
+신규 적재를 `CoverageContract → 독립 expected planner → MutationService 단일 clock →
+mutation/no-op receipt → foundation gate`로 결속하는 기반을 먼저 구현한다.
+
+**P0 ingest integrity 완료 기준**은 coverage 없는 single/batch pre-write 차단, assembled/direct
+identity 결속, 신규·변경 write semantics, canonical receipt와 복구, 설치 runtime·template parity,
+foundation gate, clean baseline과 BB2 소비 회귀를 모두 통과하는 것이다. 현재 Task 12~15의 gate,
+baseline, BB2 검증이 남아 있으므로 P0 완료로 표시하지 않는다.
+
+**Task 18 blocked handoff:** P0 기준이 모두 통과하고 새 binding으로 실코퍼스 부채를 다시 측정하기
+전에는 Task 18 label/quote debt migration을 시작하지 않는다. **실코퍼스 migration은 미완료**이며,
+이 엔진 단계에서 기존 BB2 객체를 수정하지 않는다. legacy 객체는 ingest 당시 검토됐지만 지금
+기계적으로 재검증할 수 없는 항목으로 분리해 기록한다.
+
+그 밖의 후보는 아래 "미뤄둔 작업"에 착수 트리거와 함께 있다. 특히 7번(Task 17 복구 번들
+소속과 엔진 흡수)과 8번(옛 앵커 수정을 막는 읽기/쓰기 비대칭)은 별도 후속이다.
 
 ---
 

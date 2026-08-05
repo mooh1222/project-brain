@@ -63,11 +63,11 @@ description: |
 
 1. **Source Intake.** 대상, 현재 사실 또는 이력 범위, 이번 소스 묶음, 코드 기준점을 짧게 선언한다.
 2. **소스 읽기.** 코드·현행 문서·보조 근거를 읽고, 코드로 확인 가능한 흐름은 프로젝트 규칙에 맞춰 추적한다.
-3. **원자 추출.** 심볼은 발견 단위로 쓰고, 저장은 의미 원자 단위로 한다. 불명확한 사실은 예외 목록으로 분리한다.
-4. **연결 조립.** 논리 key 노트와 근거를 만든 뒤 build로 ID와 연결을 조립한다. 객체 필드와 연결은 `references/object-model.md`를 따른다.
+3. **원자·coverage 선언.** 의미 원자와 독립 expected planner 입력을 먼저 정해 `COVERAGE`의 `expected_objects`에 정확한 `(id, kind)`를 선언한다. coverage는 원문 의미 완전성을 추론하지 않는다.
+4. **연결 조립.** coverage를 `--coverage-out`으로 고정하고 notes와 exact 비교한 뒤, build에 같은 `--coverage-file`을 넘겨 ID와 연결을 조립한다.
 5. **적대 검증.** 별도 검증자가 근거, 경계, 코드 앵커, 중복을 반박하며 확인한다. 변경 이력의 결론은 `references/judgment.md`로 판정한다.
 6. **수정 또는 보류.** 기존 사실을 갱신하거나 대체하면 `references/update-rules.md`의 kind별 묶음을 따른다. 근거가 없는 항목은 억지로 채우지 않는다.
-7. **적재.** build 오류가 없고 완료 조건을 만족할 때만 한 묶음으로 ingest한다.
+7. **적재.** build 오류가 없고 coverage-bound build report가 맞을 때만 같은 `--coverage-file`로 한 묶음 ingest한다. coverage 없는 single/batch는 쓰기 전에 실패해야 한다.
 8. **마무리.** 적재 뒤 검증과 회상 확인은 `references/completeness-checklist.md` 및 `references/ingest-tools.md`를 따른다.
 
 원자별로 source의 위치, 확인한 경계, 남은 불확실성을 짧게 기록한다.
@@ -89,7 +89,7 @@ description: |
 
 ## 단건과 대량 분기
 
-항목 하나면 단건 실행 흐름을 쓴다. build와 적재 전 검증을 끝낸 뒤에만 마무리 단계로 간다.
+항목 하나면 단건 실행 흐름을 쓴다. direct/assembled coverage와 build·적재 전 검증을 끝낸 뒤에만 마무리 단계로 간다.
 실행 인자, `--dry`, 저장 규약은 `references/ingest-tools.md`를 따른다.
 
 단건도 부분 결과를 성공으로 부르지 않는다.
@@ -100,7 +100,7 @@ description: |
 실패 항목이 하나라도 있으면 finalization을 호출하지 않는다.
 
 report의 `item_records`가 manifest 항목과 같은 순서·key인지 확인한다. 각 record는 item/input
-바인딩, 상태, 실패 정보, exact transaction을 한 객체에 묶으며 성공 record는 `status=committed`다.
+바인딩, 상태, 실패 정보, canonical mutation receipt를 한 객체에 묶는다. terminal record는 `status=committed|no_changes`이고 receipt의 `expected_objects`와 `verified_objects`가 같아야 한다.
 `transactions`·`succeeded`·`failed`는 이 정본에서 파생된 호환 필드일 뿐 독립 근거가 아니다.
 batch `manifest_sha256`, target config가 해석한 canonical brain root와 inode, immutable staged
 입력 hash, resolved target commit과 실제 engine HEAD를 포함한 resume 계약이 그대로인지 확인한다.

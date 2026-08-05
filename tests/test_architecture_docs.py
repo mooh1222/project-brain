@@ -179,3 +179,51 @@ def test_primary_entrypoints_link_to_architecture_map():
         if "docs/architecture/README.md" not in text:
             missing.append(relative)
     assert missing == []
+
+
+def test_p0_ingest_integrity_flow_and_deferred_migration_are_explicit():
+    runtime = _read_architecture_doc("runtime-map.md")
+    for token in (
+        "CoverageContract",
+        "expected planner",
+        "MutationService",
+        "단일 clock",
+        "no-op receipt",
+        "foundation gate",
+        "같은 좌표 재검증",
+    ):
+        assert token in runtime
+
+    contracts = _read_architecture_doc("data-contracts.md")
+    for token in (
+        "timestamp owner map",
+        "created_at",
+        "updated_at",
+        "verified_at",
+        "generated_at",
+        "reviewed_at",
+        "object-templates",
+        "다음 audit",
+    ):
+        assert token in contracts
+
+    changes = _read_architecture_doc("change-map.md")
+    for token in (
+        "coverage",
+        "timestamp",
+        "receipt",
+        "focused",
+        "full",
+        "brain/checks",
+        "rebuild 불필요",
+    ):
+        assert token in changes
+
+    roadmap = (ROOT / "ROADMAP.md").read_text(encoding="utf-8")
+    for token in (
+        "P0 ingest integrity 완료 기준",
+        "Task 18",
+        "blocked handoff",
+        "실코퍼스 migration은 미완료",
+    ):
+        assert token in roadmap

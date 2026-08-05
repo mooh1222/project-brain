@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "mode": "direct",
+  "objects": [
+    {
+      "id": "mapping.ctx.behavior",
+      "kind": "DomainMapping"
+    }
+  ]
+}

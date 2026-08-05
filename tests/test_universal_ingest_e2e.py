@@ -26,6 +26,7 @@ from unittest import mock
 
 from project_brain.code_verify import VerifiedLocator
 from project_brain.id_grammar import format_id
+from project_brain.ingest import IngestError, ingest as product_ingest
 from tests.test_ingest import ingest
 from project_brain.lint import lint_store
 from project_brain.objbase import base
@@ -570,6 +571,18 @@ class MinaKayakEndToEndTest(unittest.TestCase):
             self.assertEqual(store.get(mid)["status"], "candidate", mid)
         for tid in GLOSSARY_IDS:
             self.assertEqual(store.get(tid)["status"], "candidate", tid)
+
+    def test_product_single_ingest_without_coverage_fails_before_write(self):
+        with self.assertRaises(IngestError) as caught:
+            product_ingest(
+                self.root,
+                build_candidate_bundle(),
+                engine_sha="e" * 40,
+                repo_context=self.repo_context,
+            )
+
+        self.assertEqual(caught.exception.code, "coverage_required")
+        self.assertEqual(list(self.root.rglob("*.json")), [])
 
     def test_e2e_promote_glossary(self):
         """AC2 단계2: single_object 승격 후 ingest. 대상 term reviewed + review.<id> 존재."""

@@ -8,6 +8,8 @@
 
 | 목적 | 파일 | 보장 범위 |
 |---|---|---|
+| 조립 coverage 작성 | `build-coverage.complete.template.json` | notes의 8개 section identity, verify group, context mode, `expected_objects`를 exact 결속한다 |
+| 직접 coverage 작성 | `direct-coverage.template.json` | 직접 적재할 객체의 정확한 `(id, kind)` 집합을 선언한다 |
 | build 노트 작성 | `build-notes.complete.template.json` | 9개 section을 모두 사용하며 `validate_notes()`와 `build()`를 통과한다 |
 | 연결된 저장 객체 확인 | `object-graph.complete.template.json` | 6개 reviewed 객체가 하나의 연결 요소를 이루며 schema·ID·lint를 통과한다 |
 | kind 하나의 키 모양 확인 | `kinds/<Kind>.template.json` | 19종 각각의 공통·kind 필수 키와 정식 ID 문법을 통과한다 |
@@ -24,7 +26,7 @@ JSON에는 설치기가 알지 못하는 임의 placeholder가 없다. 따라서
 
 - 의미와 출처: `title`, 의미 필드, `locator`, `captured_at`, `acl`, `redaction_status`
 - 생명주기: `status`, candidate metadata, review metadata
-- 시간과 ID: `created_at`, `updated_at`, 객체 ID와 연결 ID
+- 시간과 ID: caller가 소유하는 도메인 시각, 객체 ID와 연결 ID
 - 코드 좌표: `repo`, `path`, `commit_sha`, `symbol`, `verified_quote`
 
 ID만 따로 바꾸면 안 된다. `DomainContext.context_key`, `GlossaryTerm.context_id`,
@@ -33,7 +35,17 @@ ID만 따로 바꾸면 안 된다. `DomainContext.context_key`, `GlossaryTerm.co
 `SlideRef.spec_revision_id`·`slide_no`, `ContextProjection.context_id`·`format`처럼 ID와 결속된
 필드도 함께 바꿔야 한다. 참조 ID를 바꾸면 같은 묶음의 대상과 역방향 연결도 함께 고친다.
 
+kind template의 고정 timestamp는 JSON shape fixture일 뿐 실제 생성 시각의 증거가 아니다.
+정상 ingest에서는 `created_at`·`updated_at`과 `CodeLocator.verified_at`,
+`ContextProjection.generated_at`을 caller가 찍지 않고 MutationService의 단일 clock에 맡긴다.
+`captured_at`·`happened_at`·`valid_from`처럼 원문 사건을 뜻하는 시각만 근거에서 가져온다.
+
 ## build 입력과 저장 객체는 다른 층이다
+
+assembled 경로는 notes보다 먼저 `build-coverage.complete.template.json` 모양의 coverage를 작성한다.
+coverage의 8개 section identity가 notes와 exact 일치하고 독립 expected planner 결과가
+`expected_objects`와 같아야 build로 간다. 직접 객체 경로도 `direct-coverage.template.json`처럼
+정확한 `(id, kind)`를 선언해야 한다. coverage는 원문 의미가 완전하다고 추론해 주지 않는다.
 
 `build-notes.complete.template.json`의 일반 section은 의미 중심 입력이다. build가 정식 ID,
 `truth_role`, 공통 metadata를 만들고 다음 객체 관계를 조립한다.

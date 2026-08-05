@@ -18,6 +18,9 @@ from project_brain.config import CONFIG_FILENAME
 from project_brain.installer import InstallConflictError, MANIFEST_FILENAME, install, render_text
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class RenderTextTest(unittest.TestCase):
     def test_substitutes_project_and_brain_root(self):
         out = render_text("name: {{PROJECT}}-brain-query → {{BRAIN_ROOT}}/x",
@@ -232,7 +235,9 @@ class InstallTest(unittest.TestCase):
         root = self._skill_dir("demo-brain-ingest") / "references/object-templates"
         expected_non_kind = {
             "README.md",
+            "build-coverage.complete.template.json",
             "build-notes.complete.template.json",
+            "direct-coverage.template.json",
             "object-graph.complete.template.json",
             "invalid/manifest.json",
             "invalid/notes-missing-context-commit.json",
@@ -272,6 +277,14 @@ class InstallTest(unittest.TestCase):
         )
         for path in root.rglob("*.json"):
             json.loads(path.read_text(encoding="utf-8"))
+        canonical_root = (
+            ROOT / "src/project_brain/templates/ingest/references/object-templates"
+        )
+        for name in (
+            "build-coverage.complete.template.json",
+            "direct-coverage.template.json",
+        ):
+            self.assertEqual((root / name).read_bytes(), (canonical_root / name).read_bytes())
         for field in ("created", "updated", "removed", "adopted", "skipped"):
             self.assertEqual(second[field], [], field)
 

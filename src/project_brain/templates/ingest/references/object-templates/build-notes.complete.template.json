@@ -3,7 +3,6 @@
     "key": "ctx-build",
     "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "repo": "demoapp",
-    "now": "2026-06-04T00:00:00Z",
     "display_name": "Build 계약 컨텍스트",
     "boundary_summary": "적재 build 계약을 검증하는 합성 경계",
     "in_scope": ["build 입력 조립", "결정 역참조"],

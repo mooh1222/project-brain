@@ -3,12 +3,21 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from project_brain.installer import install
+from project_brain.mutation import MutationOperation, MutationRequest, MutationService
+from tests.coverage_helpers import direct_coverage
+from tests.test_ingest import manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +48,177 @@ EXPECTED_RAW_HASHES = {
     "legacy-archive/legacy-plan-16.md": "74886aedb1cf64bdd20e2e1dadc10bda6c22416ce5236a50a3fe1c71328ce13b",
     "legacy-archive/legacy-plan-17.md": "6078d14ba9ed0cb6df0e0940be2663157aad69cabba83b6bcfde3dfeec9e04ac",
 }
+
+
+def _write_surface_inventory(root: Path) -> dict[str, bytes | None]:
+    inventory: dict[str, bytes | None] = {}
+    for relative in (
+        "brain/objects",
+        "brain/raw",
+        "brain/indexes",
+        "brain/views",
+        ".brain-local",
+    ):
+        base = root / relative
+        if not base.exists():
+            continue
+        inventory[relative + "/"] = None
+        for path in sorted(base.rglob("*")):
+            key = path.relative_to(root).as_posix()
+            inventory[key + ("/" if path.is_dir() else "")] = (
+                None if path.is_dir() else path.read_bytes()
+            )
+    return inventory
+
+
+def _load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class CoverageWriteBoundaryReplayTest(unittest.TestCase):
+    def test_direct_plan_is_a_no_write_dry_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            brain_root = root / "brain"
+            obj = manifest()
+            before = _write_surface_inventory(root)
+            request = MutationRequest(
+                operation=MutationOperation.INGEST,
+                brain_root=brain_root,
+                repo_context=None,
+                engine_sha="e" * 40,
+                objects=(obj,),
+                coverage=direct_coverage(obj),
+            )
+
+            result = MutationService().plan((obj,), request=request)
+
+            self.assertTrue(result.ok, (result.error_code, result.detail))
+            self.assertEqual(_write_surface_inventory(root), before)
+
+    def test_installed_batch_rejects_missing_coverage_before_runner_or_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            install(root, project="demo")
+            verify = root / "verify.json"
+            domain = root / "domain.py"
+            manifest_path = root / "batch.json"
+            report = root / "batch-report.json"
+            verify.write_text('{"groups": []}\n', encoding="utf-8")
+            domain.write_text('CTX = "missing-coverage"\n', encoding="utf-8")
+            manifest_path.write_text(json.dumps({
+                "repo_root": str(root.resolve()),
+                "expected_repo_id": "demo",
+                "expected_revision_ref": "HEAD",
+                "engine_sha": "e" * 40,
+                "items": [{
+                    "key": "one",
+                    "verify_json": verify.name,
+                    "domain_spec_py": domain.name,
+                }],
+                "finalization": {},
+            }), encoding="utf-8")
+            runtime = (
+                root / ".agents/skills/demo-brain-ingest/scripts/run_ingest_batch.py"
+            )
+            module = _load_module(runtime, "installed_batch_missing_coverage")
+            runner = mock.Mock(side_effect=AssertionError("runner must not start"))
+            before = _write_surface_inventory(root)
+
+            with self.assertRaisesRegex(ValueError, "COVERAGE가 없습니다"):
+                module.run_batch(manifest_path, report, item_runner=runner)
+
+            runner.assert_not_called()
+            self.assertFalse(report.exists())
+            self.assertEqual(_write_surface_inventory(root), before)
+
+    def test_installed_assembled_dry_run_checks_coverage_without_corpus_writes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            install(root, project="demo")
+            verify = root / "verify.json"
+            domain = root / "domain.py"
+            bin_dir = root / "bin"
+            tmp_dir = root / "tmp"
+            calls = root / "calls.jsonl"
+            bin_dir.mkdir()
+            tmp_dir.mkdir()
+            verify.write_text('{"groups": []}\n', encoding="utf-8")
+            domain.write_text(textwrap.dedent('''\
+                CTX = "dry-fixture"
+                COMMIT = "a" * 40
+                REPO = "demo"
+                MANIFESTS = {}
+                DISPLAY_NAME = "비파괴 조립 fixture"
+                BOUNDARY_SUMMARY = "coverage dry-run 경계"
+                IN_SCOPE = []
+                OUT_OF_SCOPE = []
+                COVERAGE = {
+                    "version": 1,
+                    "mode": "assembled",
+                    "verify_groups": {"names": [], "empty_reason": "검증 그룹 없음"},
+                    "context": {"key": "dry-fixture", "mode": "create"},
+                    "sections": {
+                        "sources": {"ids": [], "empty_reason": "출처 없음"},
+                        "glossary": {"keys": [], "empty_reason": "용어 없음"},
+                        "code_anchors": {"keys": [], "empty_reason": "코드 없음"},
+                        "mappings": {"keys": [], "empty_reason": "매핑 없음"},
+                        "decisions": {"items": [], "empty_reason": "결정 없음"},
+                        "refs": {"items": [], "empty_reason": "참조 없음"},
+                        "updates": {"ids": [], "empty_reason": "갱신 없음"},
+                        "extra_objects": {"objects": [], "empty_reason": "추가 없음"},
+                    },
+                    "expected_objects": [
+                        {"id": "context.dry-fixture", "kind": "DomainContext"}
+                    ],
+                }
+                EXCLUDE_TERMS = set()
+                HISTORY_COVERAGE = "unsearched"
+                CLAIM_STATUS = "reviewed"
+                CORRECTIONS = {}
+                DECISIONS = []
+            '''), encoding="utf-8")
+            fake_cli = bin_dir / "project-brain"
+            fake_cli.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
+                import json
+                import os
+                import sys
+                from pathlib import Path
+                from project_brain.cli import main
+
+                with Path(os.environ["CALL_LOG"]).open("a", encoding="utf-8") as stream:
+                    print(json.dumps({"command": sys.argv[1], "args": sys.argv[2:]}), file=stream)
+                raise SystemExit(main())
+            '''), encoding="utf-8")
+            fake_cli.chmod(0o755)
+            runner = root / ".agents/skills/demo-brain-ingest/scripts/run_ingest.sh"
+            before = _write_surface_inventory(root)
+            env = dict(
+                os.environ,
+                PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                PYTHONPATH=str(ROOT / "src"),
+                TMPDIR=str(tmp_dir),
+                CALL_LOG=str(calls),
+            )
+
+            result = subprocess.run(
+                [str(runner), "--dry", str(verify), str(domain)],
+                env=env,
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+            self.assertEqual([item["command"] for item in recorded], ["build"])
+            self.assertEqual(_write_surface_inventory(root), before)
 
 
 class RawReplayDriverTest(unittest.TestCase):

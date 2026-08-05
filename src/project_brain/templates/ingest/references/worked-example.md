@@ -1,7 +1,12 @@
 # 작은 전체 예시
 
 이 문서는 source에서 verify까지 가는 판단 흐름과, 그대로 실행할 수 있는 JSON 예시를 연결한다.
-구체적인 payload를 새로 추측하지 말고 다음 세 파일을 함께 본다.
+구체적인 payload를 새로 추측하지 말고 다음 다섯 파일을 함께 본다.
+
+- [object-templates/build-coverage.complete.template.json](object-templates/build-coverage.complete.template.json):
+  notes 8개 section과 `expected_objects`를 결속하는 assembled coverage
+- [object-templates/direct-coverage.template.json](object-templates/direct-coverage.template.json):
+  완성 객체를 직접 적재할 때 쓰는 exact `(id, kind)` coverage
 
 - [object-templates/build-notes.complete.template.json](object-templates/build-notes.complete.template.json):
   9개 section을 모두 사용한 build 입력
@@ -36,7 +41,8 @@
 
 ## 3. build 입력 조립
 
-각 원자에 논리 key와 이번 source packet의 EvidenceRef를 붙인다.
+각 원자에 논리 key와 이번 source packet의 EvidenceRef를 붙이고 `COVERAGE`에 verify group,
+context mode, 8개 section identity, `expected_objects`를 독립 선언한다.
 코드 원자에는 확인한 심볼과 기준 commit SHA를 붙인다.
 원자 사이 연결은 논리 key로 적고 build가 완성 ID와 객체 연결을 조립하게 한다.
 
@@ -60,11 +66,16 @@ build 오류가 없고 verify가 통과하면 한 묶음으로 ingest한다.
 
 실행 순서는 다음과 같다.
 
-1. build 전 `validate_notes()`로 입력 구조를 확인한다.
-2. build 결과의 `errors`가 비었는지, `resolved_refs`와 `preconditions`가 예상과 같은지 확인한다.
-3. 독립 verify 뒤 `ingest`를 실행한다. build 자체는 저장하지 않는다.
-4. ingest 뒤 lint/audit와 소비 데이터 레포의 회귀 범위를 작업 종류에 맞게 실행한다.
-5. 실패 관문을 확인할 때는 `invalid/manifest.json`의 `setup`, `validator`, `expected`를 함께 쓴다.
+1. assemble에서 `--coverage-out coverage.json`을 만들고 notes identity와 exact 비교한다.
+2. `project-brain build --notes notes.json --coverage-file coverage.json --objects-file out.json > report.json`을 실행한다. 정상 `--dry`는 `objects/`, `raw/`, index를 쓰지 않는다.
+3. build 결과의 `errors`가 비었고 `expected_objects`·`actual_objects`, `resolved_refs`, `preconditions`가 예상과 같은지 확인한다.
+4. 독립 verify 뒤 `project-brain ingest --objects-file out.json --coverage-file coverage.json --build-report report.json ...`을 실행한다. coverage가 없으면 pre-write 실패다.
+5. receipt의 `expected_objects == verified_objects`와 `committed|no_changes`를 확인한 뒤 finalize한다.
+6. ingest 뒤 lint/audit와 소비 데이터 레포의 회귀 범위를 작업 종류에 맞게 실행한다.
+7. 실패 관문을 확인할 때는 `invalid/manifest.json`의 `setup`, `validator`, `expected`를 함께 쓴다.
+
+coverage는 원문 의미가 완전하다고 추론하지 않는다. 수기 JSON은 write boundary를 우회하므로
+다음 audit 전까지 문제의 즉시 탐지를 보장하지 않는다.
 
 이 예시는 현재 사실 한 조각을 끝까지 잇는 모습만 보여 준다. 상태값의 뜻은 `scope.md`, 변경의
 결론은 `judgment.md`, 19종 전체 저장 계약은 `object-templates/README.md`에서 확인한다.

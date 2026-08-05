@@ -5,7 +5,8 @@
 간결하게 정리한다. **아래 표는 주요 kind만 추린 요약이지 19종 전체 계약이 아니다.**
 
 실행 가능한 전체 예시는 [object-templates/README.md](object-templates/README.md)에서 시작한다.
-`object-templates/kinds/`에는 19종 shape, `build-notes.complete.template.json`에는 build 입력,
+`object-templates/kinds/`에는 19종 shape, 두 coverage template에는 assembled/direct 예상 객체 계약,
+`build-notes.complete.template.json`에는 build 입력,
 `object-graph.complete.template.json`에는 닫힌 정상 그래프, `invalid/manifest.json`에는 실패 층별
 반례가 있다. 엔진 checkout에서 조건부·금지 필드, ID 결속, 생성 경로, 소비처, 과거 읽기와 신규
 쓰기 차이까지 볼 때는 `docs/architecture/data-contracts.md`를 기준으로 삼는다.
@@ -13,6 +14,7 @@
 ## 목차
 
 - 공통 필드와 enum
+- coverage와 시간 소유권
 - 전체 계약 파일과 주요 kind 요약
 - 연결과 reviewed 근거
 - EvidenceManifest redaction
@@ -38,6 +40,19 @@ title, created_at, updated_at, tags, evidence_refs
 
 필수 필드의 누락, enum 밖 값, kind와 다른 `truth_role`은 ingest가 거부한다.
 완성 객체를 손으로 조립할 때도 build와 같은 계약을 지켜야 한다.
+
+## coverage와 시간 소유권
+
+assembled 적재는 `COVERAGE`에 context mode, verify group, notes 8개 section identity,
+`expected_objects`를 선언한다. assemble의 `--coverage-out`, build와 ingest의 `--coverage-file`은
+같은 canonical coverage를 전달한다. direct 적재도 객체마다 exact `(id, kind)`를 선언하며 coverage
+없는 single/batch는 pre-write 실패한다. coverage는 선언과 산출물의 일치를 검증할 뿐 원문 의미가
+완전하다고 추론하지 않는다.
+
+MutationService가 한 번 읽은 clock으로 `created_at`·`updated_at`을 찍고, 검증·projection 경로에서는
+`verified_at`·`generated_at`도 같은 event time으로 정한다. promote의 `reviewed_at`은 명시 입력이
+없을 때만 같은 clock을 쓴다. caller가 소유하는 `captured_at`·`happened_at`·`valid_from`·`as_of`
+등은 실제 근거 시각을 넣는다. template의 고정 timestamp는 shape fixture이며 실제 생성 시각 증거가 아니다.
 
 ## 전체 계약 파일과 주요 kind 요약
 
