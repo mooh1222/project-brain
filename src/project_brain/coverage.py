@@ -58,6 +58,18 @@ class BuildArtifactBinding:
     actual_objects: tuple[ObjectIdentity, ...]
     objects_sha256: str
 
+    def as_dict(self) -> dict[str, object]:
+        def identities(values: tuple[ObjectIdentity, ...]) -> list[dict[str, str]]:
+            return [{"id": item.id, "kind": item.kind} for item in values]
+
+        return {
+            "version": self.version,
+            "coverage_sha256": self.coverage_sha256,
+            "expected_objects": identities(self.expected_objects),
+            "actual_objects": identities(self.actual_objects),
+            "objects_sha256": self.objects_sha256,
+        }
+
 
 class CoverageError(ValueError):
     def __init__(

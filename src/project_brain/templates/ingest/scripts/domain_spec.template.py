@@ -11,7 +11,23 @@ DISPLAY_NAME = ""
 BOUNDARY_SUMMARY = """"""      # 다줄 한국어 경계 설명
 IN_SCOPE = []
 OUT_OF_SCOPE = []
-GROUP_ORDER = []              # 의미 경계(사람 판정). verify 그룹명 순서
+COVERAGE = {                  # 필수. verify 그룹 순서·notes section·최종 객체 집합 선언
+    "version": 1,
+    "mode": "assembled",
+    "verify_groups": {"names": [], "empty_reason": "채울 것"},
+    "context": {"key": "", "mode": "create"},  # create | reuse
+    "sections": {
+        "sources": {"ids": [], "empty_reason": "채울 것"},
+        "glossary": {"keys": [], "empty_reason": "채울 것"},
+        "code_anchors": {"keys": [], "empty_reason": "채울 것"},
+        "mappings": {"keys": [], "empty_reason": "채울 것"},
+        "decisions": {"items": [], "empty_reason": "채울 것"},
+        "refs": {"items": [], "empty_reason": "채울 것"},
+        "updates": {"ids": [], "empty_reason": "채울 것"},
+        "extra_objects": {"objects": [], "empty_reason": "채울 것"},
+    },
+    "expected_objects": [],
+}
 EXCLUDE_TERMS = set()        # 독립 회상 가치 없는 용어(사람 판정)
 HISTORY_COVERAGE = "unsearched"   # unsearched | partial | complete
 NOW = ""                      # 고정 ISO 시각 (예: "2026-06-26T00:00:00+09:00") — churn 0

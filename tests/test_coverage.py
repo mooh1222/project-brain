@@ -455,6 +455,17 @@ def test_build_artifact_binding_hashes_canonical_object_bundle():
         actual_objects=binding.expected_objects,
         objects_sha256=hashlib.sha256(canonical).hexdigest(),
     )
+    assert artifact.as_dict() == {
+        "version": 1,
+        "coverage_sha256": binding.sha256,
+        "expected_objects": [
+            {"id": "ledger.ctx.one", "kind": "EventLedgerRecord"}
+        ],
+        "actual_objects": [
+            {"id": "ledger.ctx.one", "kind": "EventLedgerRecord"}
+        ],
+        "objects_sha256": hashlib.sha256(canonical).hexdigest(),
+    }
 
 
 def test_build_artifact_binding_rejects_actual_object_mismatch():

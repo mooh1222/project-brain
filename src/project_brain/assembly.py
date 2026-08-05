@@ -6,8 +6,17 @@
 """
 import copy
 import hashlib
+import json
+import math
 import re
+from collections.abc import Mapping, Sequence
 
+from project_brain.coverage import (
+    BuildArtifactBinding,
+    CoverageBinding,
+    CoverageError,
+    build_artifact_binding,
+)
 from project_brain.id_grammar import format_id
 from project_brain.objbase import base
 from project_brain.schema import (
@@ -18,6 +27,240 @@ from project_brain.schema import (
 from project_brain.lint import lint_mutation_input_store_report
 from project_brain.graph import ISOLATION_LEAF_KINDS, referenced_ids
 from project_brain.store import BrainStore
+
+
+def _coverage_mismatch(
+    binding: CoverageBinding,
+    *,
+    section: str,
+    missing: Sequence[str] = (),
+    unexpected: Sequence[str] = (),
+) -> CoverageError:
+    return CoverageError(
+        "coverage_notes_mismatch",
+        "assembled notes do not match declared coverage",
+        section=section,
+        missing=tuple(sorted(missing)),
+        unexpected=tuple(sorted(unexpected)),
+        coverage_sha256=binding.sha256,
+    )
+
+
+def _compare_coverage_values(
+    binding: CoverageBinding,
+    *,
+    section: str,
+    expected: Sequence[object],
+    actual: Sequence[object],
+) -> None:
+    expected_tokens = [_coverage_token(value) for value in expected]
+    actual_tokens = [_coverage_token(value) for value in actual]
+    if sorted(expected_tokens) == sorted(actual_tokens):
+        return
+    expected_counts = {value: expected_tokens.count(value) for value in expected_tokens}
+    actual_counts = {value: actual_tokens.count(value) for value in actual_tokens}
+    missing = [
+        value
+        for value, count in expected_counts.items()
+        for _ in range(max(0, count - actual_counts.get(value, 0)))
+    ]
+    unexpected = [
+        value
+        for value, count in actual_counts.items()
+        for _ in range(max(0, count - expected_counts.get(value, 0)))
+    ]
+    raise _coverage_mismatch(
+        binding,
+        section=section,
+        missing=missing,
+        unexpected=unexpected,
+    )
+
+
+def _strict_json_value(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        raise TypeError("non-finite float")
+    if isinstance(value, list):
+        return [_strict_json_value(item) for item in value]
+    if isinstance(value, Mapping):
+        normalized = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("non-string JSON key")
+            normalized[key] = _strict_json_value(item)
+        return normalized
+    raise TypeError(f"non-JSON value {type(value).__name__}")
+
+
+def _coverage_token(value: object) -> str:
+    try:
+        normalized = _strict_json_value(value)
+        return json.dumps(
+            normalized,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        return f"<invalid:{exc}>"
+
+
+def _verify_group_names(verify_data: object) -> list[str]:
+    groups = (
+        verify_data.get("groups")
+        if isinstance(verify_data, Mapping)
+        else verify_data
+    )
+    if not isinstance(groups, list):
+        return []
+    return [
+        str(group.get("group"))
+        for group in groups
+        if isinstance(group, Mapping) and isinstance(group.get("group"), str)
+    ]
+
+
+def validate_assembled_inputs(
+    *,
+    binding: CoverageBinding,
+    verify_data: object,
+    notes: Mapping[str, object],
+    store: BrainStore,
+) -> None:
+    """Coverage 선언과 verify/notes의 실제 정체성 집합을 정확히 비교한다."""
+    del store  # context/store 결속은 독립 planner가 build 전에 검사한다.
+    if binding.mode != "assembled":
+        return
+
+    contract = binding.contract
+    sections = contract["sections"]
+    context = contract["context"]
+    assert isinstance(sections, dict)
+    assert isinstance(context, dict)
+
+    expected_groups = list(contract["verify_groups"]["names"])
+    _compare_coverage_values(
+        binding,
+        section="verify_groups",
+        expected=expected_groups,
+        actual=_verify_group_names(verify_data),
+    )
+
+    note_context = notes.get("context")
+    if not isinstance(note_context, Mapping) or note_context.get("key") != context["key"]:
+        raise _coverage_mismatch(binding, section="context")
+    if context["mode"] == "create":
+        if "display_name" not in note_context or "boundary_summary" not in note_context:
+            raise _coverage_mismatch(binding, section="context")
+    else:
+        allowed = {"key", "commit", "repo", "claim_status"}
+        unexpected_context = sorted(set(note_context) - allowed)
+        if unexpected_context:
+            raise _coverage_mismatch(
+                binding,
+                section="context",
+                unexpected=unexpected_context,
+            )
+
+    simple_sections = {
+        "sources": ("ids", "id"),
+        "glossary": ("keys", "key"),
+        "code_anchors": ("keys", "key"),
+        "mappings": ("keys", "key"),
+        "updates": ("ids", "id"),
+    }
+    for section, (coverage_field, notes_field) in simple_sections.items():
+        raw_items = notes.get(section, [])
+        actual = []
+        if isinstance(raw_items, list):
+            for item in raw_items:
+                if isinstance(item, Mapping) and notes_field in item:
+                    actual.append(item[notes_field])
+                else:
+                    actual.append(item)
+        else:
+            actual.append(raw_items)
+        _compare_coverage_values(
+            binding,
+            section=section,
+            expected=sections[section][coverage_field],
+            actual=actual,
+        )
+
+    decisions = []
+    raw_decisions = notes.get("decisions", [])
+    if isinstance(raw_decisions, list):
+        for decision in raw_decisions:
+            if not isinstance(decision, Mapping):
+                decisions.append(decision)
+                continue
+            evidence = []
+            for item in decision.get("evidence", []):
+                if isinstance(item, Mapping):
+                    evidence.append({"type": item.get("type"), "ref": item.get("ref")})
+                else:
+                    evidence.append(item)
+            decisions.append({"key": decision.get("key"), "evidence": evidence})
+    _compare_coverage_values(
+        binding,
+        section="decisions",
+        expected=sections["decisions"]["items"],
+        actual=decisions,
+    )
+
+    refs = []
+    raw_refs = notes.get("refs", {})
+    if isinstance(raw_refs, Mapping):
+        for category, aliases in raw_refs.items():
+            if not isinstance(aliases, Mapping):
+                refs.append({"category": category, "aliases": aliases})
+                continue
+            for alias, spec in aliases.items():
+                if isinstance(spec, Mapping):
+                    refs.append({
+                        "category": category,
+                        "alias": alias,
+                        "id": spec.get("id"),
+                        "expect": spec.get("expect"),
+                    })
+                else:
+                    refs.append({"category": category, "alias": alias, "spec": spec})
+    _compare_coverage_values(
+        binding,
+        section="refs",
+        expected=sections["refs"]["items"],
+        actual=refs,
+    )
+
+    extra_objects = notes.get("extra_objects", [])
+    actual_extra = []
+    if isinstance(extra_objects, list):
+        for item in extra_objects:
+            if isinstance(item, Mapping):
+                actual_extra.append({"id": item.get("id"), "kind": item.get("kind")})
+            else:
+                actual_extra.append(item)
+    else:
+        actual_extra.append(extra_objects)
+    _compare_coverage_values(
+        binding,
+        section="extra_objects",
+        expected=sections["extra_objects"]["objects"],
+        actual=actual_extra,
+    )
+
+
+def verify_build_output(
+    binding: CoverageBinding,
+    objects: Sequence[Mapping[str, object]],
+) -> BuildArtifactBinding:
+    """Build output을 coverage expected_objects와 결속한다."""
+    return build_artifact_binding(binding, objects)
 
 def derive_id(kind, ctx, key):
     """kind+컨텍스트+key로 객체 id를 만든다. 문법은 id_grammar 정본을 따른다."""

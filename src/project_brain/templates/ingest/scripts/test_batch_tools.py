@@ -1560,7 +1560,13 @@ class RunIngestCleanupTest(unittest.TestCase):
             import os
             import sys
             from pathlib import Path
+            if os.environ.get("FAKE_LOG_RUNNER_COMMANDS") == "1":
+                with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
+                    print(json.dumps({"kind": "assemble", "args": sys.argv[1:]}), file=log)
             Path(sys.argv[sys.argv.index("-o") + 1]).write_text("notes", encoding="utf-8")
+            if "--coverage-out" in sys.argv:
+                Path(sys.argv[sys.argv.index("--coverage-out") + 1]).write_text(
+                    "{}\\n", encoding="utf-8")
             if "--finalization-out" in sys.argv and os.environ.get("FAKE_OMIT_FINALIZATION") != "1":
                 payload = {} if os.environ.get("FAKE_INVALID_FINALIZATION") == "1" else {
                     "recall_checks": [{"key": "one", "query": "one query",
@@ -1623,6 +1629,9 @@ class RunIngestCleanupTest(unittest.TestCase):
 
             command, *args = sys.argv[1:]
             if command == "build":
+                if os.environ.get("FAKE_LOG_RUNNER_COMMANDS") == "1":
+                    with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
+                        print(json.dumps({"kind": "build", "args": args}), file=log)
                 objects = Path(args[args.index("--objects-file") + 1])
                 objects.write_text("[]\\n", encoding="utf-8")
                 print(json.dumps({"ok": True, "preconditions": {"expected": "fresh"}}))
@@ -1664,13 +1673,15 @@ class RunIngestCleanupTest(unittest.TestCase):
         self.assertNotIn('exec "$HERE/finalize_ingest.sh"', text)
 
     def _run(self, flags=(), *, finalizer_exit=0, ingest_exit=0, build_exit=0,
-             invalid_finalization=False, omit_finalization=False):
+             invalid_finalization=False, omit_finalization=False,
+             log_runner_commands=False):
         env = dict(os.environ, TMPDIR=str(self.tmp_dir),
                    PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
                    FAKE_CALL_LOG=str(self.call_log),
                    FAKE_FINALIZER_EXIT=str(finalizer_exit),
                    FAKE_INGEST_EXIT=str(ingest_exit),
                    FAKE_BUILD_EXIT=str(build_exit),
+                   FAKE_LOG_RUNNER_COMMANDS="1" if log_runner_commands else "0",
                    FAKE_INVALID_FINALIZATION="1" if invalid_finalization else "0",
                    FAKE_OMIT_FINALIZATION="1" if omit_finalization else "0")
         context_flags = [
@@ -1684,6 +1695,19 @@ class RunIngestCleanupTest(unittest.TestCase):
                                *context_flags,
                                str(self.verify), str(self.spec)],
                               env=env, text=True, capture_output=True, check=False)
+
+    def test_single_runner_forwards_assembled_coverage_to_build(self):
+        result = self._run(["--dry"], log_runner_commands=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [
+            json.loads(line)
+            for line in self.call_log.read_text(encoding="utf-8").splitlines()
+        ]
+        assemble = next(call for call in calls if call["kind"] == "assemble")
+        build = next(call for call in calls if call["kind"] == "build")
+        self.assertIn("--coverage-out", assemble["args"])
+        self.assertIn("--coverage-file", build["args"])
 
     def test_build_report_is_forwarded_to_ingest_as_preconditions(self):
         result = self._run(["--defer-finalize"])
@@ -1757,6 +1781,7 @@ class RunIngestCleanupTest(unittest.TestCase):
                 self.assertEqual(list(self.tmp_dir.glob("objects.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("build-report.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("finalization.*")), [])
+                self.assertEqual(list(self.tmp_dir.glob("coverage.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("isolation-baseline.*")), [])
                 self.assertEqual(list(self.tmp_dir.glob("transaction-result.*")), [])
 

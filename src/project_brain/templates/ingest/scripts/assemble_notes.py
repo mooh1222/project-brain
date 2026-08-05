@@ -5,22 +5,45 @@
 (2) 공통 조립 루프(atom→code_anchors/glossary/mappings),
 (3) decisions[] 패스스루(엔진 build_decisions가 조립 — 여기선 해석 안 함).
 조립 로직은 적재마다 재작성하지 않는다. 적재별 데이터는 domain_spec.py가 담는다.
-stdlib만 사용(json). 금지선: 그룹 분해·결정 내용·EXCLUDE·history_coverage는 추론 금지(spec이 데이터로 줌)."""
+coverage 정본은 엔진 모듈을 사용한다. 금지선: 그룹 분해·결정 내용·EXCLUDE·history_coverage는 추론 금지(spec이 데이터로 줌)."""
 import json
+import os
 import sys
+from pathlib import Path
+
+from project_brain.coverage import CoverageError, normalize_coverage
 
 
 def normalize(verify_data, spec):
     """verify 출력 → 정렬·보정된 atom 리스트."""
     # CASE: verify 결과가 list(main-map) 또는 {"groups": [...]}(ball-select) — 둘 다 흡수 (근거: ball-select·main-map 2026-06). 새 래핑은 여기 추가.
     groups = verify_data["groups"] if isinstance(verify_data, dict) else verify_data
+    binding = normalize_coverage(spec["COVERAGE"])
+    if binding.mode != "assembled":
+        raise CoverageError(
+            "coverage_notes_mismatch",
+            "assemble_notes requires assembled coverage",
+            section="mode",
+            coverage_sha256=binding.sha256,
+        )
+    expected_groups = list(binding.contract["verify_groups"]["names"])
+    actual_groups = [g.get("group") for g in groups if isinstance(g, dict)]
+    if sorted(expected_groups) != sorted(actual_groups) or len(expected_groups) != len(actual_groups):
+        raise CoverageError(
+            "coverage_notes_mismatch",
+            "verify groups do not match coverage",
+            section="verify_groups",
+            missing=tuple(sorted(set(expected_groups) - set(actual_groups))),
+            unexpected=tuple(sorted(set(actual_groups) - set(expected_groups))),
+            coverage_sha256=binding.sha256,
+        )
     by_group = {}
     for g in groups:
         # CASE: verify가 corrected_atoms를 비워 반환하면 extract.atoms로 폴백 (근거: main-map map-stage-episode 2026-06-25). 새 폴백은 여기 추가.
         atoms = (g.get("verify") or {}).get("corrected_atoms") or (g.get("extract") or {}).get("atoms") or []
         by_group[g["group"]] = atoms
     ordered = []
-    for name in spec["GROUP_ORDER"]:
+    for name in expected_groups:
         ordered += by_group.get(name, [])
     # CASE: per-atom 선언적 보정(verify 의미 보정·용어 제외) — 사람이 spec에 데이터로 (근거: main-map NEW_MEANING 2건 2026-06-25).
     corrections = spec.get("CORRECTIONS") or {}
@@ -88,12 +111,18 @@ def build_notes(atoms, spec):
                 term[field] = info[field]
         glossary_section.append(term)
         gids.append(f"g.{ctx}.{tk}")
+    coverage_context = normalize_coverage(spec["COVERAGE"]).contract["context"]
     context = {"key": ctx, "commit": spec["COMMIT"], "repo": spec.get("REPO", "{{REPO}}"),
-               "display_name": spec["DISPLAY_NAME"], "boundary_summary": spec["BOUNDARY_SUMMARY"],
-               "in_scope": spec["IN_SCOPE"], "out_of_scope": spec["OUT_OF_SCOPE"],
-               "glossary_term_ids": gids,
                "claim_status": spec.get("CLAIM_STATUS", "reviewed")}
-    if spec.get("NOW"):
+    if coverage_context["mode"] == "create":
+        context.update({
+            "display_name": spec["DISPLAY_NAME"],
+            "boundary_summary": spec["BOUNDARY_SUMMARY"],
+            "in_scope": spec["IN_SCOPE"],
+            "out_of_scope": spec["OUT_OF_SCOPE"],
+            "glossary_term_ids": gids,
+        })
+    if coverage_context["mode"] == "create" and spec.get("NOW"):
         context["now"] = spec["NOW"]  # CLI(project-brain build)가 context.now를 읽어 build()의 now 인자로 넘김 → churn 0
     # 도메인 근거(code/commit/jira/pr)는 내부 공유 승인 성격이라 redaction_status="approved"를 명시한다.
     # 엔진 build_manifests가 기본값을 안 채우므로(B3, 2026-07-02 발견 1) 노트가 직접 줘야 ingest schema
@@ -134,11 +163,19 @@ def finalization_contract(notes, spec):
     return contract
 
 
-def _load_spec(path):
+def _load_spec_bytes(payload: bytes, *, filename: str) -> dict[str, object]:
     ns = {}
-    with open(path, encoding="utf-8") as f:
-        exec(compile(f.read(), path, "exec"), ns)
+    exec(compile(payload, filename, "exec"), ns)
     return {k: ns[k] for k in ns if k.isupper() or k == "HOOK"}
+
+
+def _load_spec(path: Path) -> dict[str, object]:
+    path = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        payload = stream.read()
+    return _load_spec_bytes(payload, filename=str(path))
 
 
 def main(argv):
@@ -147,6 +184,8 @@ def main(argv):
     ap.add_argument("verify_json")
     ap.add_argument("domain_spec_py")
     ap.add_argument("-o", "--out", default="notes.json")
+    ap.add_argument("--coverage-out", required=True,
+                    help="정규화된 canonical coverage JSON 저장 경로")
     ap.add_argument("--finalization-out",
                     help="domain spec의 FINALIZATION을 semantic gate JSON으로 저장")
     args = ap.parse_args(argv)
@@ -154,8 +193,18 @@ def main(argv):
         verify_data = json.load(f)
     spec = _load_spec(args.domain_spec_py)
     notes = assemble_notes(verify_data, spec)
+    binding = normalize_coverage(spec["COVERAGE"])
+    from project_brain.assembly import validate_assembled_inputs
+    from project_brain.store import BrainStore
+    validate_assembled_inputs(
+        binding=binding,
+        verify_data=verify_data,
+        notes=notes,
+        store=BrainStore({}),
+    )
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(notes, f, ensure_ascii=False, indent=2)
+    Path(args.coverage_out).write_bytes(binding.canonical_bytes)
     if args.finalization_out:
         if "FINALIZATION" not in spec:
             raise SystemExit("domain spec에 FINALIZATION이 없습니다")

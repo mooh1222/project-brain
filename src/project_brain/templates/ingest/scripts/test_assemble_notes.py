@@ -1,12 +1,47 @@
 import unittest
-from assemble_notes import normalize, build_notes, assemble_notes, finalization_contract
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from project_brain.coverage import CoverageError
+
+try:
+    from . import assemble_notes as _assemble_notes_module
+except ImportError:  # unittest discover는 scripts/를 top-level import path로 쓴다.
+    import assemble_notes as _assemble_notes_module
+
+_load_spec = _assemble_notes_module._load_spec
+_load_spec_bytes = _assemble_notes_module._load_spec_bytes
+assemble_notes = _assemble_notes_module.assemble_notes
+build_notes = _assemble_notes_module.build_notes
+finalization_contract = _assemble_notes_module.finalization_contract
+normalize = _assemble_notes_module.normalize
+
+
+def _coverage(*, verify_groups=None):
+    return {
+        "version": 1,
+        "mode": "assembled",
+        "verify_groups": {"names": verify_groups or ["g1", "g2"]},
+        "context": {"key": "ctx", "mode": "create"},
+        "sections": {
+            "sources": {"ids": ["manifest.ctx.code"]},
+            "glossary": {"keys": [], "empty_reason": "fixture에서 용어 없음"},
+            "code_anchors": {"keys": [], "empty_reason": "fixture에서 앵커 없음"},
+            "mappings": {"keys": [], "empty_reason": "fixture에서 매핑 없음"},
+            "decisions": {"items": [], "empty_reason": "fixture에서 결정 없음"},
+            "refs": {"items": [], "empty_reason": "fixture에서 참조 없음"},
+            "updates": {"ids": [], "empty_reason": "fixture에서 갱신 없음"},
+            "extra_objects": {"objects": [], "empty_reason": "fixture에서 추가 객체 없음"},
+        },
+        "expected_objects": [{"id": "context.ctx", "kind": "DomainContext"}],
+    }
 
 SPEC = {
     "CTX": "ctx", "COMMIT": "abc123", "REPO": "{{REPO}}",
     "MANIFESTS": {"code": "manifest.ctx.code"},
     "DISPLAY_NAME": "테스트", "BOUNDARY_SUMMARY": "경계 문장",
     "IN_SCOPE": ["x"], "OUT_OF_SCOPE": ["y"],
-    "GROUP_ORDER": ["g1", "g2"], "EXCLUDE_TERMS": {"drop-me"},
+    "COVERAGE": _coverage(), "EXCLUDE_TERMS": {"drop-me"},
     "HISTORY_COVERAGE": "partial", "NOW": "2026-06-26T00:00:00+09:00",
     "CLAIM_STATUS": "reviewed", "SOURCE_ACL": ["team"],
     "CAPTURED_AT": "2026-06-26T00:00:00+09:00",
@@ -71,6 +106,24 @@ class BuildNotesTest(unittest.TestCase):
         # B3(2026-07-02): 엔진이 redaction_status 기본값을 안 채우므로 노트가 명시해야
         # ingest schema(필수 필드 + enum)를 통과한다. 누락 시 "missing field"로 적재 거부.
         self.assertEqual(notes["sources"][0]["redaction_status"], "approved")
+
+    def test_reuse_context_emits_only_existing_context_material(self):
+        coverage = _coverage()
+        coverage["context"] = {"key": "ctx", "mode": "reuse"}
+        coverage["expected_objects"] = [
+            {"id": "manifest.ctx.code", "kind": "EvidenceManifest"},
+        ]
+        notes = build_notes([], dict(SPEC, COVERAGE=coverage))
+
+        self.assertEqual(
+            notes["context"],
+            {
+                "key": "ctx",
+                "commit": "abc123",
+                "repo": "{{REPO}}",
+                "claim_status": "reviewed",
+            },
+        )
 
     def test_explicit_source_provenance_and_claim_status_pass_through(self):
         spec = dict(SPEC, CLAIM_STATUS="candidate", SOURCE_ACL=["brain-team"],
@@ -156,15 +209,28 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual([a["mapping_key"] for a in atoms], ["m1", "m2"])
 
     def test_group_order_respected(self):
-        spec = dict(SPEC, GROUP_ORDER=["g2", "g1"])
+        spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g2", "g1"]))
         atoms = normalize(self._groups(), spec)
         self.assertEqual([a["mapping_key"] for a in atoms], ["m2", "m1"])
+
+    def test_exact_verify_group_set_is_required(self):
+        spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g2", "g1"]))
+        verify = {"groups": [
+            {"group": "g1"},
+            {"group": "extra"},
+            {"group": "g2"},
+        ]}
+
+        with self.assertRaises(CoverageError) as raised:
+            assemble_notes(verify, spec)
+
+        self.assertEqual(raised.exception.code, "coverage_notes_mismatch")
 
     def test_corrections_applied(self):
         spec = dict(SPEC, CORRECTIONS={"m1": {"meaning": "고친 의미", "drop_terms": ["t1"]}})
         groups = [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1", terms=["t1", "keep"])]},
                    "extract": {"atoms": []}}]
-        spec = dict(spec, GROUP_ORDER=["g1"])
+        spec = dict(spec, COVERAGE=_coverage(verify_groups=["g1"]))
         atoms = normalize(groups, spec)
         self.assertEqual(atoms[0]["meaning"], "고친 의미")
         self.assertEqual([t["term_key"] for t in atoms[0]["glossary_terms"]], ["keep"])
@@ -173,7 +239,7 @@ class NormalizeTest(unittest.TestCase):
         calls = []
         def hook(atoms):
             calls.append(len(atoms)); return atoms[:1]
-        spec = dict(SPEC, HOOK=hook, GROUP_ORDER=["g1"])
+        spec = dict(SPEC, HOOK=hook, COVERAGE=_coverage(verify_groups=["g1"]))
         groups = [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1"), _atom("m2")]}, "extract": {"atoms": []}}]
         atoms = normalize(groups, spec)
         self.assertEqual(calls, [2])
@@ -184,7 +250,7 @@ class EndToEndTest(unittest.TestCase):
     def test_assemble_notes(self):
         groups = {"groups": [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1", terms=["t1"])]},
                               "extract": {"atoms": []}}]}
-        spec = dict(SPEC, GROUP_ORDER=["g1"])
+        spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g1"]))
         notes = assemble_notes(groups, spec)
         self.assertEqual(notes["mappings"][0]["key"], "m1")
         self.assertEqual(notes["context"]["now"], spec["NOW"])
@@ -212,6 +278,29 @@ class FinalizationContractTest(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 self.assertEqual(finalization_contract(notes, spec)["expected_unmerged_locator_ids"], [])
+
+
+class SpecLoaderTest(unittest.TestCase):
+    def test_bytes_loader_uses_pinned_payload_not_live_path(self):
+        with TemporaryDirectory() as td:
+            path = Path(td) / "domain_spec.py"
+            pinned = b'COVERAGE = {"version": 1, "mode": "direct", "objects": []}\n'
+            path.write_bytes(b'raise AssertionError("live path was reopened")\n')
+
+            loaded = _load_spec_bytes(pinned, filename=str(path))
+
+            self.assertEqual(loaded["COVERAGE"]["version"], 1)
+
+    def test_path_adapter_matches_bytes_loader(self):
+        with TemporaryDirectory() as td:
+            path = Path(td) / "domain_spec.py"
+            payload = b'COVERAGE = {"version": 1, "mode": "direct", "objects": []}\n'
+            path.write_bytes(payload)
+
+            self.assertEqual(
+                _load_spec(path),
+                _load_spec_bytes(payload, filename=str(path)),
+            )
 
 
 if __name__ == "__main__":

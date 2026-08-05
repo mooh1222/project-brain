@@ -933,11 +933,13 @@ def _run_bootstrap(argv) -> int:
 def _run_build(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli build")
     parser.add_argument("--notes", required=True, help="구조화 노트 JSON 경로")
+    parser.add_argument("--coverage-file", required=True, help="coverage JSON 경로")
     parser.add_argument("--objects-file", required=True, help="조립 결과 객체 묶음 출력 경로")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     args = parser.parse_args(argv)
 
-    from project_brain.assembly import build
+    from project_brain import assembly
+    from project_brain.coverage import CoverageError, plan_expected_objects, read_coverage
     from project_brain.store import BrainStore
 
     brain_root = resolve_brain_root(args.brain_root)
@@ -946,18 +948,45 @@ def _run_build(argv) -> int:
     # (소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
     now = notes.get("context", {}).get("now") or now_kst()
     store = BrainStore.load(brain_root)
-    result = build(notes, store, now)
-    if result["errors"]:
-        print(json.dumps({"ok": False, "errors": result["errors"]},
-                         ensure_ascii=False, indent=2))
+    try:
+        binding = read_coverage(Path(args.coverage_file))
+        plan_expected_objects(binding, store)
+        if binding.mode == "assembled":
+            group_names = binding.contract["verify_groups"]["names"]
+            assembly.validate_assembled_inputs(
+                binding=binding,
+                verify_data={"groups": [{"group": name} for name in group_names]},
+                notes=notes,
+                store=store,
+            )
+        result = assembly.build(notes, store, now)
+        if result["errors"]:
+            print(json.dumps({"ok": False, "errors": result["errors"]},
+                             ensure_ascii=False, indent=2))
+            return 1
+        artifact = assembly.verify_build_output(binding, result["objects"])
+    except CoverageError as exc:
+        print(json.dumps(
+            {"ok": False, "error_code": exc.code, **exc.as_dict()},
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 1
-    Path(args.objects_file).write_text(
-        json.dumps(result["objects"], ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_bytes(
+        Path(args.objects_file),
+        json.dumps(result["objects"], ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    build_binding = artifact.as_dict()
     print(json.dumps({"ok": True, "built": len(result["objects"]),
                       "objects_file": args.objects_file, "diff": result["diff"],
                       "resolved_refs": result["resolved_refs"],
                       "preconditions": result["preconditions"],
-                      "warnings": result.get("warnings", [])},
+                      "warnings": result.get("warnings", []),
+                      "coverage_sha256": artifact.coverage_sha256,
+                      "expected_objects": build_binding["expected_objects"],
+                      "actual_objects": build_binding["actual_objects"],
+                      "objects_sha256": artifact.objects_sha256,
+                      "build_binding": build_binding},
                      ensure_ascii=False, indent=2))
     return 0
 

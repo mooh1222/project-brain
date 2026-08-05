@@ -18,7 +18,9 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
-from project_brain import cli
+import pytest
+
+from project_brain import assembly, cli
 from project_brain.cli import _run_build
 from project_brain.id_grammar import format_id
 from project_brain.mutation import (
@@ -1921,9 +1923,18 @@ class CliSessionTest(unittest.TestCase):
 
 
 class RunBuildTest(unittest.TestCase):
+    @staticmethod
+    def _write_coverage(path, *objects):
+        path.write_text(json.dumps({
+            "version": 1,
+            "mode": "direct",
+            "objects": list(objects),
+        }), encoding="utf-8")
+
     def test_build_writes_objects_file(self):
         with tempfile.TemporaryDirectory() as td:
             notes_path = Path(td) / "notes.json"
+            coverage_path = Path(td) / "coverage.json"
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
@@ -1942,7 +1953,16 @@ class RunBuildTest(unittest.TestCase):
                 "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                               "evidence_refs": ["evref.ctx.hit-hook"]}],
             }), encoding="utf-8")
-            rc = _run_build(["--notes", str(notes_path), "--objects-file", str(out_path),
+            self._write_coverage(
+                coverage_path,
+                {"id": "code.ctx.hit-hook", "kind": "CodeLocator"},
+                {"id": "evref.ctx.hit-hook", "kind": "EvidenceRef"},
+                {"id": "g.ctx.hit", "kind": "GlossaryTerm"},
+                {"id": "manifest.ctx.code", "kind": "EvidenceManifest"},
+            )
+            rc = _run_build(["--notes", str(notes_path),
+                             "--coverage-file", str(coverage_path),
+                             "--objects-file", str(out_path),
                              "--brain-root", str(brain)])
             self.assertEqual(rc, 0)
             objs = json.loads(out_path.read_text(encoding="utf-8"))
@@ -1951,11 +1971,18 @@ class RunBuildTest(unittest.TestCase):
     def test_build_errors_return_1_and_no_file(self):
         with tempfile.TemporaryDirectory() as td:
             notes_path = Path(td) / "notes.json"
+            coverage_path = Path(td) / "coverage.json"
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
             notes_path.write_text(json.dumps({"glossary": []}), encoding="utf-8")  # context 없음
-            rc = _run_build(["--notes", str(notes_path), "--objects-file", str(out_path),
+            self._write_coverage(
+                coverage_path,
+                {"id": "ledger.ctx.placeholder", "kind": "EventLedgerRecord"},
+            )
+            rc = _run_build(["--notes", str(notes_path),
+                             "--coverage-file", str(coverage_path),
+                             "--objects-file", str(out_path),
                              "--brain-root", str(brain)])
             self.assertEqual(rc, 1)
             self.assertFalse(out_path.exists())
@@ -1966,6 +1993,7 @@ class RunBuildTest(unittest.TestCase):
         # created_at이 빈 값/None이 돼 이 단언이 깨진다 — 시점 분산 재발 가드. 신규 코드 0줄.
         with tempfile.TemporaryDirectory() as td:
             notes_path = Path(td) / "notes.json"
+            coverage_path = Path(td) / "coverage.json"
             out_path = Path(td) / "out.json"
             brain = Path(td) / "brain"
             (brain / "objects").mkdir(parents=True)
@@ -1982,7 +2010,16 @@ class RunBuildTest(unittest.TestCase):
                 "glossary": [{"key": "hit", "term": "hit", "definition": "정의",
                               "evidence_refs": ["evref.ctx.hit-hook"]}],
             }), encoding="utf-8")
-            rc = _run_build(["--notes", str(notes_path), "--objects-file", str(out_path),
+            self._write_coverage(
+                coverage_path,
+                {"id": "code.ctx.hit-hook", "kind": "CodeLocator"},
+                {"id": "evref.ctx.hit-hook", "kind": "EvidenceRef"},
+                {"id": "g.ctx.hit", "kind": "GlossaryTerm"},
+                {"id": "manifest.ctx.code", "kind": "EvidenceManifest"},
+            )
+            rc = _run_build(["--notes", str(notes_path),
+                             "--coverage-file", str(coverage_path),
+                             "--objects-file", str(out_path),
                              "--brain-root", str(brain)])
             self.assertEqual(rc, 0)
             objs = json.loads(out_path.read_text(encoding="utf-8"))
@@ -1990,6 +2027,118 @@ class RunBuildTest(unittest.TestCase):
             # KST 표준(+09:00, microsecond 없음)으로 자동 기입, created_at == updated_at.
             self.assertTrue(term["created_at"].endswith("+09:00"), term["created_at"])
             self.assertEqual(term["created_at"], term["updated_at"])
+
+
+def _write_complete_build_inputs(tmp_path):
+    notes_path = tmp_path / "notes.json"
+    coverage_path = tmp_path / "coverage.json"
+    objects_path = tmp_path / "objects.json"
+    notes_path.write_text(json.dumps({
+        "context": {
+            "key": "ctx", "commit": "abc", "now": "2026-06-16T00:00:00Z",
+            "repo": "demoapp", "display_name": "컨텍스트", "boundary_summary": "경계",
+            "in_scope": [], "out_of_scope": [], "glossary_term_ids": [],
+            "claim_status": "reviewed",
+        },
+        "sources": [{
+            "id": "manifest.ctx.code", "source_type": "code_search", "title": "코드",
+            "locator": "demoapp@abc", "captured_by": "agent",
+            "captured_at": "2026-06-16T00:00:00Z", "acl": ["team"],
+            "redaction_status": "approved",
+        }],
+        "code_anchors": [{
+            "key": "anchor-one", "path": "D.h", "symbol": "S", "quote": "q",
+            "manifest": "manifest.ctx.code",
+        }],
+    }), encoding="utf-8")
+    coverage_path.write_text(json.dumps({
+        "version": 1,
+        "mode": "assembled",
+        "verify_groups": {"names": [], "empty_reason": "직접 작성한 합성 노트"},
+        "context": {"key": "ctx", "mode": "create"},
+        "sections": {
+            "sources": {"ids": ["manifest.ctx.code"]},
+            "glossary": {"keys": [], "empty_reason": "용어 없음"},
+            "code_anchors": {"keys": ["anchor-one"]},
+            "mappings": {"keys": [], "empty_reason": "매핑 없음"},
+            "decisions": {"items": [], "empty_reason": "결정 없음"},
+            "refs": {"items": [], "empty_reason": "참조 없음"},
+            "updates": {"ids": [], "empty_reason": "갱신 없음"},
+            "extra_objects": {"objects": [], "empty_reason": "추가 객체 없음"},
+        },
+        "expected_objects": [
+            {"id": "code.ctx.anchor-one", "kind": "CodeLocator"},
+            {"id": "context.ctx", "kind": "DomainContext"},
+            {"id": "evref.ctx.anchor-one", "kind": "EvidenceRef"},
+            {"id": "manifest.ctx.code", "kind": "EvidenceManifest"},
+        ],
+    }), encoding="utf-8")
+    return notes_path, coverage_path, objects_path
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unexpected"])
+def test_build_rejects_missing_or_unexpected_object(
+    mutation, monkeypatch, tmp_path, capsys
+):
+    notes_path, coverage_path, objects_path = _write_complete_build_inputs(tmp_path)
+    real_build = assembly.build
+
+    def changed_build(notes, store, now):
+        result = real_build(notes, store, now)
+        if mutation == "missing":
+            result["objects"] = [
+                obj for obj in result["objects"] if obj["kind"] != "CodeLocator"
+            ]
+        else:
+            result["objects"].append({
+                "id": "ledger.ctx.unexpected", "kind": "EventLedgerRecord"
+            })
+        return result
+
+    monkeypatch.setattr(assembly, "build", changed_build)
+    assert cli._run_build([
+        "--notes", str(notes_path),
+        "--coverage-file", str(coverage_path),
+        "--objects-file", str(objects_path),
+        "--brain-root", str(tmp_path / "brain"),
+    ]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "coverage_build_mismatch"
+    assert not objects_path.exists()
+
+
+def test_build_cli_requires_coverage_file():
+    with pytest.raises(SystemExit):
+        cli._run_build(["--notes", "notes.json", "--objects-file", "objects.json"])
+
+
+def test_build_report_contains_exact_coverage_binding_fields(tmp_path, capsys):
+    notes_path, coverage_path, objects_path = _write_complete_build_inputs(tmp_path)
+
+    assert cli._run_build([
+        "--notes", str(notes_path),
+        "--coverage-file", str(coverage_path),
+        "--objects-file", str(objects_path),
+        "--brain-root", str(tmp_path / "brain"),
+    ]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    identities = [
+        {"id": "code.ctx.anchor-one", "kind": "CodeLocator"},
+        {"id": "context.ctx", "kind": "DomainContext"},
+        {"id": "evref.ctx.anchor-one", "kind": "EvidenceRef"},
+        {"id": "manifest.ctx.code", "kind": "EvidenceManifest"},
+    ]
+    assert report["expected_objects"] == identities
+    assert report["actual_objects"] == identities
+    assert len(report["coverage_sha256"]) == 64
+    assert len(report["objects_sha256"]) == 64
+    assert report["build_binding"] == {
+        "version": 1,
+        "coverage_sha256": report["coverage_sha256"],
+        "expected_objects": identities,
+        "actual_objects": identities,
+        "objects_sha256": report["objects_sha256"],
+    }
 
 
 class TestCliProjectionBuildReuse(unittest.TestCase):

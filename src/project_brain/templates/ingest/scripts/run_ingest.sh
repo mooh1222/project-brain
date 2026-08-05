@@ -39,14 +39,15 @@ NOTES="$(mktemp -t notes.XXXXXX.json)"
 OBJS="$(mktemp -t objects.XXXXXX.json)"
 BUILD_REPORT="$(mktemp -t build-report.XXXXXX.json)"
 FINALIZATION_CONFIG="$(mktemp -t finalization.XXXXXX.json)"
+COVERAGE="$(mktemp -t coverage.XXXXXX.json)"
 ISOLATION_BASELINE="$(mktemp -t isolation-baseline.XXXXXX.json)"
 TRANSACTION_RESULT="$(mktemp -t transaction-result.XXXXXX.json)"
-trap 'rm -f "$NOTES" "$OBJS" "$BUILD_REPORT" "$FINALIZATION_CONFIG" "$ISOLATION_BASELINE" "$TRANSACTION_RESULT"' EXIT
+trap 'rm -f "$NOTES" "$OBJS" "$BUILD_REPORT" "$FINALIZATION_CONFIG" "$COVERAGE" "$ISOLATION_BASELINE" "$TRANSACTION_RESULT"' EXIT
 
 step() { echo "── [$1] ──" >&2; }
 
 step "assemble_notes"
-ASSEMBLE=(python3 "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES")
+ASSEMBLE=(python3 "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES" --coverage-out "$COVERAGE")
 if [ "$DRY" = "0" ] && [ "$DEFER_FINALIZE" = "0" ]; then
   ASSEMBLE+=(--finalization-out "$FINALIZATION_CONFIG")
 fi
@@ -56,7 +57,7 @@ if [ "$DRY" = "0" ] && [ "$DEFER_FINALIZE" = "0" ]; then
 fi
 
 step "build"
-project-brain build --notes "$NOTES" --objects-file "$OBJS" | tee "$BUILD_REPORT" >&2
+project-brain build --notes "$NOTES" --coverage-file "$COVERAGE" --objects-file "$OBJS" | tee "$BUILD_REPORT" >&2
 
 if [ "$DRY" = "1" ]; then
   echo "── [dry] build까지 OK (ingest/finalize 생략) ──"

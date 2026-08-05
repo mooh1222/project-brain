@@ -1,12 +1,206 @@
 import unittest
+
+import pytest
+from project_brain.coverage import CoverageError, normalize_coverage
 from project_brain.assembly import derive_id, build_glossary_terms, build_code_evidence, resolve_refs
 from project_brain.assembly import build_mappings
 from project_brain.assembly import build_manifests, build_context
 from project_brain.assembly import apply_updates
-from project_brain.assembly import build_decisions
+from project_brain.assembly import build_decisions, validate_assembled_inputs
 from project_brain.store import BrainStore
 
 NOW = "2026-06-16T00:00:00Z"
+
+
+def _assembled_coverage_fixture():
+    return {
+        "version": 1,
+        "mode": "assembled",
+        "verify_groups": {"names": ["g1"]},
+        "context": {"key": "ctx", "mode": "create"},
+        "sections": {
+            "sources": {"ids": ["manifest.ctx.code"]},
+            "glossary": {"keys": ["term-one"]},
+            "code_anchors": {"keys": ["anchor-one"]},
+            "mappings": {"keys": ["mapping-one"]},
+            "decisions": {"items": [{
+                "key": "decision-one",
+                "evidence": [{"type": "commit", "ref": "abc"}],
+            }]},
+            "refs": {"items": [{
+                "category": "glossary",
+                "alias": "shared",
+                "id": "g.ctx.existing",
+                "expect": {"kind": "GlossaryTerm", "meta": {"rank": 1}},
+            }]},
+            "updates": {"ids": ["mapping.ctx.old"]},
+            "extra_objects": {"objects": [{
+                "id": "ledger.ctx.extra", "kind": "EventLedgerRecord",
+            }]},
+        },
+        "expected_objects": [
+            {"id": "code.ctx.anchor-one", "kind": "CodeLocator"},
+            {"id": "context.ctx", "kind": "DomainContext"},
+            {"id": "decision.ctx.decision-one", "kind": "DecisionRecord"},
+            {"id": "evref.ctx.anchor-one", "kind": "EvidenceRef"},
+            {"id": "evref.ctx.commit-abc", "kind": "EvidenceRef"},
+            {"id": "g.ctx.term-one", "kind": "GlossaryTerm"},
+            {"id": "ledger.ctx.extra", "kind": "EventLedgerRecord"},
+            {"id": "manifest.ctx.code", "kind": "EvidenceManifest"},
+            {"id": "mapping.ctx.mapping-one", "kind": "DomainMapping"},
+            {"id": "mapping.ctx.old", "kind": "DomainMapping"},
+        ],
+    }
+
+
+def _complete_verify_fixture():
+    return {"groups": [{"group": "g1"}]}
+
+
+def _complete_notes_fixture():
+    return {
+        "context": {
+            "key": "ctx", "commit": "abc", "repo": "demoapp",
+            "display_name": "컨텍스트", "boundary_summary": "경계",
+            "in_scope": [], "out_of_scope": [], "glossary_term_ids": [],
+            "claim_status": "reviewed",
+        },
+        "sources": [{"id": "manifest.ctx.code"}],
+        "glossary": [{"key": "term-one"}],
+        "code_anchors": [{"key": "anchor-one"}],
+        "mappings": [{"key": "mapping-one"}],
+        "decisions": [{
+            "key": "decision-one",
+            "evidence": [{
+                "type": "commit", "ref": "abc", "summary": "커밋 근거",
+            }],
+        }],
+        "refs": {"glossary": {"shared": {
+            "id": "g.ctx.existing",
+            "expect": {"kind": "GlossaryTerm", "meta": {"rank": 1}},
+        }}},
+        "updates": [{"id": "mapping.ctx.old"}],
+        "extra_objects": [{"id": "ledger.ctx.extra", "kind": "EventLedgerRecord"}],
+    }
+
+
+def _remove_identity(notes, section, identity):
+    field = "id" if section in {"sources", "updates"} else "key"
+    notes[section] = [item for item in notes[section] if item[field] != identity]
+
+
+@pytest.mark.parametrize(
+    ("section", "identity"),
+    [
+        ("sources", "manifest.ctx.code"),
+        ("glossary", "term-one"),
+        ("code_anchors", "anchor-one"),
+        ("mappings", "mapping-one"),
+        ("updates", "mapping.ctx.old"),
+    ],
+)
+def test_assemble_rejects_one_missing_declared_item(section, identity):
+    notes = _complete_notes_fixture()
+    _remove_identity(notes, section, identity)
+
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(_assembled_coverage_fixture()),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
+@pytest.mark.parametrize("field", ["category", "alias", "id", "expect"])
+def test_assemble_compares_every_ref_identity_field(field):
+    notes = _complete_notes_fixture()
+    ref = notes["refs"]["glossary"]["shared"]
+    if field == "category":
+        notes["refs"] = {"mapping": notes["refs"].pop("glossary")}
+    elif field == "alias":
+        notes["refs"]["glossary"]["renamed"] = notes["refs"]["glossary"].pop("shared")
+    elif field == "id":
+        ref["id"] = "g.ctx.other"
+    else:
+        ref["expect"] = {"kind": "GlossaryTerm", "meta": {"rank": 2}}
+
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(_assembled_coverage_fixture()),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
+@pytest.mark.parametrize("field", ["key", "evidence"])
+def test_assemble_compares_decision_key_and_evidence(field):
+    notes = _complete_notes_fixture()
+    if field == "key":
+        notes["decisions"][0]["key"] = "decision-other"
+    else:
+        notes["decisions"][0]["evidence"][0]["ref"] = "def"
+
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(_assembled_coverage_fixture()),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
+@pytest.mark.parametrize("field", ["id", "kind"])
+def test_assemble_compares_extra_object_id_and_kind(field):
+    notes = _complete_notes_fixture()
+    notes["extra_objects"][0][field] = (
+        "ledger.ctx.other" if field == "id" else "TemporalFact"
+    )
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(_assembled_coverage_fixture()),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
+def test_assemble_rejects_unexpected_notes_item():
+    notes = _complete_notes_fixture()
+    notes["sources"].append({"id": "manifest.ctx.extra"})
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(_assembled_coverage_fixture()),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+    assert exc.value.code == "coverage_notes_mismatch"
+
+
+def test_assemble_does_not_filter_malformed_unexpected_item():
+    coverage = _assembled_coverage_fixture()
+    coverage["sections"]["glossary"] = {
+        "keys": [], "empty_reason": "용어 없음",
+    }
+    notes = _complete_notes_fixture()
+    notes["glossary"] = [42]
+
+    with pytest.raises(CoverageError) as exc:
+        validate_assembled_inputs(
+            binding=normalize_coverage(coverage),
+            verify_data=_complete_verify_fixture(),
+            notes=notes,
+            store=BrainStore({}),
+        )
+
+    assert exc.value.code == "coverage_notes_mismatch"
 
 
 class DeriveIdTest(unittest.TestCase):
