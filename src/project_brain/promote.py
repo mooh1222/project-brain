@@ -2,7 +2,8 @@
 
 폐기 ingest_mina_kayak_source.build_reviewed_terms(single_object)의 변환을 흡수한다.
 GlossaryTerm 전용 title 문구("Reviewed term: ")는 흡수하지 않는다(spec §3.2) — title은
-caller가 bundle에 미리 박는다. reviewer/reviewed_at은 caller 주입(도메인/시점 상수 0).
+caller가 bundle에 미리 박는다. explicit reviewed_at은 사건 시각으로만 보존하고,
+lifecycle 시각은 mutation transaction이 소유한다.
 
 review_extra_by_id(single_object 전용)는 {object_id: {추가필드}}로, 각 검수기록에 per-id로
 merge한다 — 자동 승격의 vouched_by_mapping_ids(§4.5), 수동 conflict 해소 기록(§4.4)에 쓴다.
@@ -68,7 +69,8 @@ def select_vouched_candidates(store):
     return result
 
 
-def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
+def promote(objects, ids, scope, *, bundle_key=None, reviewer,
+            reviewed_at: str | None,
             review_extra_by_id=None):
     """ids에 해당하는 객체를 reviewed로 승격하고 (promoted_objects, review_records)를 반환.
 
@@ -89,7 +91,7 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
             obj = index[tid]  # 없는 id면 KeyError
             reviewed = dict(obj)
             reviewed["status"] = "reviewed"
-            reviewed["updated_at"] = reviewed_at
+            reviewed.pop("updated_at", None)
             reviewed.pop("candidate", None)
             review_id = format_id("ReviewRecord", target_object_id=reviewed["id"])
             reviewed["review_record_id"] = review_id
@@ -100,8 +102,8 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
                 reviewed_at=reviewed_at,
                 verdict="approved",
                 tags=reviewed.get("tags", []),
-                created_at=reviewed_at,
-                updated_at=reviewed_at,
+                created_at=None,
+                updated_at=None,
                 evidence_refs=reviewed.get("evidence_refs", []),
                 **extra_by_id.get(tid, {}),
             )
@@ -117,7 +119,7 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
             obj = index[mid]  # 없는 id면 KeyError
             m = dict(obj)
             m["status"] = "reviewed"
-            m["updated_at"] = reviewed_at
+            m.pop("updated_at", None)
             m["review_record_id"] = review_id
             m["review_state"] = {
                 "meaning_reviewed": True,
@@ -133,8 +135,8 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer, reviewed_at,
             reviewed_at=reviewed_at,
             verdict="approved",
             tags=[],
-            created_at=reviewed_at,
-            updated_at=reviewed_at,
+            created_at=None,
+            updated_at=None,
             review_type="meaning_review",
             review_scope="mapping_bundle",
             bundle_key=bundle_key,

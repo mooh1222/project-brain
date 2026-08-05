@@ -1141,7 +1141,8 @@ class TestCliPromote(unittest.TestCase):
         self.assertEqual(lint_store(store), [])
 
     def test_promote_reviewed_at_defaults_to_kst_when_omitted(self):
-        # --reviewed-at 생략 시 엔진이 현재 KST(+09:00)를 박는다(시점은 caller 주입이 아니라 엔진 자동).
+        from project_brain import ingest as ingest_module
+
         self._ingest()
         argv = [
             "promote", "--brain-root", str(self.root),
@@ -1149,11 +1150,19 @@ class TestCliPromote(unittest.TestCase):
             *ENGINE_ARGS,
         ]
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+        with mock.patch.object(
+            ingest_module,
+            "_new_mutation_service",
+            return_value=MutationService(
+                clock=lambda: "2026-08-05T12:34:56+09:00"
+            ),
+        ), mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 0)
         rr = BrainStore.load(self.root).get("review.g.neutral.x")
-        self.assertTrue(rr["reviewed_at"].endswith("+09:00"), rr["reviewed_at"])
+        self.assertEqual(rr["reviewed_at"], "2026-08-05T12:34:56+09:00")
+        self.assertEqual(rr["created_at"], rr["updated_at"])
+        self.assertEqual(rr["reviewed_at"], rr["updated_at"])
 
     def test_promote_missing_id_returns_error(self):
         self._ingest()
@@ -1263,6 +1272,9 @@ class TestCliPromote(unittest.TestCase):
                 reviewer="first-reviewer",
                 reviewed_at="2026-06-05T00:00:00Z",
             )
+            first_promoted[0]["updated_at"] = "2026-06-05T00:00:00Z"
+            first_records[0]["created_at"] = "2026-06-05T00:00:00Z"
+            first_records[0]["updated_at"] = "2026-06-05T00:00:00Z"
             for obj in first_promoted + first_records:
                 BrainStore.save_object(self.root, obj)
             return original_apply(**kwargs)
@@ -2176,8 +2188,7 @@ class RunBuildTest(unittest.TestCase):
             BrainStore.save_object(brain, _context_object("ctx"))
             # reviewed GlossaryTerm은 evidence_refs가 필수(schema) → source+code_anchor로 닫는다
             notes_path.write_text(json.dumps({
-                "context": {"key": "ctx", "commit": "abc",
-                            "now": "2026-06-16T00:00:00Z", "repo": "demoapp"},
+                "context": {"key": "ctx", "commit": "abc", "repo": "demoapp"},
                 "sources": [{"id": "manifest.ctx.code", "source_type": "code_search",
                              "title": "코드", "locator": "...", "captured_by": "agent",
                              "captured_at": "2026-06-16T00:00:00Z", "acl": ["team"],
@@ -2202,6 +2213,27 @@ class RunBuildTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             objs = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertTrue(any(o["id"] == "g.ctx.hit" for o in objs))
+
+    def test_context_now_cannot_override_build_clock(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            notes_path, coverage_path, out_path = _write_complete_build_inputs(root)
+            notes = json.loads(notes_path.read_text(encoding="utf-8"))
+            notes["context"]["now"] = "2000-01-01T00:00:00+09:00"
+            notes_path.write_text(json.dumps(notes), encoding="utf-8")
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = cli._run_build([
+                    "--notes", str(notes_path),
+                    "--coverage-file", str(coverage_path),
+                    "--objects-file", str(out_path),
+                    "--brain-root", str(root / "brain"),
+                ])
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads(out.getvalue())["error_code"], "notes_invalid")
+            self.assertFalse(out_path.exists())
 
     def test_build_errors_return_1_and_no_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2270,7 +2302,7 @@ def _write_complete_build_inputs(tmp_path):
     objects_path = tmp_path / "objects.json"
     notes_path.write_text(json.dumps({
         "context": {
-            "key": "ctx", "commit": "abc", "now": "2026-06-16T00:00:00Z",
+            "key": "ctx", "commit": "abc",
             "repo": "demoapp", "display_name": "컨텍스트", "boundary_summary": "경계",
             "in_scope": [], "out_of_scope": [], "glossary_term_ids": [],
             "claim_status": "reviewed",
@@ -2601,7 +2633,10 @@ class TestCliProjectionRefresh(unittest.TestCase):
             store, context_id="context.neutral", requirement_key="rpr",
             source_object_ids=["mapping.neutral.race-end"],
             reuse_payload="착수 브리핑", title="브리핑",
-            generated_at=self.GEN_AT, generated_by="t")
+            generated_by="t")
+        proj["created_at"] = self.GEN_AT
+        proj["updated_at"] = self.GEN_AT
+        proj["generated_at"] = self.GEN_AT
         self.pid = proj["id"]
         # 일부러 stale: 저장 hash를 틀린 값으로(C2 이전 옛 해시·수작업 오류 모사).
         proj["source_content_hash"] = "stale-wrong-hash"

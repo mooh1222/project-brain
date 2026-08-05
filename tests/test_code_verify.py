@@ -6,7 +6,6 @@ import unittest
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from unittest import mock
 
 from project_brain.code_verify import (
     CodeVerificationError,
@@ -482,7 +481,7 @@ class VerifyLocatorForWriteTest(unittest.TestCase):
 
         self.assertEqual(code, "symbol_verification_missing")
 
-    def test_success_returns_quote_hash_and_engine_timestamp(self):
+    def test_success_returns_verification_without_timestamp(self):
         quote = "void Foo::bar() { return; }"
         td, _repo, sha, context = self._committed_repo({
             "src/example.cpp": (quote + "\n").encode(),
@@ -490,17 +489,12 @@ class VerifyLocatorForWriteTest(unittest.TestCase):
         self.addCleanup(td.cleanup)
         target = self._locator(sha)
 
-        with mock.patch(
-            "project_brain.code_verify.now_kst",
-            return_value="2026-07-28T12:34:56+09:00",
-        ):
-            result = verify_locator_for_write(target, repo=context)
+        result = verify_locator_for_write(target, repo=context)
 
         self.assertEqual(result.quote_sha256, sha256(quote.encode()).hexdigest())
-        self.assertEqual(result.verified_at, "2026-07-28T12:34:56+09:00")
         self.assertEqual(result.symbol_status, "verified")
-        self.assertEqual(result.locator["verified_at"], result.verified_at)
-        self.assertNotEqual(result.locator["verified_at"], target["verified_at"])
+        self.assertNotIn("verified_at", result.locator)
+        self.assertFalse(hasattr(result, "verified_at"))
 
     def test_locator_repo_must_match_resolved_repo_context(self):
         td, _repo, sha, context = self._committed_repo({

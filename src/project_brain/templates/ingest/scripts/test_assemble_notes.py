@@ -42,7 +42,7 @@ SPEC = {
     "DISPLAY_NAME": "테스트", "BOUNDARY_SUMMARY": "경계 문장",
     "IN_SCOPE": ["x"], "OUT_OF_SCOPE": ["y"],
     "COVERAGE": _coverage(), "EXCLUDE_TERMS": {"drop-me"},
-    "HISTORY_COVERAGE": "partial", "NOW": "2026-06-26T00:00:00+09:00",
+    "HISTORY_COVERAGE": "partial",
     "CLAIM_STATUS": "reviewed", "SOURCE_ACL": ["team"],
     "CAPTURED_AT": "2026-06-26T00:00:00+09:00",
     "EXPECT_UNMERGED_ANCHORS": False,
@@ -88,13 +88,13 @@ class BuildNotesTest(unittest.TestCase):
         self.assertEqual(notes["mappings"][0]["glossary_keys"], ["keep"])
         self.assertNotIn("drop-me", [g["key"] for g in notes["glossary"]])
 
-    def test_decisions_passthrough_and_now(self):
+    def test_decisions_passthrough_without_caller_clock(self):
         spec = dict(SPEC, DECISIONS=[{"key": "d1", "decision_type": "improvement",
                                       "title": "t", "summary": "s", "decision": "d",
                                       "evidence": [], "affects": ["m1"]}])
         notes = build_notes([_atom("m1")], spec)
         self.assertEqual(notes["decisions"], spec["DECISIONS"])  # 해석 없이 그대로
-        self.assertEqual(notes["context"]["now"], "2026-06-26T00:00:00+09:00")
+        self.assertNotIn("now", notes["context"])
 
     def test_context_shape(self):
         notes = build_notes([_atom("m1", terms=["t1"])], SPEC)
@@ -265,7 +265,7 @@ class EndToEndTest(unittest.TestCase):
         spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g1"]))
         notes = assemble_notes(groups, spec)
         self.assertEqual(notes["mappings"][0]["key"], "m1")
-        self.assertEqual(notes["context"]["now"], spec["NOW"])
+        self.assertNotIn("now", notes["context"])
 
 
 class FinalizationContractTest(unittest.TestCase):

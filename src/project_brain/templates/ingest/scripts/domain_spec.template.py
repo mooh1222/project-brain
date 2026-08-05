@@ -30,7 +30,6 @@ COVERAGE = {                  # 필수. verify 그룹 순서·notes section·최
 }
 EXCLUDE_TERMS = set()        # 독립 회상 가치 없는 용어(사람 판정)
 HISTORY_COVERAGE = "unsearched"   # unsearched | partial | complete
-NOW = ""                      # 고정 ISO 시각 (예: "2026-06-26T00:00:00+09:00") — churn 0
 # claim 기본 상태. candidate GlossaryTerm은 각 항목에 아래 기존 계약을 반드시 함께 둔다:
 # {"candidate": {"candidate_state": "ready_for_review", "candidate_source": "code"}}
 # candidate_state/source의 허용값은 schema.py를 따른다. 후보 메타데이터가 비면 조립이 거부된다.

@@ -249,6 +249,8 @@ def test_glossary_template_promotes_through_official_mutation_gate(tmp_path):
     reviewed, record = promoted[0], records[0]
     expected_record = _load_json(KINDS / "ReviewRecord.template.json")
     expected_record["evidence_refs"] = candidate["evidence_refs"]
+    expected_record.pop("created_at")
+    expected_record.pop("updated_at")
     assert record == expected_record
     result = _mutation_plan(
         brain_root,
@@ -277,9 +279,10 @@ def test_context_projection_template_is_rederived_by_current_builder():
         BrainStore({context["id"]: context}),
         context["id"],
         output_locator=expected["output_locator"],
-        generated_at=FIXED_TIME,
         generated_by=expected["generated_by"],
     )
+    for field in ("created_at", "updated_at", "generated_at"):
+        expected.pop(field)
 
     assert actual == expected
     assert content.startswith("GENERATED FROM PROJECT BRAIN - DO NOT EDIT\n")
@@ -386,6 +389,7 @@ def test_complete_build_notes_exercises_all_sections_and_builds_clean_bundle():
         "updates",
         "extra_objects",
     }
+    notes["context"].pop("now")
     assert validate_notes(notes) == []
     assert all("decision_keys" not in mapping for mapping in notes["mappings"])
     assert notes["decisions"][0]["affects"] == ["behavior"]

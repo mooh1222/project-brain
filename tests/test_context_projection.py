@@ -6,6 +6,7 @@ candidate prompt_payload projection을 생성하고 스키마 검증(validate_ob
 """
 
 import unittest
+import inspect
 
 from project_brain.context_projection import build_reuse_projection
 from project_brain.lint import projection_is_fresh
@@ -70,6 +71,9 @@ class TestBuildReuseProjection(unittest.TestCase):
             _context("context.mina-kayak", context_key="mina-kayak"),
             _mapping("mapping.mina-kayak.race-end-result-achieve", "context.mina-kayak"),
         ])
+        kwargs = {}
+        if "generated_at" in inspect.signature(build_reuse_projection).parameters:
+            kwargs["generated_at"] = T
         return build_reuse_projection(
             store,
             context_id="context.mina-kayak",
@@ -77,12 +81,19 @@ class TestBuildReuseProjection(unittest.TestCase):
             source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
             reuse_payload="데이터 출처: RaceInfo recordMap...",
             title="미나 결과 팝업 순위 표시",
-            generated_at=T,
             generated_by="demo-brain-query",
+            **kwargs,
+        )
+
+    def test_projection_builder_has_no_fabricated_timestamp(self):
+        proj = self._make_proj()
+
+        self.assertFalse(
+            {"created_at", "updated_at", "generated_at"} & proj.keys()
         )
 
     def test_build_reuse_projection_validates(self):
-        from project_brain.schema import validate_object
+        from project_brain.schema import validate_mutation_input_schema
         proj = self._make_proj()
 
         self.assertEqual(proj["status"], "candidate")
@@ -90,7 +101,15 @@ class TestBuildReuseProjection(unittest.TestCase):
         self.assertEqual(proj["id"], "projection.mina-kayak.result-popup-rank.reuse")
         self.assertTrue(proj["projection_hash"], "projection_hash는 비면 안 됨")
         self.assertTrue(proj["source_content_hash"], "source_content_hash는 비면 안 됨")
-        self.assertEqual(validate_object(proj), [])  # 스키마 통과
+        self.assertEqual(
+            validate_mutation_input_schema(
+                proj,
+                omitted_required_fields=frozenset(
+                    {"created_at", "updated_at", "generated_at"}
+                ),
+            ),
+            [],
+        )
 
     def test_id_uses_context_key_not_context_id(self):
         """context_key('mina-kayak')를 id에 쓰고 context_id 전체를 쓰지 않는다."""
@@ -122,7 +141,6 @@ class TestBuildReuseProjection(unittest.TestCase):
                 source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
                 reuse_payload="payload",
                 title="title",
-                generated_at=T,
                 generated_by="test",
             )
 
@@ -144,7 +162,6 @@ class TestBuildReuseFreshnessRoundtrip(unittest.TestCase):
             source_object_ids=["mapping.mina-kayak.race-end-result-achieve"],
             reuse_payload="데이터 출처: RaceInfo recordMap...",
             title="미나 결과 팝업 순위 표시",
-            generated_at=T,
             generated_by="demo-brain-query",
         )
         return store, proj

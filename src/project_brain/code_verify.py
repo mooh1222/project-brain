@@ -15,7 +15,6 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Callable, Iterable
 
-from project_brain.objbase import now_kst
 from project_brain.repo_context import RepoContext, VerificationFailure
 from project_brain.stale_check import GitError
 from project_brain.symbol_verify import SymbolStatus, verify_symbol_relation
@@ -38,7 +37,6 @@ _MANUAL_SYMBOL_FIELDS = frozenset({
 class VerifiedLocator:
     locator: dict
     quote_sha256: str
-    verified_at: str
     symbol_status: str
 
 
@@ -286,13 +284,11 @@ def verify_locator_for_write(
             evidence or "structured manual symbol verification is required",
         )
 
-    verified_at = now_kst()
     verified_locator = dict(locator)
-    verified_locator["verified_at"] = verified_at
+    verified_locator.pop("verified_at", None)
     return VerifiedLocator(
         locator=verified_locator,
         quote_sha256=quote_hash,
-        verified_at=verified_at,
         symbol_status=symbol_status.value,
     )
 

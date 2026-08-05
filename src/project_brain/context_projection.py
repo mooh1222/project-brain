@@ -103,7 +103,6 @@ def build_context_projection(
     context_id: str,
     *,
     output_locator: str,
-    generated_at: str,
     generated_by: str,
 ) -> tuple[dict, str]:
     context = store.get(context_id)
@@ -127,8 +126,6 @@ def build_context_projection(
         "poc_priority": "P0",
         "truth_role": "index",
         "title": f"Generated context_md projection for {context.get('display_name') or context_id}",
-        "created_at": generated_at,
-        "updated_at": generated_at,
         "tags": context.get("tags", []),
         "evidence_refs": [],
         "context_id": context_id,
@@ -137,7 +134,6 @@ def build_context_projection(
         "source_object_ids": source_object_ids,
         "source_content_hash": source_content_hash,
         "projection_hash": projection_hash,
-        "generated_at": generated_at,
         "generated_by": generated_by,
         "stale_policy": "fail_on_manual_edit",
     }
@@ -152,7 +148,6 @@ def build_reuse_projection(
     source_object_ids: list,
     reuse_payload: str,
     title: str,
-    generated_at: str,
     generated_by: str,
 ) -> dict:
     """요구 부분집합 prompt_payload candidate projection을 생성한다.
@@ -177,8 +172,6 @@ def build_reuse_projection(
         "poc_priority": "P0",
         "truth_role": "index",
         "title": title,
-        "created_at": generated_at,
-        "updated_at": generated_at,
         "tags": context.get("tags", []),
         "evidence_refs": [],
         "context_id": context_id,
@@ -188,7 +181,6 @@ def build_reuse_projection(
         "source_object_ids": list(source_object_ids),
         "source_content_hash": source_content_hash,
         "projection_hash": projection_hash,
-        "generated_at": generated_at,
         "generated_by": generated_by,
         "stale_policy": "fail_on_manual_edit",
     }

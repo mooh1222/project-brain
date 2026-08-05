@@ -335,13 +335,8 @@ def plan_mark_checked(
     repo_context: RepoContext,
     engine_sha: str,
 ) -> MarkCheckedPlan:
-    """reviewed mapping closure를 실제 target blob에서 다시 확인해 쓰기 묶음을 만든다."""
-    from project_brain.code_verify import (
-        CodeVerificationError,
-        verify_locator_for_write,
-    )
+    """reviewed mapping closure와 checked commit intent를 mutation 입력으로 고정한다."""
     from project_brain.mutation import corpus_fingerprint
-    from project_brain.objbase import now_kst
     if not isinstance(repo_context, RepoContext):
         raise MarkCheckedError(
             "repo_context_required",
@@ -451,33 +446,11 @@ def plan_mark_checked(
             locator_ids=no_quote,
         )
 
-    verified_locators = []
+    updated = []
     for locator in eligible:
         target = dict(locator)
         target["commit_sha"] = checked_head
-        try:
-            verified = verify_locator_for_write(
-                target,
-                repo=repo_context,
-                manual_symbol_verification=target.get(
-                    "manual_symbol_verification"
-                ),
-            )
-        except CodeVerificationError as exc:
-            raise MarkCheckedError(
-                exc.failure.code,
-                exc.failure.detail,
-                locator_ids=(str(locator["id"]),),
-            ) from exc
-        verified_locators.append(verified.locator)
-
-    verification_event_at = now_kst()
-    updated = []
-    for locator in verified_locators:
-        replacement = dict(locator)
-        replacement["verified_at"] = verification_event_at
-        replacement["updated_at"] = verification_event_at
-        updated.append(replacement)
+        updated.append(target)
 
     preconditions = {
         locator["id"]: hashlib.sha256(

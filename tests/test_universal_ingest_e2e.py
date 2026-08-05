@@ -536,11 +536,10 @@ class MinaKayakEndToEndTest(unittest.TestCase):
             manual_symbol_verification=None,
         ):
             verified = dict(locator)
-            verified["verified_at"] = T
+            verified.pop("verified_at", None)
             return VerifiedLocator(
                 locator=verified,
                 quote_sha256="f" * 64,
-                verified_at=T,
                 symbol_status="verified",
             )
 

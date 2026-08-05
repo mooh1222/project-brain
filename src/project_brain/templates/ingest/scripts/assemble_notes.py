@@ -148,8 +148,6 @@ def build_notes(atoms, spec):
             "out_of_scope": spec["OUT_OF_SCOPE"],
             "glossary_term_ids": gids,
         })
-    if coverage_context["mode"] == "create" and spec.get("NOW"):
-        context["now"] = spec["NOW"]  # CLI(project-brain build)가 context.now를 읽어 build()의 now 인자로 넘김 → churn 0
     # 도메인 근거(code/commit/jira/pr)는 내부 공유 승인 성격이라 redaction_status="approved"를 명시한다.
     # 엔진 build_manifests가 기본값을 안 채우므로(B3, 2026-07-02 발견 1) 노트가 직접 줘야 ingest schema
     # 검사(EvidenceManifest 필수 필드 + enum)를 통과한다. 제한할 근거가 생기면 그 source만 값을 바꾼다.

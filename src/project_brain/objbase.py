@@ -29,7 +29,8 @@ def base(obj, *, tags, created_at, updated_at, schema_version="0.1", poc_priorit
         "evidence_refs": [],
     }
     for k, v in defaults.items():
-        obj.setdefault(k, v)
+        if v is not None:
+            obj.setdefault(k, v)
     return obj
 
 
@@ -61,9 +62,10 @@ def review_record(
         "truth_role": truth_role,
         "title": title,
         "reviewer": reviewer,
-        "reviewed_at": reviewed_at,
         "verdict": verdict,
     }
+    if reviewed_at is not None:
+        obj["reviewed_at"] = reviewed_at
     if target_object_id is not None:
         obj["target_object_id"] = target_object_id
     if target_object_ids is not None:

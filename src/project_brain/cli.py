@@ -618,7 +618,8 @@ def _run_promote(argv) -> int:
     try:
         promoted, records = promote(
             objects, args.ids, args.scope,
-            bundle_key=args.bundle_key, reviewer=args.reviewer, reviewed_at=args.reviewed_at or now_kst(),
+            bundle_key=args.bundle_key, reviewer=args.reviewer,
+            reviewed_at=args.reviewed_at,
             review_extra_by_id=review_extra_by_id,
         )
     except (ValueError, KeyError) as exc:
@@ -707,7 +708,8 @@ def _run_promote_auto(argv) -> int:
         try:
             promoted, records = promote(
                 objects, eligible, "single_object",
-                reviewer="auto:mapping-vouched", reviewed_at=args.reviewed_at or now_kst(),
+                reviewer="auto:mapping-vouched",
+                reviewed_at=args.reviewed_at,
                 review_extra_by_id=review_extra,
             )
         except (ValueError, KeyError) as exc:
@@ -1112,6 +1114,14 @@ def _run_build(argv) -> int:
         store = BrainStore.load(brain_root)
         plan_expected_objects(binding, store)
         notes = json.loads(Path(args.notes).read_text(encoding="utf-8"))
+        notes_context = notes.get("context")
+        if isinstance(notes_context, dict) and "now" in notes_context:
+            print(json.dumps({
+                "ok": False,
+                "error_code": "notes_invalid",
+                "errors": ["노트: context.now는 외부 입력으로 허용하지 않음"],
+            }, ensure_ascii=False, indent=2))
+            return 1
         if binding.mode == "assembled":
             group_names = binding.contract["verify_groups"]["names"]
             assembly.validate_assembled_inputs(
@@ -1120,12 +1130,13 @@ def _run_build(argv) -> int:
                 notes=notes,
                 store=store,
             )
-        # 객체 created_at/updated_at 시점. 노트에 context.now를 적으면 그 값을 쓰고
-        # (소급·테스트 override), 없으면 엔진이 현재 KST를 자동으로 박는다.
-        now = notes.get("context", {}).get("now") or now_kst()
+        # build 결과의 lifecycle은 검토용 preview일 뿐이며 저장 증거가 아니다.
+        # 실제 ingest는 transaction clock으로 다시 stamp한다.
+        now = now_kst()
         result = assembly.build(notes, store, now)
         if result["errors"]:
-            print(json.dumps({"ok": False, "errors": result["errors"]},
+            print(json.dumps({"ok": False, "error_code": "notes_invalid",
+                              "errors": result["errors"]},
                              ensure_ascii=False, indent=2))
             return 1
         artifact = assembly.verify_build_output(binding, result["objects"])
@@ -1306,8 +1317,6 @@ def _run_projection(argv) -> int:
         return 1
 
     payload = Path(args.payload_file).read_text(encoding="utf-8")
-    # mark-checked와 같은 방식의 현재 시각(코퍼스 datetime 표준 KST +09:00, microsecond 없음).
-    now = now_kst()
     projection = build_reuse_projection(
         store,
         context_id=args.context_id,
@@ -1315,7 +1324,6 @@ def _run_projection(argv) -> int:
         source_object_ids=args.source_object_ids,
         reuse_payload=payload,
         title=args.title,
-        generated_at=now,
         generated_by=args.generated_by,
     )
 

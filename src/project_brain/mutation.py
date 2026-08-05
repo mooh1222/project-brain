@@ -382,12 +382,18 @@ class MutationService:
 
         # 3) schema와 enum.
         for obj in inputs:
+            omitted_required_fields = engine_owned_input_fields(
+                request.operation.value,
+                str(obj.get("kind", "")),
+            )
+            if (
+                obj.get("kind") == "ReviewRecord"
+                and obj.get("id") in existing_by_id
+            ):
+                omitted_required_fields -= frozenset({"reviewed_at"})
             errors = validate_mutation_input_schema(
                 obj,
-                omitted_required_fields=engine_owned_input_fields(
-                    request.operation.value,
-                    str(obj.get("kind", "")),
-                ),
+                omitted_required_fields=omitted_required_fields,
             )
             if errors:
                 return _failure("schema_invalid", "; ".join(errors))
@@ -636,6 +642,23 @@ class MutationService:
             )
         except ValueError as exc:
             return _failure("timestamp_policy_missing", str(exc))
+
+        if request.operation is MutationOperation.INGEST:
+            invalid_projection_ids = sorted(
+                action.object_id
+                for action in object_actions
+                if (
+                    action.object_kind == "ContextProjection"
+                    and action.action
+                    in {ObjectActionKind.CREATE, ObjectActionKind.UPDATE}
+                )
+            )
+            if invalid_projection_ids:
+                return _failure(
+                    "operation_kind_invalid",
+                    "ContextProjection create/update requires projection operation: "
+                    + ", ".join(invalid_projection_ids),
+                )
 
         if request.operation is MutationOperation.MARK_CHECKED:
             object_actions = tuple(

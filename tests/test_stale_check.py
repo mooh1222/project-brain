@@ -829,7 +829,7 @@ class MarkCheckedTest(unittest.TestCase):
             ),
         )
 
-    def test_full_closure_reverifies_quote_and_symbol_with_one_event_time(self):
+    def test_full_closure_plans_commit_intent_without_timestamp(self):
         from project_brain.stale_check import plan_mark_checked
 
         repo_context, old, checked = self._repo()
@@ -845,10 +845,11 @@ class MarkCheckedTest(unittest.TestCase):
         self.assertEqual([loc["id"] for loc in plan.updated], ["code.x.shared"])
         locator = plan.updated[0]
         self.assertEqual(locator["commit_sha"], checked)
-        self.assertEqual(locator["verified_at"], locator["updated_at"])
-        self.assertNotEqual(
-            locator["verified_at"],
-            store.get("code.x.shared")["verified_at"],
+        self.assertEqual(
+            locator["verified_at"], store.get("code.x.shared")["verified_at"]
+        )
+        self.assertEqual(
+            locator["updated_at"], store.get("code.x.shared")["updated_at"]
         )
         self.assertEqual(plan.warnings, ({
             "locator_id": "code.x.shared",
@@ -883,27 +884,43 @@ class MarkCheckedTest(unittest.TestCase):
         )
         self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
 
-    def test_symbol_mismatch_refuses_entire_bundle(self):
-        from project_brain.stale_check import (
-            MarkCheckedError,
-            plan_mark_checked,
-        )
+    def test_symbol_mismatch_is_refused_by_mutation_service(self):
+        from project_brain.stale_check import plan_mark_checked
 
         repo_context, old, checked = self._repo()
         store = self._shared(old)
         store.get("code.x.shared")["symbol"] = "Other::bar"
+        brain_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(brain_tmp.cleanup)
+        brain_root = Path(brain_tmp.name).resolve()
+        for obj in store.all():
+            BrainStore.save_object(brain_root, obj)
+        persisted = BrainStore.load(brain_root)
+        plan = plan_mark_checked(
+            persisted,
+            mapping_ids=["mapping.x.r1", "mapping.x.r2"],
+            checked_head=checked,
+            repo_context=repo_context,
+            engine_sha=ENGINE_SHA,
+        )
+        request = MutationRequest(
+            operation=MutationOperation.MARK_CHECKED,
+            brain_root=brain_root,
+            repo_context=plan.repo_context,
+            engine_sha=plan.engine_sha,
+            objects=plan.updated,
+            preconditions=plan.preconditions,
+            expected_corpus_fingerprint=plan.expected_corpus_fingerprint,
+        )
 
-        with self.assertRaises(MarkCheckedError) as raised:
-            plan_mark_checked(
-                store,
-                mapping_ids=["mapping.x.r1", "mapping.x.r2"],
-                checked_head=checked,
-                repo_context=repo_context,
-                engine_sha=ENGINE_SHA,
-            )
+        result = MutationService().apply(plan.updated, request=request)
 
-        self.assertEqual(raised.exception.code, "symbol_mismatch")
-        self.assertEqual(store.get("code.x.shared")["commit_sha"], old)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "symbol_mismatch")
+        self.assertEqual(
+            BrainStore.load(brain_root).get("code.x.shared")["commit_sha"],
+            old,
+        )
 
     def test_partial_closure_is_blocked_without_verification(self):
         from project_brain.stale_check import plan_mark_checked
@@ -970,17 +987,19 @@ class MarkCheckedTest(unittest.TestCase):
             expected_corpus_fingerprint=corpus_fingerprint(store),
         )
 
-        result = MutationService().apply(objects, request=request)
+        event_time = "2026-08-05T12:34:56+09:00"
+        calls = []
+        result = MutationService(
+            clock=lambda: calls.append(event_time) or event_time
+        ).apply(objects, request=request)
 
         self.assertTrue(result.ok)
+        self.assertEqual(calls, [event_time])
         persisted = BrainStore.load(brain_root).get(locator["id"])
         self.assertEqual(persisted["commit_sha"], checked)
         self.assertEqual(persisted["title"], locator["title"])
         self.assertEqual(persisted["verified_at"], persisted["updated_at"])
-        self.assertNotEqual(
-            persisted["verified_at"],
-            locator["verified_at"],
-        )
+        self.assertEqual(persisted["verified_at"], event_time)
 
     def test_same_sha_symbol_failure_refuses_entire_apply_bundle(self):
         repo_context, _old, checked = self._repo()
@@ -1060,13 +1079,11 @@ class CliMarkCheckedTest(unittest.TestCase):
             repo,
             manual_symbol_verification=None,
         ):
-            verified_at = "2026-07-29T00:00:00+09:00"
             verified = dict(locator)
-            verified["verified_at"] = verified_at
+            verified.pop("verified_at", None)
             return VerifiedLocator(
                 locator=verified,
                 quote_sha256="f" * 64,
-                verified_at=verified_at,
                 symbol_status="verified",
             )
 
@@ -1081,10 +1098,6 @@ class CliMarkCheckedTest(unittest.TestCase):
                      expected_revision_ref="origin/develop",
                      target_revision_sha=checked_head,
                  ),
-             ), \
-             mock.patch(
-                 "project_brain.code_verify.verify_locator_for_write",
-                 side_effect=verify_fixture_locator,
              ), \
              mock.patch(
                  "project_brain.mutation.verify_locator_for_write",

@@ -25,6 +25,7 @@ from project_brain.mutation import (
     corpus_fingerprint,
 )
 from project_brain.objbase import base
+from project_brain.promote import promote
 from project_brain.hash_utils import stable_json
 from project_brain.hash_utils import source_content_hash
 from project_brain.repo_context import resolve_repo_context
@@ -1195,12 +1196,16 @@ def test_projection_repair_removes_existing_hash_mismatch(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "operation",
-    [MutationOperation.PROJECTION, MutationOperation.INGEST],
+    ("operation", "expected_error"),
+    [
+        (MutationOperation.PROJECTION, "existing_lint_problem"),
+        (MutationOperation.INGEST, "operation_kind_invalid"),
+    ],
 )
 def test_general_mutation_still_rejects_existing_projection_mismatch(
     tmp_path,
     operation,
+    expected_error,
 ):
     brain_root = tmp_path / operation.value
     source = context()
@@ -1217,7 +1222,7 @@ def test_general_mutation_still_rejects_existing_projection_mismatch(
         preconditions={stale["id"]: _object_hash(stale)},
     )
 
-    assert result.error_code == "existing_lint_problem"
+    assert result.error_code == expected_error
 
 
 @pytest.mark.parametrize("case", ["missing", "extra", "mismatch"])
@@ -2479,6 +2484,90 @@ def test_unchanged_ingest_locator_preserves_engine_fields(tmp_path):
     assert result.after["title"] == "legacy display"
 
 
+def test_locator_apply_create_change_and_noop_timestamp_contract(tmp_path):
+    repo_context, sha = _git_repo(tmp_path)
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(commit_sha=sha)
+    create_request = _request(
+        brain_root,
+        (locator,),
+        repo_context=repo_context,
+    )
+
+    created = MutationService(clock=lambda: FIXED_TIME).apply(
+        create_request.objects,
+        request=create_request,
+    )
+
+    stored = object_by_id(created.after_objects, locator["id"])
+    assert created.outcome is transaction_receipt.MutationOutcome.COMMITTED
+    assert (
+        stored["created_at"], stored["updated_at"], stored["verified_at"]
+    ) == (FIXED_TIME, FIXED_TIME, FIXED_TIME)
+
+    second_path = repo_context.repo_root / "Bar.cpp"
+    second_path.write_text("void Foo::bar() {}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Bar.cpp"], cwd=repo_context.repo_root, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "second locator"],
+        cwd=repo_context.repo_root,
+        check=True,
+    )
+    second_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_context.repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    second_context = resolve_repo_context(
+        repo_context.repo_root,
+        expected_repo_id="demo",
+        configured_repo_id="demo",
+        expected_revision_ref=second_sha,
+    )
+    changed = {
+        **stored,
+        "path": "Bar.cpp",
+        "commit_sha": second_sha,
+        "verified_at": "2099-01-01T00:00:00+09:00",
+    }
+    change_request = _request(
+        brain_root,
+        (changed,),
+        repo_context=second_context,
+    )
+
+    updated = MutationService(clock=lambda: NEW_EVENT_TIME).apply(
+        change_request.objects,
+        request=change_request,
+    )
+
+    changed_stored = object_by_id(updated.after_objects, locator["id"])
+    assert updated.outcome is transaction_receipt.MutationOutcome.COMMITTED
+    assert changed_stored["created_at"] == FIXED_TIME
+    assert (
+        changed_stored["updated_at"], changed_stored["verified_at"]
+    ) == (NEW_EVENT_TIME, NEW_EVENT_TIME)
+
+    caller_noop = {
+        **changed_stored,
+        "verified_at": "2099-01-02T00:00:00+09:00",
+    }
+    noop_request = _request(brain_root, (caller_noop,))
+
+    def forbidden_clock() -> str:
+        raise AssertionError("unchanged locator opened transaction clock")
+
+    noop = MutationService(clock=forbidden_clock).apply(
+        noop_request.objects,
+        request=noop_request,
+    )
+
+    assert noop.outcome is transaction_receipt.MutationOutcome.NO_CHANGES
+    assert object_by_id(noop.after_objects, locator["id"]) == changed_stored
+
+
 def test_legacy_id_only_is_the_only_no_quote_exception(tmp_path):
     repo_context, sha = _git_repo(tmp_path)
     normal = _code_locator(commit_sha=sha, quote=None)
@@ -3494,6 +3583,187 @@ def test_live_pre_schema_allows_engine_fields_omission_before_final_stamp(
     stored = object_by_id(result.after_objects, draft["id"])
     assert result.ok
     assert stored["created_at"] == stored["updated_at"] == FIXED_TIME
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_ok", "expected_error"),
+    [
+        (MutationOperation.PROJECTION, True, None),
+        (MutationOperation.INGEST, False, "operation_kind_invalid"),
+    ],
+)
+def test_context_projection_writes_require_projection_operation(
+    tmp_path,
+    operation,
+    expected_ok,
+    expected_error,
+):
+    brain_root = tmp_path / operation.value
+    _write_raw(brain_root, context())
+    draft = _projection(source_hash=source_content_hash([context()]))
+    for field in ("created_at", "updated_at", "generated_at"):
+        draft.pop(field)
+    request = _request(
+        brain_root,
+        (draft,),
+        operation=operation,
+        coverage=None if operation is MutationOperation.PROJECTION else _AUTO_COVERAGE,
+    )
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    assert (result.ok, result.error_code) == (expected_ok, expected_error)
+    if expected_ok:
+        stored = object_by_id(result.after_objects, draft["id"])
+        assert (
+            stored["created_at"],
+            stored["updated_at"],
+            stored["generated_at"],
+        ) == (FIXED_TIME, FIXED_TIME, FIXED_TIME)
+
+
+def test_projection_apply_update_and_noop_use_clock_only_for_change(tmp_path):
+    brain_root = tmp_path / "brain"
+    source = context()
+    _write_raw(brain_root, source)
+    draft = _projection(source_hash=source_content_hash([source]))
+    for field in ("created_at", "updated_at", "generated_at"):
+        draft.pop(field)
+    create_request = _request(
+        brain_root,
+        (draft,),
+        operation=MutationOperation.PROJECTION,
+        coverage=None,
+    )
+    created = MutationService(clock=lambda: FIXED_TIME).apply(
+        create_request.objects,
+        request=create_request,
+    )
+    old = object_by_id(created.after_objects, draft["id"])
+    changed = {**old, "reuse_payload": "new payload"}
+    for field in ("created_at", "updated_at", "generated_at"):
+        changed.pop(field)
+    update_request = _request(
+        brain_root,
+        (changed,),
+        operation=MutationOperation.PROJECTION,
+        coverage=None,
+    )
+
+    updated = MutationService(clock=lambda: NEW_EVENT_TIME).apply(
+        update_request.objects,
+        request=update_request,
+    )
+
+    stored = object_by_id(updated.after_objects, draft["id"])
+    assert stored["created_at"] == FIXED_TIME
+    assert (stored["updated_at"], stored["generated_at"]) == (
+        NEW_EVENT_TIME,
+        NEW_EVENT_TIME,
+    )
+    noop_draft = dict(stored)
+    for field in ("created_at", "updated_at", "generated_at"):
+        noop_draft.pop(field)
+    noop_request = _request(
+        brain_root,
+        (noop_draft,),
+        operation=MutationOperation.PROJECTION,
+        coverage=None,
+    )
+
+    def forbidden_clock() -> str:
+        raise AssertionError("projection no-op opened transaction clock")
+
+    noop = MutationService(clock=forbidden_clock).apply(
+        noop_request.objects,
+        request=noop_request,
+    )
+
+    assert noop.outcome is transaction_receipt.MutationOutcome.NO_CHANGES
+    assert object_by_id(noop.after_objects, draft["id"]) == stored
+
+
+@pytest.mark.parametrize("reviewed_at", [None, NEW_EVENT_TIME])
+def test_promote_apply_stamps_lifecycle_and_preserves_explicit_review_time(
+    tmp_path,
+    reviewed_at,
+):
+    brain_root = tmp_path / ("omitted" if reviewed_at is None else "explicit")
+    term = candidate_term()
+    term["evidence_refs"] = ["evref.neutral.ref"]
+    for obj in (manifest(), evidence_ref(), context(), term):
+        _write_raw(brain_root, obj)
+    promoted, records = promote(
+        [term],
+        [term["id"]],
+        "single_object",
+        reviewer="alice",
+        reviewed_at=reviewed_at,
+    )
+    inputs = tuple(promoted + records)
+    before = BrainStore.load(brain_root)
+    request = _request(
+        brain_root,
+        inputs,
+        operation=MutationOperation.PROMOTE,
+        preconditions={term["id"]: _object_hash(term)},
+        expected_corpus_fingerprint=corpus_fingerprint(before),
+        coverage=None,
+    )
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    promoted_stored = object_by_id(result.after_objects, term["id"])
+    review_stored = object_by_id(result.after_objects, records[0]["id"])
+    assert result.outcome is transaction_receipt.MutationOutcome.COMMITTED
+    assert promoted_stored["created_at"] == term["created_at"]
+    assert promoted_stored["updated_at"] == FIXED_TIME
+    assert review_stored["created_at"] == review_stored["updated_at"] == FIXED_TIME
+    assert review_stored["reviewed_at"] == (
+        FIXED_TIME if reviewed_at is None else reviewed_at
+    )
+
+
+def test_plain_ingest_cannot_omit_review_record_reviewed_at(tmp_path):
+    draft = review_record_for("review.g.neutral.x", "g.neutral.x")
+    for field in ("created_at", "updated_at", "reviewed_at"):
+        draft.pop(field)
+    request = _request(tmp_path / "brain", (draft,))
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    assert (result.ok, result.error_code) == (False, "schema_invalid")
+
+
+def test_promote_reviewed_at_omission_allowlist_is_new_record_only(tmp_path):
+    brain_root = tmp_path / "brain"
+    existing = review_record_for("review.g.neutral.x", "g.neutral.x")
+    _write_raw(brain_root, existing)
+    draft = dict(existing)
+    for field in ("created_at", "updated_at", "reviewed_at"):
+        draft.pop(field)
+    request = _request(
+        brain_root,
+        (draft,),
+        operation=MutationOperation.PROMOTE,
+        coverage=None,
+    )
+
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        request.objects,
+        request=request,
+    )
+
+    assert (result.ok, result.error_code) == (False, "schema_invalid")
 
 
 def test_invalid_injected_clock_fails_before_manifest(tmp_path):

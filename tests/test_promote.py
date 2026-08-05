@@ -12,7 +12,7 @@ from project_brain.promote import (
     backfill_evidence,
     select_vouched_candidates,
 )
-from project_brain.schema import validate_object
+from project_brain.schema import validate_mutation_input_schema
 from project_brain.store import BrainStore
 
 T = "2026-06-04T00:00:00Z"
@@ -44,6 +44,20 @@ def candidate_term(tid, *, candidate=None, term="용어", title="Candidate term:
 
 
 class TestSingleObject(unittest.TestCase):
+    def test_omitted_reviewed_at_remains_unset_until_mutation(self):
+        promoted, records = promote(
+            [candidate_term("g.neutral.x")],
+            ["g.neutral.x"],
+            "single_object",
+            reviewer="user-confirmed",
+            reviewed_at=None,
+        )
+
+        self.assertNotIn("updated_at", promoted[0])
+        self.assertFalse(
+            {"created_at", "updated_at", "reviewed_at"} & records[0].keys()
+        )
+
     def test_single_object_promotes_candidate_glossary(self):
         objs = [candidate_term("g.neutral.x")]
         promoted, records = promote(
@@ -53,7 +67,7 @@ class TestSingleObject(unittest.TestCase):
         p = promoted[0]
         self.assertEqual(p["status"], "reviewed")
         self.assertNotIn("candidate", p)
-        self.assertEqual(p["updated_at"], T)
+        self.assertNotIn("updated_at", p)
         self.assertEqual(p["review_record_id"], "review.g.neutral.x")
         self.assertEqual(len(records), 1)
         rr = records[0]
@@ -69,8 +83,19 @@ class TestSingleObject(unittest.TestCase):
         promoted, records = promote(
             objs, ["g.neutral.x"], "single_object", reviewer="user-confirmed", reviewed_at=T,
         )
-        self.assertEqual(validate_object(promoted[0]), [])
-        self.assertEqual(validate_object(records[0]), [])
+        self.assertEqual(
+            validate_mutation_input_schema(
+                promoted[0], omitted_required_fields=frozenset({"updated_at"})
+            ),
+            [],
+        )
+        self.assertEqual(
+            validate_mutation_input_schema(
+                records[0],
+                omitted_required_fields=frozenset({"created_at", "updated_at"}),
+            ),
+            [],
+        )
 
     def test_single_object_drops_conflict_candidate(self):
         conflict = {
@@ -83,7 +108,12 @@ class TestSingleObject(unittest.TestCase):
             objs, ["g.neutral.c"], "single_object", reviewer="user-confirmed", reviewed_at=T,
         )
         self.assertNotIn("candidate", promoted[0])
-        self.assertEqual(validate_object(promoted[0]), [])
+        self.assertEqual(
+            validate_mutation_input_schema(
+                promoted[0], omitted_required_fields=frozenset({"updated_at"})
+            ),
+            [],
+        )
 
     def test_single_object_does_not_rewrite_title(self):
         objs = [candidate_term("g.neutral.x", title="원본 제목")]
@@ -134,8 +164,14 @@ class TestSingleObject(unittest.TestCase):
             rr["vouched_by_mapping_ids"],
             ["mapping.neutral.z", "mapping.neutral.a"],
         )
-        # 추가 필드가 있어도 스키마 통과
-        self.assertEqual(validate_object(rr), [])
+        # 추가 필드가 있어도 mutation 전 스키마를 통과한다.
+        self.assertEqual(
+            validate_mutation_input_schema(
+                rr,
+                omitted_required_fields=frozenset({"created_at", "updated_at"}),
+            ),
+            [],
+        )
 
     def test_single_object_no_extra_when_absent(self):
         objs = [candidate_term("g.neutral.x")]
@@ -225,8 +261,19 @@ class TestMappingBundle(unittest.TestCase):
             reviewer="user-confirmed", reviewed_at=T,
         )
         for p in promoted:
-            self.assertEqual(validate_object(p), [])
-        self.assertEqual(validate_object(records[0]), [])
+            self.assertEqual(
+                validate_mutation_input_schema(
+                    p, omitted_required_fields=frozenset({"updated_at"})
+                ),
+                [],
+            )
+        self.assertEqual(
+            validate_mutation_input_schema(
+                records[0],
+                omitted_required_fields=frozenset({"created_at", "updated_at"}),
+            ),
+            [],
+        )
 
     def test_mapping_bundle_requires_bundle_key(self):
         objs = [candidate_mapping("mapping.neutral.one", mapping_key="one")]
