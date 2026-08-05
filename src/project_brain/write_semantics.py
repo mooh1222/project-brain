@@ -105,21 +105,18 @@ _ALLOWED_TIMESTAMP_ACTIONS = {
         {
             ObjectActionKind.CREATE,
             ObjectActionKind.UPDATE,
-            ObjectActionKind.REFERENCE_REWRITE,
         }
     ),
     "promote": frozenset(
         {
             ObjectActionKind.CREATE,
             ObjectActionKind.UPDATE,
-            ObjectActionKind.REFERENCE_REWRITE,
         }
     ),
     "promote_auto": frozenset(
         {
             ObjectActionKind.CREATE,
             ObjectActionKind.UPDATE,
-            ObjectActionKind.REFERENCE_REWRITE,
         }
     ),
     "mark_checked": frozenset({ObjectActionKind.UPDATE}),
@@ -257,6 +254,11 @@ def _reference_map(obj: Mapping[str, object]) -> dict[str, str]:
     return {ref.pointer: ref.object_id for ref in iter_object_refs(obj)}
 
 
+def _substantive_shape(obj: Mapping[str, object]) -> dict[str, object]:
+    engine_temporal = engine_owned_temporal_fields(str(obj.get("kind", "")))
+    return {key: value for key, value in obj.items() if key not in engine_temporal}
+
+
 def reference_only_rewrite(
     before: Mapping[str, object],
     after: Mapping[str, object],
@@ -279,8 +281,8 @@ def reference_only_rewrite(
         for pointer in changed
     ):
         return False
-    rewritten, _ = rewrite_object_refs(before, replacements)
-    return _json_exact(rewritten, dict(after))
+    rewritten, _ = rewrite_object_refs(_substantive_shape(before), replacements)
+    return _json_exact(rewritten, _substantive_shape(after))
 
 
 def _timestamp_policy(
@@ -318,10 +320,10 @@ def _rename_is_exact(
     after: Mapping[str, object],
     replacements: Mapping[str, str],
 ) -> bool:
-    projected = dict(before)
+    projected = _substantive_shape(before)
     projected["id"] = after.get("id")
     projected, _ = rewrite_object_refs(projected, replacements)
-    return _json_exact(projected, dict(after))
+    return _json_exact(projected, _substantive_shape(after))
 
 
 def _verified_rewrite_is_exact(
@@ -373,12 +375,20 @@ def classify_object_actions(
         before = existing_by_id[old_id]
         after = transformed_by_id[new_id]
         exact_move = _rename_is_exact(before, after, replacements)
+        source_id = (
+            new_id
+            if (
+                operation_value == "canonical_repair"
+                and new_id in existing_by_id
+            )
+            else old_id
+        )
         actions.append(
             ObjectWriteAction(
                 action=ObjectActionKind.RENAME,
                 object_id=new_id,
                 object_kind=str(after.get("kind", before.get("kind", ""))),
-                source_id=old_id,
+                source_id=source_id,
                 timestamp_policy=_timestamp_policy(
                     operation_value,
                     ObjectActionKind.RENAME,
@@ -393,7 +403,7 @@ def classify_object_actions(
     for object_id in sorted(common_ids):
         before = existing_by_id[object_id]
         after = transformed_by_id[object_id]
-        if _json_exact(before, after):
+        if _json_exact(_substantive_shape(before), _substantive_shape(after)):
             action_kind = ObjectActionKind.NO_CHANGE
             exact_reference_rewrite = False
         elif _verified_rewrite_is_exact(

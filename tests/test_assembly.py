@@ -1022,6 +1022,18 @@ class ValidateNotesTest(unittest.TestCase):
 
 
 class BuildIntegrationTest(unittest.TestCase):
+    def test_build_merged_store_rejects_untouched_missing_lifecycle_before_task6(self):
+        existing = _context()
+        del existing["created_at"]
+        notes = {"context": {"key": "ctx", "commit": "a", "now": NOW}}
+
+        result = build(notes, _store(existing), NOW)
+
+        self.assertTrue(
+            any("missing base field 'created_at'" in error for error in result["errors"]),
+            result["errors"],
+        )
+
     def test_build_new_objects_bundle(self):
         notes = {
             "context": {"key": "ctx", "commit": "abc", "now": NOW, "repo": "demoapp"},

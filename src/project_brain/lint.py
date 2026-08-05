@@ -18,7 +18,6 @@ from project_brain.schema import (
     validate_object_schema,
 )
 from project_brain.store import BrainStore
-from project_brain.write_semantics import engine_owned_input_fields
 
 GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
 LEGACY_SOURCE_TYPES = {"context", "wiki"}
@@ -176,9 +175,10 @@ def _lint_store_report(
         schema_problems = (
             validate_mutation_input_schema(
                 obj,
-                omitted_required_fields=engine_owned_input_fields(
-                    operation,
-                    str(obj.get("kind", "")),
+                omitted_required_fields=(
+                    frozenset({"verified_at"})
+                    if obj.get("kind") == "CodeLocator"
+                    else frozenset()
                 ),
             )
             if mutation_input
@@ -367,7 +367,8 @@ def lint_mutation_input_store_report(
 ) -> tuple[LintProblem, ...]:
     """MutationService에 넘길 draft bundle 전용 lint.
 
-    operation별 engine-owned 필드 누락만 중앙 stamp 전까지 허용한다.
+    Task 6 producer 전환 전에는 기존 CodeLocator ``verified_at`` 누락만 허용한다.
+    operation 인자는 이후 operation-aware allowlist 활성화를 위한 필수 계약이다.
     일반/public lint와 최종 merged lint는 이 함수를 사용하지 않는다.
     """
     return _lint_store_report(

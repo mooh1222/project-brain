@@ -19,6 +19,7 @@ from tests.test_ingest import candidate_mapping, manifest as manifest_fixture
 
 T = "2026-06-04T00:00:00Z"
 EVENT_TIME = "2026-08-05T12:34:56+09:00"
+CALLER_LIFECYCLE = "2099-01-01T00:00:00+09:00"
 
 
 def event(*, happened_at: object = T, object_id: str = "ledger.neutral.change") -> dict:
@@ -213,6 +214,51 @@ def test_context_replace_action_matrix_distinguishes_exact_move_from_live_rename
     assert live[0].timestamp_policy is TimestampPolicy.LIVE
 
 
+def test_exact_move_ignores_caller_lifecycle_values_when_classifying_payload():
+    old = mapping(object_id="mapping.neutral.old")
+    moved = {
+        **old,
+        "id": "mapping.neutral.new",
+        "created_at": CALLER_LIFECYCLE,
+        "updated_at": CALLER_LIFECYCLE,
+    }
+
+    actions = classify_object_actions(
+        operation="context_replace",
+        existing_by_id={old["id"]: old},
+        transformed_by_id={moved["id"]: moved},
+        delete_ids=(old["id"],),
+        rename_pairs=((old["id"], moved["id"]),),
+        verified_reference_rewrites=(),
+    )
+
+    assert [(action.action, action.timestamp_policy) for action in actions] == [
+        (ObjectActionKind.RENAME, TimestampPolicy.PRESERVE)
+    ]
+
+
+def test_caller_lifecycle_values_alone_are_no_change():
+    old = mapping()
+    caller = {
+        **old,
+        "created_at": CALLER_LIFECYCLE,
+        "updated_at": CALLER_LIFECYCLE,
+    }
+
+    actions = classify_object_actions(
+        operation="ingest",
+        existing_by_id={old["id"]: old},
+        transformed_by_id={caller["id"]: caller},
+        delete_ids=(),
+        rename_pairs=(),
+        verified_reference_rewrites=(),
+    )
+
+    assert [(action.action, action.timestamp_policy) for action in actions] == [
+        (ObjectActionKind.NO_CHANGE, None)
+    ]
+
+
 def test_reference_only_rewrite_requires_same_pointer_shape():
     before = mapping(evidence_refs=["evref.neutral.old"])
     after = {**before, "evidence_refs": ["evref.neutral.new"]}
@@ -247,6 +293,86 @@ def test_verified_same_pointer_reference_rewrite_is_a_preserve_action():
     assert [(action.action, action.timestamp_policy) for action in actions] == [
         (ObjectActionKind.REFERENCE_REWRITE, TimestampPolicy.PRESERVE)
     ]
+
+
+def test_verified_reference_rewrite_ignores_caller_lifecycle_values():
+    before = mapping(evidence_refs=["evref.neutral.old"])
+    after = {
+        **before,
+        "evidence_refs": ["evref.neutral.new"],
+        "created_at": CALLER_LIFECYCLE,
+        "updated_at": CALLER_LIFECYCLE,
+    }
+
+    actions = classify_object_actions(
+        operation="context_replace",
+        existing_by_id={before["id"]: before},
+        transformed_by_id={after["id"]: after},
+        delete_ids=(),
+        rename_pairs=(),
+        verified_reference_rewrites=(
+            VerifiedReferenceRewrite(
+                object_id=before["id"],
+                pointer="/evidence_refs/0",
+                before_id="evref.neutral.old",
+                after_id="evref.neutral.new",
+            ),
+        ),
+    )
+
+    assert [(action.action, action.timestamp_policy) for action in actions] == [
+        (ObjectActionKind.REFERENCE_REWRITE, TimestampPolicy.PRESERVE)
+    ]
+
+
+def test_canonical_collision_rename_uses_existing_target_as_timestamp_source():
+    deleted = mapping(object_id="mapping.neutral.old", meaning="deleted")
+    deleted["created_at"] = "2020-01-01T00:00:00Z"
+    survivor = mapping(object_id="mapping.neutral.new", meaning="survivor")
+    survivor["created_at"] = "2021-01-01T00:00:00Z"
+
+    actions = classify_object_actions(
+        operation="canonical_repair",
+        existing_by_id={deleted["id"]: deleted, survivor["id"]: survivor},
+        transformed_by_id={survivor["id"]: dict(survivor)},
+        delete_ids=(deleted["id"],),
+        rename_pairs=((deleted["id"], survivor["id"]),),
+        verified_reference_rewrites=(),
+    )
+    stamped = apply_timestamp_policy(
+        [survivor],
+        actions=actions,
+        existing_by_id={deleted["id"]: deleted, survivor["id"]: survivor},
+        operation="canonical_repair",
+        verified_object_ids=(),
+        event_time=EVENT_TIME,
+    )[0]
+
+    assert actions[0].source_id == survivor["id"]
+    assert stamped["created_at"] == survivor["created_at"]
+
+
+@pytest.mark.parametrize("operation", ["ingest", "promote", "promote_auto"])
+def test_live_operations_reject_verified_reference_rewrite_action(operation):
+    before = mapping(evidence_refs=["evref.neutral.old"])
+    after = {**before, "evidence_refs": ["evref.neutral.new"]}
+
+    with pytest.raises(ValueError, match="timestamp_policy_missing"):
+        classify_object_actions(
+            operation=operation,
+            existing_by_id={before["id"]: before},
+            transformed_by_id={after["id"]: after},
+            delete_ids=(),
+            rename_pairs=(),
+            verified_reference_rewrites=(
+                VerifiedReferenceRewrite(
+                    object_id=before["id"],
+                    pointer="/evidence_refs/0",
+                    before_id="evref.neutral.old",
+                    after_id="evref.neutral.new",
+                ),
+            ),
+        )
 
 
 def test_unregistered_operation_action_pair_has_no_timestamp_policy_fallback():

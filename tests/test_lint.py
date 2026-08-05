@@ -102,6 +102,24 @@ class TestLintStore(unittest.TestCase):
             (),
         )
 
+    def test_mutation_input_lint_does_not_allow_missing_engine_fields_before_task6(self):
+        projection = _projection(
+            source_object_ids=[],
+            source_content_hash="e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        )
+        del projection["generated_at"]
+
+        report = lint_mutation_input_store_report(
+            store_of(projection),
+            operation="projection",
+        )
+
+        assert any(
+            problem.code == "schema" and "generated_at" in problem.message
+            for problem in report
+        )
+
     def test_structured_report_keeps_wrapper_messages_compatible(self):
         term = candidate_term()
         term["evidence_refs"] = ["evref.neutral.missing"]
