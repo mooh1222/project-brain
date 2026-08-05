@@ -2,6 +2,8 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -163,6 +165,111 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _timestamp_details_bytes(payload: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _timestamp_details_target_stat(parent_fd: int, name: str):
+    try:
+        target_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(target_stat.st_mode):
+        raise ValueError(
+            "timestamp details target must be a regular file when it exists"
+        )
+    return target_stat
+
+
+def _atomic_write_timestamp_details(path: Path, payload: bytes) -> None:
+    """검증된 absolute regular target에 canonical details를 원자 교체한다."""
+    if not path.is_absolute():
+        raise ValueError("timestamp details path must be absolute")
+    parent = path.parent
+    try:
+        parent_stat = parent.lstat()
+    except OSError as exc:
+        raise ValueError(
+            "timestamp details parent must be an existing directory"
+        ) from exc
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ValueError(
+            "timestamp details parent must be an existing real directory"
+        )
+
+    parent_fd = os.open(
+        parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    temporary_name = ""
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (
+            opened_parent.st_dev != parent_stat.st_dev
+            or opened_parent.st_ino != parent_stat.st_ino
+        ):
+            raise ValueError("timestamp details parent changed during validation")
+        before = _timestamp_details_target_stat(parent_fd, path.name)
+
+        for _ in range(100):
+            candidate = f".{path.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            temporary_name = candidate
+            break
+        else:
+            raise OSError("could not allocate timestamp details temporary file")
+
+        try:
+            view = memoryview(payload)
+            written = 0
+            while written < len(view):
+                written += os.write(descriptor, view[written:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+        after = _timestamp_details_target_stat(parent_fd, path.name)
+        if before is None and after is not None:
+            raise ValueError("timestamp details target appeared during write")
+        if before is not None and (
+            after is None
+            or after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+        ):
+            raise ValueError("timestamp details target changed during write")
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        temporary_name = ""
+        os.fsync(parent_fd)
+    finally:
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        os.close(parent_fd)
 
 
 def _run_query(argv) -> int:
@@ -973,6 +1080,10 @@ def _run_audit(argv) -> int:
     parser.add_argument("--no-fetch", action="store_true", help="git fetch 생략(오프라인·테스트)")
     parser.add_argument("--no-stale", action="store_true",
                         help="stale-check 생략(git 없는 환경) — lint·isolated만 돈다")
+    parser.add_argument(
+        "--timestamp-details-file",
+        help="객체 ID를 포함한 timestamp 진단 JSON의 absolute 출력 경로",
+    )
     args = parser.parse_args(argv)
 
     brain_root = resolve_brain_root(args.brain_root)
@@ -991,6 +1102,31 @@ def _run_audit(argv) -> int:
         acl_evaluator=None,
         now=now_kst(),
     )
+    if args.timestamp_details_file:
+        from project_brain.write_semantics import collect_timestamp_diagnostics
+
+        try:
+            details = collect_timestamp_diagnostics(
+                store.all(),
+                include_object_ids=True,
+            )
+            _atomic_write_timestamp_details(
+                Path(args.timestamp_details_file),
+                _timestamp_details_bytes(details),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            failure_report = {
+                **report,
+                "ok": False,
+                "audit_ok": report["ok"],
+                "timestamp_details": {
+                    "ok": False,
+                    "error_code": "timestamp_details_write_failed",
+                    "error": str(exc),
+                },
+            }
+            print(json.dumps(failure_report, ensure_ascii=False, indent=2))
+            return 2
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 

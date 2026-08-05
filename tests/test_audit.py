@@ -3,6 +3,7 @@ from pathlib import Path
 
 from project_brain.audit import run_audit
 from project_brain.store import BrainStore
+from tests.test_ingest import manifest
 
 
 def _store(*objects: dict) -> BrainStore:
@@ -46,6 +47,46 @@ def _unchanged_git_runner(calls: list[list[str]]):
         raise AssertionError(f"unexpected git args: {args}")
 
     return run
+
+
+def _audit_without_git(store: BrainStore, brain_root: Path) -> dict:
+    return run_audit(
+        store,
+        brain_root=brain_root,
+        no_stale=True,
+        principal=None,
+        acl_evaluator=None,
+        now="2026-08-05T12:34:56+09:00",
+    )
+
+
+def test_audit_reports_invalid_timestamp_without_changing_ok(tmp_path: Path):
+    legacy = manifest()
+    legacy["captured_at"] = "legacy"
+
+    report = _audit_without_git(_store(legacy), tmp_path)
+
+    assert report["ok"] is True
+    assert report["timestamps"]["timestamp_format_legacy"] == {
+        "count": 1,
+        "by_field": {"captured_at": 1},
+        "by_reason": {"not_datetime": 1},
+        "by_date": {"unknown": 1},
+    }
+
+
+def test_audit_midnight_density_is_informational(tmp_path: Path):
+    report = _audit_without_git(_store(manifest()), tmp_path)
+
+    assert report["ok"] is True
+    assert report["timestamps"]["midnight_density"] == {
+        "total_timestamp_values": 3,
+        "midnight_values": 3,
+        "ratio": 1.0,
+        "by_field": {"captured_at": 1, "created_at": 1, "updated_at": 1},
+        "by_context": {"neutral": 3},
+        "by_date": {"2026-06-04": 3},
+    }
 
 
 def test_locator_always_has_six_axes_and_missing_quote_does_not_skip_stale(

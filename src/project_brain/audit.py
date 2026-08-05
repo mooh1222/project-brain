@@ -26,6 +26,7 @@ from project_brain.stale_check import (
 )
 from project_brain.store import BrainStore
 from project_brain.symbol_verify import SymbolStatus, verify_symbol_relation
+from project_brain.write_semantics import collect_timestamp_diagnostics
 
 
 AclEvaluator = Callable[
@@ -300,6 +301,7 @@ def run_audit(
         and axes_ok
         and (no_stale or code_quotes["ok"])
     )
+    timestamps = collect_timestamp_diagnostics(store.all())
     return {
         "ok": ok,
         "lint": {"ok": not problems, "problems": problems},
@@ -313,4 +315,5 @@ def run_audit(
         "code_quotes": code_quotes,
         "locators": locator_results,
         "cache_written": cache_written,
+        "timestamps": timestamps,
     }

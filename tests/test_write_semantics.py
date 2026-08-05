@@ -9,6 +9,7 @@ from project_brain.write_semantics import (
     VerifiedReferenceRewrite,
     apply_timestamp_policy,
     classify_object_actions,
+    collect_timestamp_diagnostics,
     engine_owned_input_fields,
     engine_owned_temporal_fields,
     reference_only_rewrite,
@@ -140,6 +141,22 @@ def test_thread_ts_is_not_treated_as_an_iso_timestamp():
         before_by_id={}, after_by_id={obj["id"]: obj}, source_id_by_after_id={}
     )
     assert not report.errors
+
+
+def test_timestamp_diagnostics_exclude_thread_ts_from_summary_and_details():
+    obj = {
+        "id": "slack.neutral.thread",
+        "kind": "SlackThread",
+        "created_at": "2026-08-05T12:00:00+09:00",
+        "updated_at": "2026-08-05T12:00:00+09:00",
+        "thread_ts": "1712345678.123456",
+    }
+
+    report = collect_timestamp_diagnostics([obj], include_object_ids=True)
+
+    assert report["timestamp_format_legacy"]["count"] == 0
+    assert report["midnight_density"]["total_timestamp_values"] == 2
+    assert "thread_ts" not in str(report)
 
 
 def test_write_semantics_grandfathers_same_object_field_value_only():

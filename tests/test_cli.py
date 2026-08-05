@@ -1890,6 +1890,111 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(payload["code_quotes"]["checked"], 0)
         self.assertIsNone(payload["cache_written"])
 
+    def test_audit_timestamp_details_are_opt_in_and_canonical(self):
+        legacy = manifest()
+        legacy["captured_at"] = "legacy"
+        BrainStore.save_object(self.brain, legacy)
+        details = Path(self._tmp.name) / "timestamp-details.json"
+
+        out = io.StringIO()
+        with mock.patch(
+            "sys.argv",
+            ["cli", "audit", "--brain-root", str(self.brain), "--no-stale"],
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 0)
+        self.assertFalse(details.exists())
+        self.assertNotIn("object_ids_by_bucket", out.getvalue())
+        details.write_text("old", encoding="utf-8")
+
+        out = io.StringIO()
+        with mock.patch(
+            "sys.argv",
+            [
+                "cli",
+                "audit",
+                "--brain-root",
+                str(self.brain),
+                "--no-stale",
+                "--timestamp-details-file",
+                str(details),
+            ],
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        expected = {
+            "timestamp_format_legacy": {
+                "count": 1,
+                "by_field": {"captured_at": 1},
+                "by_reason": {"not_datetime": 1},
+                "by_date": {"unknown": 1},
+            },
+            "midnight_density": {
+                "total_timestamp_values": 3,
+                "midnight_values": 2,
+                "ratio": 2 / 3,
+                "by_field": {"created_at": 1, "updated_at": 1},
+                "by_context": {"neutral": 2},
+                "by_date": {"2026-06-04": 2},
+            },
+            "object_ids_by_bucket": {
+                "timestamp_format_legacy": {
+                    "captured_at:not_datetime": ["manifest.neutral.source"],
+                },
+                "midnight_density": {
+                    "created_at": ["manifest.neutral.source"],
+                    "updated_at": ["manifest.neutral.source"],
+                },
+            },
+        }
+        expected_bytes = (
+            json.dumps(
+                expected,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("object_ids_by_bucket", out.getvalue())
+        self.assertEqual(details.read_bytes(), expected_bytes)
+
+    def test_audit_timestamp_details_reject_unsafe_output_paths(self):
+        BrainStore.save_object(self.brain, manifest())
+        target = Path(self._tmp.name) / "target.json"
+        target.write_text("keep", encoding="utf-8")
+        symlink = Path(self._tmp.name) / "details-link.json"
+        symlink.symlink_to(target)
+        directory = Path(self._tmp.name) / "details-dir"
+        directory.mkdir()
+
+        for unsafe in ("relative.json", str(symlink), str(directory)):
+            with self.subTest(path=unsafe):
+                out = io.StringIO()
+                with mock.patch(
+                    "sys.argv",
+                    [
+                        "cli",
+                        "audit",
+                        "--brain-root",
+                        str(self.brain),
+                        "--no-stale",
+                        "--timestamp-details-file",
+                        unsafe,
+                    ],
+                ), redirect_stdout(out):
+                    rc = cli.main()
+                payload = json.loads(out.getvalue())
+                self.assertNotEqual(rc, 0)
+                self.assertFalse(payload["ok"])
+                self.assertTrue(payload["audit_ok"])
+                self.assertFalse(payload["timestamp_details"]["ok"])
+                self.assertNotIn("object_ids_by_bucket", out.getvalue())
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
     def test_audit_succeeds_when_stale_and_exact_quote_checks_pass(self):
         from tests.test_stale_check import code_locator
         loc = code_locator("code.quoted", path="a/X.cpp", commit_sha="SHA1")
