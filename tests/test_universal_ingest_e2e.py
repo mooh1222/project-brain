@@ -19,6 +19,7 @@
 single_object 승격 → 단계3 mapping_bundle 승격을 generic 부품으로 태운다.
 """
 
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,27 @@ T = "2026-06-04T00:00:00Z"
 REPO = "demoapp"
 CTX = "context.mina-kayak"
 BUNDLE_KEY = "bundle.mina-kayak.domain-mapping"
+
+
+def _full_tree_inventory(root: Path) -> dict[str, tuple[str, bytes | str | None]]:
+    inventory: dict[str, tuple[str, bytes | str | None]] = {}
+
+    def visit(directory: Path) -> None:
+        for path in sorted(directory.iterdir(), key=lambda item: item.name):
+            relative = path.relative_to(root).as_posix()
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                inventory[relative] = ("symlink", path.readlink().as_posix())
+            elif stat.S_ISDIR(mode):
+                inventory[relative + "/"] = ("directory", None)
+                visit(path)
+            elif stat.S_ISREG(mode):
+                inventory[relative] = ("file", path.read_bytes())
+            else:
+                inventory[relative] = ("special", None)
+
+    visit(root)
+    return inventory
 
 
 # ── 살아있는 소스에서 추출한 candidate bundle 빌더 ──────────────────────────────
@@ -573,6 +595,9 @@ class MinaKayakEndToEndTest(unittest.TestCase):
             self.assertEqual(store.get(tid)["status"], "candidate", tid)
 
     def test_product_single_ingest_without_coverage_fails_before_write(self):
+        before = _full_tree_inventory(self.root)
+        self.assertEqual(before, {})
+
         with self.assertRaises(IngestError) as caught:
             product_ingest(
                 self.root,
@@ -582,7 +607,7 @@ class MinaKayakEndToEndTest(unittest.TestCase):
             )
 
         self.assertEqual(caught.exception.code, "coverage_required")
-        self.assertEqual(list(self.root.rglob("*.json")), [])
+        self.assertEqual(_full_tree_inventory(self.root), before)
 
     def test_e2e_promote_glossary(self):
         """AC2 단계2: single_object 승격 후 ingest. 대상 term reviewed + review.<id> 존재."""

@@ -77,7 +77,9 @@ flowchart LR
     Mutation --> Clock[MutationService 단일 clock]
     Clock --> CorpusIO[corpus_io transaction 또는 no-op receipt]
     CorpusIO --> Receipt[canonical receipt]
-    Receipt --> Foundation[foundation gate]
+    Receipt -. installed batch .-> ReceiptRecovery[durable receipt recovery]
+    ReceiptRecovery --> SemanticFinalizer[installed semantic finalization]
+    SemanticFinalizer --> TailVerify[post-finalizer object-tail verification]
     CorpusIO --> Objects[데이터 레포 BrainStore kind 디렉터리]
     CorpusIO -. 무효화 .-> Derived[.brain-local index와 stale cache]
 
@@ -146,10 +148,22 @@ raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르�
    `corpus_io.apply_transaction()`으로 객체 파일을 원자 적용한다. 실제 action이 있는 transaction은
    파생 index DB와 sidecar, stale cache를 무효화하며 자동 rebuild하지 않는다.
 8. 변경이 있으면 canonical mutation receipt, 없으면 `expected_objects == verified_objects`인
-   no-op receipt를 만든다. receipt와 현재 corpus를 재검증한 `foundation gate` 뒤에만 finalize한다.
+   no-op receipt를 만든다.
+9. 현재 설치 batch 경로는 durable journal에서 canonical receipt를 복구한 뒤 설치된 semantic
+   finalizer를 실행한다. finalizer는 index rebuild·lint·eval·graph·audit·데이터 레포 checks와
+   선언된 recall을 검사하고, 마지막에 `post_gate_object_tail` 모드로 receipt와 객체 tail을 다시
+   확인한다. 이 경로가 현재 동작하는 finalization과 tail verification이다.
 
 coverage는 선언한 identity와 실제 산출물을 결속할 뿐 원문 의미가 완전하다고 추론하지 않는다.
 coverage가 없거나 mode/build binding이 맞지 않으면 objects/raw/index 쓰기 전에 실패한다.
+
+### 계획된 별도 P0 최종 gate
+
+`Task 12–15에서 추가할 별도 P0 최종 gate`는 아직 계획일 뿐 **현재 활성 경로가 아니다**.
+이 gate는 receipt와 현재 corpus를 독립적으로 판정하는 P0 완료 조건이며
+**일반 ingest finalizer가 아니다**. 따라서 설치된 semantic **finalizer를 호출하지 않는다**. 파생 색인과 검색 품질을
+갱신하는 단계도 아니므로 **index rebuild를 호출하지 않는다**. 현재의 installed batch
+finalization/tail verification과 이 별도 gate를 같은 실행 단계처럼 해석하면 안 된다.
 
 **코퍼스 객체 변경만 MutationService**를 거친다는 원칙은 정상적인 의미 변경이 적어도
 `MutationService.plan()`의 검증과 고정 manifest를 거친다는 뜻이다. 대부분은

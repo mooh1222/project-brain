@@ -189,7 +189,6 @@ def test_p0_ingest_integrity_flow_and_deferred_migration_are_explicit():
         "MutationService",
         "단일 clock",
         "no-op receipt",
-        "foundation gate",
         "같은 좌표 재검증",
     ):
         assert token in runtime
@@ -227,3 +226,30 @@ def test_p0_ingest_integrity_flow_and_deferred_migration_are_explicit():
         "실코퍼스 migration은 미완료",
     ):
         assert token in roadmap
+
+
+def test_runtime_map_separates_active_finalization_from_planned_p0_gate():
+    runtime = _read_architecture_doc("runtime-map.md")
+    match = re.search(
+        r"## 전체 실행 흐름\s*```mermaid\s*(.*?)\s*```",
+        runtime,
+        re.DOTALL,
+    )
+    assert match is not None
+    active_graph = match.group(1)
+    for edge in (
+        "Receipt -. installed batch .-> ReceiptRecovery[durable receipt recovery]",
+        "ReceiptRecovery --> SemanticFinalizer[installed semantic finalization]",
+        "SemanticFinalizer --> TailVerify[post-finalizer object-tail verification]",
+    ):
+        assert edge in active_graph
+    assert "Receipt --> Foundation" not in active_graph
+
+    for statement in (
+        "Task 12–15에서 추가할 별도 P0 최종 gate",
+        "현재 활성 경로가 아니다",
+        "일반 ingest finalizer가 아니다",
+        "finalizer를 호출하지 않는다",
+        "index rebuild를 호출하지 않는다",
+    ):
+        assert statement in runtime

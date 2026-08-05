@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -50,24 +51,41 @@ EXPECTED_RAW_HASHES = {
 }
 
 
-def _write_surface_inventory(root: Path) -> dict[str, bytes | None]:
-    inventory: dict[str, bytes | None] = {}
-    for relative in (
-        "brain/objects",
-        "brain/raw",
-        "brain/indexes",
-        "brain/views",
-        ".brain-local",
+def _write_surface_inventory(
+    root: Path,
+) -> dict[str, tuple[str, bytes | str | None]]:
+    inventory: dict[str, tuple[str, bytes | str | None]] = {}
+
+    def visit(path: Path) -> None:
+        key = path.relative_to(root).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            inventory[key] = ("symlink", path.readlink().as_posix())
+        elif stat.S_ISDIR(mode):
+            inventory[key + "/"] = ("directory", None)
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                visit(child)
+        elif stat.S_ISREG(mode):
+            inventory[key] = ("file", path.read_bytes())
+        elif stat.S_ISFIFO(mode):
+            inventory[key] = ("fifo", None)
+        elif stat.S_ISSOCK(mode):
+            inventory[key] = ("socket", None)
+        elif stat.S_ISCHR(mode):
+            inventory[key] = ("character-device", None)
+        elif stat.S_ISBLK(mode):
+            inventory[key] = ("block-device", None)
+        else:
+            inventory[key] = ("special", None)
+
+    for base in (
+        root / "brain",
+        root / ".brain-local",
+        root / ".brain.project-brain-corpus.lock",
+        root / ".brain.project-brain-restore",
     ):
-        base = root / relative
-        if not base.exists():
-            continue
-        inventory[relative + "/"] = None
-        for path in sorted(base.rglob("*")):
-            key = path.relative_to(root).as_posix()
-            inventory[key + ("/" if path.is_dir() else "")] = (
-                None if path.is_dir() else path.read_bytes()
-            )
+        if base.exists() or base.is_symlink():
+            visit(base)
     return inventory
 
 
@@ -80,12 +98,52 @@ def _load_module(path: Path, name: str):
     return module
 
 
+def _initialize_empty_corpus_lock(root: Path) -> None:
+    local_root = root / "brain/.brain-local"
+    local_root.mkdir(parents=True)
+    (local_root / "corpus.lock").write_bytes(b"")
+    (root / ".brain.project-brain-corpus.lock").write_bytes(b"")
+
+
 class CoverageWriteBoundaryReplayTest(unittest.TestCase):
+    def test_write_surface_inventory_covers_the_complete_brain_tree(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "brain/.brain-local").mkdir(parents=True)
+            (root / "brain/.brain-local/index.db").write_bytes(b"index-bytes")
+            (root / "brain/raw").mkdir()
+            (root / "brain/raw/odd.name").write_bytes(b"raw-bytes")
+            (root / "brain/source-link").symlink_to("raw/odd.name")
+            (root / ".brain-local").mkdir()
+            (root / ".brain-local/project.state").write_bytes(b"project-bytes")
+            (root / ".brain.project-brain-corpus.lock").write_bytes(b"stable-lock")
+            (root / ".brain.project-brain-restore").mkdir()
+
+            self.assertEqual(
+                _write_surface_inventory(root),
+                {
+                    "brain/": ("directory", None),
+                    "brain/.brain-local/": ("directory", None),
+                    "brain/.brain-local/index.db": ("file", b"index-bytes"),
+                    "brain/raw/": ("directory", None),
+                    "brain/raw/odd.name": ("file", b"raw-bytes"),
+                    "brain/source-link": ("symlink", "raw/odd.name"),
+                    ".brain-local/": ("directory", None),
+                    ".brain-local/project.state": ("file", b"project-bytes"),
+                    ".brain.project-brain-corpus.lock": (
+                        "file",
+                        b"stable-lock",
+                    ),
+                    ".brain.project-brain-restore/": ("directory", None),
+                },
+            )
+
     def test_direct_plan_is_a_no_write_dry_run(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             brain_root = root / "brain"
             obj = manifest()
+            _initialize_empty_corpus_lock(root)
             before = _write_surface_inventory(root)
             request = MutationRequest(
                 operation=MutationOperation.INGEST,
@@ -197,6 +255,7 @@ class CoverageWriteBoundaryReplayTest(unittest.TestCase):
             '''), encoding="utf-8")
             fake_cli.chmod(0o755)
             runner = root / ".agents/skills/demo-brain-ingest/scripts/run_ingest.sh"
+            _initialize_empty_corpus_lock(root)
             before = _write_surface_inventory(root)
             env = dict(
                 os.environ,
