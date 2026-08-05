@@ -1970,7 +1970,7 @@ class TestCliSearch(unittest.TestCase):
         directory = Path(self._tmp.name) / "details-dir"
         directory.mkdir()
 
-        for unsafe in ("relative.json", str(symlink), str(directory)):
+        for unsafe in ("", "relative.json", str(symlink), str(directory)):
             with self.subTest(path=unsafe):
                 out = io.StringIO()
                 with mock.patch(
@@ -1994,6 +1994,150 @@ class TestCliSearch(unittest.TestCase):
                 self.assertNotIn("object_ids_by_bucket", out.getvalue())
 
         self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
+    def test_timestamp_details_swap_race_restores_existing_regular_target(self):
+        variants = (
+            "temp_symlink",
+            "temp_regular",
+            "target_symlink",
+            "target_directory",
+            "target_fifo",
+            "target_regular",
+            "target_absent",
+        )
+        original_target_stat = cli._timestamp_details_target_stat
+
+        for variant in variants:
+            with self.subTest(variant=variant):
+                case_dir = Path(self._tmp.name) / f"existing-{variant}"
+                case_dir.mkdir()
+                target = case_dir / "details.json"
+                target.write_bytes(b"old\n")
+                victim = case_dir / "victim.txt"
+                victim.write_bytes(b"victim\n")
+                calls = 0
+
+                def inject_after_final_stat(parent_fd, name):
+                    nonlocal calls
+                    result = original_target_stat(parent_fd, name)
+                    calls += 1
+                    if calls != 2:
+                        return result
+                    temporary = next(
+                        entry
+                        for entry in os.listdir(parent_fd)
+                        if entry.startswith(".details.json.")
+                        and entry.endswith(".tmp")
+                    )
+                    entry = temporary if variant.startswith("temp_") else name
+                    os.unlink(entry, dir_fd=parent_fd)
+                    if variant == "target_absent":
+                        return result
+                    if variant.endswith("symlink"):
+                        os.symlink(str(victim), entry, dir_fd=parent_fd)
+                    elif variant.endswith("directory"):
+                        os.mkdir(entry, dir_fd=parent_fd)
+                    elif variant.endswith("fifo"):
+                        os.mkfifo(entry, dir_fd=parent_fd)
+                    else:
+                        descriptor = os.open(
+                            entry,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                            0o600,
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            os.write(descriptor, b"injected\n")
+                        finally:
+                            os.close(descriptor)
+                    return result
+
+                with mock.patch.object(
+                    cli,
+                    "_timestamp_details_target_stat",
+                    side_effect=inject_after_final_stat,
+                ):
+                    with self.assertRaises((OSError, ValueError)):
+                        cli._atomic_write_timestamp_details(target, b"new\n")
+
+                self.assertFalse(target.is_symlink())
+                self.assertTrue(target.is_file())
+                self.assertEqual(target.read_bytes(), b"old\n")
+                self.assertEqual(victim.read_bytes(), b"victim\n")
+                self.assertEqual(
+                    sorted(path.name for path in case_dir.iterdir()),
+                    ["details.json", "victim.txt"],
+                )
+
+    def test_timestamp_details_swap_race_restores_absent_target(self):
+        variants = (
+            "temp_symlink",
+            "temp_regular",
+            "target_symlink",
+            "target_directory",
+            "target_fifo",
+            "target_regular",
+        )
+        original_target_stat = cli._timestamp_details_target_stat
+
+        for variant in variants:
+            with self.subTest(variant=variant):
+                case_dir = Path(self._tmp.name) / f"absent-{variant}"
+                case_dir.mkdir()
+                target = case_dir / "details.json"
+                victim = case_dir / "victim.txt"
+                victim.write_bytes(b"victim\n")
+                calls = 0
+
+                def inject_after_final_stat(parent_fd, name):
+                    nonlocal calls
+                    result = original_target_stat(parent_fd, name)
+                    calls += 1
+                    if calls != 2:
+                        return result
+                    temporary = next(
+                        entry
+                        for entry in os.listdir(parent_fd)
+                        if entry.startswith(".details.json.")
+                        and entry.endswith(".tmp")
+                    )
+                    entry = temporary if variant.startswith("temp_") else name
+                    if variant.startswith("temp_"):
+                        os.unlink(entry, dir_fd=parent_fd)
+                    if variant.endswith("symlink"):
+                        os.symlink(str(victim), entry, dir_fd=parent_fd)
+                    elif variant.endswith("directory"):
+                        os.mkdir(entry, dir_fd=parent_fd)
+                    elif variant.endswith("fifo"):
+                        os.mkfifo(entry, dir_fd=parent_fd)
+                    else:
+                        descriptor = os.open(
+                            entry,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                            0o600,
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            os.write(descriptor, b"injected\n")
+                        finally:
+                            os.close(descriptor)
+                    return result
+
+                with mock.patch.object(
+                    cli,
+                    "_timestamp_details_target_stat",
+                    side_effect=inject_after_final_stat,
+                ):
+                    with self.assertRaises((OSError, ValueError)):
+                        cli._atomic_write_timestamp_details(target, b"new\n")
+
+                self.assertFalse(target.exists())
+                self.assertFalse(target.is_symlink())
+                self.assertEqual(victim.read_bytes(), b"victim\n")
+                self.assertEqual(
+                    sorted(path.name for path in case_dir.iterdir()),
+                    ["victim.txt"],
+                )
 
     def test_audit_succeeds_when_stale_and_exact_quote_checks_pass(self):
         from tests.test_stale_check import code_locator

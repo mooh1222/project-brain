@@ -1,4 +1,6 @@
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -179,10 +181,19 @@ def _timestamp_details_bytes(payload: Mapping[str, object]) -> bytes:
     ).encode("utf-8")
 
 
-def _timestamp_details_target_stat(parent_fd: int, name: str):
+def _directory_entry_stat(parent_fd: int, name: str) -> os.stat_result | None:
     try:
-        target_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
+        return None
+
+
+def _timestamp_details_target_stat(
+    parent_fd: int,
+    name: str,
+) -> os.stat_result | None:
+    target_stat = _directory_entry_stat(parent_fd, name)
+    if target_stat is None:
         return None
     if not stat.S_ISREG(target_stat.st_mode):
         raise ValueError(
@@ -191,8 +202,199 @@ def _timestamp_details_target_stat(parent_fd: int, name: str):
     return target_stat
 
 
+def _same_inode(left: os.stat_result | None, right: os.stat_result) -> bool:
+    return (
+        left is not None
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+    )
+
+
+def _remove_directory_entry(parent_fd: int, name: str) -> None:
+    entry_stat = _directory_entry_stat(parent_fd, name)
+    if entry_stat is None:
+        return
+    if stat.S_ISDIR(entry_stat.st_mode):
+        os.rmdir(name, dir_fd=parent_fd)
+    else:
+        os.unlink(name, dir_fd=parent_fd)
+
+
+def _exchange_directory_entries(parent_fd: int, left: str, right: str) -> None:
+    """같은 고정 dirfd 안의 두 이름을 한 syscall로 맞바꾼다."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    exchange = getattr(libc, "renameatx_np", None)
+    if exchange is None:
+        exchange = getattr(libc, "renameat2", None)
+    if exchange is None:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic directory-entry exchange is not supported",
+        )
+    exchange.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    exchange.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = exchange(
+        parent_fd,
+        os.fsencode(left),
+        parent_fd,
+        os.fsencode(right),
+        0x00000002,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno() or errno.EIO
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            f"{left} <-> {right}",
+        )
+
+
+def _create_timestamp_entry(
+    parent_fd: int,
+    target_name: str,
+    suffix: str,
+) -> tuple[str, int]:
+    for _ in range(100):
+        candidate = f".{target_name}.{secrets.token_hex(8)}.{suffix}"
+        try:
+            descriptor = os.open(
+                candidate,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            continue
+        return candidate, descriptor
+    raise OSError(f"could not allocate timestamp details {suffix} entry")
+
+
+def _create_timestamp_guard(
+    parent_fd: int,
+    target_name: str,
+    expected: os.stat_result,
+) -> tuple[str, os.stat_result]:
+    for _ in range(100):
+        candidate = f".{target_name}.{secrets.token_hex(8)}.guard"
+        try:
+            os.link(
+                target_name,
+                candidate,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            continue
+        guard_stat = _directory_entry_stat(parent_fd, candidate)
+        current = _directory_entry_stat(parent_fd, target_name)
+        if (
+            guard_stat is not None
+            and stat.S_ISREG(guard_stat.st_mode)
+            and _same_inode(guard_stat, expected)
+            and _same_inode(current, expected)
+        ):
+            return candidate, guard_stat
+        _remove_directory_entry(parent_fd, candidate)
+        raise ValueError("timestamp details target changed while being anchored")
+    raise OSError("could not allocate timestamp details guard entry")
+
+
+def _publish_timestamp_details_over_existing(
+    parent_fd: int,
+    *,
+    target_name: str,
+    temporary_name: str,
+    guard_name: str,
+    guard_stat: os.stat_result,
+    temporary_stat: os.stat_result,
+) -> None:
+    try:
+        _exchange_directory_entries(parent_fd, temporary_name, target_name)
+        published = _directory_entry_stat(parent_fd, target_name)
+        displaced = _directory_entry_stat(parent_fd, temporary_name)
+        anchored = _directory_entry_stat(parent_fd, guard_name)
+        if not (
+            _same_inode(published, temporary_stat)
+            and _same_inode(displaced, guard_stat)
+            and _same_inode(anchored, guard_stat)
+        ):
+            raise ValueError(
+                "timestamp details temp or target changed during publication"
+            )
+    except Exception:
+        anchored = _directory_entry_stat(parent_fd, guard_name)
+        if not _same_inode(anchored, guard_stat):
+            raise OSError("timestamp details rollback anchor changed")
+        current = _directory_entry_stat(parent_fd, target_name)
+        if not _same_inode(current, guard_stat):
+            if current is None:
+                os.link(
+                    guard_name,
+                    target_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            else:
+                _exchange_directory_entries(parent_fd, guard_name, target_name)
+        restored = _directory_entry_stat(parent_fd, target_name)
+        if not _same_inode(restored, guard_stat):
+            raise OSError("timestamp details target rollback failed")
+        _remove_directory_entry(parent_fd, guard_name)
+        _remove_directory_entry(parent_fd, temporary_name)
+        os.fsync(parent_fd)
+        raise
+    _remove_directory_entry(parent_fd, temporary_name)
+    _remove_directory_entry(parent_fd, guard_name)
+    os.fsync(parent_fd)
+
+
+def _publish_timestamp_details_to_absent(
+    parent_fd: int,
+    *,
+    target_name: str,
+    temporary_name: str,
+    temporary_stat: os.stat_result,
+) -> None:
+    try:
+        os.link(
+            temporary_name,
+            target_name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileExistsError:
+        _exchange_directory_entries(parent_fd, temporary_name, target_name)
+        _remove_directory_entry(parent_fd, target_name)
+        _remove_directory_entry(parent_fd, temporary_name)
+        os.fsync(parent_fd)
+        raise ValueError("timestamp details target appeared during publication")
+
+    published = _directory_entry_stat(parent_fd, target_name)
+    source = _directory_entry_stat(parent_fd, temporary_name)
+    if not (
+        _same_inode(published, temporary_stat)
+        and _same_inode(source, temporary_stat)
+    ):
+        _remove_directory_entry(parent_fd, target_name)
+        _remove_directory_entry(parent_fd, temporary_name)
+        os.fsync(parent_fd)
+        raise ValueError("timestamp details temp changed during publication")
+    _remove_directory_entry(parent_fd, temporary_name)
+    os.fsync(parent_fd)
+
+
 def _atomic_write_timestamp_details(path: Path, payload: bytes) -> None:
-    """검증된 absolute regular target에 canonical details를 원자 교체한다."""
+    """검증된 absolute target에 CAS 방식으로 details를 원자 게시한다."""
     if not path.is_absolute():
         raise ValueError("timestamp details path must be absolute")
     parent = path.parent
@@ -212,6 +414,8 @@ def _atomic_write_timestamp_details(path: Path, payload: bytes) -> None:
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
     )
     temporary_name = ""
+    guard_name = ""
+    descriptor: int | None = None
     try:
         opened_parent = os.fstat(parent_fd)
         if (
@@ -220,55 +424,66 @@ def _atomic_write_timestamp_details(path: Path, payload: bytes) -> None:
         ):
             raise ValueError("timestamp details parent changed during validation")
         before = _timestamp_details_target_stat(parent_fd, path.name)
+        guard_stat = None
+        if before is not None:
+            guard_name, guard_stat = _create_timestamp_guard(
+                parent_fd,
+                path.name,
+                before,
+            )
 
-        for _ in range(100):
-            candidate = f".{path.name}.{secrets.token_hex(8)}.tmp"
-            try:
-                descriptor = os.open(
-                    candidate,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600,
-                    dir_fd=parent_fd,
-                )
-            except FileExistsError:
-                continue
-            temporary_name = candidate
-            break
-        else:
-            raise OSError("could not allocate timestamp details temporary file")
+        temporary_name, descriptor = _create_timestamp_entry(
+            parent_fd,
+            path.name,
+            "tmp",
+        )
 
-        try:
-            view = memoryview(payload)
-            written = 0
-            while written < len(view):
-                written += os.write(descriptor, view[written:])
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        view = memoryview(payload)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("timestamp details temporary write made no progress")
+            written += count
+        os.fsync(descriptor)
+        temporary_stat = os.fstat(descriptor)
 
         after = _timestamp_details_target_stat(parent_fd, path.name)
-        if before is None and after is not None:
-            raise ValueError("timestamp details target appeared during write")
         if before is not None and (
             after is None
             or after.st_dev != before.st_dev
             or after.st_ino != before.st_ino
         ):
             raise ValueError("timestamp details target changed during write")
-        os.replace(
-            temporary_name,
-            path.name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
+        if before is None and after is not None:
+            raise ValueError("timestamp details target appeared during write")
+
+        if before is None:
+            _publish_timestamp_details_to_absent(
+                parent_fd,
+                target_name=path.name,
+                temporary_name=temporary_name,
+                temporary_stat=temporary_stat,
+            )
+        else:
+            assert guard_stat is not None
+            _publish_timestamp_details_over_existing(
+                parent_fd,
+                target_name=path.name,
+                temporary_name=temporary_name,
+                guard_name=guard_name,
+                guard_stat=guard_stat,
+                temporary_stat=temporary_stat,
+            )
         temporary_name = ""
-        os.fsync(parent_fd)
+        guard_name = ""
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         if temporary_name:
-            try:
-                os.unlink(temporary_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
+            _remove_directory_entry(parent_fd, temporary_name)
+        if guard_name:
+            _remove_directory_entry(parent_fd, guard_name)
         os.close(parent_fd)
 
 
@@ -1102,7 +1317,7 @@ def _run_audit(argv) -> int:
         acl_evaluator=None,
         now=now_kst(),
     )
-    if args.timestamp_details_file:
+    if args.timestamp_details_file is not None:
         from project_brain.write_semantics import collect_timestamp_diagnostics
 
         try:
