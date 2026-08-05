@@ -361,6 +361,41 @@ def _scan_tree_receipt(
     return _tree_receipt(root, entries)
 
 
+def _ignored_snapshots_receipt(
+    ignored_snapshots_root: Path,
+    artifact_root: Path,
+) -> TreeReceipt:
+    receipt = _scan_tree_receipt(
+        ignored_snapshots_root,
+        excluded_paths=(artifact_root,),
+    )
+    relative = artifact_root.relative_to(ignored_snapshots_root).as_posix()
+    parts = PurePosixPath(relative).parts
+    ancestors = {
+        "/".join(parts[:index])
+        for index in range(1, len(parts))
+    }
+    surviving_paths = {
+        entry.path for entry in receipt.entries if entry.path not in ancestors
+    }
+    removable = {
+        ancestor
+        for ancestor in ancestors
+        if not any(path.startswith(ancestor + "/") for path in surviving_paths)
+    }
+    if not removable:
+        return receipt
+    entries = tuple(
+        entry for entry in receipt.entries if entry.path not in removable
+    )
+    payload = {"entries": [asdict(entry) for entry in entries]}
+    return TreeReceipt(
+        root=receipt.root,
+        entries=entries,
+        sha256=hashlib.sha256(canonical_receipt_bytes(payload)).hexdigest(),
+    )
+
+
 def _absolute_relative(root: Path, path: Path, *, label: str) -> str:
     path = Path(path)
     if not path.is_absolute() or path != Path(os.path.abspath(path)):
@@ -744,10 +779,7 @@ def capture_foundation_baseline(
         except SnapshotError as absent_exc:
             raise _from_snapshot(absent_exc) from absent_exc
         artifact = _tree_receipt(artifact_root, ())
-    ignored = _scan_tree_receipt(
-        ignored_snapshots_root,
-        excluded_paths=(artifact_root,),
-    )
+    ignored = _ignored_snapshots_receipt(ignored_snapshots_root, artifact_root)
     ignored_dict = _tree_dict(ignored)
     ignored_dict["excluded_subtree"] = artifact_root.relative_to(ignored_snapshots_root).as_posix()
     # Corpus readers may materialize their persistent lock file. Capture user
@@ -979,10 +1011,7 @@ def verify_foundation_invariants(
         add("unexpected_dirt_path")
 
     try:
-        ignored = _scan_tree_receipt(
-            ignored_snapshots_root,
-            excluded_paths=(artifact_root,),
-        )
+        ignored = _ignored_snapshots_receipt(ignored_snapshots_root, artifact_root)
         if ignored.sha256 != baseline["ignored_snapshots_inventory"]["sha256"]:
             add("ignored_snapshots_changed")
     except (FoundationError, KeyError, TypeError):
@@ -1374,10 +1403,7 @@ def capture_foundation_state(
     corpus, index = _capture_corpus(brain_root)
     runtime = _runtime_inventory(repo_root)
     stale_set = _stale_receipt(brain_root)
-    ignored = _scan_tree_receipt(
-        ignored_snapshots_root,
-        excluded_paths=(artifact_root,),
-    )
+    ignored = _ignored_snapshots_receipt(ignored_snapshots_root, artifact_root)
     ignored_value = _tree_dict(ignored)
     ignored_value["excluded_subtree"] = artifact_root.relative_to(
         ignored_snapshots_root

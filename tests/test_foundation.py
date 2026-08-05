@@ -544,6 +544,46 @@ def test_baseline_records_absent_artifact_root_without_creating_it(
     assert not foundation_fixture.artifact_root.parent.exists()
 
 
+def test_artifact_only_parent_does_not_change_ignored_snapshot_inventory(
+    foundation_fixture,
+):
+    foundation_fixture.artifact_root.rmdir()
+    foundation_fixture.artifact_root.parent.rmdir()
+    baseline = _capture(foundation_fixture)
+
+    receipt = foundation_fixture.artifact_root / "foundation-baseline.json"
+    _write(receipt, b"{}\n")
+
+    report = foundation_fixture.verify(
+        baseline,
+        allowed_artifact_files=[receipt],
+    )
+    state = foundation.capture_foundation_state(
+        engine_root=foundation_fixture.engine,
+        repo_root=foundation_fixture.repo,
+        brain_root=foundation_fixture.brain,
+        artifact_root=foundation_fixture.artifact_root,
+        ignored_snapshots_root=foundation_fixture.snapshots_root,
+        protected_artifact_files=[receipt],
+    )
+
+    assert report["ok"] is True, report
+    assert (
+        state["ignored_snapshots_inventory"]
+        == baseline["ignored_snapshots_inventory"]
+    )
+
+    _write(foundation_fixture.artifact_root.parent / "sibling.json", b"{}\n")
+
+    drift = foundation_fixture.verify(
+        baseline,
+        allowed_artifact_files=[receipt],
+    )
+
+    assert drift["ok"] is False
+    assert "ignored_snapshots_changed" in drift["errors"]
+
+
 def _receipt_fixture(*, purpose="p0-foundation-baseline"):
     if purpose == "p0-foundation-gate":
         return {
