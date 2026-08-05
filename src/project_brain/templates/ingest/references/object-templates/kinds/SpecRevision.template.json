@@ -1,0 +1,17 @@
+{
+  "id": "revision.game-spec.v2",
+  "kind": "SpecRevision",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "reference",
+  "title": "Game spec v2",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "spec_document_id": "spec.game-spec",
+  "revision_label": "v2",
+  "captured_at": "2026-06-04T00:00:00Z",
+  "slide_refs": []
+}

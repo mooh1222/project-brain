@@ -1,0 +1,22 @@
+{
+  "id": "projection.ctx.context-md",
+  "kind": "ContextProjection",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "index",
+  "title": "Generated context_md projection for Context",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "context_id": "context.ctx",
+  "format": "context_md",
+  "output_locator": "docs/contexts/generated/ctx/CONTEXT.md",
+  "source_object_ids": ["context.ctx"],
+  "source_content_hash": "dc9cb5a6d26880c59bba5c4ae3843f54b616b32cfae3581328b2bc3568d02075",
+  "projection_hash": "05b29ec3cea7c21590b0349958a2bff9b5709d3ca14b9cf0952fd3b170ee8278",
+  "generated_at": "2026-06-04T00:00:00Z",
+  "generated_by": "agent",
+  "stale_policy": "fail_on_manual_edit"
+}

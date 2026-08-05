@@ -3,6 +3,7 @@
 검수 상태·근거가 붙은 객체 코퍼스 + 한국어 하이브리드 검색 + 조회/적재 CLI를 갖춘
 **범용 프로젝트 브레인 엔진**의 발전 단계와 미뤄둔 작업을 한 곳에서 관리한다.
 
+- 전체 구조·현재 코드 길찾기: [docs/architecture/README.md](docs/architecture/README.md)
 - 설계 근거(정체성·철학·아키텍처·미결): [docs/design-canonical.md](docs/design-canonical.md)
 - 설치·사용: [README.md](README.md) · 개발 루프: [CLAUDE.md](CLAUDE.md)
 - 단계별 설계/계획 문서: `docs/specs/`(19) · `docs/plans/`(46) · `docs/skill-drafts/`(3)

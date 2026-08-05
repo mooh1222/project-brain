@@ -1,0 +1,18 @@
+{
+  "id": "view.feature-status.main",
+  "kind": "CurrentView",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "synthesis",
+  "title": "현재 보기",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "view_type": "feature_status",
+  "as_of": "2026-06-04T00:00:00Z",
+  "source_fact_ids": [],
+  "source_event_ids": [],
+  "summary": "현재 상태"
+}

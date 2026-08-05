@@ -1,0 +1,20 @@
+{
+  "id": "fact.ctx.state",
+  "kind": "TemporalFact",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "fact",
+  "title": "시간 사실",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "subject": "합성 규칙",
+  "predicate": "enabled",
+  "value": true,
+  "scope": {"release": "test"},
+  "valid_from": "2026-06-04T00:00:00Z",
+  "derived_from_event_id": "ledger.ctx.event",
+  "confidence": "high"
+}

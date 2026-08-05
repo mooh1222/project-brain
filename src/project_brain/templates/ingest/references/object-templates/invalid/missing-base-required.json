@@ -1,0 +1,16 @@
+{
+  "id": "ledger.ctx.missing-title",
+  "kind": "EventLedgerRecord",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "event",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "event_type": "contract_example",
+  "happened_at": "2026-06-04T00:00:00Z",
+  "summary": "title이 빠진 반례",
+  "related_objects": []
+}

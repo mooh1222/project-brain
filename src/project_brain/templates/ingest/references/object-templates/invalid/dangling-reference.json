@@ -1,0 +1,17 @@
+{
+  "id": "ledger.ctx.dangling",
+  "kind": "EventLedgerRecord",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "event",
+  "title": "끊어진 참조 사건",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "event_type": "contract_example",
+  "happened_at": "2026-06-04T00:00:00Z",
+  "summary": "존재하지 않는 매핑을 가리킨다",
+  "related_objects": ["mapping.ctx.missing"]
+}

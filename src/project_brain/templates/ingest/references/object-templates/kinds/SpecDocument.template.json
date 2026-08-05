@@ -1,0 +1,15 @@
+{
+  "id": "spec.game-spec",
+  "kind": "SpecDocument",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "reference",
+  "title": "Game spec",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "source_system": "spec",
+  "canonical_locator": "spec://game-spec"
+}

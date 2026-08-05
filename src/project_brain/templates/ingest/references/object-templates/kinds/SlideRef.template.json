@@ -1,0 +1,15 @@
+{
+  "id": "slide.game-spec.v2.3",
+  "kind": "SlideRef",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "reference",
+  "title": "Slide 3",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "spec_revision_id": "revision.game-spec.v2",
+  "slide_no": 3
+}

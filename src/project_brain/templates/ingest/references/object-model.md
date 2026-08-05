@@ -1,12 +1,19 @@
 # 객체 모델 — 조립 계약
 
 조립 노트와 build 결과는 이 문서의 필드·enum·연결 계약을 따른다.
-엔진 `src/project_brain/schema.py`가 최종 검증자이며, 이 문서는 적재자가 놓치기 쉬운 계약을 간결하게 정리한다.
+엔진 `src/project_brain/schema.py`가 최종 검증자이며, 이 문서는 적재자가 자주 쓰는 조립 계약을
+간결하게 정리한다. **아래 표는 주요 kind만 추린 요약이지 19종 전체 계약이 아니다.**
+
+실행 가능한 전체 예시는 [object-templates/README.md](object-templates/README.md)에서 시작한다.
+`object-templates/kinds/`에는 19종 shape, `build-notes.complete.template.json`에는 build 입력,
+`object-graph.complete.template.json`에는 닫힌 정상 그래프, `invalid/manifest.json`에는 실패 층별
+반례가 있다. 엔진 checkout에서 조건부·금지 필드, ID 결속, 생성 경로, 소비처, 과거 읽기와 신규
+쓰기 차이까지 볼 때는 `docs/architecture/data-contracts.md`를 기준으로 삼는다.
 
 ## 목차
 
 - 공통 필드와 enum
-- 주요 kind별 필수 필드
+- 전체 계약 파일과 주요 kind 요약
 - 연결과 reviewed 근거
 - EvidenceManifest redaction
 - TemporalFact 시간·연결 계약
@@ -32,7 +39,16 @@ title, created_at, updated_at, tags, evidence_refs
 필수 필드의 누락, enum 밖 값, kind와 다른 `truth_role`은 ingest가 거부한다.
 완성 객체를 손으로 조립할 때도 build와 같은 계약을 지켜야 한다.
 
-## 주요 kind별 필수 필드
+## 전체 계약 파일과 주요 kind 요약
+
+19종 전체 필수 키 집합은 `object-templates/kinds/*.template.json`과 엔진
+`schema.py::KIND_REQUIRED`가 정확히 맞아야 한다. 다만 required key의 존재만으로 실제 신규 쓰기가
+성공하는 것은 아니다. ID 결속, 참조 대상 존재, 상태 전환, CodeLocator repo 검증 같은 관문을
+순서대로 통과해야 한다.
+
+아래는 일반 build·review·시간축에서 자주 다루는 11종의 빠른 요약이다. 나머지
+`ContextProjection`, `CurrentView`, `KnowledgePage`, `IndexRecord`, `SpecDocument`, `SpecRevision`,
+`SlideRef`, `SlackThread`는 전체 계약 파일에서 확인한다.
 
 | kind | 공통 필드 외 필수 필드 |
 |---|---|

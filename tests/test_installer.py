@@ -226,6 +226,55 @@ class InstallTest(unittest.TestCase):
         self.assertNotIn("{{DEFAULT_BRANCH}}", audit)
         self.assertIn("session-snapshot filtering은 Project Brain install 범위 밖", ingest_tools)
 
+    def test_installs_complete_object_contract_reference_and_second_install_is_noop(self):
+        first = install(self.target, project="demo")
+        second = install(self.target, project="demo")
+        root = self._skill_dir("demo-brain-ingest") / "references/object-templates"
+        expected_non_kind = {
+            "README.md",
+            "build-notes.complete.template.json",
+            "object-graph.complete.template.json",
+            "invalid/manifest.json",
+            "invalid/notes-missing-context-commit.json",
+            "invalid/missing-base-required.json",
+            "invalid/missing-kind-required.json",
+            "invalid/candidate-without-metadata.json",
+            "invalid/reviewed-without-evidence.json",
+            "invalid/invalid-redaction-status.json",
+            "invalid/dangling-reference.json",
+            "invalid/code-locator-without-quote.json",
+            "invalid/code-locator-coordinate-change-without-quote.json",
+            "invalid/reviewed-to-candidate.json",
+        }
+        self.assertTrue(first["created"])
+        self.assertTrue(
+            all((root / relative).is_file() for relative in expected_non_kind)
+        )
+
+        kind_files = {
+            path.name.removesuffix(".template.json")
+            for path in (root / "kinds").glob("*.template.json")
+        }
+        from project_brain.schema import VALID_KINDS
+
+        self.assertEqual(kind_files, VALID_KINDS)
+        invalid_manifest = json.loads(
+            (root / "invalid/manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {case["file"] for case in invalid_manifest["cases"]},
+            {
+                Path(relative).name
+                for relative in expected_non_kind
+                if relative.startswith("invalid/")
+                and relative != "invalid/manifest.json"
+            },
+        )
+        for path in root.rglob("*.json"):
+            json.loads(path.read_text(encoding="utf-8"))
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+
     def test_config_symlink_fails_closed_before_any_read_or_write(self):
         with TemporaryDirectory() as outside_dir:
             external = Path(outside_dir) / "external-config.json"

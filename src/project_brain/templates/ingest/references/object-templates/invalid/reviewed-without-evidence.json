@@ -1,0 +1,16 @@
+{
+  "id": "g.ctx.reviewed-without-evidence",
+  "kind": "GlossaryTerm",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "domain",
+  "title": "근거 없는 검수 용어",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "context_id": "context.ctx",
+  "term": "근거 없는 용어",
+  "definition": "reviewed evidence_refs가 빈 반례"
+}

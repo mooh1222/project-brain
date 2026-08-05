@@ -1,0 +1,20 @@
+{
+  "id": "mapping.ctx.mapping",
+  "kind": "DomainMapping",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "domain",
+  "title": "Mapping: 중립 의미",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": ["evref.ctx.ref"],
+  "context_id": "context.ctx",
+  "mapping_key": "mapping",
+  "canonical_summary": "중립 의미",
+  "meaning": "중립 의미",
+  "boundary": "중립 경계",
+  "glossary_term_ids": [],
+  "decision_record_ids": []
+}

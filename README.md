@@ -6,7 +6,8 @@
 
 한 프로젝트의 내부 도구로 개발되다 2026-06에 범용 엔진으로 분리됐다.
 
-색인·임베딩·검색의 코드 기준 동작은 [docs/search-internals.md](docs/search-internals.md),
+처음 구조를 파악하거나 변경 지점을 찾을 때는 [전체 아키텍처 지도](docs/architecture/README.md)에서
+시작한다. 색인·임베딩·검색의 코드 기준 동작은 [docs/search-internals.md](docs/search-internals.md),
 설계 근거는 [docs/design-canonical.md](docs/design-canonical.md), 발전 단계·히스토리는
 [ROADMAP.md](ROADMAP.md)를 본다.
 
@@ -44,7 +45,7 @@ project-brain install --project <이름>   # config + 스킬 4종(조회/적재/
 project-brain install --project <이름> --default-branch develop --repo myorg/myrepo  # 스킬의 {{DEFAULT_BRANCH}}·{{REPO}} 값 채움
 project-brain install --project <이름> --force  # manifest에 기록된 사용자 수정 파일도 덮어 갱신
 project-brain doctor                      # 환경·프로젝트 상태 진단
-project-brain bootstrap                   # install → 색인 재구축 → doctor 한번에
+project-brain bootstrap                   # install → brain/objects가 있으면 색인 재구축 → doctor
 ```
 
 `install`은 `.agents/skills/<이름>-brain-{query,ingest,session-ingest,audit}/` 4종을 엔진 `templates/`에서
@@ -70,22 +71,31 @@ installer의 파일 소유권 기준은 `.project-brain-manifest.json`이다.
 ## 주요 명령
 
 ```bash
-project-brain search "<질문>"            # 의미 회상 (reviewed/candidate/raw 채널)
+project-brain query "<질문>"             # 정확 객체 경로 + fresh일 때 선택적 의미 보강
+project-brain search "<질문>"            # fresh index 기반 5채널 의미 회상
 project-brain index rebuild              # 코퍼스에서 색인 전체 재구축 (파생물)
 project-brain ingest --objects-file f    # 객체 묶음 적재 (스키마+lint 원자적)
 project-brain promote --ids ...          # candidate → reviewed 승격 (검토 기록 동반)
 project-brain eval                       # 골든셋 회귀 (실모델)
 project-brain eval --check-ids           # 골든셋 기대 id 실존 가드 (모델 불필요)
 project-brain show <id>                  # 객체 본문 + 1-hop 이웃(종류·제목) 펼쳐보기
-project-brain doctor [--download]         # 진단
-project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (읽기 전용)
-project-brain graph export out.html      # 코퍼스를 vis-network 인터랙티브 HTML로 시각화
-project-brain lint                       # 무결성: 끊긴 참조(가리키는 대상 없음) 탐지 (읽기 전용)
-project-brain stale-check                # 코드 변경 → 갱신 필요 매핑 추출 (읽기 전용). --write-cache로 query/show 노출용 캐시 떨굼
+project-brain doctor [--download]         # 환경 진단. --download는 모델 cache를 채움
+project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (코퍼스 불변)
+project-brain graph export out.html      # 코퍼스 불변, 지정한 HTML 파일은 씀
+project-brain lint                       # 끊긴 참조 등 무결성 점검 (코퍼스 불변)
+project-brain stale-check                # 코드 변경 후보. --write-cache는 stale-set cache를 씀
+project-brain audit                      # lint+isolated+stale·quote 감사. 기본 stale-set cache 갱신
 project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매핑의 commit_sha 갱신
 ```
 
-**점검·진단 4종**(모두 읽기 전용 이상 감지): `lint`(끊긴 참조=아웃바운드) · `graph isolated`(고립=인바운드) · `stale-check`(코드 변경→갱신 후보) · `doctor`(환경). `mark-checked`가 stale 해소(쓰기)다. `stale-check`은 미머지 앵커(작업 브랜치 커밋이 config의 `default_branch` 조상이 아님)를 변경과 별개로 `unmerged_anchors`에 라벨해 거짓 신호를 거른다. `--write-cache`로 떨군 캐시는 `query`/`show`가 읽어 매핑별 `stale_advisory`(코드 변경 감지)를 곁들인다. stale 자동화 설계는 [docs/plans/2026-06-25-brain-stale-automation-bc.md](docs/plans/2026-06-25-brain-stale-automation-bc.md), Step 1·2 구현 계획은 [docs/plans/2026-06-25-brain-stale-step12-impl-plan.md](docs/plans/2026-06-25-brain-stale-step12-impl-plan.md).
+**점검·진단의 쓰기 경계:** `lint`, `graph isolated`, 기본 `stale-check`는 코퍼스 객체를
+바꾸지 않는다. `stale-check --write-cache`는 `.brain-local/stale-set.json`을 쓰고,
+`audit`은 기본 stale 검사 결과를 같은 cache에 쓰며 `--no-stale`이면 그 단계를 생략한다.
+`graph export`는 코퍼스는 안 바꾸지만 지정한 HTML을 쓰고, `doctor --download`는 모델 cache를
+채운다. `mark-checked`는 stale 해소를 위해 CodeLocator를 실제로 갱신하는 mutation이다.
+`stale-check`은 미머지 앵커를 변경과 별개로 `unmerged_anchors`에 라벨하며, cache는
+`query`/`show`가 `stale_advisory`로 읽는다. 전체 명령과 산출물 경계는
+[런타임 지도](docs/architecture/runtime-map.md)에 있다.
 
 **코드 앵커 SHA 원칙:** 한번 만들어진 커밋 SHA는 머지해도 바뀌지 않는다. fast-forward와
 일반 merge에서는 작업 브랜치 커밋이 기본 브랜치 이력에 그대로 포함되므로 기존

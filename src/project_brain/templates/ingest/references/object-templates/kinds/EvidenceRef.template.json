@@ -1,0 +1,17 @@
+{
+  "id": "evref.ctx.ref",
+  "kind": "EvidenceRef",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "reference",
+  "title": "중립 ref",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "evidence_manifest_id": "manifest.ctx.source",
+  "ref_type": "spec_section",
+  "locator": {"section": "1"},
+  "summary": "중립 인용"
+}

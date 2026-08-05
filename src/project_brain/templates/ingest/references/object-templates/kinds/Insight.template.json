@@ -1,0 +1,17 @@
+{
+  "id": "insight.ctx.risk",
+  "kind": "Insight",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "synthesis",
+  "title": "인사이트: 노출 게이트 이중구현",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "body": "노출 게이트가 두 팝업에 이중구현돼 어긋난다",
+  "source_object_ids": ["mapping.ctx.a", "mapping.ctx.b"],
+  "scope": "스테이지 클리어 토큰 노출",
+  "insight_type": "cross-cutting-risk"
+}

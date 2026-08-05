@@ -1,0 +1,19 @@
+{
+  "id": "decision.ctx.decision",
+  "kind": "DecisionRecord",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "event",
+  "title": "결정",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "decision_type": "spec_clarification",
+  "summary": "합성 결정",
+  "decision": "합성 결론",
+  "source_object_ids": [],
+  "affected_context_ids": [],
+  "spec_reflected": "not_applicable"
+}

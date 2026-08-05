@@ -1,0 +1,17 @@
+{
+  "id": "review.g.ctx.term",
+  "kind": "ReviewRecord",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "review",
+  "title": "검수 기록",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "target_object_id": "g.ctx.term",
+  "reviewer": "user-confirmed",
+  "reviewed_at": "2026-06-04T00:00:00Z",
+  "verdict": "approved"
+}

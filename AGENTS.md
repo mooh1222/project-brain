@@ -24,6 +24,22 @@ brain 객체의 주 소비자는 사람이 아니라 에이전트다. 사용자�
   (완료 단계·현황·미뤄둔 작업) + [docs/design-canonical.md](docs/design-canonical.md) +
   `docs/specs/`·`docs/plans/`. 데이터·적재 이력만 데이터 레포(`brain/`)·vault task에 있다.
 
+## 작업 길찾기 — 먼저 전체 지도로
+
+- 전체 구조·데이터 흐름: [docs/architecture/README.md](docs/architecture/README.md)에서 시작해
+  [runtime-map](docs/architecture/runtime-map.md)을 본다.
+- 적재 객체·필드·관계·JSON 예시: [data-contracts](docs/architecture/data-contracts.md)와
+  `src/project_brain/templates/ingest/references/object-templates/`를 본다.
+- 검색·라우터 변경: [change-map](docs/architecture/change-map.md)의 검색 행과
+  [search-internals](docs/search-internals.md)을 함께 본다.
+- mutation·migration 변경: runtime map의 코퍼스 쓰기 경로와 change map의 해당 행을 본다.
+- 정체성·의도·안정적인 설계 경계: [design-canonical](docs/design-canonical.md)을 본다.
+- 현재 완료 상태와 미뤄둔 일: [ROADMAP](ROADMAP.md)을 본다.
+- 과거 이유: 연결된 날짜 spec·plan·report를 보되, 현재 코드·테스트와 반드시 대조한다.
+
+전체 지도는 코드보다 높은 새 정본이 아니다. 현재 동작은 현재 checkout의 코드·테스트·CLI가
+기준이며, 지도와 다르면 문서 드리프트와 엔진 설계 이탈을 먼저 구분한다.
+
 ## 개발 루프
 
 ```bash

@@ -1,0 +1,18 @@
+{
+  "id": "page.guide.main",
+  "kind": "KnowledgePage",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "synthesis",
+  "title": "지식 페이지",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "category": "guide",
+  "path": "docs/guide.md",
+  "summary": "지식 요약",
+  "source_object_ids": [],
+  "stale_policy": "manual"
+}

@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "notes-missing-context-commit",
+      "file": "notes-missing-context-commit.json",
+      "layer": "notes",
+      "validator": "validate_notes",
+      "setup": {"mode": "standalone", "base_fixture_files": []},
+      "expected": {"code": null, "message_fragment": "context.key·context.commit 필수"},
+      "purpose": "build 입력의 context commit 누락을 조용히 통과시키지 않는다"
+    },
+    {
+      "name": "missing-base-required",
+      "file": "missing-base-required.json",
+      "layer": "schema",
+      "validator": "validate_object",
+      "setup": {"mode": "standalone", "base_fixture_files": []},
+      "expected": {"code": null, "message_fragment": "missing base field 'title'"},
+      "purpose": "모든 객체에 필요한 공통 title 누락을 schema에서 거부한다"
+    },
+    {
+      "name": "missing-kind-required",
+      "file": "missing-kind-required.json",
+      "layer": "schema",
+      "validator": "validate_object",
+      "setup": {"mode": "standalone", "base_fixture_files": []},
+      "expected": {"code": null, "message_fragment": "EvidenceManifest missing field 'redaction_status'"},
+      "purpose": "EvidenceManifest의 redaction 상태를 추측해 채우지 않는다"
+    },
+    {
+      "name": "candidate-without-metadata",
+      "file": "candidate-without-metadata.json",
+      "layer": "schema",
+      "validator": "validate_object",
+      "setup": {"mode": "standalone", "base_fixture_files": []},
+      "expected": {"code": null, "message_fragment": "candidate GlossaryTerm requires candidate metadata"},
+      "purpose": "후보 용어의 검토 상태와 출처 metadata 누락을 거부한다"
+    },
+    {
+      "name": "reviewed-without-evidence",
+      "file": "reviewed-without-evidence.json",
+      "layer": "schema",
+      "validator": "validate_object",
+      "setup": {"mode": "standalone", "base_fixture_files": []},
+      "expected": {"code": null, "message_fragment": "reviewed GlossaryTerm requires non-empty evidence_refs"},
+      "purpose": "검수 완료 용어가 근거 없이 저장되는 것을 거부한다"
+    },
+    {
+      "name": "invalid-redaction-status",
+      "file": "invalid-redaction-status.json",
+      "layer": "schema",
+      "validator": "validate_object",
+      "setup": {"mode": "standalone", "base_fixture_files": []},
+      "expected": {"code": null, "message_fragment": "EvidenceManifest invalid redaction_status"},
+      "purpose": "옛 none 값처럼 허용 목록 밖 redaction 상태를 거부한다"
+    },
+    {
+      "name": "dangling-reference",
+      "file": "dangling-reference.json",
+      "layer": "lint",
+      "validator": "lint_store_report",
+      "setup": {"mode": "merged_store", "base_fixture_files": []},
+      "expected": {"code": "dangling_reference", "message_fragment": null},
+      "purpose": "등록 참조가 없는 객체 ID를 가리키면 합쳐진 store 점검에서 거부한다"
+    },
+    {
+      "name": "code-locator-without-quote",
+      "file": "code-locator-without-quote.json",
+      "layer": "mutation",
+      "validator": "mutation_plan",
+      "setup": {"mode": "repo_fixture", "base_fixture_files": []},
+      "expected": {"code": "quote_required", "message_fragment": null},
+      "purpose": "신규 CodeLocator는 실제 코드 인용 없이 저장할 수 없다"
+    },
+    {
+      "name": "code-locator-coordinate-change-without-quote",
+      "file": "code-locator-coordinate-change-without-quote.json",
+      "layer": "mutation",
+      "validator": "mutation_plan",
+      "setup": {"mode": "repo_fixture", "base_fixture_files": ["kinds/CodeLocator.template.json"]},
+      "expected": {"code": "quote_required", "message_fragment": null},
+      "purpose": "기존 CodeLocator의 좌표를 바꿀 때도 새 인용 검증을 요구한다"
+    },
+    {
+      "name": "reviewed-to-candidate",
+      "file": "reviewed-to-candidate.json",
+      "layer": "mutation",
+      "validator": "mutation_plan",
+      "setup": {"mode": "existing_object", "base_fixture_files": ["object-graph.complete.template.json"]},
+      "expected": {"code": "status_transition_invalid", "message_fragment": null},
+      "purpose": "reviewed 객체를 candidate로 되돌리는 상태 후퇴를 거부한다"
+    }
+  ]
+}

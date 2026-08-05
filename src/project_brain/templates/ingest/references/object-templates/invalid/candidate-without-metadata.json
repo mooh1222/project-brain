@@ -1,0 +1,16 @@
+{
+  "id": "g.ctx.candidate-without-meta",
+  "kind": "GlossaryTerm",
+  "schema_version": "0.1",
+  "status": "candidate",
+  "poc_priority": "P0",
+  "truth_role": "domain",
+  "title": "후보 metadata 누락",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "context_id": "context.ctx",
+  "term": "후보 용어",
+  "definition": "candidate metadata가 빠진 반례"
+}

@@ -1,0 +1,17 @@
+{
+  "id": "index.code-locator.21a0af6db18b5997",
+  "kind": "IndexRecord",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "index",
+  "title": "색인 기록",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "index_name": "code_locator",
+  "source_object_id": "mapping.ctx.source",
+  "indexed_at": "2026-06-04T00:00:00Z",
+  "content_hash": "21a0af6db18b5997"
+}

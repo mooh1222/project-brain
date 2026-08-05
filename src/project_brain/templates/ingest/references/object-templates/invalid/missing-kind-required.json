@@ -1,0 +1,19 @@
+{
+  "id": "manifest.ctx.missing-redaction",
+  "kind": "EvidenceManifest",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "source",
+  "title": "redaction 누락 manifest",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "source_type": "spec",
+  "locator": "spec://missing-redaction",
+  "captured_at": "2026-06-04T00:00:00Z",
+  "captured_by": "agent",
+  "sensitivity": "internal",
+  "acl": ["team"]
+}

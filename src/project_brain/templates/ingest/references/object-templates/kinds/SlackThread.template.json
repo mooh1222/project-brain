@@ -1,0 +1,18 @@
+{
+  "id": "slack.ctx.thread",
+  "kind": "SlackThread",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "source",
+  "title": "Slack thread",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "channel_id": "C123",
+  "thread_ts": "1710000000.000100",
+  "participants": [],
+  "message_refs": [],
+  "summary": "합성 스레드"
+}

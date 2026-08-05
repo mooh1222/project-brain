@@ -1,0 +1,18 @@
+{
+  "id": "code.ctx.loc",
+  "kind": "CodeLocator",
+  "schema_version": "0.1",
+  "status": "reviewed",
+  "poc_priority": "P0",
+  "truth_role": "reference",
+  "title": "Code: Foo::bar",
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:00Z",
+  "tags": ["ctx"],
+  "evidence_refs": [],
+  "repo": "demoapp",
+  "path": "Foo.cpp",
+  "symbol": "Foo::bar",
+  "locator_source": "rg",
+  "verified_at": "2026-06-04T00:00:00Z"
+}
