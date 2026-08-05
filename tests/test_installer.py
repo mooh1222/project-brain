@@ -15,7 +15,13 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from project_brain.config import CONFIG_FILENAME
-from project_brain.installer import InstallConflictError, MANIFEST_FILENAME, install, render_text
+from project_brain.installer import (
+    InstallConflictError,
+    MANIFEST_FILENAME,
+    install,
+    normalize_installer_report_path,
+    render_text,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -174,7 +180,10 @@ class InstallTest(unittest.TestCase):
             adopted.chmod(adopted.stat().st_mode & ~stat.S_IXUSR)
             adopted_report = install(adopted_target, project="demo")
             self.assertTrue(adopted.stat().st_mode & stat.S_IXUSR)  # matching untracked adopt
-            self.assertIn(str(adopted), adopted_report["adopted"])
+            self.assertIn(
+                adopted.relative_to(adopted_target).as_posix(),
+                adopted_report["adopted"],
+            )
             second_adopt = install(adopted_target, project="demo")
             for field in ("created", "updated", "removed", "adopted", "skipped"):
                 self.assertEqual(second_adopt[field], [])
@@ -213,6 +222,59 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["config"], "created")
         self.assertEqual(len(report["created"]), self._expected_count())
 
+    def test_report_paths_are_target_relative_and_control_paths_track_writes(self):
+        first = install(
+            self.target,
+            project="demo",
+            brain_root="brain",
+            default_branch="develop",
+            repo="demo_client",
+        )
+        self.assertEqual(first["target_root"], str(self.target))
+        self.assertEqual(
+            first["installer_control_paths"],
+            [MANIFEST_FILENAME, CONFIG_FILENAME],
+        )
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            for value in first[field]:
+                self.assertFalse(Path(value).is_absolute(), (field, value))
+                self.assertEqual(value, Path(value).as_posix())
+
+        second = install(
+            self.target,
+            project="demo",
+            brain_root="brain",
+            default_branch="develop",
+            repo="demo_client",
+        )
+        self.assertEqual(second["installer_control_paths"], [MANIFEST_FILENAME])
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+
+    def test_normalize_installer_report_path_accepts_legacy_internal_absolute(self):
+        relative = ".agents/skills/demo-brain-ingest/SKILL.md"
+        self.assertEqual(
+            normalize_installer_report_path(self.target, relative),
+            relative,
+        )
+        self.assertEqual(
+            normalize_installer_report_path(self.target, str(self.target / relative)),
+            relative,
+        )
+
+    def test_normalize_installer_report_path_rejects_escape_empty_and_parent_symlink(self):
+        outside = self.target.parent / "outside"
+        outside.mkdir(exist_ok=True)
+        linked = self.target / ".agents"
+        linked.symlink_to(outside, target_is_directory=True)
+        for value in ("", "../outside", str(outside / "file"), ".agents/file"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    InstallConflictError,
+                    "installer report path",
+                ):
+                    normalize_installer_report_path(self.target, value)
+
     def test_real_skill_install_is_idempotent_and_uses_engine_templates(self):
         first = install(self.target, project="demo", default_branch="trunk")
         second = install(self.target, project="demo", default_branch="trunk")
@@ -228,6 +290,55 @@ class InstallTest(unittest.TestCase):
         self.assertIn("trunk", audit)
         self.assertNotIn("{{DEFAULT_BRANCH}}", audit)
         self.assertIn("session-snapshot filtering은 Project Brain install 범위 밖", ingest_tools)
+
+    def test_p0_bb2_install_reports_exact_controls_and_installs_only_runtime_script(self):
+        config = {
+            "project": "bb2",
+            "brain_root": "brain",
+            "default_branch": "develop",
+            "repo": "bb2_client",
+        }
+        (self.target / CONFIG_FILENAME).write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        first = install(
+            self.target,
+            project="bb2",
+            brain_root="brain",
+            default_branch="develop",
+            repo="bb2_client",
+        )
+        second = install(
+            self.target,
+            project="bb2",
+            brain_root="brain",
+            default_branch="develop",
+            repo="bb2_client",
+        )
+        scripts = self._skill_dir("bb2-brain-ingest") / "scripts"
+        runtime = scripts / "validate_foundation.py"
+        self.assertTrue(runtime.is_file())
+        self.assertTrue(runtime.stat().st_mode & stat.S_IXUSR)
+        self.assertFalse((scripts / "test_validate_foundation.py").exists())
+        manifest = self._manifest()["files"]
+        runtime_relative = runtime.relative_to(self.target).as_posix()
+        self.assertEqual(
+            manifest[runtime_relative],
+            hashlib.sha256(runtime.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(first["target_root"], str(self.target))
+        self.assertEqual(first["config"], "kept")
+        self.assertEqual(first["installer_control_paths"], [MANIFEST_FILENAME])
+        self.assertEqual(first["skipped"], [])
+        self.assertEqual(first["adopted"], [])
+        self.assertEqual(second["installer_control_paths"], [MANIFEST_FILENAME])
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+        self.assertEqual(
+            json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8")),
+            config,
+        )
 
     def test_installs_complete_object_contract_reference_and_second_install_is_noop(self):
         first = install(self.target, project="demo")
@@ -428,7 +539,7 @@ class InstallTest(unittest.TestCase):
         report = install(self.target, project="demo")
 
         self.assertFalse(retired.exists())
-        self.assertEqual(report["removed"], [str(retired)])
+        self.assertEqual(report["removed"], [retired.relative_to(self.target).as_posix()])
         self.assertNotIn(rel_key, self._manifest()["files"])
 
     def test_reinstall_prunes_missing_retired_manifest_key_without_reporting_removal(self):
@@ -659,8 +770,14 @@ class InstallTest(unittest.TestCase):
             migrated = install(self.target, project="demo")
             second = install(self.target, project="demo")
 
-            self.assertEqual(migrated["removed"], [str(old_installed)])
-            self.assertIn(str(new_installed), migrated["created"])
+            self.assertEqual(
+                migrated["removed"],
+                [old_installed.relative_to(self.target).as_posix()],
+            )
+            self.assertIn(
+                new_installed.relative_to(self.target).as_posix(),
+                migrated["created"],
+            )
             self.assertFalse(old_installed.exists())
             self.assertTrue(new_installed.is_file())
             for field in ("created", "updated", "removed", "adopted", "skipped"):
@@ -802,8 +919,14 @@ class InstallTest(unittest.TestCase):
 
             report = install(self.target, project="demo")
 
-            self.assertEqual(report["removed"], [str(old_installed)])
-            self.assertEqual(report["adopted"], [str(new_installed)])
+            self.assertEqual(
+                report["removed"],
+                [old_installed.relative_to(self.target).as_posix()],
+            )
+            self.assertEqual(
+                report["adopted"],
+                [new_installed.relative_to(self.target).as_posix()],
+            )
             self.assertEqual(report["skipped"], [])
             self.assertFalse(old_installed.exists())
             self.assertEqual(new_installed.read_text(encoding="utf-8"), "managed\n")
@@ -829,8 +952,14 @@ class InstallTest(unittest.TestCase):
 
             report = install(self.target, project="demo", force=True)
 
-            self.assertEqual(report["removed"], [str(old_installed)])
-            self.assertEqual(report["updated"], [str(kept_installed)])
+            self.assertEqual(
+                report["removed"],
+                [old_installed.relative_to(self.target).as_posix()],
+            )
+            self.assertEqual(
+                report["updated"],
+                [kept_installed.relative_to(self.target).as_posix()],
+            )
             self.assertFalse(old_installed.exists())
             self.assertEqual(kept_installed.read_text(encoding="utf-8"), "managed v2\n")
         finally:
@@ -856,7 +985,7 @@ class InstallTest(unittest.TestCase):
         skill.write_text("사용자 수정본", encoding="utf-8")
         report = install(self.target, project="demo")
         self.assertEqual(skill.read_text(encoding="utf-8"), "사용자 수정본")
-        self.assertIn(str(skill), report["skipped"])
+        self.assertIn(skill.relative_to(self.target).as_posix(), report["skipped"])
 
     def test_preexisting_user_skill_not_touched(self):
         # install 밖에서 만들어진(=manifest에 없는) 스킬은 사용자 소유 — 건드리지 않는다.
@@ -865,7 +994,7 @@ class InstallTest(unittest.TestCase):
         skill.write_text("기존 사용자 스킬", encoding="utf-8")
         report = install(self.target, project="demo")
         self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
-        self.assertIn(str(skill), report["skipped"])
+        self.assertIn(skill.relative_to(self.target).as_posix(), report["skipped"])
 
     def test_install_writes_new_config_keys(self):
         install(self.target, project="demo", default_branch="main", repo="myrepo")
@@ -908,7 +1037,7 @@ class InstallTest(unittest.TestCase):
         skill.write_text("사용자 수정본", encoding="utf-8")  # manifest 기록 있음 + 수정
         report = install(self.target, project="demo", force=True)
         self.assertIn("name: demo-brain-query", skill.read_text(encoding="utf-8"))
-        self.assertIn(str(skill), report["updated"])
+        self.assertIn(skill.relative_to(self.target).as_posix(), report["updated"])
 
     def test_force_preserves_manifest_outside_file(self):
         # manifest 밖(사용자 소유) 파일은 force여도 보존.
@@ -917,7 +1046,7 @@ class InstallTest(unittest.TestCase):
         skill.write_text("기존 사용자 스킬", encoding="utf-8")
         report = install(self.target, project="demo", force=True)
         self.assertEqual(skill.read_text(encoding="utf-8"), "기존 사용자 스킬")
-        self.assertIn(str(skill), report["skipped"])
+        self.assertIn(skill.relative_to(self.target).as_posix(), report["skipped"])
 
     def test_real_templates_render_with_synthetic_values(self):
         # 역수입된 실제 templates를 합성값으로 렌더 → (a) 미치환 토큰 0(현재 brain 스킬엔
@@ -950,11 +1079,11 @@ class InstallTest(unittest.TestCase):
 
         scripts = self._skill_dir("demo-brain-ingest") / "scripts"
         for name in ("run_ingest.sh", "finalize_ingest.sh", "finalize_ingest.py", "run_ingest_batch.py",
-                     "validate_workflow_result.py"):
+                     "validate_workflow_result.py", "validate_foundation.py"):
             with self.subTest(name=name):
                 script = scripts / name
                 self.assertTrue(script.is_file())
-                if name.endswith(".sh") and script.is_file():
+                if name.endswith(".sh") or name == "validate_foundation.py":
                     self.assertTrue(script.stat().st_mode & stat.S_IXUSR)
         run_ingest = (scripts / "run_ingest.sh").read_text(encoding="utf-8")
         for flag in ("--repo-root", "--brain-root", "--expected-repo-id", "--expected-revision-ref",
@@ -979,6 +1108,7 @@ class InstallTest(unittest.TestCase):
         self.assertIn("quote_access=allow", installed_query)
         self.assertIn("code_quote=missing", installed_audit)
         self.assertFalse((scripts / "test_batch_tools.py").exists())
+        self.assertFalse((scripts / "test_validate_foundation.py").exists())
         self.assertEqual(overlay.read_text(encoding="utf-8"),
                          "프로젝트가 소유하는 코드 검증 규칙\n")
         self.assertNotIn(str(overlay.relative_to(self.target)),

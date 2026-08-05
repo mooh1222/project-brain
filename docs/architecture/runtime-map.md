@@ -157,10 +157,17 @@ raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르�
 coverage는 선언한 identity와 실제 산출물을 결속할 뿐 원문 의미가 완전하다고 추론하지 않는다.
 coverage가 없거나 mode/build binding이 맞지 않으면 objects/raw/index 쓰기 전에 실패한다.
 
-### 계획된 별도 P0 최종 gate
+### 설치 가능한 별도 P0 최종 gate
 
-`Task 12–15에서 추가할 별도 P0 최종 gate`는 아직 계획일 뿐 **현재 활성 경로가 아니다**.
-이 gate는 receipt와 현재 corpus를 독립적으로 판정하는 P0 완료 조건이며
+과거 `Task 12–15에서 추가할 별도 P0 최종 gate`라고 계획한 경로 가운데 엔진 판정기와
+설치 런타임 `scripts/validate_foundation.py`는 구현됐다. 이 경로는 명시적인 `baseline` 뒤 첫 설치
+report와 무변이 두 번째 설치 report를 받고, 고정된 6개 command를 순서대로 실행하면서 각 command
+전후에 engine·BB2 Git, objects/raw, index, runtime manifest, artifact 불변식을 다시 확인한다. 성공한
+gate receipt는 baseline receipt SHA와 gate 시작/종료 상태를 함께 결속한다. snapshot handoff는 독립
+`snapshot verify`를 한 번 더 실행하고 snapshot과 artifact를 두 번 재검사한 뒤에만 receipt를 게시한다.
+
+다만 Task 15에서 실제 BB2 baseline·설치 report·snapshot을 만들어 명시적으로 실행하기 전까지는
+**현재 활성 경로가 아니다**. 이 gate는 receipt와 현재 corpus를 독립적으로 판정하는 P0 완료 조건이며
 **일반 ingest finalizer가 아니다**. 따라서 설치된 semantic **finalizer를 호출하지 않는다**. 파생 색인과 검색 품질을
 갱신하는 단계도 아니므로 **index rebuild를 호출하지 않는다**. 현재의 installed batch
 finalization/tail verification과 이 별도 gate를 같은 실행 단계처럼 해석하면 안 된다.

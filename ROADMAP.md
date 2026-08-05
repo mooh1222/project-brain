@@ -43,8 +43,10 @@ mutation/no-op receipt → foundation gate`로 결속하는 기반을 먼저 구
 
 **P0 ingest integrity 완료 기준**은 coverage 없는 single/batch pre-write 차단, assembled/direct
 identity 결속, 신규·변경 write semantics, canonical receipt와 복구, 설치 runtime·template parity,
-foundation gate, clean baseline과 BB2 소비 회귀를 모두 통과하는 것이다. 현재 Task 12~15의 gate,
-baseline, BB2 검증이 남아 있으므로 P0 완료로 표시하지 않는다.
+foundation gate, clean baseline과 BB2 소비 회귀를 모두 통과하는 것이다. Task 13에서 foundation
+판정기와 설치 런타임, target-relative install report, 비변이 gate와 snapshot handoff 검증 경계까지
+합성 repo로 구현했다. 그러나 Task 14 전체 병합·독립 리뷰와 Task 15 실제 BB2 clean baseline,
+두 번 설치, 6개 command gate, snapshot handoff가 남아 있으므로 P0 완료로 표시하지 않는다.
 
 **Task 18 blocked handoff:** P0 기준이 모두 통과하고 새 binding으로 실코퍼스 부채를 다시 측정하기
 전에는 Task 18 label/quote debt migration을 시작하지 않는다. **실코퍼스 migration은 미완료**이며,

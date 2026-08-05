@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,14 +16,20 @@ from project_brain.foundation import (
     FoundationError,
     atomic_create_bound_receipt,
     atomic_create_receipt,
+    BB2_MANAGED_SKILL_ROOTS,
+    build_foundation_handoff,
     canonical_receipt_bytes,
     capture_foundation_baseline,
     capture_tree_receipt,
+    foundation_command_specs,
+    run_foundation_gate,
+    task15_stage_paths,
+    validate_task15_cached_paths,
     verify_artifact_inventory,
     verify_bound_receipt,
     verify_foundation_invariants,
 )
-from project_brain.snapshot import SnapshotRequest, create_snapshot
+from project_brain.snapshot import SnapshotRequest, create_snapshot, verify_snapshot
 
 
 def _write(path: Path, data: bytes) -> None:
@@ -113,14 +120,22 @@ def foundation_fixture(tmp_path, monkeypatch) -> FoundationFixture:
         json.dumps({"id": "domain.fixture", "kind": "DomainContext"}).encode(),
     )
     _write(raw_file, b"fixture raw source\n")
-    managed = repo / ".agents/skills/demo/SKILL.md"
+    managed = repo / ".agents/skills/bb2-brain-ingest/SKILL.md"
     _write(managed, b"managed-v1\n")
     manifest = repo / ".project-brain-manifest.json"
     _write(
         manifest,
         canonical_receipt_bytes({"files": {managed.relative_to(repo).as_posix(): _sha(managed.read_bytes())}}),
     )
-    _write(repo / ".project-brain.json", b'{"brain_root":"brain"}\n')
+    _write(
+        repo / ".project-brain.json",
+        canonical_receipt_bytes({
+            "project": "bb2",
+            "brain_root": "brain",
+            "default_branch": "develop",
+            "repo": "bb2_client",
+        }),
+    )
     _write(repo / ".gitignore", b".snapshots/\nbrain/.brain-local/\n")
     user_dirt = repo / "user-note.txt"
     _write(user_dirt, b"clean\n")
@@ -815,3 +830,532 @@ def test_bound_receipt_closes_first_parent_if_second_parent_validation_fails(
     assert len(opened) == 1
     with pytest.raises(OSError):
         os.fstat(opened[0])
+
+
+def _installer_gate_report(root: Path) -> dict[str, object]:
+    managed = ".agents/skills/bb2-brain-ingest/scripts/validate_foundation.py"
+    return {
+        "ok": True,
+        "target_root": str(root),
+        "config": "kept",
+        "created": [managed],
+        "updated": [],
+        "removed": [],
+        "adopted": [],
+        "skipped": [],
+        "installer_control_paths": [".project-brain-manifest.json"],
+    }
+
+
+def test_task15_stage_paths_are_exactly_managed_changes_plus_manifest(tmp_path):
+    root = (tmp_path / "bb2").resolve()
+    root.mkdir()
+    report = _installer_gate_report(root)
+    assert task15_stage_paths(report) == [
+        ".agents/skills/bb2-brain-ingest/scripts/validate_foundation.py",
+        ".project-brain-manifest.json",
+    ]
+
+    report["created"] = [".agents/skills/bb2-brain-unlisted/SKILL.md"]
+    with pytest.raises(FoundationError, match="managed runtime path"):
+        task15_stage_paths(report)
+
+    assert BB2_MANAGED_SKILL_ROOTS == (
+        ".agents/skills/bb2-brain-query/",
+        ".agents/skills/bb2-brain-ingest/",
+        ".agents/skills/bb2-brain-session-ingest/",
+        ".agents/skills/bb2-brain-audit/",
+    )
+
+
+def test_task15_cached_paths_must_be_nonempty_subset_without_preexisting_paths(tmp_path):
+    root = (tmp_path / "bb2").resolve()
+    root.mkdir()
+    allowed = task15_stage_paths(_installer_gate_report(root))
+    with pytest.raises(FoundationError, match="preexisting cached"):
+        validate_task15_cached_paths(
+            preexisting_cached_paths=["user-owned.txt"],
+            cached_paths=allowed[:1],
+            allowed_paths=allowed,
+        )
+    with pytest.raises(FoundationError, match="empty cached"):
+        validate_task15_cached_paths(
+            preexisting_cached_paths=[],
+            cached_paths=[],
+            allowed_paths=allowed,
+        )
+    with pytest.raises(FoundationError, match="cached path"):
+        validate_task15_cached_paths(
+            preexisting_cached_paths=[],
+            cached_paths=["brain/objects/user-owned.json"],
+            allowed_paths=allowed,
+        )
+    validate_task15_cached_paths(
+        preexisting_cached_paths=[],
+        cached_paths=allowed[:1],
+        allowed_paths=allowed,
+    )
+
+
+def test_foundation_command_set_has_exact_order_and_forbids_mutating_commands(tmp_path):
+    engine = (tmp_path / "engine").resolve()
+    repo = (tmp_path / "bb2").resolve()
+    brain = repo / "brain"
+    runtime = repo / ".agents/skills/bb2-brain-ingest/scripts/validate_foundation.py"
+    smoke = (tmp_path / "smoke").resolve()
+    rows = foundation_command_specs(
+        engine_root=engine,
+        repo_root=repo,
+        brain_root=brain,
+        installed_runtime=runtime,
+        smoke_root=smoke,
+        python_executable=Path(sys.executable),
+    )
+    assert [row.id for row in rows] == [
+        "installed-runtime-unittest",
+        "bb2-checks",
+        "lint",
+        "audit-no-fetch",
+        "eval",
+        "coverage-build-dry-smoke",
+    ]
+    assert rows[0].argv == (
+        str(Path(sys.executable)),
+        "-m",
+        "unittest",
+        "src.project_brain.templates.ingest.scripts.test_validate_foundation",
+    )
+    assert rows[1].argv[-4:] == ("-s", "brain/checks", "-p", "test_*.py")
+    assert rows[2].argv[-3:] == ("lint", "--brain-root", str(brain))
+    assert rows[3].argv[-6:] == (
+        "audit", "--brain-root", str(brain), "--repo-root", str(repo), "--no-fetch"
+    )
+    assert rows[4].argv[-3:] == ("eval", "--brain-root", str(brain))
+    rendered = "\n".join(" ".join(row.argv) for row in rows)
+    assert "finalize_ingest" not in rendered
+    assert "index rebuild" not in rendered
+
+
+def test_coverage_build_smoke_writes_only_to_temporary_root(
+    tmp_path,
+    foundation_fixture,
+):
+    engine_root = Path(__file__).resolve().parents[1]
+    installed_runtime = (
+        engine_root
+        / "src/project_brain/templates/ingest/scripts/validate_foundation.py"
+    )
+    smoke_root = (tmp_path / "coverage-smoke").resolve()
+    protected = {
+        path: path.read_bytes()
+        for path in (
+            foundation_fixture.object_file,
+            foundation_fixture.raw_file,
+            foundation_fixture.index_db,
+        )
+    }
+
+    foundation.prepare_coverage_smoke(
+        installed_runtime=installed_runtime,
+        smoke_root=smoke_root,
+    )
+    command = foundation_command_specs(
+        engine_root=engine_root,
+        repo_root=foundation_fixture.repo,
+        brain_root=foundation_fixture.brain,
+        installed_runtime=installed_runtime,
+        smoke_root=smoke_root,
+        python_executable=Path(sys.executable),
+    )[-1]
+
+    row = foundation._command_row(command)
+
+    assert row["ok"] is True, row["stderr"]
+    assert (smoke_root / "objects.json").is_file()
+    assert json.loads((smoke_root / "objects.json").read_text(encoding="utf-8"))
+    assert {path: path.read_bytes() for path in protected} == protected
+
+
+@dataclass
+class GateFixture:
+    base: FoundationFixture
+    baseline_path: Path
+    baseline_binding_path: Path
+    install_one_path: Path
+    install_two_path: Path
+    installed_runtime: Path
+    managed_changes: list[str]
+
+
+def _write_json(path: Path, value: Mapping[str, object]) -> None:
+    _write(
+        path,
+        (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    )
+
+
+def _successful_command_row(spec) -> dict[str, object]:
+    return {
+        "id": spec.id,
+        "argv": list(spec.argv),
+        "cwd": spec.cwd,
+        "exit_code": 0,
+        "stdout": "ok\n",
+        "stdout_sha256": _sha(b"ok\n"),
+        "stderr": "",
+        "stderr_sha256": _sha(b""),
+        "ok": True,
+    }
+
+
+@pytest.fixture
+def gate_fixture(foundation_fixture, monkeypatch) -> GateFixture:
+    base = foundation_fixture
+    baseline = _capture(base)
+    baseline_path = base.artifact_root / "foundation-baseline.json"
+    baseline_binding_path = base.artifact_root / "foundation-baseline.binding.json"
+    atomic_create_bound_receipt(
+        receipt_path=baseline_path,
+        binding_path=baseline_binding_path,
+        value=baseline,
+    )
+
+    skill = base.repo / ".agents/skills/bb2-brain-ingest"
+    installed_runtime = skill / "scripts/validate_foundation.py"
+    source_templates = (
+        Path(__file__).resolve().parents[1]
+        / "src/project_brain/templates/ingest/references/object-templates"
+    )
+    installed_templates = skill / "references/object-templates"
+    sources = {
+        installed_runtime: (
+            Path(__file__).resolve().parents[1]
+            / "src/project_brain/templates/ingest/scripts/validate_foundation.py"
+        ),
+        installed_templates / "build-notes.complete.template.json": (
+            source_templates / "build-notes.complete.template.json"
+        ),
+        installed_templates / "build-coverage.complete.template.json": (
+            source_templates / "build-coverage.complete.template.json"
+        ),
+        installed_templates / "object-graph.complete.template.json": (
+            source_templates / "object-graph.complete.template.json"
+        ),
+    }
+    for destination, source in sources.items():
+        _write(destination, source.read_bytes())
+    installed_runtime.chmod(0o755)
+    managed_changes = sorted(path.relative_to(base.repo).as_posix() for path in sources)
+    manifest = json.loads(base.manifest.read_text(encoding="utf-8"))
+    for path in sources:
+        relative = path.relative_to(base.repo).as_posix()
+        manifest["files"][relative] = _sha(path.read_bytes())
+    _write(base.manifest, canonical_receipt_bytes(manifest))
+    subprocess.run(
+        ["git", "-C", str(base.repo), "add", "--", *managed_changes, base.manifest.name],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(base.repo), "commit", "-q", "-m", "runtime install"],
+        check=True,
+    )
+
+    install_one_path = base.artifact_root / "install-1.json"
+    install_two_path = base.artifact_root / "install-2.json"
+    first = {
+        "ok": True,
+        "target_root": str(base.repo),
+        "config": "kept",
+        "created": managed_changes,
+        "updated": [],
+        "removed": [],
+        "adopted": [],
+        "skipped": [],
+        "installer_control_paths": [".project-brain-manifest.json"],
+    }
+    second = {
+        **first,
+        "created": [],
+    }
+    _write_json(install_one_path, first)
+    _write_json(install_two_path, second)
+    monkeypatch.setattr(foundation, "_command_row", _successful_command_row)
+    return GateFixture(
+        base=base,
+        baseline_path=baseline_path,
+        baseline_binding_path=baseline_binding_path,
+        install_one_path=install_one_path,
+        install_two_path=install_two_path,
+        installed_runtime=installed_runtime,
+        managed_changes=managed_changes,
+    )
+
+
+def _run_gate(fixture: GateFixture) -> dict[str, object]:
+    base = fixture.base
+    return run_foundation_gate(
+        engine_root=base.engine,
+        repo_root=base.repo,
+        brain_root=base.brain,
+        artifact_root=base.artifact_root,
+        baseline_path=fixture.baseline_path,
+        baseline_binding_path=fixture.baseline_binding_path,
+        install_report_1_path=fixture.install_one_path,
+        install_report_2_path=fixture.install_two_path,
+        installed_runtime=fixture.installed_runtime,
+        python_executable=Path(sys.executable),
+    )
+
+
+def test_gate_records_exact_six_commands_and_nonzero_result(gate_fixture, monkeypatch):
+    def fail_lint(spec):
+        row = _successful_command_row(spec)
+        if spec.id == "lint":
+            row.update({
+                "exit_code": 1,
+                "stderr": "lint failed\n",
+                "stderr_sha256": _sha(b"lint failed\n"),
+                "ok": False,
+            })
+        return row
+
+    monkeypatch.setattr(foundation, "_command_row", fail_lint)
+    report = _run_gate(gate_fixture)
+    assert report["ok"] is False
+    assert [row["id"] for row in report["commands"]] == [
+        "installed-runtime-unittest",
+        "bb2-checks",
+        "lint",
+        "audit-no-fetch",
+        "eval",
+        "coverage-build-dry-smoke",
+    ]
+    assert next(row for row in report["commands"] if row["id"] == "lint")["ok"] is False
+    assert set(report["allowed_changes"]) == {
+        "managed_runtime_paths",
+        "installer_control_paths",
+        "expected_local_mutation_paths",
+    }
+
+
+def test_gate_rejects_tampered_baseline_without_rebinding(gate_fixture):
+    gate_fixture.baseline_path.write_bytes(gate_fixture.baseline_path.read_bytes() + b" ")
+    with pytest.raises(FoundationError) as exc:
+        _run_gate(gate_fixture)
+    assert exc.value.code == "baseline_sha256_mismatch"
+
+
+def test_gate_checks_invariants_after_each_command(gate_fixture, monkeypatch):
+    def mutate_after_lint(spec):
+        row = _successful_command_row(spec)
+        if spec.id == "lint":
+            gate_fixture.base.object_file.write_bytes(
+                gate_fixture.base.object_file.read_bytes() + b" "
+            )
+        return row
+
+    monkeypatch.setattr(foundation, "_command_row", mutate_after_lint)
+    with pytest.raises(FoundationError) as exc:
+        _run_gate(gate_fixture)
+    assert exc.value.code == "objects_changed"
+
+
+@dataclass
+class HandoffFixture:
+    gate: GateFixture
+    gate_path: Path
+    gate_binding_path: Path
+    snapshot_root: Path
+    snapshot_create_path: Path
+    snapshot_verify_path: Path
+    output: Path
+
+
+@pytest.fixture
+def handoff_fixture(gate_fixture) -> HandoffFixture:
+    gate = _run_gate(gate_fixture)
+    assert gate["ok"] is True
+    base = gate_fixture.base
+    gate_path = base.artifact_root / "foundation-gate.json"
+    gate_binding_path = base.artifact_root / "foundation-gate.binding.json"
+    atomic_create_bound_receipt(
+        receipt_path=gate_path,
+        binding_path=gate_binding_path,
+        value=gate,
+    )
+    result = create_snapshot(SnapshotRequest(
+        brain_root=base.brain,
+        repo_root=base.repo,
+        engine_root=base.engine,
+        output_root=base.artifact_root,
+        snapshot_id="p0-foundation-corpus",
+    ))
+    verification = verify_snapshot(
+        result.snapshot_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
+    snapshot_create_path = base.artifact_root / "snapshot-create.json"
+    snapshot_verify_path = base.artifact_root / "snapshot-verify.json"
+    _write_json(snapshot_create_path, {
+        "ok": True,
+        "snapshot_id": result.snapshot_id,
+        "snapshot_root": str(result.snapshot_root),
+        "manifest_path": str(result.manifest_path),
+        "manifest_sha256": result.manifest_sha256,
+        "file_count": result.file_count,
+        "restore_scope": "brain_only",
+    })
+    _write_json(snapshot_verify_path, {
+        "ok": verification.ok,
+        "snapshot_id": verification.snapshot_id,
+        "manifest_sha256": verification.manifest_sha256,
+        "file_count": verification.file_count,
+    })
+    return HandoffFixture(
+        gate=gate_fixture,
+        gate_path=gate_path,
+        gate_binding_path=gate_binding_path,
+        snapshot_root=result.snapshot_root,
+        snapshot_create_path=snapshot_create_path,
+        snapshot_verify_path=snapshot_verify_path,
+        output=base.artifact_root / "p0-handoff.json",
+    )
+
+
+def _build_handoff(fixture: HandoffFixture) -> dict[str, object]:
+    base = fixture.gate.base
+    return build_foundation_handoff(
+        engine_root=base.engine,
+        repo_root=base.repo,
+        brain_root=base.brain,
+        artifact_root=base.artifact_root,
+        baseline_path=fixture.gate.baseline_path,
+        baseline_binding_path=fixture.gate.baseline_binding_path,
+        gate_path=fixture.gate_path,
+        gate_binding_path=fixture.gate_binding_path,
+        snapshot_root=fixture.snapshot_root,
+        snapshot_create_receipt_path=fixture.snapshot_create_path,
+        snapshot_verify_receipt_path=fixture.snapshot_verify_path,
+        output_path=fixture.output,
+    )
+
+
+def test_handoff_rechecks_state_and_publishes_canonical_receipt(handoff_fixture):
+    receipt = _build_handoff(handoff_fixture)
+    assert receipt["ok"] is True
+    assert receipt["task18_status"] == "blocked_pending_new_measurement_design_binding"
+    assert receipt["final_recheck"]["first"] == receipt["final_recheck"]["second"]
+    assert handoff_fixture.output.read_bytes() == canonical_receipt_bytes(receipt)
+
+
+def test_handoff_rejects_gate_tamper_without_rebinding(handoff_fixture):
+    handoff_fixture.gate_path.write_bytes(handoff_fixture.gate_path.read_bytes() + b" ")
+    with pytest.raises(FoundationError) as exc:
+        _build_handoff(handoff_fixture)
+    assert exc.value.code == "gate_sha256_mismatch"
+    assert not handoff_fixture.output.exists()
+
+
+@pytest.mark.parametrize(
+    ("path_getter", "expected_code"),
+    [
+        (lambda fixture: fixture.gate.base.engine / "pyproject.toml", "engine_core_changed"),
+        (lambda fixture: fixture.gate.installed_runtime, "runtime_changed"),
+    ],
+)
+def test_handoff_normalizes_capture_failures_to_drift_codes(
+    handoff_fixture,
+    path_getter,
+    expected_code,
+):
+    path = path_getter(handoff_fixture)
+    path.write_bytes(path.read_bytes() + b"tamper\n")
+
+    with pytest.raises(FoundationError) as exc:
+        _build_handoff(handoff_fixture)
+
+    assert exc.value.code == expected_code
+    assert not handoff_fixture.output.exists()
+
+
+def test_handoff_detects_snapshot_tamper_after_write_and_removes_owned_output(
+    handoff_fixture,
+    monkeypatch,
+):
+    payload_file = next(
+        path for path in handoff_fixture.snapshot_root.rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    )
+    monkeypatch.setattr(
+        foundation,
+        "_after_handoff_write_hook",
+        lambda: payload_file.write_bytes(payload_file.read_bytes() + b"tamper"),
+    )
+    with pytest.raises(FoundationError, match="snapshot"):
+        _build_handoff(handoff_fixture)
+    assert not handoff_fixture.output.exists()
+
+
+def test_handoff_does_not_delete_competitor_replacement(handoff_fixture, monkeypatch):
+    def replace_output():
+        handoff_fixture.output.unlink()
+        handoff_fixture.output.write_bytes(b"competitor\n")
+
+    monkeypatch.setattr(foundation, "_after_handoff_write_hook", replace_output)
+    with pytest.raises(FoundationError, match="handoff"):
+        _build_handoff(handoff_fixture)
+    assert handoff_fixture.output.read_bytes() == b"competitor\n"
+
+
+def test_handoff_preserves_unexpected_sibling_when_owned_output_is_removed(
+    handoff_fixture,
+    monkeypatch,
+):
+    sibling = handoff_fixture.gate.base.artifact_root / "unexpected-user-file.json"
+    monkeypatch.setattr(
+        foundation,
+        "_after_handoff_write_hook",
+        lambda: sibling.write_bytes(b"{}\n"),
+    )
+    with pytest.raises(FoundationError, match="artifact inventory"):
+        _build_handoff(handoff_fixture)
+    assert not handoff_fixture.output.exists()
+    assert sibling.read_bytes() == b"{}\n"
+
+
+def test_handoff_reruns_snapshot_verifier_exactly_once(handoff_fixture, monkeypatch):
+    calls = []
+    original = foundation.snapshot.verify_snapshot
+
+    def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(foundation.snapshot, "verify_snapshot", counted)
+    _build_handoff(handoff_fixture)
+    assert len(calls) == 1
+
+
+def test_handoff_detects_snapshot_race_between_post_scan_and_inventory(
+    handoff_fixture,
+    monkeypatch,
+):
+    payload_file = next(
+        path for path in handoff_fixture.snapshot_root.rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    )
+    original = foundation.verify_artifact_inventory
+
+    def race(artifact_root, *, allowed_files, verified_snapshot_root=None):
+        if handoff_fixture.output in allowed_files:
+            payload_file.write_bytes(payload_file.read_bytes() + b"raced")
+        return original(
+            artifact_root,
+            allowed_files=allowed_files,
+            verified_snapshot_root=verified_snapshot_root,
+        )
+
+    monkeypatch.setattr(foundation, "verify_artifact_inventory", race)
+    with pytest.raises(FoundationError, match="snapshot"):
+        _build_handoff(handoff_fixture)
+    assert not handoff_fixture.output.exists()

@@ -426,6 +426,32 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
 
 조회 쪽 계약(결과 해석·채널 라벨·사용 시점 promote)은 `{{PROJECT}}-brain-query` 스킬이 정본이다.
 
+## P0 foundation gate — 일반 적재 finalizer와 별개
+
+설치되는 `scripts/validate_foundation.py`는 P0 완료를 판정하기 위한 명시적 운영 경계다. 평소
+ingest 뒤 자동으로 실행되는 finalizer가 아니며, semantic finalizer나 `index rebuild`를 호출하지
+않는다. Task 15에서 clean BB2 checkout과 고정 artifact 디렉터리를 준비한 뒤 다음 순서로만 쓴다.
+
+1. `baseline`이 engine·BB2 HEAD와 dirt, objects/raw, index DB·meta, stale cache, 설치 manifest,
+   artifact 상태를 고정하고 자기 SHA에 결속된 receipt를 만든다.
+2. 같은 target에 installer를 두 번 실행한다. 첫 report는 설치된 관리 파일과 control file을
+   target-relative POSIX 경로로 기록하고, 두 번째 report의 `created/updated/removed/adopted/skipped`
+   다섯 배열은 모두 비어 있어야 한다.
+3. `verify`가 installed runtime unittest → BB2 checks → lint → `audit --no-fetch` → eval → 임시
+   디렉터리 coverage build dry smoke의 고정 6개 command를 순서대로 실행한다. 각 command 전후
+   상태는 baseline과 같아야 하며 audit이 만든 stale cache 변화만 허용한다. coverage smoke 출력은
+   임시 디렉터리에만 쓴다.
+4. 성공한 gate receipt는 제공받은 baseline receipt의 SHA와 시작·종료 상태를 결속한다. 입력
+   receipt가 바뀌었으면 현재 파일을 다시 해시해 새 기준처럼 받아들이지 않고 실패한다.
+5. `handoff`는 기존 snapshot create/verify receipt의 CLI schema와 snapshot manifest를 대조하고,
+   독립 `snapshot verify`를 정확히 한 번 다시 실행한다. snapshot과 전체 artifact를 게시 전과 게시
+   후 두 번 더 확인한 뒤 canonical handoff receipt를 배타적으로 만든다. 경쟁자가 같은 경로를
+   선점하거나 바꾼 파일은 삭제하지 않는다.
+
+이 snapshot은 P0 foundation 상태의 복구·인계 증거일 뿐 Task 18 migration binding이 아니다.
+실제 BB2 객체나 raw corpus 수정, Task 18 label/quote debt migration은 P0 기준이 모두 통과하고 새
+binding으로 부채를 다시 측정하기 전에는 시작하지 않는다.
+
 ## 설치 범위
 
 엔진 `templates/`가 생성 스킬의 단일 원본이다. 소비 프로젝트에서는 먼저 `project-brain install`을

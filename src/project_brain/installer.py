@@ -19,6 +19,7 @@ import os
 import stat
 import tempfile
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from project_brain.config import CONFIG_FILENAME
 
@@ -42,6 +43,70 @@ class InstallConflictError(RuntimeError):
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def normalize_installer_report_path(target_root: Path, value: str) -> str:
+    """새 상대경로와 전환 전 target 내부 절대경로를 안전하게 정규화한다."""
+    target_root = Path(target_root)
+    if (
+        not target_root.is_absolute()
+        or target_root != Path(os.path.abspath(target_root))
+    ):
+        raise InstallConflictError(
+            f"installer report path target_root가 exact absolute가 아님: {target_root}"
+        )
+    try:
+        root_mode = target_root.lstat().st_mode
+    except OSError as exc:
+        raise InstallConflictError(
+            f"installer report path target_root를 검사할 수 없음: {exc}"
+        ) from exc
+    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        raise InstallConflictError(
+            "installer report path target_root가 실제 디렉터리가 아님"
+        )
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise InstallConflictError(f"installer report path가 비었거나 안전하지 않음: {value!r}")
+
+    candidate = Path(value)
+    if candidate.is_absolute():
+        if candidate != Path(os.path.abspath(candidate)):
+            raise InstallConflictError(
+                f"installer report path 절대경로가 정규화되지 않음: {value!r}"
+            )
+        try:
+            relative = candidate.relative_to(target_root).as_posix()
+        except ValueError as exc:
+            raise InstallConflictError(
+                f"installer report path가 target_root 밖임: {value!r}"
+            ) from exc
+    else:
+        pure = PurePosixPath(value)
+        if pure.is_absolute() or pure.as_posix() in {"", "."} or ".." in pure.parts:
+            raise InstallConflictError(
+                f"installer report path가 target_root를 벗어남: {value!r}"
+            )
+        relative = pure.as_posix()
+
+    pure = PurePosixPath(relative)
+    if pure.as_posix() in {"", "."} or ".." in pure.parts:
+        raise InstallConflictError(f"installer report path가 안전하지 않음: {value!r}")
+    cursor = target_root
+    for part in pure.parts[:-1]:
+        cursor = cursor / part
+        try:
+            mode = cursor.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise InstallConflictError(
+                f"installer report path 부모를 검사할 수 없음: {relative}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise InstallConflictError(
+                f"installer report path 부모가 실제 디렉터리가 아님: {relative}"
+            )
+    return relative
 
 
 def render_text(text: str, *, project: str, brain_root: str,
@@ -307,8 +372,9 @@ def install(target, *, project: str, brain_root: str = "brain",
     manifest key만 정리하므로 ``removed``에 넣지 않는다.
     """
     target = Path(target).resolve()
-    report = {"config": "kept", "created": [], "updated": [],
-              "removed": [], "adopted": [], "skipped": []}
+    report = {"target_root": str(target), "config": "kept", "created": [],
+              "updated": [], "removed": [], "adopted": [], "skipped": [],
+              "installer_control_paths": []}
 
     cfg_path = target / CONFIG_FILENAME
     manifest_path = target / MANIFEST_FILENAME
@@ -378,20 +444,20 @@ def install(target, *, project: str, brain_root: str = "brain",
             if on_disk == rendered_hash:
                 if recorded != rendered_hash:
                     _preserve_executable_mode(src, dst)
-                    report["adopted"].append(str(dst))
+                    report["adopted"].append(rel_key)
                 elif _preserve_executable_mode(src, dst):
-                    report["updated"].append(str(dst))
+                    report["updated"].append(rel_key)
                 manifest["files"][rel_key] = rendered_hash
                 continue
             if recorded == on_disk or (recorded is not None and force):
                 _atomic_write_bytes(dst, rendered, src=src)
-                report["updated"].append(str(dst))
+                report["updated"].append(rel_key)
             else:
-                report["skipped"].append(str(dst))
+                report["skipped"].append(rel_key)
                 continue
         else:
             _atomic_write_bytes(dst, rendered, src=src)
-            report["created"].append(str(dst))
+            report["created"].append(rel_key)
         manifest["files"][rel_key] = rendered_hash
 
     # 5. manifest를 먼저 준비한다. retired 원본은 manifest 확정 전까지 같은 디렉터리의
@@ -440,5 +506,8 @@ def install(target, *, project: str, brain_root: str = "brain",
     if cleanup_errors:
         details = "; ".join(str(error) for error in cleanup_errors)
         raise RuntimeError(f"manifest 확정 뒤 retired backup 정리 실패: {details}")
-    report["removed"] = [str(dst) for _, dst, exists in retired if exists]
+    report["removed"] = [rel_key for rel_key, _, exists in retired if exists]
+    report["installer_control_paths"] = [MANIFEST_FILENAME]
+    if config_bytes is not None:
+        report["installer_control_paths"].append(CONFIG_FILENAME)
     return report
