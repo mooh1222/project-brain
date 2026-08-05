@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -1160,6 +1161,95 @@ def test_gate_checks_invariants_after_each_command(gate_fixture, monkeypatch):
     assert exc.value.code == "objects_changed"
 
 
+def test_gate_semantic_validator_rejects_each_forged_contract(gate_fixture):
+    gate = _run_gate(gate_fixture)
+    baseline = json.loads(gate_fixture.baseline_path.read_text(encoding="utf-8"))
+    binding = json.loads(
+        gate_fixture.baseline_binding_path.read_text(encoding="utf-8")
+    )
+    first_raw = json.loads(gate_fixture.install_one_path.read_text(encoding="utf-8"))
+    second_raw = json.loads(gate_fixture.install_two_path.read_text(encoding="utf-8"))
+    first, second, allowed_managed = foundation.validate_foundation_install_reports(
+        first_raw,
+        second_raw,
+        repo_root=gate_fixture.base.repo,
+    )
+    mutations = {
+        "command_argv": lambda value: value["commands"][0].update({
+            "argv": ["/tmp/not-engine-python", "-c", "print(1)"],
+        }),
+        "command_cwd": lambda value: value["commands"][0].update({
+            "cwd": "/tmp",
+        }),
+        "stdout_sha": lambda value: value["commands"][0].update({
+            "stdout_sha256": "0" * 64,
+        }),
+        "stderr_sha": lambda value: value["commands"][0].update({
+            "stderr_sha256": "0" * 64,
+        }),
+        "heads": lambda value: value["heads"].update({"engine": "0" * 40}),
+        "install": lambda value: value["install"]["first"].update({"config": "created"}),
+        "allowed": lambda value: value["allowed_changes"].update({
+            "expected_local_mutation_paths": [],
+        }),
+        "observed": lambda value: value["observed_changes"].update({
+            "bb2_commit_paths": [],
+        }),
+        "state": lambda value: value.update({"before": {}}),
+    }
+    accepted = []
+
+    for label, mutate in mutations.items():
+        forged = copy.deepcopy(gate)
+        mutate(forged)
+        try:
+            foundation._validate_gate_receipt(
+                forged,
+                baseline=baseline,
+                baseline_path=gate_fixture.baseline_path,
+                baseline_sha=binding["receipt_sha256"],
+                engine_root=gate_fixture.base.engine,
+                repo_root=gate_fixture.base.repo,
+                brain_root=gate_fixture.base.brain,
+                installed_runtime=gate_fixture.installed_runtime,
+                python_executable=Path(sys.executable),
+                install_first=first,
+                install_second=second,
+                allowed_managed=allowed_managed,
+            )
+        except FoundationError:
+            continue
+        accepted.append(label)
+
+    assert accepted == []
+
+
+def test_gate_rejects_stale_change_after_last_command_post(
+    gate_fixture,
+    monkeypatch,
+):
+    original = foundation.capture_foundation_state
+    calls = 0
+
+    def mutate_before_final_capture(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 14:
+            gate_fixture.base.stale_set.write_bytes(b'{"stale":["not-from-audit"]}\n')
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        foundation,
+        "capture_foundation_state",
+        mutate_before_final_capture,
+    )
+
+    with pytest.raises(FoundationError) as exc:
+        _run_gate(gate_fixture)
+
+    assert exc.value.code == "stale_set_changed"
+
+
 @dataclass
 class HandoffFixture:
     gate: GateFixture
@@ -1243,6 +1333,7 @@ def _build_handoff(fixture: HandoffFixture) -> dict[str, object]:
 def test_handoff_rechecks_state_and_publishes_canonical_receipt(handoff_fixture):
     receipt = _build_handoff(handoff_fixture)
     assert receipt["ok"] is True
+    assert receipt["snapshot"]["ok"] is True
     assert receipt["task18_status"] == "blocked_pending_new_measurement_design_binding"
     assert receipt["final_recheck"]["first"] == receipt["final_recheck"]["second"]
     assert handoff_fixture.output.read_bytes() == canonical_receipt_bytes(receipt)
@@ -1253,6 +1344,70 @@ def test_handoff_rejects_gate_tamper_without_rebinding(handoff_fixture):
     with pytest.raises(FoundationError) as exc:
         _build_handoff(handoff_fixture)
     assert exc.value.code == "gate_sha256_mismatch"
+    assert not handoff_fixture.output.exists()
+
+
+def test_handoff_rejects_post_write_allowed_artifact_metadata_tamper(
+    handoff_fixture,
+    monkeypatch,
+):
+    targets = (
+        handoff_fixture.gate_path,
+        handoff_fixture.gate_binding_path,
+        handoff_fixture.gate.install_one_path,
+        handoff_fixture.snapshot_verify_path,
+    )
+    for target in targets:
+        before = target.read_bytes()
+        monkeypatch.setattr(
+            foundation,
+            "_after_handoff_write_hook",
+            lambda target=target, before=before: target.write_bytes(before + b" "),
+        )
+
+        with pytest.raises(FoundationError) as exc:
+            _build_handoff(handoff_fixture)
+
+        assert exc.value.code == "artifact_inventory_changed"
+        assert not handoff_fixture.output.exists()
+        assert target.read_bytes() == before + b" "
+        target.write_bytes(before)
+
+
+def test_handoff_rejects_pre_publish_allowed_artifact_metadata_tamper(
+    handoff_fixture,
+    monkeypatch,
+):
+    binding = handoff_fixture.gate_binding_path
+    before = binding.read_bytes()
+    monkeypatch.setattr(
+        foundation,
+        "_before_handoff_publish_hook",
+        lambda: binding.write_bytes(before + b" "),
+    )
+
+    with pytest.raises(FoundationError) as exc:
+        _build_handoff(handoff_fixture)
+
+    assert exc.value.code == "artifact_inventory_changed"
+    assert not handoff_fixture.output.exists()
+    assert binding.read_bytes() == before + b" "
+
+
+def test_handoff_rejects_snapshot_receipts_forged_consistently(
+    handoff_fixture,
+):
+    create = json.loads(handoff_fixture.snapshot_create_path.read_text(encoding="utf-8"))
+    verify = json.loads(handoff_fixture.snapshot_verify_path.read_text(encoding="utf-8"))
+    create.update({"snapshot_id": "forged-snapshot", "file_count": 999999})
+    verify.update({"snapshot_id": "forged-snapshot", "file_count": 999999})
+    _write_json(handoff_fixture.snapshot_create_path, create)
+    _write_json(handoff_fixture.snapshot_verify_path, verify)
+
+    with pytest.raises(FoundationError) as exc:
+        _build_handoff(handoff_fixture)
+
+    assert exc.value.code == "snapshot_verify_result_mismatch"
     assert not handoff_fixture.output.exists()
 
 

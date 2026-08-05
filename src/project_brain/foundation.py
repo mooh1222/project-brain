@@ -1787,6 +1787,7 @@ def run_foundation_gate(
         ignored_snapshots_root=ignored_snapshots_root,
         protected_artifact_files=protected_files,
     )
+    _assert_state_transition(previous, after, allow_stale_set=False)
     final_invariant = _invariant_or_fail(
         baseline,
         engine_root=engine_root,
@@ -1835,8 +1836,17 @@ def run_foundation_gate(
 def _validate_gate_receipt(
     gate: Mapping[str, object],
     *,
+    baseline: Mapping[str, object],
     baseline_path: Path,
     baseline_sha: str,
+    engine_root: Path,
+    repo_root: Path,
+    brain_root: Path,
+    installed_runtime: Path,
+    python_executable: Path,
+    install_first: Mapping[str, object],
+    install_second: Mapping[str, object],
+    allowed_managed: Sequence[str],
 ) -> None:
     expected_keys = {
         "version",
@@ -1862,14 +1872,6 @@ def _validate_gate_receipt(
     if gate.get("baseline") != {"path": str(baseline_path), "sha256": baseline_sha}:
         _fail("gate_baseline_mismatch", "gate does not bind the immutable baseline")
     commands = gate.get("commands")
-    expected_ids = [
-        "installed-runtime-unittest",
-        "bb2-checks",
-        "lint",
-        "audit-no-fetch",
-        "eval",
-        "coverage-build-dry-smoke",
-    ]
     command_keys = {
         "id",
         "argv",
@@ -1883,29 +1885,138 @@ def _validate_gate_receipt(
     }
     if (
         not isinstance(commands, list)
-        or [row.get("id") for row in commands if isinstance(row, dict)] != expected_ids
+        or len(commands) != 6
         or any(not isinstance(row, dict) or set(row) != command_keys for row in commands)
-        or any(row.get("ok") is not True or row.get("exit_code") != 0 for row in commands)
     ):
         _fail("gate_commands_invalid", "gate command rows are not the exact successful fixed set")
+    coverage_argv = commands[-1].get("argv")
+    if not isinstance(coverage_argv, list) or not all(
+        isinstance(value, str) for value in coverage_argv
+    ):
+        _fail("gate_commands_invalid", "coverage command argv must be a string array")
+    try:
+        notes_index = coverage_argv.index("--notes")
+        if coverage_argv.count("--notes") != 1:
+            raise ValueError("duplicate --notes")
+        smoke_root = Path(coverage_argv[notes_index + 1]).parent
+    except (ValueError, IndexError) as exc:
+        _fail("gate_commands_invalid", f"cannot derive coverage smoke root: {exc}")
+    expected_temp_root = Path(tempfile.gettempdir()).resolve()
+    if (
+        not smoke_root.is_absolute()
+        or smoke_root != Path(os.path.abspath(smoke_root))
+        or smoke_root.name != "smoke"
+        or not smoke_root.parent.name.startswith("project-brain-foundation-smoke-")
+        or smoke_root.parent.parent != expected_temp_root
+    ):
+        _fail("gate_commands_invalid", f"unsafe coverage smoke root: {smoke_root}")
+    expected_specs = foundation_command_specs(
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+        installed_runtime=installed_runtime,
+        smoke_root=smoke_root,
+        python_executable=python_executable,
+    )
+    for row, spec in zip(commands, expected_specs, strict=True):
+        if (
+            row.get("id") != spec.id
+            or row.get("argv") != list(spec.argv)
+            or row.get("cwd") != spec.cwd
+            or type(row.get("exit_code")) is not int
+            or row.get("exit_code") != 0
+            or row.get("ok") is not True
+        ):
+            _fail("gate_commands_invalid", f"gate command differs from fixed spec: {spec.id}")
+        for stream in ("stdout", "stderr"):
+            value = row.get(stream)
+            digest = row.get(f"{stream}_sha256")
+            if (
+                not isinstance(value, str)
+                or not isinstance(digest, str)
+                or digest != hashlib.sha256(value.encode("utf-8")).hexdigest()
+            ):
+                _fail(
+                    "gate_commands_invalid",
+                    f"gate command {spec.id} {stream} SHA mismatch",
+                )
     rendered = "\n".join(" ".join(row["argv"]) for row in commands)
     if "finalize_ingest" in rendered or "index rebuild" in rendered:
         _fail("gate_commands_invalid", "gate includes a forbidden mutating command")
+    expected_install = {
+        "first": dict(install_first),
+        "second": dict(install_second),
+    }
+    if gate.get("install") != expected_install:
+        _fail("gate_install_invalid", "embedded install reports differ from artifact reports")
     allowed = gate.get("allowed_changes")
-    if not isinstance(allowed, dict) or set(allowed) != {
-        "managed_runtime_paths",
-        "installer_control_paths",
-        "expected_local_mutation_paths",
-    }:
-        _fail("gate_allowed_changes_invalid", "gate allowed_changes exact shape is invalid")
-    if allowed["installer_control_paths"] != [MANIFEST_FILENAME]:
-        _fail("gate_allowed_changes_invalid", "gate control path must be the manifest only")
+    expected_allowed = {
+        "managed_runtime_paths": sorted(allowed_managed),
+        "installer_control_paths": [MANIFEST_FILENAME],
+        "expected_local_mutation_paths": ["brain/.brain-local/stale-set.json"],
+    }
+    if allowed != expected_allowed:
+        _fail("gate_allowed_changes_invalid", "gate allowed_changes contract is invalid")
+    before = gate.get("before")
+    after = gate.get("after")
+    state_keys = {
+        "roots",
+        "engine",
+        "bb2",
+        "corpus",
+        "search_index",
+        "runtime",
+        "stale_set",
+        "ignored_snapshots_inventory",
+        "artifact_inventory",
+    }
+    if (
+        not isinstance(before, dict)
+        or not isinstance(after, dict)
+        or set(before) != state_keys
+        or set(after) != state_keys
+    ):
+        _fail("gate_state_invalid", "gate before/after exact state shape is invalid")
+    drift = [
+        code for code in _state_drift_codes(before, after)
+        if code != "stale_set_changed"
+    ]
+    try:
+        state_contract_ok = (
+            before["roots"] == after["roots"] == baseline["roots"]
+            and before["engine"] == after["engine"] == baseline["engine"]
+            and before["bb2"] == after["bb2"]
+            and before["corpus"] == after["corpus"] == baseline["corpus"]
+            and before["search_index"] == after["search_index"] == baseline["search_index"]
+            and before["runtime"] == after["runtime"]
+            and before["stale_set"] == baseline["stale_set"]
+            and before["ignored_snapshots_inventory"]
+            == after["ignored_snapshots_inventory"]
+            == baseline["ignored_snapshots_inventory"]
+            and before["artifact_inventory"] == after["artifact_inventory"]
+        )
+    except (KeyError, TypeError):
+        state_contract_ok = False
+    if drift or not state_contract_ok:
+        _fail("gate_state_invalid", f"gate state contract differs: {drift!r}")
     heads = gate.get("heads")
-    if not isinstance(heads, dict) or set(heads) != {"engine", "bb2_before", "bb2_after"}:
-        _fail("gate_heads_invalid", "gate heads exact shape is invalid")
-    for name, value in heads.items():
-        if not isinstance(value, str) or len(value) != 40 or any(ch not in _SHA256 for ch in value):
-            _fail("gate_heads_invalid", f"gate {name} is not lowercase 40-hex")
+    expected_heads = {
+        "engine": after["engine"]["head"],
+        "bb2_before": baseline["bb2"]["head"],
+        "bb2_after": after["bb2"]["head"],
+    }
+    if heads != expected_heads:
+        _fail("gate_heads_invalid", "gate heads do not match baseline/after states")
+    expected_observed = {
+        "bb2_commit_paths": sorted(set(allowed_managed) | {MANIFEST_FILENAME}),
+        "expected_local_mutation_paths": (
+            ["brain/.brain-local/stale-set.json"]
+            if after["stale_set"] != baseline["stale_set"]
+            else []
+        ),
+    }
+    if gate.get("observed_changes") != expected_observed:
+        _fail("gate_observed_changes_invalid", "gate observed_changes contract is invalid")
 
 
 def _snapshot_handoff_evidence(
@@ -1963,21 +2074,42 @@ def _snapshot_handoff_evidence(
     actual_sha = hashlib.sha256(manifest_data).hexdigest()
     if actual_sha != expected_sha:
         _fail("snapshot_manifest_sha_mismatch", "actual snapshot manifest SHA differs from create receipt")
+    before_verify = _scan_tree_receipt(snapshot_root)
+    try:
+        verification = snapshot.verify_snapshot(
+            snapshot_root,
+            expected_manifest_sha256=expected_sha,
+        )
+    except SnapshotError as exc:
+        raise _from_snapshot(exc, code="snapshot_verify_failed") from exc
+    after_verify = _scan_tree_receipt(snapshot_root)
+    if after_verify != before_verify:
+        _fail("snapshot_changed", "snapshot changed during independent verification")
+    actual = {
+        "ok": verification.ok,
+        "snapshot_id": verification.snapshot_id,
+        "manifest_sha256": verification.manifest_sha256,
+        "file_count": verification.file_count,
+    }
     if (
-        verify_value.get("manifest_sha256") != expected_sha
-        or verify_value.get("snapshot_id") != create_value.get("snapshot_id")
-        or verify_value.get("file_count") != create_value.get("file_count")
+        actual["ok"] is not True
+        or create_value.get("snapshot_id") != actual["snapshot_id"]
+        or create_value.get("manifest_sha256") != actual["manifest_sha256"]
+        or create_value.get("file_count") != actual["file_count"]
+        or verify_value != actual
     ):
-        _fail("snapshot_verify_receipt_mismatch", "snapshot verify receipt differs from create receipt")
-    # verify_artifact_inventory is the one independent snapshot verification rerun.
-    tree = _scan_tree_receipt(snapshot_root)
+        _fail(
+            "snapshot_verify_result_mismatch",
+            "snapshot create/verify receipts differ from independent verification",
+        )
     return (
         {
+            "ok": actual["ok"],
             "root": str(snapshot_root),
             "manifest_path": str(manifest_path),
-            "manifest_sha256": expected_sha,
-            "snapshot_id": create_value["snapshot_id"],
-            "file_count": create_value["file_count"],
+            "manifest_sha256": actual["manifest_sha256"],
+            "snapshot_id": actual["snapshot_id"],
+            "file_count": actual["file_count"],
             "create_receipt": {
                 "path": str(create_receipt_path),
                 "sha256": hashlib.sha256(create_data).hexdigest(),
@@ -1987,7 +2119,7 @@ def _snapshot_handoff_evidence(
                 "sha256": hashlib.sha256(verify_data).hexdigest(),
             },
         },
-        tree,
+        after_verify,
     )
 
 
@@ -2037,6 +2169,19 @@ def _assert_snapshot_entries_in_artifact_receipt(
             "snapshot metadata differs inside the final artifact inventory receipt",
             paths=(snapshot_root,),
         )
+
+
+def _tree_receipt_from_entry_receipts(
+    root: Path,
+    entries: Collection[TreeEntryReceipt],
+) -> TreeReceipt:
+    ordered = tuple(sorted(entries, key=lambda entry: entry.path))
+    payload = {"entries": [asdict(entry) for entry in ordered]}
+    return TreeReceipt(
+        root=str(root),
+        entries=ordered,
+        sha256=hashlib.sha256(canonical_receipt_bytes(payload)).hexdigest(),
+    )
 
 
 def _capture_handoff_state(**kwargs: object) -> dict[str, object]:
@@ -2117,24 +2262,48 @@ def build_foundation_handoff(
         purpose="p0-foundation-gate-binding",
         label="gate",
     )
-    _validate_gate_receipt(
-        gate,
-        baseline_path=baseline_path,
-        baseline_sha=baseline_sha,
-    )
     install_report_1_path = artifact_root / "install-1.json"
     install_report_2_path = artifact_root / "install-2.json"
+    first_raw, _ = _read_json_document(
+        install_report_1_path,
+        label="install_report_1",
+    )
+    second_raw, _ = _read_json_document(
+        install_report_2_path,
+        label="install_report_2",
+    )
+    install_first, install_second, allowed_managed = validate_foundation_install_reports(
+        first_raw,
+        second_raw,
+        repo_root=repo_root,
+    )
+    installed_runtime = _exact_absolute(
+        repo_root / ".agents/skills/bb2-brain-ingest/scripts/validate_foundation.py",
+        label="installed_runtime",
+    )
+    _validate_gate_receipt(
+        gate,
+        baseline=baseline,
+        baseline_path=baseline_path,
+        baseline_sha=baseline_sha,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+        installed_runtime=installed_runtime,
+        python_executable=_exact_absolute(
+            Path(os.sys.executable),
+            label="python_executable",
+        ),
+        install_first=install_first,
+        install_second=install_second,
+        allowed_managed=allowed_managed,
+    )
     protected_files = (
         baseline_path,
         baseline_binding_path,
         install_report_1_path,
         install_report_2_path,
     )
-    allowed_managed = gate["allowed_changes"]["managed_runtime_paths"]
-    if not isinstance(allowed_managed, list) or not all(
-        isinstance(path, str) for path in allowed_managed
-    ):
-        _fail("gate_allowed_changes_invalid", "managed runtime paths are invalid")
     snapshot_evidence, initial_snapshot_tree = _snapshot_handoff_evidence(
         snapshot_root=snapshot_root,
         create_receipt_path=snapshot_create_receipt_path,
@@ -2147,12 +2316,17 @@ def build_foundation_handoff(
         snapshot_create_receipt_path,
         snapshot_verify_receipt_path,
     )
-    verify_artifact_inventory(
-        artifact_root,
-        allowed_files=full_artifact_files,
-        verified_snapshot_root=snapshot_root,
-    )
     snapshot_regular = _snapshot_regular_paths(artifact_root, initial_snapshot_tree)
+    initial_full_inventory = verify_artifact_inventory(
+        artifact_root,
+        allowed_files=(*full_artifact_files, *snapshot_regular),
+    )
+    _assert_snapshot_entries_in_artifact_receipt(
+        artifact_root=artifact_root,
+        snapshot_root=snapshot_root,
+        artifact_receipt=initial_full_inventory,
+        expected_snapshot=initial_snapshot_tree,
+    )
     first = _capture_handoff_state(
         engine_root=engine_root,
         repo_root=repo_root,
@@ -2189,6 +2363,11 @@ def build_foundation_handoff(
         artifact_receipt=second_inventory,
         expected_snapshot=initial_snapshot_tree,
     )
+    if second_inventory != initial_full_inventory:
+        _fail(
+            "artifact_inventory_changed",
+            "full artifact inventory changed before handoff publish",
+        )
     second = _capture_handoff_state(
         engine_root=engine_root,
         repo_root=repo_root,
@@ -2215,6 +2394,20 @@ def build_foundation_handoff(
     try:
         _preflight_absent(parent_fd, name, label="handoff")
         created = _create_at(parent_fd, name, data, label="handoff")
+        output_relative = output_path.relative_to(artifact_root).as_posix()
+        expected_post_inventory = _tree_receipt_from_entry_receipts(
+            artifact_root,
+            (
+                *initial_full_inventory.entries,
+                TreeEntryReceipt(
+                    path=output_relative,
+                    entry_type="regular",
+                    mode=stat.S_IMODE(created.st_mode),
+                    size=len(data),
+                    sha256=hashlib.sha256(data).hexdigest(),
+                ),
+            ),
+        )
         try:
             _after_handoff_write_hook()
             post_snapshot_tree = _scan_tree_receipt(snapshot_root)
@@ -2234,13 +2427,17 @@ def build_foundation_handoff(
                 artifact_receipt=post_inventory,
                 expected_snapshot=initial_snapshot_tree,
             )
+            if post_inventory != expected_post_inventory:
+                _fail(
+                    "artifact_inventory_changed",
+                    "post-write artifact inventory is not initial receipt plus owned output",
+                )
             try:
                 linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             except OSError as exc:
                 _fail("handoff_output_changed", f"cannot re-stat handoff output: {exc}")
             if linked.st_dev != created.st_dev or linked.st_ino != created.st_ino:
                 _fail("handoff_output_changed", "handoff output name no longer binds the owned inode")
-            output_relative = output_path.relative_to(artifact_root).as_posix()
             output_entry = next(
                 (entry for entry in post_inventory.entries if entry.path == output_relative),
                 None,
