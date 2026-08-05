@@ -98,7 +98,13 @@ class TestValidateObject(unittest.TestCase):
             hasattr(schema, "validate_mutation_input_schema"),
             "pre-verification mutation input schema API is missing",
         )
-        self.assertEqual(schema.validate_mutation_input_schema(locator), [])
+        self.assertEqual(
+            schema.validate_mutation_input_schema(
+                locator,
+                omitted_required_fields=frozenset({"verified_at"}),
+            ),
+            [],
+        )
         self.assertTrue(
             any("verified_at" in error for error in validate_object(locator))
         )
@@ -107,6 +113,35 @@ class TestValidateObject(unittest.TestCase):
                 BrainStore({locator["id"]: locator})
             ))
         )
+
+    def test_pre_schema_omission_allowlist_applies_to_base_and_kind_fields(self):
+        locator = base(
+            {
+                "id": "code.neutral.omitted",
+                "kind": "CodeLocator",
+                "status": "reviewed",
+                "truth_role": "reference",
+                "title": "Foo::bar",
+                "repo": "demo",
+                "path": "Foo.cpp",
+                "symbol": "Foo::bar",
+                "commit_sha": "a" * 40,
+                "locator_source": "rg",
+                "verified_quote": "void Foo::bar() {}",
+            },
+            tags=["neutral"],
+            created_at="2026-07-28T00:00:00+09:00",
+            updated_at="2026-07-28T00:00:00+09:00",
+        )
+        del locator["created_at"]
+
+        errors = schema.validate_mutation_input_schema(
+            locator,
+            omitted_required_fields=frozenset({"created_at", "verified_at"}),
+        )
+
+        self.assertEqual(errors, [])
+        self.assertTrue(any("created_at" in error for error in validate_object(locator)))
 
 
 class TestReferenceFieldTypes(unittest.TestCase):

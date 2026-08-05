@@ -232,7 +232,7 @@ def _validate_object_schema(
         return ["?: missing base field 'id'"]
     errors = []
     for field in BASE_REQUIRED:
-        if field not in obj:
+        if field not in obj and field not in omitted_required_fields:
             errors.append(f"{obj['id']}: missing base field {field!r}")
     for field in KIND_REQUIRED[kind]:
         if field not in obj and field not in omitted_required_fields:
@@ -396,20 +396,15 @@ def validate_object_schema(obj: dict) -> list[str]:
     return _validate_object_schema(obj)
 
 
-def validate_mutation_input_schema(obj: dict) -> list[str]:
-    """저장 전 검증 대상 CodeLocator만 ``verified_at`` 누락을 허용한다.
-
-    일반 schema와 최종 merged lint는 계속 엄격하다. 이 API는
-    MutationService가 quote/symbol을 검증해 엔진 시각을 넣기 전 입력 단계에서만 쓴다.
-    """
-    omitted = (
-        frozenset({"verified_at"})
-        if obj.get("kind") == "CodeLocator"
-        else frozenset()
-    )
+def validate_mutation_input_schema(
+    obj: dict,
+    *,
+    omitted_required_fields: frozenset[str],
+) -> list[str]:
+    """저장 전 단계에서 caller가 명시한 engine-owned 누락만 허용한다."""
     return _validate_object_schema(
         obj,
-        omitted_required_fields=omitted,
+        omitted_required_fields=omitted_required_fields,
     )
 
 

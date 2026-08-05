@@ -97,7 +97,10 @@ class TestLintStore(unittest.TestCase):
         self.assertTrue(
             any("verified_at" in problem.message for problem in lint_store_report(store))
         )
-        self.assertEqual(lint_mutation_input_store_report(store), ())
+        self.assertEqual(
+            lint_mutation_input_store_report(store, operation="ingest"),
+            (),
+        )
 
     def test_structured_report_keeps_wrapper_messages_compatible(self):
         term = candidate_term()

@@ -325,7 +325,14 @@ class MutationService:
 
         # 3) schema와 enum.
         for obj in inputs:
-            errors = validate_mutation_input_schema(obj)
+            errors = validate_mutation_input_schema(
+                obj,
+                omitted_required_fields=(
+                    frozenset({"verified_at"})
+                    if obj.get("kind") == "CodeLocator"
+                    else frozenset()
+                ),
+            )
             if errors:
                 return _failure("schema_invalid", "; ".join(errors))
 

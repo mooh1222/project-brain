@@ -805,7 +805,10 @@ def build(notes, store, now):
     # 2층: 객체 스키마 + dangling + merged lint
     for o in all_objs:
         if o.get("kind") == "CodeLocator" and "verified_at" not in o:
-            errors += validate_mutation_input_schema(o)
+            errors += validate_mutation_input_schema(
+                o,
+                omitted_required_fields=frozenset({"verified_at"}),
+            )
             errors += validate_object_id(o)
         else:
             errors += validate_object(o)
@@ -826,7 +829,10 @@ def build(notes, store, now):
     merged_store = BrainStore(merged)
     errors += [
         problem.message
-        for problem in lint_mutation_input_store_report(merged_store)
+        for problem in lint_mutation_input_store_report(
+            merged_store,
+            operation="ingest",
+        )
     ]
 
     # C8: 이번 묶음 신규 잎 중 인바운드 0(아무도 안 가리킴)을 비차단 경고로 담는다 — 차단

@@ -526,7 +526,14 @@ def _run_invalid_case(case: dict, payload, tmp_path: Path) -> None:
                 obj["repo"] = "demoapp"
                 obj["commit_sha"] = sha
     for obj in [*bases, *inputs]:
-        assert validate_mutation_input_schema(obj) == [], obj.get("id")
+        assert validate_mutation_input_schema(
+            obj,
+            omitted_required_fields=(
+                frozenset({"verified_at"})
+                if obj.get("kind") == "CodeLocator"
+                else frozenset()
+            ),
+        ) == [], obj.get("id")
         assert validate_object_id(obj) == [], obj.get("id")
     if bases:
         assert lint_store_report(BrainStore({obj["id"]: obj for obj in bases})) == ()

@@ -18,6 +18,7 @@ from project_brain.schema import (
     validate_object_schema,
 )
 from project_brain.store import BrainStore
+from project_brain.write_semantics import engine_owned_input_fields
 
 GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
 LEGACY_SOURCE_TYPES = {"context", "wiki"}
@@ -154,6 +155,7 @@ def _lint_store_report(
     workspace_root: Path | None,
     *,
     mutation_input: bool,
+    operation: str | None = None,
 ) -> tuple[LintProblem, ...]:
     problems: list[LintProblem] = []
     objs = store.all()
@@ -172,7 +174,13 @@ def _lint_store_report(
     for obj in objs:
         object_id = _object_id(obj)
         schema_problems = (
-            validate_mutation_input_schema(obj)
+            validate_mutation_input_schema(
+                obj,
+                omitted_required_fields=engine_owned_input_fields(
+                    operation,
+                    str(obj.get("kind", "")),
+                ),
+            )
             if mutation_input
             else validate_object_schema(obj)
         )
@@ -347,22 +355,26 @@ def lint_store_report(
         store,
         workspace_root,
         mutation_input=False,
+        operation=None,
     )
 
 
 def lint_mutation_input_store_report(
     store: BrainStore,
     workspace_root: Path | None = None,
+    *,
+    operation: str,
 ) -> tuple[LintProblem, ...]:
     """MutationService에 넘길 draft bundle 전용 lint.
 
-    CodeLocator의 ``verified_at`` 누락만 verifier 실행 전까지 허용한다.
+    operation별 engine-owned 필드 누락만 중앙 stamp 전까지 허용한다.
     일반/public lint와 최종 merged lint는 이 함수를 사용하지 않는다.
     """
     return _lint_store_report(
         store,
         workspace_root,
         mutation_input=True,
+        operation=operation,
     )
 
 
