@@ -10,7 +10,12 @@ import stat
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
+
+from project_brain.coverage import ObjectIdentity
+
+if TYPE_CHECKING:
+    from project_brain.mutation import MutationPlanResult
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -30,6 +35,28 @@ _BATCH_BINDING_FIELDS = {
     "target_revision_sha",
     "engine_root",
     "engine_sha",
+}
+_MUTATION_RECEIPT_FIELDS = {
+    "version",
+    "receipt_id",
+    "ok",
+    "outcome",
+    "operation",
+    "committed",
+    "transaction_id",
+    "manifest_sha256",
+    "coverage_sha256",
+    "expected_objects",
+    "verified_objects",
+    "changed_objects",
+    "before_fingerprint",
+    "after_fingerprint",
+}
+_CHANGED_ACTION_ORDER = {
+    "create": 0,
+    "update": 1,
+    "delete": 2,
+    "rename": 3,
 }
 
 
@@ -56,6 +83,296 @@ class BatchBinding:
     target_revision_sha: str
     engine_root: str
     engine_sha: str
+
+
+@dataclass(frozen=True)
+class MutationReceipt:
+    version: int
+    receipt_id: str
+    ok: bool
+    outcome: MutationOutcome
+    operation: str
+    committed: bool
+    transaction_id: str | None
+    manifest_sha256: str
+    coverage_sha256: str | None
+    expected_objects: tuple[ObjectIdentity, ...]
+    verified_objects: tuple[ObjectIdentity, ...]
+    changed_objects: tuple[Mapping[str, object], ...]
+    before_fingerprint: str
+    after_fingerprint: str
+
+
+def _canonical_receipt_identity(payload: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        {key: value for key, value in payload.items() if key != "receipt_id"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _normalize_object_identities(
+    value: object,
+    *,
+    field: str,
+) -> tuple[ObjectIdentity, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field} must be an array")
+    identities: list[ObjectIdentity] = []
+    for index, raw in enumerate(value):
+        if isinstance(raw, ObjectIdentity):
+            identity = raw
+        elif isinstance(raw, Mapping) and set(raw) == {"id", "kind"}:
+            object_id = raw.get("id")
+            kind = raw.get("kind")
+            if (
+                not isinstance(object_id, str)
+                or not object_id
+                or not isinstance(kind, str)
+                or not kind
+            ):
+                raise ValueError(f"{field}[{index}] is invalid")
+            identity = ObjectIdentity(object_id, kind)
+        else:
+            raise ValueError(f"{field}[{index}] is invalid")
+        identities.append(identity)
+    if len(identities) != len(set(identities)):
+        raise ValueError(f"{field} contains duplicate rows")
+    return tuple(sorted(identities))
+
+
+def _normalize_changed_objects(
+    value: object,
+) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("changed_objects must be an array")
+    normalized: list[dict[str, object]] = []
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"changed_objects[{index}] is invalid")
+        action = raw.get("action")
+        if action not in _CHANGED_ACTION_ORDER:
+            raise ValueError(f"changed_objects[{index}] action is invalid")
+        expected_fields = (
+            {"action", "old_id", "new_id", "kind"}
+            if action == "rename"
+            else {"action", "id", "kind"}
+        )
+        if set(raw) != expected_fields:
+            raise ValueError(f"changed_objects[{index}] fields are invalid")
+        for field_name in expected_fields - {"action"}:
+            field_value = raw.get(field_name)
+            if not isinstance(field_value, str) or not field_value:
+                raise ValueError(
+                    f"changed_objects[{index}].{field_name} is invalid"
+                )
+        normalized.append(
+            {
+                "action": action,
+                "old_id": raw["old_id"],
+                "new_id": raw["new_id"],
+                "kind": raw["kind"],
+            }
+            if action == "rename"
+            else {
+                "action": action,
+                "id": raw["id"],
+                "kind": raw["kind"],
+            }
+        )
+    frozen_rows = {
+        tuple(sorted(row.items()))
+        for row in normalized
+    }
+    if len(frozen_rows) != len(normalized):
+        raise ValueError("changed_objects contains duplicate rows")
+
+    def sort_key(row: Mapping[str, object]) -> tuple[object, ...]:
+        action = str(row["action"])
+        if action == "rename":
+            suffix = (row["old_id"], row["new_id"], row["kind"])
+        else:
+            suffix = (row["id"], row["kind"])
+        return (_CHANGED_ACTION_ORDER[action], *suffix)
+
+    return tuple(sorted(normalized, key=sort_key))
+
+
+def _receipt_payload(receipt: MutationReceipt) -> dict[str, object]:
+    def identities(values: tuple[ObjectIdentity, ...]) -> list[dict[str, str]]:
+        return [{"id": item.id, "kind": item.kind} for item in values]
+
+    return {
+        "version": receipt.version,
+        "receipt_id": receipt.receipt_id,
+        "ok": receipt.ok,
+        "outcome": receipt.outcome.value,
+        "operation": receipt.operation,
+        "committed": receipt.committed,
+        "transaction_id": receipt.transaction_id,
+        "manifest_sha256": receipt.manifest_sha256,
+        "coverage_sha256": receipt.coverage_sha256,
+        "expected_objects": identities(receipt.expected_objects),
+        "verified_objects": identities(receipt.verified_objects),
+        "changed_objects": [dict(row) for row in receipt.changed_objects],
+        "before_fingerprint": receipt.before_fingerprint,
+        "after_fingerprint": receipt.after_fingerprint,
+    }
+
+
+def normalize_mutation_receipt(value: object) -> MutationReceipt:
+    """Return the exact canonical receipt after validating all invariants."""
+    raw = _receipt_payload(value) if isinstance(value, MutationReceipt) else value
+    if not isinstance(raw, Mapping) or set(raw) != _MUTATION_RECEIPT_FIELDS:
+        raise ValueError("mutation receipt fields do not match the contract")
+    if raw.get("version") != 1:
+        raise ValueError("mutation receipt version is invalid")
+    receipt_id = raw.get("receipt_id")
+    if not isinstance(receipt_id, str) or _SHA256.fullmatch(receipt_id) is None:
+        raise ValueError("mutation receipt receipt_id is invalid")
+    if raw.get("ok") is not True:
+        raise ValueError("mutation receipt ok must be true")
+    try:
+        outcome = MutationOutcome(raw.get("outcome"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("mutation receipt outcome is invalid") from exc
+    operation = raw.get("operation")
+    if not isinstance(operation, str) or not operation:
+        raise ValueError("mutation receipt operation is invalid")
+    committed = raw.get("committed")
+    if not isinstance(committed, bool):
+        raise ValueError("mutation receipt committed must be bool")
+    transaction_id = raw.get("transaction_id")
+    if outcome is MutationOutcome.COMMITTED:
+        if committed is not True or not isinstance(transaction_id, str) or (
+            _SHA256.fullmatch(transaction_id) is None
+        ):
+            raise ValueError("committed receipt transaction fields are invalid")
+    elif committed is not False or transaction_id is not None:
+        raise ValueError("no_changes receipt transaction fields are invalid")
+    manifest_sha256 = raw.get("manifest_sha256")
+    if (
+        not isinstance(manifest_sha256, str)
+        or _SHA256.fullmatch(manifest_sha256) is None
+    ):
+        raise ValueError("mutation receipt manifest_sha256 is invalid")
+    coverage_sha256 = raw.get("coverage_sha256")
+    if coverage_sha256 is not None and (
+        not isinstance(coverage_sha256, str)
+        or _SHA256.fullmatch(coverage_sha256) is None
+    ):
+        raise ValueError("mutation receipt coverage_sha256 is invalid")
+    expected_objects = _normalize_object_identities(
+        raw.get("expected_objects"),
+        field="expected_objects",
+    )
+    verified_objects = _normalize_object_identities(
+        raw.get("verified_objects"),
+        field="verified_objects",
+    )
+    if expected_objects != verified_objects:
+        raise ValueError("expected_objects must equal verified_objects")
+    changed_objects = _normalize_changed_objects(raw.get("changed_objects"))
+    before_fingerprint = raw.get("before_fingerprint")
+    after_fingerprint = raw.get("after_fingerprint")
+    for field_name, fingerprint in (
+        ("before_fingerprint", before_fingerprint),
+        ("after_fingerprint", after_fingerprint),
+    ):
+        if not isinstance(fingerprint, str) or _SHA256.fullmatch(fingerprint) is None:
+            raise ValueError(f"mutation receipt {field_name} is invalid")
+    if outcome is MutationOutcome.NO_CHANGES and (
+        changed_objects or before_fingerprint != after_fingerprint
+    ):
+        raise ValueError("no_changes receipt state invariants are invalid")
+    receipt = MutationReceipt(
+        version=1,
+        receipt_id=receipt_id,
+        ok=True,
+        outcome=outcome,
+        operation=operation,
+        committed=committed,
+        transaction_id=transaction_id,
+        manifest_sha256=manifest_sha256,
+        coverage_sha256=coverage_sha256,
+        expected_objects=expected_objects,
+        verified_objects=verified_objects,
+        changed_objects=changed_objects,
+        before_fingerprint=before_fingerprint,
+        after_fingerprint=after_fingerprint,
+    )
+    if receipt_id != _canonical_receipt_identity(_receipt_payload(receipt)):
+        raise ValueError("mutation receipt receipt_id does not match its payload")
+    return receipt
+
+
+def _build_mutation_receipt(payload: Mapping[str, object]) -> MutationReceipt:
+    expected = _normalize_object_identities(
+        payload.get("expected_objects"),
+        field="expected_objects",
+    )
+    verified = _normalize_object_identities(
+        payload.get("verified_objects"),
+        field="verified_objects",
+    )
+    with_id = {
+        **payload,
+        "expected_objects": [
+            {"id": item.id, "kind": item.kind} for item in expected
+        ],
+        "verified_objects": [
+            {"id": item.id, "kind": item.kind} for item in verified
+        ],
+        "changed_objects": [
+            dict(row)
+            for row in _normalize_changed_objects(payload.get("changed_objects"))
+        ],
+        "receipt_id": "0" * 64,
+    }
+    with_id["receipt_id"] = _canonical_receipt_identity(with_id)
+    return normalize_mutation_receipt(with_id)
+
+
+def receipt_from_result(
+    result: "MutationPlanResult",
+    *,
+    committed: bool,
+) -> MutationReceipt:
+    """Build a canonical receipt from one final ``MutationService.apply`` result."""
+    outcome = getattr(result, "outcome", None)
+    if outcome not in (MutationOutcome.COMMITTED, MutationOutcome.NO_CHANGES):
+        raise ValueError("mutation result outcome is not final")
+    expected_committed = outcome is MutationOutcome.COMMITTED
+    if not isinstance(committed, bool) or committed != expected_committed:
+        raise ValueError("committed flag does not match mutation result outcome")
+    if getattr(result, "ok", None) is not True:
+        raise ValueError("mutation result is not successful")
+    manifest = getattr(result, "manifest", None)
+    if manifest is None:
+        raise ValueError("mutation result manifest is missing")
+    return _build_mutation_receipt({
+        "version": 1,
+        "ok": True,
+        "outcome": outcome.value,
+        "operation": manifest.operation,
+        "committed": committed,
+        "transaction_id": manifest.transaction_id if committed else None,
+        "manifest_sha256": result.manifest_sha256,
+        "coverage_sha256": manifest.coverage_sha256,
+        "expected_objects": list(manifest.expected_objects),
+        "verified_objects": list(manifest.verified_objects),
+        "changed_objects": list(manifest.changed_objects),
+        "before_fingerprint": manifest.before_fingerprint,
+        "after_fingerprint": manifest.expected_after_fingerprint,
+    })
+
+
+def mutation_receipt_dict(
+    value: MutationReceipt | Mapping[str, object],
+) -> dict[str, object]:
+    return _receipt_payload(normalize_mutation_receipt(value))
 
 
 def normalize_batch_binding(

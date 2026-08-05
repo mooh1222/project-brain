@@ -20,9 +20,13 @@ from typing import Any
 
 from project_brain.transaction_receipt import (
     BatchBinding,
+    MutationOutcome,
+    MutationReceipt,
     batch_binding_dict,
     batch_intent_id,
+    mutation_receipt_dict,
     normalize_batch_binding,
+    normalize_mutation_receipt,
 )
 
 
@@ -109,6 +113,10 @@ _MUTATION_MANIFEST_FIELDS = frozenset({
     "transaction_id",
     "operation",
     "engine_sha",
+    "coverage_sha256",
+    "expected_objects",
+    "verified_objects",
+    "changed_objects",
     "creates",
     "updates",
     "deletes",
@@ -1791,6 +1799,92 @@ def _publish_batch_intent_anchored(
             )
 
 
+def _publish_no_change_intent_anchored(
+    anchored: _AnchoredRoot,
+    *,
+    binding: BatchBinding,
+    receipt: MutationReceipt,
+    verified_source_sha256_by_id: Mapping[str, str],
+) -> None:
+    intent = {
+        "version": 2,
+        "intent_id": batch_intent_id(binding),
+        "outcome": MutationOutcome.NO_CHANGES.value,
+        "binding": batch_binding_dict(binding),
+        "receipt": mutation_receipt_dict(receipt),
+        "verified_source_sha256_by_id": dict(
+            sorted(verified_source_sha256_by_id.items())
+        ),
+    }
+    payload = _canonical_json_bytes(intent)
+    intents = anchored.pin_directory(
+        ".brain-local/batch-intents",
+        create=True,
+    )
+    name = f"{intent['intent_id']}.json"
+    try:
+        _write_bytes_at(
+            intents.fd,
+            name,
+            payload,
+            replace_existing=False,
+        )
+    except FileExistsError:
+        existing = _read_bytes_at(intents.fd, name)
+        if existing != payload:
+            raise CorpusIOError(
+                "batch_intent_mismatch",
+                "existing batch intent does not match the no-change proof",
+                paths=(
+                    anchored.path / batch_intent_relative_path(binding),
+                ),
+            )
+
+
+def record_no_change_receipt(
+    brain_root: Path,
+    *,
+    binding: BatchBinding,
+    receipt: MutationReceipt,
+    verified_source_sha256_by_id: Mapping[str, str],
+) -> None:
+    """Durably bind a no-change receipt without opening a transaction."""
+    normalized_binding = normalize_batch_binding(binding)
+    assert normalized_binding is not None
+    normalized_receipt = normalize_mutation_receipt(receipt)
+    if (
+        normalized_receipt.outcome is not MutationOutcome.NO_CHANGES
+        or normalized_receipt.operation != "ingest"
+    ):
+        raise ValueError("no-change intent requires an ingest no_changes receipt")
+    expected_ids = {item.id for item in normalized_receipt.verified_objects}
+    if set(verified_source_sha256_by_id) != expected_ids or any(
+        not isinstance(digest, str) or not _is_sha256(digest)
+        for digest in verified_source_sha256_by_id.values()
+    ):
+        raise ValueError(
+            "verified_source_sha256_by_id must exactly cover verified_objects"
+        )
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=True):
+            record_no_change_receipt(
+                brain_root,
+                binding=normalized_binding,
+                receipt=normalized_receipt,
+                verified_source_sha256_by_id=verified_source_sha256_by_id,
+            )
+        return
+    scope = _current_lock_scope(brain_root, require_exclusive=True)
+    scope.verify_lexical_bindings()
+    _publish_no_change_intent_anchored(
+        scope.anchored,
+        binding=normalized_binding,
+        receipt=normalized_receipt,
+        verified_source_sha256_by_id=verified_source_sha256_by_id,
+    )
+
+
 def _read_batch_intent_anchored(
     anchored: _AnchoredRoot,
     binding: BatchBinding,
@@ -1822,6 +1916,58 @@ def _read_batch_intent_anchored(
             "batch intent bytes are not canonical",
             paths=(anchored.path / relative,),
         )
+    if value.get("version") == 2:
+        expected_fields = {
+            "version",
+            "intent_id",
+            "outcome",
+            "binding",
+            "receipt",
+            "verified_source_sha256_by_id",
+        }
+        if set(value) != expected_fields:
+            raise CorpusIOError(
+                "batch_intent_invalid",
+                "no-change batch intent fields do not match the contract",
+                paths=(anchored.path / relative,),
+            )
+        if (
+            value.get("intent_id") != batch_intent_id(binding)
+            or value.get("outcome") != MutationOutcome.NO_CHANGES.value
+        ):
+            raise CorpusIOError(
+                "batch_intent_mismatch",
+                "no-change batch intent identity does not match the item",
+                paths=(anchored.path / relative,),
+            )
+        try:
+            stored_binding = normalize_batch_binding(value.get("binding"))
+            receipt = normalize_mutation_receipt(value.get("receipt"))
+        except ValueError as exc:
+            raise CorpusIOError(
+                "batch_intent_invalid",
+                str(exc),
+                paths=(anchored.path / relative,),
+            ) from exc
+        hashes = value.get("verified_source_sha256_by_id")
+        if (
+            stored_binding != binding
+            or receipt.outcome is not MutationOutcome.NO_CHANGES
+            or receipt.operation != "ingest"
+            or not isinstance(hashes, Mapping)
+            or set(hashes) != {item.id for item in receipt.verified_objects}
+            or any(
+                not isinstance(digest, str) or not _is_sha256(digest)
+                for digest in hashes.values()
+            )
+        ):
+            raise CorpusIOError(
+                "batch_intent_mismatch",
+                "no-change batch intent proof does not match the item",
+                paths=(anchored.path / relative,),
+            )
+        return value
+
     expected_fields = {
         "version",
         "intent_id",
@@ -1871,51 +2017,42 @@ def _read_batch_intent_anchored(
     return value
 
 
-def _manifest_action_object_ids(
+def _receipt_from_committed_manifest(
     manifest: Mapping[str, object],
-) -> list[str]:
-    object_ids: set[str] = set()
-    for field_name in ("creates", "updates", "deletes"):
-        actions = manifest.get(field_name)
-        if not isinstance(actions, list):
-            raise CorpusIOError(
-                "committed_receipt_invalid",
-                f"manifest.{field_name} is invalid",
-            )
-        for action in actions:
-            if not isinstance(action, Mapping):
-                raise CorpusIOError(
-                    "committed_receipt_invalid",
-                    f"manifest.{field_name} action is invalid",
-                )
-            object_id = action.get("object_id")
-            if not isinstance(object_id, str) or not object_id:
-                raise CorpusIOError(
-                    "committed_receipt_invalid",
-                    f"manifest.{field_name} object id is invalid",
-                )
-            object_ids.add(object_id)
-    renames = manifest.get("renames")
-    if not isinstance(renames, list):
+    *,
+    manifest_sha256: str,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "version": 1,
+        "receipt_id": "0" * 64,
+        "ok": True,
+        "outcome": MutationOutcome.COMMITTED.value,
+        "operation": manifest.get("operation"),
+        "committed": True,
+        "transaction_id": manifest.get("transaction_id"),
+        "manifest_sha256": manifest_sha256,
+        "coverage_sha256": manifest.get("coverage_sha256"),
+        "expected_objects": manifest.get("expected_objects"),
+        "verified_objects": manifest.get("verified_objects"),
+        "changed_objects": manifest.get("changed_objects"),
+        "before_fingerprint": manifest.get("before_fingerprint"),
+        "after_fingerprint": manifest.get("expected_after_fingerprint"),
+    }
+    payload["receipt_id"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "receipt_id"},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    try:
+        return mutation_receipt_dict(payload)
+    except ValueError as exc:
         raise CorpusIOError(
             "committed_receipt_invalid",
-            "manifest.renames is invalid",
-        )
-    for action in renames:
-        if not isinstance(action, Mapping):
-            raise CorpusIOError(
-                "committed_receipt_invalid",
-                "manifest rename action is invalid",
-            )
-        for field_name in ("old_id", "new_id"):
-            object_id = action.get(field_name)
-            if not isinstance(object_id, str) or not object_id:
-                raise CorpusIOError(
-                    "committed_receipt_invalid",
-                    f"manifest rename {field_name} is invalid",
-                )
-            object_ids.add(object_id)
-    return sorted(object_ids)
+            f"canonical receipt fields are invalid: {exc}",
+        ) from exc
 
 
 def _recover_committed_receipt_anchored(
@@ -1926,6 +2063,11 @@ def _recover_committed_receipt_anchored(
     verification_mode: ReceiptVerificationMode | None,
 ) -> dict[str, object]:
     intent = _read_batch_intent_anchored(anchored, normalized)
+    if intent.get("version") != 1:
+        raise CorpusIOError(
+            "receipt_not_committed",
+            "batch intent records no_changes rather than a commit",
+        )
     transaction_id = str(intent["transaction_id"])
     try:
         transactions = anchored.pin_directory(
@@ -1992,29 +2134,209 @@ def _recover_committed_receipt_anchored(
                 "committed_receipt_state_mismatch",
                 f"{transaction_id}: {exc}",
             ) from exc
-    object_ids = _manifest_action_object_ids(manifest)
-    if not object_ids:
-        raise CorpusIOError(
-            "committed_receipt_invalid",
-            f"{transaction_id}: committed transaction has no object actions",
-        )
-    receipt: dict[str, object] = {
-        "ok": True,
-        "transaction_id": transaction_id,
-        "operation": "ingest",
-        "committed": True,
-        "manifest_sha256": manifest_sha256,
-        "before_fingerprint": manifest["before_fingerprint"],
-        "after_fingerprint": manifest["expected_after_fingerprint"],
-        "ingested_ids": object_ids,
-        "ingested_count": len(object_ids),
-    }
-    if expected_receipt is not None and dict(expected_receipt) != receipt:
+    receipt = _receipt_from_committed_manifest(
+        manifest,
+        manifest_sha256=manifest_sha256,
+    )
+    if expected_receipt is not None:
+        try:
+            normalized_expected = mutation_receipt_dict(expected_receipt)
+        except ValueError as exc:
+            raise CorpusIOError(
+                "receipt_mismatch",
+                f"{transaction_id}: supplied receipt is invalid: {exc}",
+            ) from exc
+    else:
+        normalized_expected = None
+    if normalized_expected is not None and normalized_expected != receipt:
         raise CorpusIOError(
             "receipt_mismatch",
             f"{transaction_id}: supplied receipt does not match durable state",
         )
     return receipt
+
+
+def _recover_no_change_receipt_anchored(
+    anchored: _AnchoredRoot,
+    binding: BatchBinding,
+    intent: Mapping[str, object],
+    *,
+    expected_receipt: Mapping[str, object] | None,
+) -> dict[str, object]:
+    receipt = mutation_receipt_dict(intent["receipt"])
+    if expected_receipt is not None:
+        try:
+            normalized_expected = mutation_receipt_dict(expected_receipt)
+        except ValueError as exc:
+            raise CorpusIOError(
+                "receipt_mismatch",
+                f"supplied no-change receipt is invalid: {exc}",
+            ) from exc
+        if normalized_expected != receipt:
+            raise CorpusIOError(
+                "receipt_mismatch",
+                "supplied no-change receipt does not match durable state",
+            )
+    try:
+        from project_brain.store import BrainStore
+
+        store = BrainStore.load_unlocked(anchored.path)
+        stored_hashes = intent["verified_source_sha256_by_id"]
+        assert isinstance(stored_hashes, Mapping)
+        for identity in normalize_mutation_receipt(receipt).verified_objects:
+            if (
+                not store.has(identity.id)
+                or store.get(identity.id).get("kind") != identity.kind
+                or store.source_sha256(identity.id) != stored_hashes[identity.id]
+            ):
+                raise ValueError(f"{identity.id}: verified object state changed")
+    except (CorpusIOError, OSError, ValueError, KeyError) as exc:
+        raise CorpusIOError(
+            "receipt_state_mismatch",
+            f"no-change receipt state does not match: {exc}",
+        ) from exc
+    return receipt
+
+
+def _recover_batch_receipt_anchored(
+    anchored: _AnchoredRoot,
+    binding: BatchBinding,
+    *,
+    expected_receipt: Mapping[str, object] | None,
+    verification_mode: ReceiptVerificationMode | None,
+) -> dict[str, object]:
+    intent = _read_batch_intent_anchored(anchored, binding)
+    if intent.get("version") == 2:
+        return _recover_no_change_receipt_anchored(
+            anchored,
+            binding,
+            intent,
+            expected_receipt=expected_receipt,
+        )
+    return _recover_committed_receipt_anchored(
+        anchored,
+        binding,
+        expected_receipt=expected_receipt,
+        verification_mode=verification_mode,
+    )
+
+
+def recover_batch_receipt(
+    brain_root: Path,
+    binding: BatchBinding | Mapping[str, object],
+    *,
+    expected_receipt: Mapping[str, object] | None = None,
+    verification_mode: str = "strict_commit",
+) -> dict[str, object]:
+    """Recover one canonical committed or no-change batch receipt."""
+    try:
+        normalized_mode = ReceiptVerificationMode(verification_mode)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "receipt verification_mode must be strict_commit or "
+            "post_gate_object_tail"
+        ) from exc
+    normalized = normalize_batch_binding(binding)
+    assert normalized is not None
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=False):
+            return recover_batch_receipt(
+                brain_root,
+                normalized,
+                expected_receipt=expected_receipt,
+                verification_mode=normalized_mode.value,
+            )
+    scope = _current_lock_scope(brain_root)
+    scope.verify_lexical_bindings()
+    return _recover_batch_receipt_anchored(
+        scope.anchored,
+        normalized,
+        expected_receipt=expected_receipt,
+        verification_mode=normalized_mode,
+    )
+
+
+def recover_batch_receipts(
+    brain_root: Path,
+    bindings: Iterable[BatchBinding | Mapping[str, object]],
+    *,
+    expected_receipts: Iterable[Mapping[str, object] | None],
+    verification_mode: str = "strict_commit",
+) -> tuple[dict[str, object] | None, ...]:
+    """Recover an ordered mixed receipt chain and verify its durable tail."""
+    try:
+        normalized_mode = ReceiptVerificationMode(verification_mode)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "receipt verification_mode must be strict_commit or "
+            "post_gate_object_tail"
+        ) from exc
+    normalized_bindings = tuple(normalize_batch_binding(item) for item in bindings)
+    if any(item is None for item in normalized_bindings):
+        raise ValueError("batch receipt bindings cannot contain None")
+    expected = tuple(expected_receipts)
+    if len(normalized_bindings) != len(expected):
+        raise ValueError("receipt bindings and expected receipts length mismatch")
+    active = _CORPUS_LOCK_SCOPE.get()
+    if active is None:
+        with corpus_lock(brain_root, exclusive=False):
+            return recover_batch_receipts(
+                brain_root,
+                tuple(item for item in normalized_bindings if item is not None),
+                expected_receipts=expected,
+                verification_mode=normalized_mode.value,
+            )
+    scope = _current_lock_scope(brain_root)
+    scope.verify_lexical_bindings()
+    receipts: list[dict[str, object] | None] = []
+    missing_seen = False
+    for binding, expected_receipt in zip(normalized_bindings, expected):
+        assert binding is not None
+        try:
+            receipt = _recover_batch_receipt_anchored(
+                scope.anchored,
+                binding,
+                expected_receipt=expected_receipt,
+                verification_mode=None,
+            )
+        except CorpusIOError as exc:
+            if expected_receipt is None and exc.code in {
+                "batch_intent_missing",
+                "committed_receipt_missing",
+                "receipt_not_committed",
+            }:
+                receipt = None
+            else:
+                raise
+        if receipt is None:
+            missing_seen = True
+        elif missing_seen:
+            raise CorpusIOError(
+                "batch_receipt_gap",
+                "a durable batch receipt appears after a missing item",
+            )
+        receipts.append(receipt)
+    durable = [item for item in receipts if item is not None]
+    for previous, current in zip(durable, durable[1:]):
+        if previous["after_fingerprint"] != current["before_fingerprint"]:
+            raise CorpusIOError(
+                "batch_receipt_chain_mismatch",
+                "batch receipt before/after fingerprints do not form a chain",
+            )
+    if durable:
+        tail_index = max(
+            index for index, item in enumerate(receipts) if item is not None
+        )
+        tail_binding = normalized_bindings[tail_index]
+        assert tail_binding is not None
+        _recover_batch_receipt_anchored(
+            scope.anchored,
+            tail_binding,
+            expected_receipt=durable[-1],
+            verification_mode=normalized_mode,
+        )
+    return tuple(receipts)
 
 
 def recover_committed_receipts(
@@ -3344,6 +3666,15 @@ def _validate_manifest_model(
         raise ValueError("manifest before_fingerprint is invalid")
     if not _is_sha256(manifest.get("expected_after_fingerprint")):
         raise ValueError("manifest expected_after_fingerprint is invalid")
+    try:
+        _receipt_from_committed_manifest(
+            manifest,
+            manifest_sha256=hashlib.sha256(
+                _canonical_manifest_bytes(manifest)
+            ).hexdigest(),
+        )
+    except CorpusIOError as exc:
+        raise ValueError(f"manifest receipt fields are invalid: {exc.detail}") from exc
     try:
         batch_binding = normalize_batch_binding(
             manifest.get("batch_binding")

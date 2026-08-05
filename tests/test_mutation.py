@@ -3572,6 +3572,162 @@ def test_live_noop_does_not_call_clock_and_existing_bytes_win(tmp_path):
     assert not (brain_root / ".brain-local" / "transactions").exists()
 
 
+def test_no_change_receipt_proves_expected_objects_without_claiming_commit(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    old = _event()
+    _write_raw(brain_root, old)
+    request = _request(brain_root, (old,))
+
+    result = MutationService(
+        clock=lambda: (_ for _ in ()).throw(
+            AssertionError("no-op opened the clock")
+        )
+    ).apply(request.objects, request=request)
+    receipt = transaction_receipt.receipt_from_result(
+        result,
+        committed=False,
+    )
+
+    assert receipt.outcome is transaction_receipt.MutationOutcome.NO_CHANGES
+    assert receipt.committed is False
+    assert receipt.transaction_id is None
+    assert receipt.changed_objects == ()
+    assert receipt.before_fingerprint == receipt.after_fingerprint
+    assert receipt.expected_objects == receipt.verified_objects
+    assert receipt.receipt_id == transaction_receipt.normalize_mutation_receipt(
+        transaction_receipt.mutation_receipt_dict(receipt)
+    ).receipt_id
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt: {**receipt, "committed": True},
+        lambda receipt: {
+            **receipt,
+            "changed_objects": [
+                {"action": "update", "id": "x", "kind": "Insight"}
+            ],
+        },
+        lambda receipt: {**receipt, "after_fingerprint": "0" * 64},
+        lambda receipt: {**receipt, "verified_objects": []},
+    ],
+)
+def test_no_change_receipt_rejects_invariant_tampering(tmp_path, mutation):
+    brain_root = tmp_path / "brain"
+    old = _event()
+    _write_raw(brain_root, old)
+    request = _request(brain_root, (old,))
+    result = MutationService().apply(request.objects, request=request)
+    receipt = transaction_receipt.mutation_receipt_dict(
+        transaction_receipt.receipt_from_result(result, committed=False)
+    )
+
+    with pytest.raises(ValueError):
+        transaction_receipt.normalize_mutation_receipt(mutation(receipt))
+
+
+def test_changed_object_projection_has_fixed_action_order_and_receipt_id(
+    tmp_path,
+):
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        (_event("ledger.neutral.created"),),
+        request=_request(
+            tmp_path / "brain",
+            (_event("ledger.neutral.created"),),
+        ),
+    )
+    assert result.manifest is not None
+    rows = (
+        {
+            "action": "rename",
+            "old_id": "ledger.neutral.old",
+            "new_id": "ledger.neutral.new",
+            "kind": "EventLedgerRecord",
+        },
+        {
+            "action": "delete",
+            "id": "ledger.neutral.deleted",
+            "kind": "EventLedgerRecord",
+        },
+        {
+            "action": "update",
+            "id": "ledger.neutral.updated",
+            "kind": "EventLedgerRecord",
+        },
+        {
+            "action": "create",
+            "id": "ledger.neutral.created",
+            "kind": "EventLedgerRecord",
+        },
+    )
+    forward = transaction_receipt.receipt_from_result(
+        replace(result, manifest=replace(result.manifest, changed_objects=rows)),
+        committed=True,
+    )
+    reversed_ = transaction_receipt.receipt_from_result(
+        replace(
+            result,
+            manifest=replace(result.manifest, changed_objects=tuple(reversed(rows))),
+        ),
+        committed=True,
+    )
+
+    assert [row["action"] for row in forward.changed_objects] == [
+        "create",
+        "update",
+        "delete",
+        "rename",
+    ]
+    assert forward.changed_objects == reversed_.changed_objects
+    assert forward.receipt_id == reversed_.receipt_id
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"action": "reference_rewrite", "id": "x", "kind": "Insight"},
+        {"action": "rename", "old_id": "a", "new_id": "b"},
+        {"action": "update", "id": "x", "kind": "Insight", "extra": True},
+        {"action": "update", "id": "x", "kind": "Insight"},
+    ],
+)
+def test_changed_object_projection_rejects_unknown_nonexact_or_duplicate_shape(
+    tmp_path,
+    bad,
+):
+    brain_root = tmp_path / "brain"
+    obj = _event()
+    result = MutationService(clock=lambda: FIXED_TIME).apply(
+        (obj,),
+        request=_request(brain_root, (obj,)),
+    )
+    receipt = transaction_receipt.mutation_receipt_dict(
+        transaction_receipt.receipt_from_result(result, committed=True)
+    )
+    receipt["changed_objects"] = (
+        [bad, dict(bad)]
+        if bad.get("action") == "update" and set(bad) == {"action", "id", "kind"}
+        else [bad]
+    )
+
+    with pytest.raises(ValueError, match="changed_objects"):
+        transaction_receipt.normalize_mutation_receipt(receipt)
+
+
+def test_receipt_builder_rejects_preview_without_an_apply_outcome(tmp_path):
+    obj = _event()
+    result = MutationService().plan(
+        (obj,),
+        request=_request(tmp_path / "brain", (obj,)),
+    )
+
+    with pytest.raises(ValueError, match="outcome"):
+        transaction_receipt.receipt_from_result(result, committed=False)
+
+
 def test_live_pre_schema_allows_engine_fields_omission_before_final_stamp(
     tmp_path,
 ):

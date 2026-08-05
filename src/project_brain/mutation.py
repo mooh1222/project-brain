@@ -25,6 +25,7 @@ from project_brain.corpus_io import (
     apply_transaction,
     corpus_lock,
     read_tracked_file_bytes,
+    record_no_change_receipt,
     recover_unfinished_transaction_unlocked,
 )
 from project_brain.coverage import (
@@ -55,6 +56,7 @@ from project_brain.transaction_receipt import (
     MutationOutcome,
     batch_binding_dict,
     normalize_batch_binding,
+    receipt_from_result,
 )
 from project_brain.write_semantics import (
     ObjectActionKind,
@@ -505,7 +507,23 @@ class MutationService:
             + result.manifest.auxiliary_updates
         )
         if not actions:
-            return replace(result, outcome=MutationOutcome.NO_CHANGES)
+            no_change_result = replace(
+                result,
+                outcome=MutationOutcome.NO_CHANGES,
+            )
+            if request.batch_binding is not None:
+                record_no_change_receipt(
+                    request.brain_root,
+                    binding=request.batch_binding,
+                    receipt=receipt_from_result(
+                        no_change_result,
+                        committed=False,
+                    ),
+                    verified_source_sha256_by_id=(
+                        no_change_result.source_sha256_by_id
+                    ),
+                )
+            return no_change_result
         after_paths = {str(action["path"]) for action in writable_actions}
         after_paths.update(
             str(action["new_path"]) for action in result.manifest.renames
@@ -779,6 +797,18 @@ class MutationService:
                     f"{object_id}: loaded source receipt is invalid",
                 )
             source_sha256_by_id[object_id] = source_sha256
+        if not has_action and coverage_binding is not None:
+            for identity in coverage_binding.expected_objects:
+                source_sha256 = existing_store.source_sha256(identity.id)
+                if (
+                    not isinstance(source_sha256, str)
+                    or _SHA256.fullmatch(source_sha256) is None
+                ):
+                    return _failure(
+                        "source_receipt_missing",
+                        f"{identity.id}: verified no-op source receipt is missing",
+                    )
+                source_sha256_by_id[identity.id] = source_sha256
         if preview_only:
             after = planned_inputs[0] if len(planned_inputs) == 1 else None
             return MutationPlanResult(
@@ -3154,7 +3184,7 @@ def _build_manifest(
                 "action": "rename",
                 "old_id": action["old_id"],
                 "new_id": action["new_id"],
-                "kind": merged[action["new_id"]]["kind"],
+                "kind": existing_by_id[action["old_id"]]["kind"],
             }
             for action in renames
         )
@@ -3227,13 +3257,5 @@ def _manifest_bytes(manifest: MutationManifest) -> bytes:
 
 
 def _transaction_manifest(manifest: MutationManifest) -> dict[str, object]:
-    """Task 8 receipt 확장 전의 corpus_io journal 계약으로 투영한다."""
-    payload = asdict(manifest)
-    for field_name in (
-        "coverage_sha256",
-        "expected_objects",
-        "verified_objects",
-        "changed_objects",
-    ):
-        payload.pop(field_name, None)
-    return payload
+    """Project the full receipt-bearing manifest into the journal."""
+    return asdict(manifest)

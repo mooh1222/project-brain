@@ -24,15 +24,31 @@ from project_brain.transaction_receipt import BatchBinding
 SCRIPT = Path(__file__).with_name("finalize_ingest.py")
 WRAPPER = Path(__file__).with_name("finalize_ingest.sh")
 TRANSACTION = {
+    "version": 1,
+    "receipt_id": "ddbb23d71949730119dec1aef3ad7781a9a30b9414f60ff48865c8d7fa73c427",
     "ok": True,
+    "outcome": "committed",
     "transaction_id": "1" * 64,
     "operation": "ingest",
     "committed": True,
     "manifest_sha256": "2" * 64,
+    "coverage_sha256": "5" * 64,
+    "expected_objects": [{"id": "mapping.a", "kind": "DomainMapping"}],
+    "verified_objects": [{"id": "mapping.a", "kind": "DomainMapping"}],
+    "changed_objects": [
+        {"action": "create", "id": "mapping.a", "kind": "DomainMapping"}
+    ],
     "before_fingerprint": "3" * 64,
     "after_fingerprint": "4" * 64,
-    "ingested_ids": ["mapping.a"],
-    "ingested_count": 1,
+}
+NO_CHANGE_TRANSACTION = {
+    **TRANSACTION,
+    "receipt_id": "3f1e1060ea17906d1f1a61259f3eb3b7d4947aa8998c8d15e75770ea2c0c9a13",
+    "outcome": "no_changes",
+    "committed": False,
+    "transaction_id": None,
+    "changed_objects": [],
+    "after_fingerprint": TRANSACTION["before_fingerprint"],
 }
 BINDING = {
     "batch_manifest_sha256": "5" * 64,
@@ -151,7 +167,12 @@ class SemanticFinalizerTest(unittest.TestCase):
 
     def test_success_returns_exact_machine_readable_gate_schema(self):
         module = load_module()
-        self.assertEqual(module.validate_transaction_results([TRANSACTION]), [TRANSACTION])
+        self.assertEqual(
+            module.validate_transaction_results(
+                [TRANSACTION, NO_CHANGE_TRANSACTION]
+            ),
+            [TRANSACTION, NO_CHANGE_TRANSACTION],
+        )
         report = self._finalize(module,
             self.contract, ["code.before"], transaction_results=[TRANSACTION],
             runner=self._runner()
@@ -177,6 +198,16 @@ class SemanticFinalizerTest(unittest.TestCase):
         })
         self.assertEqual(report["recall_checks"][0]["missing_object_ids"], [])
         self.assertEqual(report["recall_checks"][0]["missing_code_locator_object_ids"], [])
+
+    def test_finalizer_compares_expected_and_verified_per_item(self):
+        module = load_module()
+        bad = {**NO_CHANGE_TRANSACTION, "verified_objects": []}
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "expected_objects.*verified_objects",
+        ):
+            module.validate_transaction_results([bad])
 
     def test_missing_mismatched_noncommitted_and_needs_user_transactions_fail_closed(self):
         module = load_module()

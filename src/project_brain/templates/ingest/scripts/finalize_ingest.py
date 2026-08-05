@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -15,17 +14,21 @@ ReceiptRecoverer = Callable[
     ...,
     tuple[dict[str, Any] | None, ...],
 ]
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TRANSACTION_FIELDS = {
+    "version",
+    "receipt_id",
     "ok",
+    "outcome",
     "transaction_id",
     "operation",
     "committed",
     "manifest_sha256",
+    "coverage_sha256",
+    "expected_objects",
+    "verified_objects",
+    "changed_objects",
     "before_fingerprint",
     "after_fingerprint",
-    "ingested_ids",
-    "ingested_count",
 }
 
 
@@ -86,45 +89,24 @@ def validate_transaction_results(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         raise ValueError("transaction results는 비어 있지 않은 배열이어야 합니다")
     normalized: list[dict[str, Any]] = []
-    transaction_ids: set[str] = set()
+    receipt_ids: set[str] = set()
     for index, raw in enumerate(value):
         prefix = f"transaction results[{index}]"
         if not isinstance(raw, dict) or set(raw) != _TRANSACTION_FIELDS:
             raise ValueError(f"{prefix} 필드가 정확하지 않습니다")
-        if raw.get("ok") is not True:
-            raise ValueError(f"{prefix}.ok가 true가 아닙니다")
-        if raw.get("operation") != "ingest":
+        try:
+            from project_brain.transaction_receipt import mutation_receipt_dict
+
+            receipt = mutation_receipt_dict(raw)
+        except ValueError as exc:
+            raise ValueError(f"{prefix} receipt가 올바르지 않습니다: {exc}") from exc
+        if receipt.get("operation") != "ingest":
             raise ValueError(f"{prefix}.operation은 ingest여야 합니다")
-        if raw.get("committed") is not True:
-            raise ValueError(f"{prefix}.committed가 true가 아닙니다")
-        transaction_id = raw.get("transaction_id")
-        if (
-            not isinstance(transaction_id, str)
-            or _SHA256.fullmatch(transaction_id) is None
-            or transaction_id in transaction_ids
-        ):
-            raise ValueError(f"{prefix}.transaction_id가 올바르지 않습니다")
-        transaction_ids.add(transaction_id)
-        for field in ("manifest_sha256", "before_fingerprint", "after_fingerprint"):
-            digest = raw.get(field)
-            if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
-                raise ValueError(f"{prefix}.{field}는 lowercase sha256이어야 합니다")
-        ingested_ids = raw.get("ingested_ids")
-        if (
-            not isinstance(ingested_ids, list)
-            or not ingested_ids
-            or any(not isinstance(object_id, str) or not object_id for object_id in ingested_ids)
-            or len(ingested_ids) != len(set(ingested_ids))
-        ):
-            raise ValueError(f"{prefix}.ingested_ids가 올바르지 않습니다")
-        ingested_count = raw.get("ingested_count")
-        if (
-            not isinstance(ingested_count, int)
-            or isinstance(ingested_count, bool)
-            or ingested_count != len(ingested_ids)
-        ):
-            raise ValueError(f"{prefix}.ingested_count가 ingested_ids와 다릅니다")
-        normalized.append(dict(raw))
+        receipt_id = str(receipt["receipt_id"])
+        if receipt_id in receipt_ids:
+            raise ValueError(f"{prefix}.receipt_id가 중복입니다")
+        receipt_ids.add(receipt_id)
+        normalized.append(receipt)
     return normalized
 
 
@@ -180,9 +162,9 @@ def _default_receipt_recoverer(
     *,
     verification_mode: str,
 ) -> tuple[dict[str, Any] | None, ...]:
-    from project_brain.corpus_io import recover_committed_receipts
+    from project_brain.corpus_io import recover_batch_receipts
 
-    return recover_committed_receipts(
+    return recover_batch_receipts(
         brain_root,
         bindings,
         expected_receipts=expected_receipts,

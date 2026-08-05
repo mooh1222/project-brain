@@ -514,7 +514,7 @@ def _run_ingest(argv) -> int:
     if batch_binding is not None:
         from project_brain.corpus_io import (
             CorpusIOError,
-            recover_committed_receipt,
+            recover_batch_receipt,
         )
         from project_brain.transaction_receipt import (
             verify_batch_input_files,
@@ -526,7 +526,7 @@ def _run_ingest(argv) -> int:
                 verify_json=Path(args.verify_json),
                 domain_spec_py=Path(args.domain_spec_py),
             )
-            payload = recover_committed_receipt(
+            payload = recover_batch_receipt(
                 brain_root,
                 batch_binding,
             )
@@ -539,36 +539,16 @@ def _run_ingest(argv) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    manifest = result.manifest
-    if manifest is None:
-        print(json.dumps(
-            {
-                "ok": False,
-                "error": "mutation result is missing its manifest",
-                "committed": False,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ))
-        return 1
-    actions = (
-        manifest.creates
-        + manifest.updates
-        + manifest.deletes
-        + manifest.renames
-        + manifest.auxiliary_updates
+    from project_brain.transaction_receipt import (
+        MutationOutcome,
+        mutation_receipt_dict,
+        receipt_from_result,
     )
-    payload = {
-        "ok": True,
-        "transaction_id": manifest.transaction_id,
-        "operation": manifest.operation,
-        "committed": bool(actions),
-        "manifest_sha256": result.manifest_sha256,
-        "before_fingerprint": manifest.before_fingerprint,
-        "after_fingerprint": manifest.expected_after_fingerprint,
-        "ingested_ids": [obj["id"] for obj in result.after_objects],
-        "ingested_count": len(result.after_objects),
-    }
+
+    payload = mutation_receipt_dict(receipt_from_result(
+        result,
+        committed=result.outcome is MutationOutcome.COMMITTED,
+    ))
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 

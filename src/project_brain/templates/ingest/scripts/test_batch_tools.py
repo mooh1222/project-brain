@@ -54,17 +54,41 @@ REPO_CONTRACT = {
 
 
 def transaction_result(key: str = "one") -> dict:
-    return {
+    payload = {
+        "version": 1,
+        "receipt_id": "0" * 64,
         "ok": True,
+        "outcome": "committed",
         "transaction_id": ("a" * 63) + key[-1].lower(),
         "operation": "ingest",
         "committed": True,
         "manifest_sha256": "b" * 64,
+        "coverage_sha256": "e" * 64,
+        "expected_objects": [
+            {"id": f"mapping.{key}", "kind": "DomainMapping"}
+        ],
+        "verified_objects": [
+            {"id": f"mapping.{key}", "kind": "DomainMapping"}
+        ],
+        "changed_objects": [
+            {
+                "action": "create",
+                "id": f"mapping.{key}",
+                "kind": "DomainMapping",
+            }
+        ],
         "before_fingerprint": "c" * 64,
         "after_fingerprint": "d" * 64,
-        "ingested_ids": [f"mapping.{key}"],
-        "ingested_count": 1,
     }
+    payload["receipt_id"] = hashlib.sha256(
+        json.dumps(
+            {name: value for name, value in payload.items() if name != "receipt_id"},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return payload
 
 
 def finalization_result(values: list[dict]) -> dict:
@@ -1627,6 +1651,7 @@ class RunIngestCleanupTest(unittest.TestCase):
         """), encoding="utf-8")
         (self.bin_dir / "project-brain").write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
+            import hashlib
             import json
             import os
             import sys
@@ -1652,17 +1677,39 @@ class RunIngestCleanupTest(unittest.TestCase):
                 with Path(os.environ["FAKE_CALL_LOG"]).open("a", encoding="utf-8") as log:
                     print(json.dumps(observed), file=log)
                 exit_code = int(os.environ.get("FAKE_INGEST_EXIT", "0"))
-                print(json.dumps({
+                payload = {
+                    "version": 1,
+                    "receipt_id": "0" * 64,
                     "ok": exit_code == 0,
+                    "outcome": "committed",
                     "transaction_id": "a" * 64,
                     "operation": "ingest",
                     "committed": exit_code == 0,
                     "manifest_sha256": "b" * 64,
+                    "coverage_sha256": "e" * 64,
+                    "expected_objects": [
+                        {"id": "mapping.one", "kind": "DomainMapping"}
+                    ],
+                    "verified_objects": [
+                        {"id": "mapping.one", "kind": "DomainMapping"}
+                    ],
+                    "changed_objects": [
+                        {
+                            "action": "create",
+                            "id": "mapping.one",
+                            "kind": "DomainMapping",
+                        }
+                    ],
                     "before_fingerprint": "c" * 64,
                     "after_fingerprint": "d" * 64,
-                    "ingested_ids": ["mapping.one"],
-                    "ingested_count": 1,
-                }))
+                }
+                payload["receipt_id"] = hashlib.sha256(json.dumps(
+                    {key: value for key, value in payload.items() if key != "receipt_id"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                print(json.dumps(payload))
                 raise SystemExit(exit_code)
         """), encoding="utf-8")
         for path in (self.runtime / "run_ingest.sh", self.runtime / "finalize_ingest.sh",

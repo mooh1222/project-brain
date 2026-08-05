@@ -37,7 +37,12 @@ from project_brain.mutation import (
     MutationService,
 )
 from project_brain.store import BrainStore
-from project_brain.transaction_receipt import BatchBinding, batch_intent_id
+from project_brain.transaction_receipt import (
+    BatchBinding,
+    batch_intent_id,
+    mutation_receipt_dict,
+    receipt_from_result,
+)
 from tests.coverage_helpers import direct_coverage
 from tests.test_ingest import candidate_term, context
 from tests.test_mutation import (
@@ -80,15 +85,7 @@ def _result_object(result, object_id: str) -> dict:
 
 
 def _journal_manifest(manifest) -> dict[str, object]:
-    payload = asdict(manifest)
-    for field_name in (
-        "coverage_sha256",
-        "expected_objects",
-        "verified_objects",
-        "changed_objects",
-    ):
-        payload.pop(field_name, None)
-    return payload
+    return asdict(manifest)
 
 
 def _hold_stable_lock_in_child(brain_root, ready, release) -> None:
@@ -1328,6 +1325,91 @@ def test_batch_intent_is_durable_before_commit_and_noncommitted_is_rejected(
         recover_committed_receipt(brain_root, binding)
 
 
+def _record_existing_batch_noop(
+    brain_root: Path,
+    *,
+    object_id: str = "context.noop-one",
+) -> tuple[BatchBinding, dict[str, object], dict]:
+    obj = context(object_id)
+    obj["context_key"] = object_id.removeprefix("context.")
+    _write_object(brain_root, obj)
+    binding = _batch_binding(brain_root=brain_root, item_key=object_id)
+    result = _service().apply(
+        (obj,),
+        request=_request(brain_root, (obj,), batch_binding=binding),
+    )
+    receipt = mutation_receipt_dict(
+        receipt_from_result(result, committed=False)
+    )
+    return binding, receipt, obj
+
+
+def test_batch_no_change_receipt_survives_later_disjoint_commit(tmp_path):
+    brain_root = tmp_path / "brain"
+    first_binding, first_receipt, first_obj = _record_existing_batch_noop(
+        brain_root
+    )
+    second = context("context.noop-two")
+    second["context_key"] = "noop-two"
+    second_binding = _batch_binding(
+        brain_root=brain_root,
+        item_key="two",
+        item_input_fingerprint="2" * 64,
+    )
+    committed = _service().apply(
+        (second,),
+        request=_request(
+            brain_root,
+            (second,),
+            batch_binding=second_binding,
+        ),
+    )
+    assert committed.ok
+
+    recovered = corpus_io.recover_batch_receipt(
+        brain_root,
+        first_binding,
+        expected_receipt=first_receipt,
+    )
+
+    assert recovered == first_receipt
+    assert BrainStore.load(brain_root).get(first_obj["id"]) == first_obj
+    assert not any(
+        path.name == first_receipt["transaction_id"]
+        for path in (brain_root / ".brain-local" / "transactions").iterdir()
+    )
+    intent = json.loads(
+        (brain_root / batch_intent_relative_path(first_binding)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(intent) == {
+        "version",
+        "intent_id",
+        "outcome",
+        "binding",
+        "receipt",
+        "verified_source_sha256_by_id",
+    }
+    assert intent["version"] == 2
+    assert intent["outcome"] == "no_changes"
+
+
+def test_batch_no_change_receipt_detects_verified_object_tamper(tmp_path):
+    brain_root = tmp_path / "brain"
+    binding, receipt, obj = _record_existing_batch_noop(brain_root)
+    _write_object(brain_root, dict(obj, title="tampered without transaction"))
+
+    with pytest.raises(CorpusIOError) as exc:
+        corpus_io.recover_batch_receipt(
+            brain_root,
+            binding,
+            expected_receipt=receipt,
+        )
+
+    assert exc.value.code == "receipt_state_mismatch"
+
+
 def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
@@ -1347,17 +1429,14 @@ def test_crash_after_committed_before_report_recovers_exact_receipt(tmp_path):
 
     receipt = recover_committed_receipt(brain_root, binding)
 
-    assert receipt == {
-        "ok": True,
-        "transaction_id": receipt["transaction_id"],
-        "operation": "ingest",
-        "committed": True,
-        "manifest_sha256": receipt["manifest_sha256"],
-        "before_fingerprint": receipt["before_fingerprint"],
-        "after_fingerprint": receipt["after_fingerprint"],
-        "ingested_ids": [after["id"]],
-        "ingested_count": 1,
-    }
+    assert receipt["outcome"] == "committed"
+    assert receipt["committed"] is True
+    assert receipt["expected_objects"] == receipt["verified_objects"] == [
+        {"id": after["id"], "kind": after["kind"]}
+    ]
+    assert receipt["changed_objects"] == [
+        {"action": "update", "id": after["id"], "kind": after["kind"]}
+    ]
     assert len(receipt["transaction_id"]) == 64
     assert len(receipt["manifest_sha256"]) == 64
     assert BrainStore.load(brain_root).get(after["id"]) == after
@@ -1428,7 +1507,9 @@ def test_historical_committed_batch_receipt_preserves_original_manifest_sha(
 
     assert receipt["transaction_id"] == result.manifest.transaction_id
     assert receipt["manifest_sha256"] == historical_manifest_sha256
-    assert receipt["ingested_ids"] == [after["id"]]
+    assert receipt["changed_objects"] == [
+        {"action": "update", "id": after["id"], "kind": after["kind"]}
+    ]
     assert journal_path.read_bytes() == journal_before
     assert intent_path.read_bytes() == intent_before
 

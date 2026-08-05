@@ -407,6 +407,7 @@ class TestCli(unittest.TestCase):
         ]
         out = io.StringIO()
         original_apply = MutationService.apply
+        from project_brain import ingest as ingest_module
         with mock.patch.object(
             BrainStore,
             "save_object",
@@ -417,6 +418,11 @@ class TestCli(unittest.TestCase):
             autospec=True,
             side_effect=original_apply,
         ) as apply, mock.patch(
+            "project_brain.ingest._new_mutation_service",
+            return_value=MutationService(
+                clock=lambda: "2026-08-05T12:34:56+09:00"
+            ),
+        ), mock.patch(
             "sys.argv",
             ["cli"] + argv,
         ), redirect_stdout(out):
@@ -424,20 +430,60 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(apply.call_count, 1)
         payload = json.loads(out.getvalue())
-        self.assertEqual(set(payload), {
-            "ok", "transaction_id", "operation", "committed",
-            "manifest_sha256", "before_fingerprint", "after_fingerprint",
-            "ingested_ids", "ingested_count",
-        })
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["committed"])
-        self.assertEqual(payload["operation"], "ingest")
-        self.assertRegex(payload["transaction_id"], r"^[0-9a-f]{64}$")
-        self.assertRegex(payload["manifest_sha256"], r"^[0-9a-f]{64}$")
-        self.assertRegex(payload["before_fingerprint"], r"^[0-9a-f]{64}$")
-        self.assertRegex(payload["after_fingerprint"], r"^[0-9a-f]{64}$")
-        self.assertEqual(payload["ingested_ids"], [obj["id"] for obj in bundle])
-        self.assertEqual(payload["ingested_count"], len(bundle))
+        expected = {
+            "version": 1,
+            "receipt_id": "2fe42bc987bc38e0e05be551dcaf83b9395601e3d070a2834d2b335a57e5fa20",
+            "ok": True,
+            "outcome": "committed",
+            "operation": "ingest",
+            "committed": True,
+            "transaction_id": "f145095bc82fa708e13872dda9795a4314575129900e85f29af7e2f06e78d302",
+            "manifest_sha256": "ccba14bfe72888682d7f37b5d76e47c05b40e7c9bc2f63ec74e87fe32c37b623",
+            "coverage_sha256": "7a05b32eed05a81200013ec59f03a058dcc3038552d121c296fb1f37b6ee5fe9",
+            "expected_objects": [
+                {"id": "context.neutral", "kind": "DomainContext"},
+                {"id": "evref.neutral.ref", "kind": "EvidenceRef"},
+                {"id": "g.neutral.x", "kind": "GlossaryTerm"},
+                {
+                    "id": "manifest.neutral.source",
+                    "kind": "EvidenceManifest",
+                },
+            ],
+            "verified_objects": [
+                {"id": "context.neutral", "kind": "DomainContext"},
+                {"id": "evref.neutral.ref", "kind": "EvidenceRef"},
+                {"id": "g.neutral.x", "kind": "GlossaryTerm"},
+                {
+                    "id": "manifest.neutral.source",
+                    "kind": "EvidenceManifest",
+                },
+            ],
+            "changed_objects": [
+                {
+                    "action": "create",
+                    "id": "context.neutral",
+                    "kind": "DomainContext",
+                },
+                {
+                    "action": "create",
+                    "id": "evref.neutral.ref",
+                    "kind": "EvidenceRef",
+                },
+                {
+                    "action": "create",
+                    "id": "g.neutral.x",
+                    "kind": "GlossaryTerm",
+                },
+                {
+                    "action": "create",
+                    "id": "manifest.neutral.source",
+                    "kind": "EvidenceManifest",
+                },
+            ],
+            "before_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "after_fingerprint": "d279ffd2f0bc7f7bc105ec27031bbbacdd0d582cd2a5d612887db4634ebb1848",
+        }
+        self.assertEqual(payload, expected)
         self.assertIs(
             apply.call_args.kwargs["request"].operation,
             MutationOperation.INGEST,
@@ -447,6 +493,44 @@ class TestCli(unittest.TestCase):
         self.assertTrue(store.has("manifest.neutral.source"))
         self.assertTrue(store.has("evref.neutral.ref"))
         self.assertEqual(store.get("g.neutral.x")["status"], "candidate")
+
+    def test_cli_ingest_no_change_is_exit_zero_without_commit(self):
+        obj = context()
+        objects_file = self.input_dir / "noop-bundle.json"
+        objects_file.write_text(json.dumps([obj], ensure_ascii=False), encoding="utf-8")
+        coverage_file = self._coverage_file("noop.coverage.json", [obj])
+        argv = [
+            "cli",
+            "ingest",
+            "--brain-root",
+            str(self.root),
+            "--objects-file",
+            str(objects_file),
+            "--coverage-file",
+            str(coverage_file),
+            *ENGINE_ARGS,
+        ]
+        from project_brain import ingest as ingest_module
+        service = MutationService(clock=lambda: "2026-08-05T12:34:56+09:00")
+        with mock.patch.object(
+            ingest_module,
+            "_new_mutation_service",
+            return_value=service,
+        ), mock.patch("sys.argv", argv), redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(), 0)
+        out = io.StringIO()
+        with mock.patch.object(
+            ingest_module,
+            "_new_mutation_service",
+            return_value=service,
+        ), mock.patch("sys.argv", argv), redirect_stdout(out):
+            rc = cli.main()
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["outcome"], "no_changes")
+        self.assertIs(payload["committed"], False)
+        self.assertIsNone(payload["transaction_id"])
 
     def test_cli_ingest_requires_coverage_file(self):
         objects_file = self.input_dir / "missing-coverage-objects.json"
@@ -737,7 +821,9 @@ class TestCli(unittest.TestCase):
 
         payload = json.loads(out.getvalue())
         self.assertTrue(payload["committed"])
-        self.assertEqual(payload["ingested_ids"], [obj["id"]])
+        self.assertEqual(payload["changed_objects"], [
+            {"action": "create", "id": obj["id"], "kind": obj["kind"]}
+        ])
         request = apply.call_args.kwargs["request"]
         self.assertEqual(request.batch_binding, binding)
         self.assertEqual(
