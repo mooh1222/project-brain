@@ -212,6 +212,9 @@ def task18_fixture(tmp_path: Path) -> SyntheticTask18:
         "snapshot_id": snapshot.snapshot_id,
         "manifest_sha256": manifest_sha,
         "file_count": snapshot.file_count,
+        "repo_head": snapshot.repo_head,
+        "engine_head": snapshot.engine_head,
+        "corpus_fingerprint": snapshot.corpus_fingerprint,
     })
     snapshot_verify_path.write_bytes(snapshot_verify_bytes)
 
@@ -305,6 +308,36 @@ def _fixed_clock() -> str:
     return FIXED_TIME
 
 
+def _mutate_snapshot_verify_receipt(
+    value: dict[str, object],
+    case: str,
+) -> None:
+    if case == "missing":
+        value.pop("repo_head")
+    elif case == "extra":
+        value["extra"] = True
+    elif case == "repo_head":
+        value["repo_head"] = "0" * 40
+    elif case == "engine_head":
+        value["engine_head"] = "1" * 40
+    elif case == "corpus_fingerprint":
+        value["corpus_fingerprint"] = "2" * 64
+    else:  # pragma: no cover - static parametrization
+        raise AssertionError(case)
+
+
+def _replace_snapshot_verify_receipt(
+    fixture: SyntheticTask18,
+    case: str,
+) -> bytes:
+    path = fixture.request.snapshot_verify_receipt_path
+    value = json.loads(path.read_bytes())
+    _mutate_snapshot_verify_receipt(value, case)
+    data = canonical_receipt_bytes(value)
+    path.write_bytes(data)
+    return data
+
+
 def test_create_task18_binding_records_exact_inputs_and_display_closure(
     task18_fixture: SyntheticTask18,
     monkeypatch: pytest.MonkeyPatch,
@@ -323,6 +356,65 @@ def test_create_task18_binding_records_exact_inputs_and_display_closure(
     assert result.value["migration"]["evidence_ref_count"] == 1
     assert result.value["engine"]["cached_paths"] == []
     assert result.value["bb2"]["cached_paths"] == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "extra", "repo_head", "engine_head", "corpus_fingerprint"],
+)
+def test_generator_rejects_invalid_production_snapshot_verify_receipt(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+):
+    import project_brain.task18_binding as module
+
+    data = _replace_snapshot_verify_receipt(task18_fixture, case)
+    task18_fixture.request = Task18BindingRequest(**{
+        **task18_fixture.request.__dict__,
+        "expected_snapshot_verify_receipt_sha256": _sha(data),
+    })
+    task18_fixture.install(monkeypatch, module)
+
+    with pytest.raises(Task18BindingError, match="snapshot_verify_receipt_mismatch"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "extra", "repo_head", "engine_head", "corpus_fingerprint"],
+)
+def test_independent_verifier_rejects_invalid_production_snapshot_verify_receipt(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+):
+    import project_brain.task18_binding as create_module
+    import project_brain.task18_binding_verify as verify_module
+
+    task18_fixture.install(monkeypatch, create_module)
+    result = create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    data = _replace_snapshot_verify_receipt(task18_fixture, case)
+    digest = _sha(data)
+    forged = deepcopy(result.value)
+    forged["inputs"]["snapshot_verify_receipt"].update({
+        "sha256": digest,
+        "size": len(data),
+    })
+    forged["pre_mutation_snapshot"]["verify_receipt_sha256"] = digest
+    forged_path = result.path.with_name(f"forged-{case}.json")
+    forged_bytes = canonical_receipt_bytes(forged)
+    forged_path.write_bytes(forged_bytes)
+    task18_fixture.install(monkeypatch, verify_module)
+
+    with pytest.raises(Task18BindingError, match="snapshot_verify_receipt_mismatch"):
+        verify_task18_binding(
+            binding_path=forged_path,
+            expected_binding_sha256=_sha(forged_bytes),
+            engine_root=task18_fixture.request.engine_root,
+            repo_root=task18_fixture.request.repo_root,
+            brain_root=task18_fixture.request.brain_root,
+        )
 
 
 def test_independent_verifier_accepts_unchanged_binding(

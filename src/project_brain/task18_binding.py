@@ -772,6 +772,9 @@ def create_task18_binding(
         "snapshot_id": snapshot.snapshot_id,
         "manifest_sha256": snapshot.manifest_sha256,
         "file_count": snapshot.file_count,
+        "repo_head": snapshot.repo_head,
+        "engine_head": snapshot.engine_head,
+        "corpus_fingerprint": snapshot.corpus_fingerprint,
     }
     if verify_receipt != expected_verify_receipt:
         _fail("snapshot_verify_receipt_mismatch")
