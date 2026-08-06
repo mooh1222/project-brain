@@ -635,6 +635,33 @@ def test_generator_rechecks_input_immediately_before_create(
     assert not task18_fixture.request.binding_path.exists()
 
 
+def test_generator_tail_rechecks_input_changed_during_final_snapshot_verify(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as module
+
+    task18_fixture.install(monkeypatch, module)
+    original = module.verify_snapshot
+    calls = 0
+
+    def snapshot(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original(*args, **kwargs)
+        if calls == 2:
+            task18_fixture.request.measurement_path.write_bytes(
+                b"changed during final snapshot verify\n"
+            )
+        return result
+
+    monkeypatch.setattr(module, "verify_snapshot", snapshot)
+
+    with pytest.raises(Task18BindingError, match="state_changed_before_binding"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    assert not task18_fixture.request.binding_path.exists()
+
+
 def test_verifier_rejects_noncanonical_actual_target_path_in_bound_dirt(
     task18_fixture: SyntheticTask18,
     monkeypatch: pytest.MonkeyPatch,
@@ -737,6 +764,41 @@ def test_verifier_rechecks_state_immediately_before_return(
             return value
 
         monkeypatch.setattr(verify_module, "_current_migration", current)
+
+    with pytest.raises(Task18BindingError, match="state_changed_during_verification"):
+        verify_task18_binding(
+            binding_path=result.path,
+            expected_binding_sha256=result.sha256,
+            engine_root=task18_fixture.request.engine_root,
+            repo_root=task18_fixture.request.repo_root,
+            brain_root=task18_fixture.request.brain_root,
+        )
+
+
+def test_verifier_tail_rechecks_input_changed_during_final_remote_lookup(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as create_module
+    import project_brain.task18_binding_verify as verify_module
+
+    task18_fixture.install(monkeypatch, create_module)
+    result = create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    task18_fixture.install(monkeypatch, verify_module)
+    original = verify_module.capture_remote_ref
+    calls = 0
+
+    def remote(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        value = original(*args, **kwargs)
+        if calls == 2:
+            task18_fixture.request.p0_handoff_path.write_bytes(
+                b"changed during final remote lookup\n"
+            )
+        return value
+
+    monkeypatch.setattr(verify_module, "capture_remote_ref", remote)
 
     with pytest.raises(Task18BindingError, match="state_changed_during_verification"):
         verify_task18_binding(

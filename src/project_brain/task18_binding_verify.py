@@ -712,32 +712,41 @@ def _recheck_before_return(
         for label, receipt in inputs.items()
     }
     try:
-        final_files = {
-            label: capture_bound_file(Path(str(receipt["path"])))
-            for label, receipt in inputs.items()
-        }
+        # snapshot/remote처럼 오래 걸리거나 외부를 보는 검사를 먼저 끝낸다.
+        # 로컬 mutable precondition은 corpus scan을 사이에 둔 reverse bracket이다.
         final_snapshot = verify_snapshot(
             Path(str(snapshot_binding["path"])),
             expected_manifest_sha256=str(snapshot_binding["manifest_sha256"]),
         )
-        final_corpus = capture_task18_corpus_state(brain_root)
         final_remote = capture_remote_ref(
             repo_root,
             local_ref=str(target_binding["local_ref"]),
             remote=str(target_binding["remote"]),
             remote_ref=str(target_binding["remote_ref"]),
         )
+        files_before = {
+            label: capture_bound_file(Path(str(receipt["path"])))
+            for label, receipt in inputs.items()
+        }
+        final_corpus = capture_task18_corpus_state(brain_root)
         final_bb2_cached = capture_cached_paths(repo_root)
         final_engine_cached = capture_cached_paths(engine_root)
         final_bb2_git = capture_git_dirt_receipt(repo_root, label="bb2")
         final_engine_git = capture_git_dirt_receipt(engine_root, label="engine")
         final_binding_bytes, _ = read_regular_no_follow(binding_path)
+        files_after = {
+            label: capture_bound_file(Path(str(receipt["path"])))
+            for label, receipt in reversed(tuple(inputs.items()))
+        }
+        rebound_binding_bytes, _ = read_regular_no_follow(binding_path)
     except Exception as exc:
         if isinstance(exc, Task18BindingError):
             raise
         raise _dependency_error(exc) from exc
     if (
-        final_files != expected_files
+        files_before != expected_files
+        or files_after != expected_files
+        or files_before != files_after
         or final_snapshot != snapshot
         or final_corpus != corpus_state
         or final_remote != remote
@@ -747,6 +756,7 @@ def _recheck_before_return(
         or final_bb2_git != bb2_git
         or hashlib.sha256(final_binding_bytes).hexdigest()
         != expected_binding_sha256
+        or rebound_binding_bytes != final_binding_bytes
     ):
         _fail("state_changed_during_verification")
 

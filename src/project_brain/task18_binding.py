@@ -585,21 +585,23 @@ def _recheck_before_create(
         "snapshot_verify_receipt": request.snapshot_verify_receipt_path,
     }
     try:
-        final_inputs = {
-            label: capture_bound_file(path)
-            for label, path in paths.items()
-        }
+        # 오래 걸리거나 외부 상태를 보는 검사는 먼저 끝낸다. 그 뒤 로컬
+        # precondition을 짧은 전방/역방향 pass로 감싸 Task 7 재검증에 넘긴다.
         final_snapshot = verify_snapshot(
             request.snapshot_root,
             expected_manifest_sha256=request.expected_snapshot_manifest_sha256,
         )
-        final_corpus = capture_task18_corpus_state(request.brain_root)
         final_remote = capture_remote_ref(
             request.repo_root,
             local_ref=request.local_target_ref,
             remote=request.remote,
             remote_ref=request.remote_target_ref,
         )
+        inputs_before = {
+            label: capture_bound_file(path)
+            for label, path in paths.items()
+        }
+        final_corpus = capture_task18_corpus_state(request.brain_root)
         final_engine_cached = capture_cached_paths(request.engine_root)
         final_bb2_cached = capture_cached_paths(request.repo_root)
         final_engine_git = capture_git_dirt_receipt(
@@ -607,12 +609,18 @@ def _recheck_before_create(
             label="engine",
         )
         final_bb2_git = capture_git_dirt_receipt(request.repo_root, label="bb2")
+        inputs_after = {
+            label: capture_bound_file(path)
+            for label, path in reversed(tuple(paths.items()))
+        }
     except Exception as exc:
         if isinstance(exc, Task18BindingError):
             raise
         raise _dependency_error(exc) from exc
     if (
-        final_inputs != input_receipts
+        inputs_before != input_receipts
+        or inputs_after != input_receipts
+        or inputs_before != inputs_after
         or final_snapshot != snapshot
         or final_corpus != corpus_state
         or final_remote != remote
