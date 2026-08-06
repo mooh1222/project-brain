@@ -38,6 +38,16 @@ _DECLARATOR_WRAPPERS = frozenset({
 _SIMPLE_IDENTIFIER = re.compile(r"~?[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
+def is_canonical_symbol_shape(symbol: object) -> bool:
+    """symbol이 정규 C/C++ 식별자 segment만으로 이뤄졌는지 반환한다."""
+    if not isinstance(symbol, str) or not symbol:
+        return False
+    return all(
+        _SIMPLE_IDENTIFIER.fullmatch(segment)
+        for segment in symbol.split("::")
+    )
+
+
 class SymbolStatus(StrEnum):
     VERIFIED = "verified"
     MANUAL_VERIFIED = "manual_verified"
@@ -81,7 +91,7 @@ def verify_symbol_relation(
         return SymbolVerification(SymbolStatus.MISMATCH, str(symbol), "empty symbol")
 
     segments = tuple(symbol.split("::"))
-    if not all(_SIMPLE_IDENTIFIER.fullmatch(segment) for segment in segments):
+    if not is_canonical_symbol_shape(symbol):
         if (
             any(segment.startswith("operator") for segment in segments)
             and all(

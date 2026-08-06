@@ -6,8 +6,27 @@ import unittest
 
 from project_brain.symbol_verify import (
     SymbolStatus,
+    is_canonical_symbol_shape,
     verify_symbol_relation,
 )
+
+
+class CanonicalSymbolShapeTest(unittest.TestCase):
+    def test_accepts_only_canonical_c_cpp_identifier_segments(self):
+        for symbol in ("run", "Ns::Widget::run", "Widget::~Widget"):
+            with self.subTest(symbol=symbol):
+                self.assertTrue(is_canonical_symbol_shape(symbol))
+
+        for symbol in (
+            "",
+            None,
+            "Ns::",
+            "Ns::run / descriptive",
+            "Ns::operator==",
+            "함수 설명",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertFalse(is_canonical_symbol_shape(symbol))
 
 
 class VerifySymbolRelationTest(unittest.TestCase):

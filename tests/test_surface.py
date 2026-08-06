@@ -230,6 +230,21 @@ class ContentHashTest(unittest.TestCase):
         obj = {"id": "x.rr", "kind": "ReviewRecord", "status": "reviewed", "summary": "t"}
         self.assertEqual(content_hash(obj, None), content_hash(obj, None))
 
+    def test_code_locator_title_change_does_not_change_surface_or_hash(self):
+        locator = code_locator(path="src/TitleOnly.cpp", symbol="Ns::run")
+        before_store = BrainStore({locator["id"]: locator})
+        changed = {**locator, "title": "Ns::run"}
+        after_store = BrainStore({changed["id"]: changed})
+
+        self.assertEqual(
+            extract_surface(locator, before_store),
+            extract_surface(changed, after_store),
+        )
+        self.assertEqual(
+            content_hash(locator, before_store),
+            content_hash(changed, after_store),
+        )
+
 
 class ExtractorVersionTest(unittest.TestCase):
     def test_version_is_positive_int(self):
