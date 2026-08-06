@@ -63,9 +63,10 @@ def capture_remote_ref(
     try:
         local_sha = resolve_exact_commit(root, local_ref)
         remote_sha = ls_remote_exact_commit(root, remote, remote_ref)
+        verified_local_sha = resolve_exact_commit(root, local_ref)
     except SnapshotError as exc:
         raise _from_dependency(exc) from exc
-    if local_sha != remote_sha:
+    if local_sha != remote_sha or verified_local_sha != local_sha:
         raise Task18StateError(
             "remote_ref_mismatch",
             "local and remote refs do not resolve to the same commit",
@@ -92,8 +93,14 @@ def capture_task18_corpus_state(brain_root: Path) -> Mapping[str, object]:
         corpus = capture_corpus_receipt(brain_root)
         search_index = capture_search_index_receipt(brain_root)
         stale_set = capture_stale_set_receipt(brain_root)
+        corpus_after = capture_corpus_receipt(brain_root)
     except FoundationError as exc:
         raise _from_dependency(exc) from exc
+    if corpus_after != corpus:
+        raise Task18StateError(
+            "corpus_changed_during_capture",
+            "corpus changed during Task 18 corpus state capture",
+        )
     return {
         "corpus": corpus,
         "search_index": search_index,

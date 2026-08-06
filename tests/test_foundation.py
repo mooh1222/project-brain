@@ -269,6 +269,51 @@ def test_public_task18_corpus_receipts_are_low_level_and_exact(foundation_fixtur
     assert stale == {"sha256": _sha(foundation_fixture.stale_set.read_bytes())}
 
 
+def test_corpus_index_pair_rejects_drift_between_public_primitives(
+    foundation_fixture,
+    monkeypatch,
+):
+    original = foundation.capture_search_index_receipt
+
+    def mutate_before_search(brain_root):
+        foundation_fixture.raw_file.write_bytes(b"changed between primitives\n")
+        return original(brain_root)
+
+    monkeypatch.setattr(
+        foundation,
+        "capture_search_index_receipt",
+        mutate_before_search,
+    )
+
+    with pytest.raises(FoundationError) as exc:
+        foundation._capture_corpus(foundation_fixture.brain)
+
+    assert exc.value.code == "corpus_changed_during_capture"
+
+
+def test_corpus_index_pair_rejects_drift_during_search_fingerprint(
+    foundation_fixture,
+    monkeypatch,
+):
+    original = search_index.compute_corpus_fingerprint
+
+    def mutate_during_search(store, brain_root):
+        fingerprint = original(store, brain_root)
+        foundation_fixture.raw_file.write_bytes(b"changed during search\n")
+        return fingerprint
+
+    monkeypatch.setattr(
+        search_index,
+        "compute_corpus_fingerprint",
+        mutate_during_search,
+    )
+
+    with pytest.raises(FoundationError) as exc:
+        foundation._capture_corpus(foundation_fixture.brain)
+
+    assert exc.value.code == "corpus_changed_during_capture"
+
+
 def test_baseline_verifier_rejects_boolean_version(foundation_fixture):
     baseline = _capture(foundation_fixture)
     baseline["version"] = True

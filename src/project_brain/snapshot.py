@@ -281,6 +281,21 @@ def read_regular_no_follow(path: Path) -> tuple[bytes, int]:
     try:
         try:
             before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            _fail("source_unavailable", f"cannot inspect {path}: {exc}", paths=(path,))
+        if stat.S_ISLNK(before.st_mode):
+            _fail(
+                "symlink_forbidden",
+                f"source is a symlink: {path}",
+                paths=(path,),
+            )
+        if not stat.S_ISREG(before.st_mode):
+            _fail(
+                "source_type_invalid",
+                f"source is not a regular file: {path}",
+                paths=(path,),
+            )
+        try:
             file_fd = os.open(
                 path.name,
                 os.O_RDONLY | os.O_NOFOLLOW,
@@ -294,7 +309,7 @@ def read_regular_no_follow(path: Path) -> tuple[bytes, int]:
             )
             _fail(code, f"cannot open {path}: {exc}", paths=(path,))
         opened = os.fstat(file_fd)
-        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(opened.st_mode):
+        if not stat.S_ISREG(opened.st_mode):
             _fail(
                 "source_type_invalid",
                 f"source is not a regular file: {path}",

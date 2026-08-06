@@ -156,6 +156,38 @@ def test_capture_remote_ref_rejects_mismatch(git_remote):
         )
 
 
+def test_capture_remote_ref_rejects_local_ref_move_during_remote_lookup(
+    git_remote,
+    monkeypatch,
+):
+    state = _state_module()
+    original = state.ls_remote_exact_commit
+    (git_remote.root / "tracked.txt").write_bytes(b"local advance\n")
+    _run(git_remote.root, "add", "tracked.txt")
+    _run(git_remote.root, "commit", "-q", "-m", "local advance")
+    advanced = _run(git_remote.root, "rev-parse", "HEAD").decode().strip()
+
+    def move_local_ref(root, remote, remote_ref):
+        remote_sha = original(root, remote, remote_ref)
+        _run(
+            git_remote.root,
+            "update-ref",
+            "refs/remotes/origin/develop",
+            advanced,
+        )
+        return remote_sha
+
+    monkeypatch.setattr(state, "ls_remote_exact_commit", move_local_ref)
+
+    with pytest.raises(state.Task18StateError, match="remote_ref_mismatch"):
+        state.capture_remote_ref(
+            git_remote.root,
+            local_ref="refs/remotes/origin/develop",
+            remote="origin",
+            remote_ref="refs/heads/develop",
+        )
+
+
 def test_capture_bound_file_rejects_symlink_leaf_or_parent(tmp_path):
     target = tmp_path / "target.json"
     target.write_text("{}\n", encoding="utf-8")
@@ -199,6 +231,29 @@ def test_capture_task18_corpus_state_includes_objects_raw_index_and_stale(
     assert state["stale_set"]["sha256"] == hashlib.sha256(
         b'{"stale":[]}\n'
     ).hexdigest()
+
+
+def test_capture_task18_corpus_state_rejects_cross_primitive_drift(
+    brain_root,
+    monkeypatch,
+):
+    state = _state_module()
+    original = state.capture_search_index_receipt
+
+    def mutate_before_search(root):
+        (root / "raw/sources/source.md").write_bytes(b"changed between receipts\n")
+        return original(root)
+
+    monkeypatch.setattr(
+        state,
+        "capture_search_index_receipt",
+        mutate_before_search,
+    )
+
+    with pytest.raises(
+        state.Task18StateError, match="corpus_changed_during_capture"
+    ):
+        state.capture_task18_corpus_state(brain_root)
 
 
 def test_capture_committed_input_rejects_dirty_or_non_ancestor_bytes(git_repo):

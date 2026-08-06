@@ -127,6 +127,33 @@ def test_read_regular_no_follow_rejects_symlink_leaf_and_parent(tmp_path):
         assert exc.value.code == "symlink_forbidden"
 
 
+def test_read_regular_no_follow_rejects_fifo_without_opening_it(tmp_path):
+    fifo = (tmp_path / "blocked.fifo").resolve()
+    os.mkfifo(fifo)
+    script = """
+import sys
+from pathlib import Path
+from project_brain.snapshot import SnapshotError, read_regular_no_follow
+
+try:
+    read_regular_no_follow(Path(sys.argv[1]))
+except SnapshotError as exc:
+    print(exc.code)
+else:
+    raise SystemExit("FIFO unexpectedly accepted")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(fifo)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    assert completed.stdout.strip() == "source_type_invalid"
+
+
 def test_verify_git_root_clean_returns_exact_head_and_empty_status(tmp_path):
     root, head = _clean_git_repo(tmp_path)
 

@@ -742,10 +742,15 @@ def capture_search_index_receipt(brain_root: Path) -> dict[str, object]:
 
 
 def _capture_corpus(brain_root: Path) -> tuple[dict[str, object], dict[str, object]]:
-    return (
-        capture_corpus_receipt(brain_root),
-        capture_search_index_receipt(brain_root),
-    )
+    corpus = capture_corpus_receipt(brain_root)
+    index = capture_search_index_receipt(brain_root)
+    corpus_after = capture_corpus_receipt(brain_root)
+    if corpus_after != corpus:
+        _fail(
+            "corpus_changed_during_capture",
+            "corpus changed during combined corpus/index capture",
+        )
+    return corpus, index
 
 
 def capture_stale_set_receipt(brain_root: Path) -> dict[str, object]:
