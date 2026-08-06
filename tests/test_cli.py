@@ -47,7 +47,7 @@ from tests.test_ingest import (
 ENGINE_ARGS = ("--engine-sha", "e" * 40)
 
 
-def _commit_git_fixture(root: Path) -> None:
+def _commit_git_fixture(root: Path) -> str:
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(
         ["git", "-C", str(root), "config", "user.email", "cli@test.invalid"],
@@ -62,6 +62,12 @@ def _commit_git_fixture(root: Path) -> None:
         ["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m", "fixture"],
         check=True,
     )
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _context_object(ctx):
@@ -4024,7 +4030,8 @@ def _canonical_task18_cli_args(tmp_path: Path) -> dict[tuple[str, str], list[str
     for path in (engine, brain):
         path.mkdir(parents=True, exist_ok=True)
     sha = "a" * 64
-    head = "b" * 40
+    _commit_git_fixture(engine)
+    head = _commit_git_fixture(repo)
     roots = [
         "--brain-root", str(brain),
         "--repo-root", str(repo),
@@ -4207,7 +4214,6 @@ def test_all_ten_task18_canonical_actions_reach_their_service_seams(tmp_path: Pa
             return_value=SimpleNamespace(manifest_bytes=b"{}\n", manifest_sha256=sha),
         ))
         stack.enter_context(mock.patch("project_brain.store.BrainStore.load", return_value=SimpleNamespace()))
-        stack.enter_context(mock.patch("project_brain.snapshot.resolve_exact_commit", return_value=head))
         stack.enter_context(mock.patch("project_brain.snapshot.verify_git_root_head", return_value=head))
         stack.enter_context(mock.patch("project_brain.stale_check.make_git_runner", return_value=object()))
         stack.enter_context(mock.patch("project_brain.stale_check.stale_check", return_value={}))
@@ -4222,6 +4228,57 @@ def test_all_ten_task18_canonical_actions_reach_their_service_seams(tmp_path: Pa
             with redirect_stdout(io.StringIO()):
                 assert cli._run_migration([*key, *args]) == 0
             services[key].assert_called_once()
+
+
+def test_quote_debt_build_accepts_exact_sha_in_real_git_repo(tmp_path: Path):
+    args = _canonical_task18_cli_args(tmp_path)[("quote-debt", "build")]
+    target_revision = args[args.index("--target-revision") + 1]
+    stale_report = {"target_head": target_revision}
+    inventory = {"quote_debt_ids": []}
+
+    with (
+        mock.patch(
+            "project_brain.store.BrainStore.load",
+            return_value=SimpleNamespace(),
+        ),
+        mock.patch(
+            "project_brain.stale_check.stale_check",
+            return_value=stale_report,
+        ) as stale,
+        mock.patch(
+            "project_brain.quote_debt.build_quote_debt_inventory",
+            return_value=inventory,
+        ) as build,
+        mock.patch(
+            "project_brain.foundation.atomic_create_receipt",
+            return_value="a" * 64,
+        ),
+        redirect_stdout(io.StringIO()),
+    ):
+        assert cli._run_migration(["quote-debt", "build", *args]) == 0
+
+    assert stale.call_args.kwargs["target_head"] == target_revision
+    assert stale.call_args.kwargs["fetch"] is False
+    assert build.call_args.kwargs["stale_report"] is stale_report
+    assert build.call_args.kwargs["target_revision_sha"] == target_revision
+
+
+def test_quote_debt_build_rejects_full_ref_before_service(tmp_path: Path):
+    args = _canonical_task18_cli_args(tmp_path)[("quote-debt", "build")]
+    target_index = args.index("--target-revision") + 1
+    args[target_index] = "refs/heads/master"
+    output = io.StringIO()
+
+    with (
+        mock.patch(
+            "project_brain.quote_debt.build_quote_debt_inventory",
+        ) as build,
+        redirect_stdout(output),
+    ):
+        assert cli._run_migration(["quote-debt", "build", *args]) == 1
+
+    assert json.loads(output.getvalue())["error_code"] == "commit_sha_invalid"
+    build.assert_not_called()
 
 
 def test_binding_create_canonical_command_dispatches_generated_at_as_clock(

@@ -65,6 +65,81 @@ def _clean_git_repo(tmp_path: Path) -> tuple[Path, str]:
     return root, _git_commit(root)
 
 
+def test_resolve_exact_commit_sha_returns_the_same_real_commit(tmp_path):
+    root, head = _clean_git_repo(tmp_path)
+
+    assert snapshot.resolve_exact_commit_sha(root, head) == head
+
+
+def test_resolve_exact_commit_sha_rejects_non_exact_or_non_commit_inputs(tmp_path):
+    root, head = _clean_git_repo(tmp_path)
+    blob = subprocess.run(
+        ["git", "-C", str(root), "hash-object", "-w", "--stdin"],
+        input=b"not a commit\n",
+        check=True,
+        capture_output=True,
+    ).stdout.decode("ascii").strip()
+    subprocess.run(
+        ["git", "-C", str(root), "tag", "-a", "fixture-tag", "-m", "fixture"],
+        check=True,
+    )
+    tag = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "refs/tags/fixture-tag"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    invalid_values = (
+        head[:12],
+        head.upper(),
+        "refs/heads/master",
+        "0" * 40,
+        blob,
+        tag,
+    )
+
+    for value in invalid_values:
+        with pytest.raises(SnapshotError) as caught:
+            snapshot.resolve_exact_commit_sha(root, value)
+        assert caught.value.code == "commit_sha_invalid"
+
+
+def test_resolve_exact_commit_sha_uses_safe_exact_git_invocation(tmp_path):
+    root, head = _clean_git_repo(tmp_path)
+    with mock.patch.object(
+        snapshot,
+        "run_git_bytes",
+        return_value=f"{head}\n".encode("ascii"),
+    ) as run_git:
+        assert snapshot.resolve_exact_commit_sha(root, head) == head
+
+    run_git.assert_called_once_with(
+        root,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        f"{head}^{{commit}}",
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"a" * 40 + b"\n" + b"a" * 40 + b"\n",
+        b"A" * 40 + b"\n",
+        b" " + b"a" * 40 + b"\n",
+        b"a" * 40 + b"\n\n",
+    ],
+)
+def test_resolve_exact_commit_sha_rejects_non_exact_git_output(tmp_path, payload):
+    root, head = _clean_git_repo(tmp_path)
+    with mock.patch.object(snapshot, "run_git_bytes", return_value=payload):
+        with pytest.raises(SnapshotError) as caught:
+            snapshot.resolve_exact_commit_sha(root, head)
+
+    assert caught.value.code == "commit_sha_invalid"
+
+
 def _git_repo_with_dirt(tmp_path: Path, dirt: str) -> Path:
     root, _ = _clean_git_repo(tmp_path)
     if dirt == "tracked":

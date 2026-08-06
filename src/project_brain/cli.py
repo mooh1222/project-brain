@@ -2398,14 +2398,17 @@ def _run_task18_migration(args) -> int:
         brain_root = Path(args.brain_root)
         if args.action == "build":
             from project_brain.snapshot import (
-                resolve_exact_commit,
+                resolve_exact_commit_sha,
                 verify_git_root_head,
             )
             from project_brain.stale_check import make_git_runner, stale_check
 
             repo_root = Path(args.repo_root)
             engine_root = Path(__file__).resolve().parents[2]
-            target_revision = resolve_exact_commit(repo_root, args.target_revision)
+            target_revision = resolve_exact_commit_sha(
+                repo_root,
+                args.target_revision,
+            )
             if target_revision != args.target_revision:
                 raise Task18CliError(
                     "target_revision_mismatch",

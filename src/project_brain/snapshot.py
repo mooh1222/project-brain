@@ -1116,6 +1116,45 @@ def resolve_exact_commit(root: Path, ref: str) -> str:
     return _decode_exact_sha(payload, code="local_ref_invalid")
 
 
+def resolve_exact_commit_sha(root: Path, commit_sha: str) -> str:
+    """Verify that one exact lowercase SHA names the same commit object."""
+
+    if not isinstance(commit_sha, str) or _GIT_SHA.fullmatch(commit_sha) is None:
+        _fail(
+            "commit_sha_invalid",
+            "commit_sha must be one exact lowercase 40-hex SHA",
+        )
+    try:
+        payload = run_git_bytes(
+            root,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{commit_sha}^{{commit}}",
+        )
+    except SnapshotError as exc:
+        raise SnapshotError(
+            "commit_sha_invalid",
+            f"cannot verify exact commit SHA {commit_sha}",
+            paths=exc.paths,
+        ) from exc
+    rows = payload.splitlines()
+    if len(rows) != 1:
+        _fail(
+            "commit_sha_invalid",
+            "Git commit output is not exactly one SHA row",
+            paths=(Path(root),),
+        )
+    resolved = _decode_exact_sha(rows[0], code="commit_sha_invalid")
+    if resolved != commit_sha:
+        _fail(
+            "commit_sha_invalid",
+            "resolved commit SHA does not exactly match commit_sha",
+            paths=(Path(root),),
+        )
+    return resolved
+
+
 def ls_remote_exact_commit(
     root: Path,
     remote: str,
