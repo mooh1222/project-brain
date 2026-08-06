@@ -150,8 +150,13 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `.project-brain.json`, 설치 스킬, 설치 manifest | `install`, `bootstrap` | 프로젝트 연결 설정과 에이전트 사용면 | installer 소유권·보존 규칙에 따라 재실행 |
 | 모델 cache | `doctor --download`, 실모델 색인 | 외부 모델 로컬 cache | 다시 download/load |
 
-raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르다. 특히 코퍼스 mutation은
+raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르다. 일반 코퍼스 mutation은
 `index.db*`와 stale cache를 무효화하지만 자동으로 rebuild하지 않는다.
+
+Task 18 표시 제목 변경은 이 일반 규칙의 예외다. `MutationOperation.DISPLAY_MIGRATION`은
+`DerivedFilePolicy.PRESERVE`로 적용되어 index와 stale 파일을 지우지 않는다. title은 색인 입력이
+아니므로 post-verify가 기존 index DB bytes를 보존하고 live/meta fingerprint가 같은지 확인하며,
+예상 밖 차이가 있으면 실패한다. 이 경로에서는 **index rebuild를 하지 않는다**.
 
 ## 코퍼스 객체 쓰기
 
@@ -216,7 +221,7 @@ session marker, build 결과, plan manifest, index, cache도 객체 mutation으�
 | `projection_repair` | `projection refresh` | 현재 source hash로 projection을 수리 |
 | `context_replace` | `context-replace apply` | plan manifest에 묶인 컨텍스트 객체 집합 교체 |
 | `id_only_migration` | `migration id apply` | snapshot·manifest에 묶인 ID·참조 migration. 필요하면 `eval_scenarios.json`도 같은 transaction의 auxiliary update로 갱신 |
-| `display_migration` | `migration display apply` | Task 18 binding과 검증된 v3 manifest에 묶인 표시 필드 migration. 일반 `migration id apply`는 이 manifest를 받을 수 없음 |
+| `display_migration` | `migration display apply` | Task 18 binding과 검증된 v3 manifest에 묶인 표시 필드 migration. 파생 index/stale 파일은 보존하며 일반 `migration id apply`는 이 manifest를 받을 수 없음 |
 | `canonical_repair` | `migration canonical-repair apply` | 분류·결정 원장과 결속한 canonical 복구 |
 
 `context-replace plan`은 `MutationService.plan()` 결과를 외부 manifest로 고정하고, apply는 그

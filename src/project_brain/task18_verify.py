@@ -103,7 +103,7 @@ _DISPLAY_MANIFEST_KEYS = {
 _POST_REPORT_KEYS = {
     "version", "purpose", "generated_at", "binding", "display_manifest",
     "quote_debt", "target_ids_sha256", "expected_after_corpus_fingerprint",
-    "actual_after_corpus_fingerprint", "object_count", "changed_paths",
+    "actual_after_corpus_fingerprint", "raw_tree_sha256", "object_count", "changed_paths",
     "update_count", "create_count", "delete_count", "rename_count",
     "reference_graph", "lint_problem_count", "pairs", "quote_debt_state",
     "noncanonical_symbol_state", "search_index", "stale_set_sha256", "git",
@@ -202,6 +202,7 @@ class Task18JsonDocument:
 class _PostInvariantStats:
     object_count: int
     actual_after_fingerprint: str
+    raw_tree_sha256: str
     reference_edge_count: int
     reference_graph_sha256: str
     pair_count: int
@@ -217,6 +218,7 @@ class _PostInvariantStats:
 class _FinalCorpusEvidence:
     object_count: int
     corpus_fingerprint: str
+    raw_tree_sha256: str
     changed_paths: tuple[str, ...]
     quote_count: int
     quote_ids_sha256: str
@@ -239,6 +241,48 @@ def _dependency(exc: Exception) -> Task18VerificationError:
     ):
         return Task18VerificationError(exc.code, getattr(exc, "detail", ""))
     return Task18VerificationError("task18_state_capture_failed", str(exc))
+
+
+def _bound_raw_tree_sha256(binding: Mapping[str, object]) -> str:
+    corpus = binding.get("corpus")
+    raw_tree_sha256 = corpus.get("raw_tree_sha256") if isinstance(corpus, Mapping) else None
+    if (
+        not isinstance(raw_tree_sha256, str)
+        or _SHA256.fullmatch(raw_tree_sha256) is None
+    ):
+        _fail("binding_schema_invalid", "corpus.raw_tree_sha256 is invalid")
+    return raw_tree_sha256
+
+
+def _raw_tree_sha256_from_state(
+    state: Mapping[str, object],
+    *,
+    label: str,
+) -> str:
+    corpus = state.get("corpus")
+    raw_tree_sha256 = corpus.get("raw_tree_sha256") if isinstance(corpus, Mapping) else None
+    if (
+        not isinstance(raw_tree_sha256, str)
+        or _SHA256.fullmatch(raw_tree_sha256) is None
+    ):
+        _fail(f"{label}_raw_tree_state_invalid")
+    return raw_tree_sha256
+
+
+def _capture_matching_raw_tree_sha256(
+    *,
+    brain_root: Path,
+    binding: Mapping[str, object],
+    label: str,
+) -> str:
+    try:
+        state = capture_task18_corpus_state(brain_root)
+    except Exception as exc:
+        raise _dependency(exc) from exc
+    raw_tree_sha256 = _raw_tree_sha256_from_state(state, label=label)
+    if raw_tree_sha256 != _bound_raw_tree_sha256(binding):
+        _fail(f"{label}_raw_tree_sha256_mismatch")
+    return raw_tree_sha256
 
 
 def _exact_absolute(path: Path, label: str) -> Path:
@@ -941,6 +985,11 @@ def _final_corpus_evidence(
         _fail("binding_schema_invalid", "migration targets missing")
     with corpus_lock(brain_root, exclusive=False):
         assert_corpus_readable(brain_root)
+        raw_tree_sha256 = _capture_matching_raw_tree_sha256(
+            brain_root=brain_root,
+            binding=binding,
+            label="closure_create",
+        )
         sources = _live_object_sources_all(brain_root)
         target_ids = [str(row["id"]) for row in targets if isinstance(row, Mapping)]
         if len(target_ids) != len(targets) or not set(target_ids).issubset(sources):
@@ -960,6 +1009,77 @@ def _final_corpus_evidence(
         return _FinalCorpusEvidence(
             object_count=len(store.all()),
             corpus_fingerprint=corpus_fingerprint(store),
+            raw_tree_sha256=raw_tree_sha256,
+            changed_paths=changed_paths,
+            quote_count=len(quote_ids),
+            quote_ids_sha256=_json_sha(quote_ids),
+            symbol_count=len(symbol_ids),
+            symbol_ids_sha256=_json_sha(symbol_ids),
+            reference_edge_count=edge_count,
+            reference_graph_sha256=graph_sha,
+        )
+
+
+def _final_corpus_evidence_independent(
+    *,
+    brain_root: Path,
+    repo_root: Path,
+    binding: Mapping[str, object],
+) -> _FinalCorpusEvidence:
+    """closure verify가 현재 raw/object 상태를 생성 경로와 별도로 다시 계산한다."""
+    migration = binding.get("migration")
+    corpus = binding.get("corpus")
+    if not isinstance(migration, Mapping) or not isinstance(corpus, Mapping):
+        _fail("binding_schema_invalid")
+    targets = migration.get("targets")
+    bound_raw_tree_sha256 = corpus.get("raw_tree_sha256")
+    if (
+        not isinstance(targets, Sequence)
+        or isinstance(targets, (str, bytes, bytearray))
+        or not isinstance(bound_raw_tree_sha256, str)
+        or _SHA256.fullmatch(bound_raw_tree_sha256) is None
+    ):
+        _fail("binding_schema_invalid")
+    with corpus_lock(brain_root, exclusive=False):
+        assert_corpus_readable(brain_root)
+        try:
+            current_state = capture_task18_corpus_state(brain_root)
+        except Exception as exc:
+            raise _dependency(exc) from exc
+        current_corpus = current_state.get("corpus")
+        current_raw_tree_sha256 = (
+            current_corpus.get("raw_tree_sha256")
+            if isinstance(current_corpus, Mapping)
+            else None
+        )
+        if (
+            not isinstance(current_raw_tree_sha256, str)
+            or _SHA256.fullmatch(current_raw_tree_sha256) is None
+        ):
+            _fail("closure_verify_raw_tree_state_invalid")
+        if current_raw_tree_sha256 != bound_raw_tree_sha256:
+            _fail("closure_verify_raw_tree_sha256_mismatch")
+
+        sources = _live_object_sources_all(brain_root)
+        target_ids = [str(row["id"]) for row in targets if isinstance(row, Mapping)]
+        if len(target_ids) != len(targets) or not set(target_ids).issubset(sources):
+            _fail("final_corpus_target_set_mismatch")
+        store = _store_from_sources(sources)
+        quote_ids = sorted(
+            str(obj["id"])
+            for obj in store.by_kind("CodeLocator")
+            if "verified_quote" not in obj
+        )
+        symbol_ids = _noncanonical_symbol_ids(store)
+        edge_count, graph_sha = _reference_graph(store)
+        changed_paths = tuple(
+            (brain_root / sources[object_id][0]).relative_to(repo_root).as_posix()
+            for object_id in target_ids
+        )
+        return _FinalCorpusEvidence(
+            object_count=len(store.all()),
+            corpus_fingerprint=corpus_fingerprint(store),
+            raw_tree_sha256=current_raw_tree_sha256,
             changed_paths=changed_paths,
             quote_count=len(quote_ids),
             quote_ids_sha256=_json_sha(quote_ids),
@@ -1412,6 +1532,9 @@ def _assert_post_invariants(
         state = capture_task18_corpus_state(binding.brain_root)
     except Exception as exc:
         raise _dependency(exc) from exc
+    raw_tree_sha256 = _raw_tree_sha256_from_state(state, label="post_invariants")
+    if raw_tree_sha256 != _bound_raw_tree_sha256(binding.value):
+        _fail("post_invariants_raw_tree_sha256_mismatch")
     live_quote_ids = sorted(
         str(obj["id"])
         for obj in live_store.by_kind("CodeLocator")
@@ -1460,6 +1583,7 @@ def _assert_post_invariants(
     return _PostInvariantStats(
         object_count=len(live_store.all()),
         actual_after_fingerprint=corpus_fingerprint(live_store),
+        raw_tree_sha256=raw_tree_sha256,
         reference_edge_count=edge_count,
         reference_graph_sha256=graph_sha,
         pair_count=pair_count,
@@ -1537,6 +1661,11 @@ def verify_task18_applied(
     quote_debt_path = _exact_absolute(Path(quote_debt_path), "quote_debt_path")
     with corpus_lock(binding.brain_root, exclusive=False):
         assert_corpus_readable(binding.brain_root)
+        raw_tree_sha256 = _capture_matching_raw_tree_sha256(
+            brain_root=binding.brain_root,
+            binding=binding.value,
+            label="post_initial",
+        )
         _read_display_manifest(manifest_path, expected_manifest_sha256, binding)
         changed_paths, before_store, live_store = _compare_snapshot_before_to_live(binding)
         stats = _assert_post_invariants(
@@ -1546,6 +1675,8 @@ def verify_task18_applied(
             quote_debt_path=quote_debt_path,
             expected_quote_debt_sha256=expected_quote_debt_sha256,
         )
+        if stats.raw_tree_sha256 != raw_tree_sha256:
+            _fail("post_invariants_raw_tree_sha256_mismatch")
         try:
             brain_objects = (binding.brain_root / "objects").relative_to(binding.repo_root).as_posix()
             git_changed = set(decode_nul_paths(run_git_bytes(
@@ -1603,6 +1734,11 @@ def verify_task18_applied(
         except Exception as exc:
             raise _dependency(exc) from exc
         if (
+            _raw_tree_sha256_from_state(tail_state, label="post_tail")
+            != raw_tree_sha256
+        ):
+            _fail("post_tail_raw_tree_sha256_mismatch")
+        if (
             tail_state.get("search_index") != stats.search_index
             or not isinstance(tail_state.get("stale_set"), Mapping)
             or tail_state["stale_set"].get("sha256") != stats.stale_set_sha256
@@ -1633,6 +1769,7 @@ def verify_task18_applied(
             "target_ids_sha256": binding.target_ids_sha256,
             "expected_after_corpus_fingerprint": binding.expected_after_corpus_fingerprint,
             "actual_after_corpus_fingerprint": stats.actual_after_fingerprint,
+            "raw_tree_sha256": stats.raw_tree_sha256,
             "object_count": stats.object_count,
             "changed_paths": list(changed_paths),
             "update_count": len(changed_paths),
@@ -1780,11 +1917,13 @@ def _assert_closure_post_report(
     migration = binding["migration"]
     search_index = binding["search_index"]
     stale_set = binding["stale_set"]
+    corpus = binding["corpus"]
     inputs = binding["inputs"]
     bb2 = binding["bb2"]
     assert isinstance(migration, Mapping)
     assert isinstance(search_index, Mapping)
     assert isinstance(stale_set, Mapping)
+    assert isinstance(corpus, Mapping)
     assert isinstance(inputs, Mapping)
     assert isinstance(bb2, Mapping)
     pairs = value.get("pairs")
@@ -1812,6 +1951,9 @@ def _assert_closure_post_report(
         != migration["expected_after_corpus_fingerprint"]
         or value.get("actual_after_corpus_fingerprint")
         != migration["expected_after_corpus_fingerprint"]
+        or not isinstance(value.get("raw_tree_sha256"), str)
+        or _SHA256.fullmatch(str(value["raw_tree_sha256"])) is None
+        or value.get("raw_tree_sha256") != corpus["raw_tree_sha256"]
         or value.get("quote_debt")
         != {"path": quote_input["path"], "sha256": quote_input["sha256"]}
         or not _exact_int(value.get("object_count"), minimum=REQUIRED_TARGET_COUNT)
@@ -1888,6 +2030,7 @@ def _assert_post_matches_final_corpus(
     if (
         post.get("object_count") != evidence.object_count
         or post.get("actual_after_corpus_fingerprint") != evidence.corpus_fingerprint
+        or post.get("raw_tree_sha256") != evidence.raw_tree_sha256
         or post.get("changed_paths") != list(evidence.changed_paths)
         or not isinstance(quote, Mapping)
         or quote.get("count") != evidence.quote_count
@@ -2021,16 +2164,18 @@ def _verify_closure_artifacts_independent(
     inputs = binding.get("inputs")
     search_index = binding.get("search_index")
     stale_set = binding.get("stale_set")
+    corpus = binding.get("corpus")
     bb2 = binding.get("bb2")
     if not all(
         isinstance(item, Mapping)
-        for item in (migration, inputs, search_index, stale_set, bb2)
+        for item in (migration, inputs, search_index, stale_set, corpus, bb2)
     ):
         _fail("binding_schema_invalid")
     assert isinstance(migration, Mapping)
     assert isinstance(inputs, Mapping)
     assert isinstance(search_index, Mapping)
     assert isinstance(stale_set, Mapping)
+    assert isinstance(corpus, Mapping)
     assert isinstance(bb2, Mapping)
     quote_input = inputs.get("quote_debt")
     if not isinstance(quote_input, Mapping):
@@ -2061,6 +2206,9 @@ def _verify_closure_artifacts_independent(
         != migration.get("expected_after_corpus_fingerprint")
         or post.get("actual_after_corpus_fingerprint")
         != migration.get("expected_after_corpus_fingerprint")
+        or not isinstance(post.get("raw_tree_sha256"), str)
+        or _SHA256.fullmatch(str(post["raw_tree_sha256"])) is None
+        or post.get("raw_tree_sha256") != corpus.get("raw_tree_sha256")
         or not _exact_int(post.get("object_count"), minimum=REQUIRED_TARGET_COUNT)
         or not _exact_int(post.get("update_count"), expected=REQUIRED_TARGET_COUNT)
         or not _exact_int(post.get("create_count"), expected=0)
@@ -2138,6 +2286,7 @@ def _verify_post_final_evidence_independent(
     if (
         post.get("object_count") != evidence.object_count
         or post.get("actual_after_corpus_fingerprint") != evidence.corpus_fingerprint
+        or post.get("raw_tree_sha256") != evidence.raw_tree_sha256
         or post.get("changed_paths") != list(evidence.changed_paths)
         or quote.get("count") != evidence.quote_count
         or quote.get("ids_sha256") != evidence.quote_ids_sha256
@@ -2462,7 +2611,7 @@ def verify_task18_closure_receipt(
     )
     if current_artifacts != artifacts:
         _fail("closure_artifact_drift")
-    final_evidence = _final_corpus_evidence(
+    final_evidence = _final_corpus_evidence_independent(
         brain_root=brain_root,
         repo_root=repo_root,
         binding=binding,
@@ -2551,7 +2700,7 @@ def verify_task18_closure_receipt(
     )
     if tail_artifacts != artifacts or tail_binding != binding or tail_post != post_value:
         _fail("closure_artifact_drift")
-    tail_evidence = _final_corpus_evidence(
+    tail_evidence = _final_corpus_evidence_independent(
         brain_root=brain_root,
         repo_root=repo_root,
         binding=tail_binding,

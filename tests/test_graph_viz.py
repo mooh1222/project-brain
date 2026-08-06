@@ -74,6 +74,45 @@ class TestNodeLabel(unittest.TestCase):
         ]
         self.assertEqual(len(labels), len(set(labels)))
         self.assertTrue(all(len(label) <= 30 for label in labels))
+        self.assertTrue(labels[0].endswith("·1"))
+        self.assertTrue(labels[1].endswith("·2"))
+
+    def test_code_locator_suffixes_do_not_collide_with_singleton_candidates(self):
+        common_symbol_prefix = "x" * 20
+        objects = (
+            _obj(
+                "code.first.shared",
+                "CodeLocator",
+                path="src/first.cpp",
+                symbol=f"{common_symbol_prefix}aa",
+            ),
+            _obj(
+                "code.second.shared",
+                "CodeLocator",
+                path="src/second.cpp",
+                symbol=f"{common_symbol_prefix}bb",
+            ),
+            _obj(
+                "code.singleton.shared",
+                "CodeLocator",
+                path="src/singleton.cpp",
+                symbol=f"{'x' * 19}·1",
+            ),
+        )
+
+        def labels_for(items):
+            return {
+                node["id"]: node["label"]
+                for node in build_payload(_store(*items))["nodes"]
+                if node["group"] == "CodeLocator"
+            }
+
+        labels = labels_for(objects)
+        expected_reviewer_collision = f"shared · {'x' * 19}·1"
+        self.assertEqual(labels["code.singleton.shared"], expected_reviewer_collision)
+        self.assertEqual(len(labels.values()), len(set(labels.values())))
+        self.assertTrue(all(len(label) <= 30 for label in labels.values()))
+        self.assertEqual(labels_for(tuple(reversed(objects))), labels)
 
     def test_code_locator_tooltip_contains_full_symbol_and_path(self):
         store = _store(

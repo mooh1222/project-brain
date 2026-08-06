@@ -20,6 +20,11 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 소비 데이터의 `brain/checks`와 eval까지 확인한다. 문서·template·검증 코드만 바뀌고 index 입력과
 실제 corpus가 그대로면 **rebuild 불필요**다.
 
+표시 제목만 바꾸는 Task 18은 일반 mutation 무효화 규칙의 예외다. `mutation.py`의
+`MutationOperation.DISPLAY_MIGRATION`은 `DerivedFilePolicy.PRESERVE`를 사용한다. title은 색인
+표면이 아니므로 기존 index DB bytes를 보존하고, post-verify가 DB bytes와 live/meta fingerprint가
+그대로인지 확인하며 **index rebuild를 하지 않는다**.
+
 문서의 과거 통과 수치나 다른 checkout의 bare `project-brain` 실행은 현재 변경의 영수증이 아니다.
 검증할 checkout의 `PYTHONPATH`와 `.venv/bin/python`을 같이 고정한다.
 
@@ -31,7 +36,7 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 | assembly·ingest | `assembly.py`, `ingest.py`, `mutation.py`, `templates/ingest/**` | `test_assembly.py`, `test_ingest.py`, `test_mutation.py`, `test_universal_ingest_e2e.py` | 항상 runtime unittest, 템플릿 변경이면 `test_installer.py`와 두 번째 install 무변경 확인 | `brain/checks` + 실제 `lint`/`audit` | 새 객체가 회수돼야 하거나 표면이 바뀌면 필요 | 코드·템플릿만 바뀌고 색인 입력이 같으면 불필요. 실제 ingest action 뒤에는 DB가 무효화되므로 후속 search/eval 전 필요 | build는 corpus를 쓰지 않음, precondition, CodeLocator verifier, semantic finalization |
 | coverage·timestamp·receipt | `coverage.py`, `assembly.py`, `write_semantics.py`, `mutation.py`, `transaction_receipt.py`, `cli.py` | `test_coverage.py`, `test_assembly.py`, `test_write_semantics.py`, `test_mutation.py`, `test_transaction_receipt.py`, `test_cli.py` | coverage 전파·finalizer가 바뀌면 runtime unittest + installer 2회 | `brain/checks` + 실제 `audit`; corpus를 썼다면 lint/eval | 저장 객체나 회수 결과가 바뀌면 필요 | 계약·문서·receipt 코드만 바뀌고 실제 corpus/index 입력이 같으면 rebuild 불필요. action이 있으면 후속 search 전 필요 | exact expected planner, MutationService 단일 clock, mutation/no-op receipt, foundation gate |
 | P0 foundation gate·handoff | `foundation.py`, `installer.py`, `templates/ingest/scripts/validate_foundation.py` | `test_foundation.py`, `test_installer.py`, `test_snapshot.py`, `test_architecture_docs.py` | 설치 runtime unittest + 첫/두 번째 install report의 target-relative 경로·control file·두 번째 무변이 확인 | 엔진 단계는 합성 repo만 사용. 실제 BB2 baseline·gate·snapshot handoff는 Task 15에서 명시적으로 한 번 실행 | gate 자체는 기존 eval command를 실행하지만 검색 입력을 바꾸지 않음 | finalizer와 index rebuild를 호출하지 않으므로 불필요 | baseline/gate SHA 결속, command 전후 불변식, audit stale 유일 허용 변화, 독립 snapshot verify, 게시 후 artifact 두 번 재확인 |
-| mutation·transaction | `mutation.py`, `corpus_io.py`, `transaction_receipt.py`, `ingest.py` | `test_mutation.py`, `test_corpus_io.py`, `test_ingest.py` | ingest 호출·영수증 계약이 바뀌면 runtime | `brain/checks` + `lint`/`audit`; 적용·rollback smoke | 검색 가능한 객체 결과가 바뀌면 필요 | 코드만 바뀌고 index 계약이 같으면 불필요. 실제 action이 있는 mutation은 DB를 무효화하므로 후속 search/eval 전 필요 | plan/apply 결속, lock, rollback, 파생물 무효화, batch receipt |
+| mutation·transaction | `mutation.py`, `corpus_io.py`, `transaction_receipt.py`, `ingest.py` | `test_mutation.py`, `test_corpus_io.py`, `test_ingest.py` | ingest 호출·영수증 계약이 바뀌면 runtime | `brain/checks` + `lint`/`audit`; 적용·rollback smoke | 검색 가능한 객체 결과가 바뀌면 필요 | 보통 실제 action은 DB를 무효화하므로 후속 search/eval 전 필요. 단 display migration의 파생물 보존 정책은 기존 DB를 그대로 검증하는 예외 | plan/apply 결속, lock, rollback, 파생물 무효화·보존 정책, batch receipt |
 | 한국어 tokenizer | `tokenize_ko.py` | `test_tokenize_ko.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | **필요** | index/query tokenizer 대칭, 정규식 fallback 결정론 |
 | surface·raw chunk·index schema | `surface.py`, `raw_chunks.py`, `search_index.py` | `test_surface.py`, `test_raw_chunks.py`, `test_search_index.py`, `test_search.py` | 적재 finalizer의 기대 행·결과가 바뀌면 runtime | `brain/checks` + `eval` | 필요 | **필요** | 객체 lane과 raw lane 분리, corpus fingerprint, 원자 DB 교체 |
 | embedder | `embedder.py`, `search_index.py` | `test_embedder.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | 모델·차원·벡터 생성 계약 변경 시 **필요** | index/query 모델 이름·차원 대칭, 테스트는 StubEmbedder |
@@ -42,7 +47,7 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 | CLI·config·installer | `cli.py`, `config.py`, `installer.py`, `templates/**` | `test_cli.py`, `test_config.py`, `test_installer.py`, `test_doctor.py`, `test_architecture_docs.py` | 템플릿·실행 스크립트 변경 시 항상 runtime; install 두 번의 두 번째 report가 빈 변경인지 확인 | 소비 프로젝트 설치 smoke. 검색 동작도 바뀌면 checks | CLI가 검색 결과 계약을 바꾸면 필요 | install/bootstrap이 색인을 새로 만드는 경우 외에는 불필요 | `명시 인자 > config > ConfigError`, 사용자 수정 보존, overlay 비관리, 실행 비트·퇴역·rollback |
 | session·session-ingest | `session.py`, `cli.py`, `templates/session-ingest/**` | `test_session.py`, session CLI와 skill contract 테스트 | session-ingest template이 바뀌면 installer/runtime | 실제 transcript scan·marker smoke는 필요할 때 별도 | 불필요 | 불필요 | transcript 해석은 스킬, CLI는 scan·marker만; marker는 코퍼스 밖 |
 | snapshot·context replace·migration·canonical repair | `snapshot.py`, `context_replace.py`, `migration.py`, `canonical_repair.py`, `canonical_merge.py`, `mutation.py`, `corpus_io.py` | `test_snapshot.py`, `test_context_replace.py`, `test_migration.py`, `test_canonical_repair.py`, `test_canonical_merge.py`, `test_mutation.py`, `test_corpus_io.py` | 보통 불필요 | 실제 적용은 별도 승인 아래 snapshot verify, corpus checks, lint/audit, rollback 증거 | 적용 뒤 사용자 회수 계약을 확인할 때 필요 | 실제 context/migration apply는 DB를 무효화하므로 후속 search/eval 전 필요. snapshot restore는 포함된 DB의 freshness를 다시 확인 | plan/apply hash 결속, snapshot, precondition, reference rewrite, 보존 문제 종료 조건 |
-| Task 18 display migration·quote debt | `quote_debt.py`, `task18_state.py`, `task18_binding.py`, `task18_binding_verify.py`, `task18_verify.py`, `migration.py`, `cli.py` | `test_quote_debt.py`, `test_task18_state.py`, `test_task18_binding.py`, `test_task18_binding_verify.py`, `test_task18_verify.py`, `test_migration.py`, `test_cli.py` | 불필요 | 실제 corpus 적용은 결속된 pre/post snapshot·binding·report 절차와 데이터 레포 checks를 모두 통과해야 함 | 적용 뒤 필요 | 검증기·문서만 바뀌면 불필요. 실제 display migration action 뒤에는 DB를 새로 만들기 전까지 기존 DB bytes 보존을 post-verify가 확인하며, 후속 검색 전 rebuild 필요 | quote inventory의 exact target revision, `--binding` 출력, 7-key snapshot verify receipt, paired title, title-only diff, shared corpus lock·reverse tail, pathspec-first/report-last, 사용자 dirt, 서로 결속된 corpus-final closure |
+| Task 18 display migration·quote debt | `quote_debt.py`, `task18_state.py`, `task18_binding.py`, `task18_binding_verify.py`, `task18_verify.py`, `migration.py`, `cli.py` | `test_quote_debt.py`, `test_task18_state.py`, `test_task18_binding.py`, `test_task18_binding_verify.py`, `test_task18_verify.py`, `test_migration.py`, `test_cli.py` | 불필요 | 실제 corpus 적용은 결속된 pre/post snapshot·binding·report 절차와 데이터 레포 checks를 모두 통과해야 함 | 적용 뒤 필요 | 검증기·문서만 바뀌면 불필요. 실제 display migration도 기존 DB bytes와 fingerprint를 post-verify로 보존 확인하며 rebuild하지 않음 | quote inventory의 exact target revision, `--binding` 출력, 7-key snapshot verify receipt, paired title, title-only diff, shared corpus lock·reverse tail, pathspec-first/report-last, 사용자 dirt, 서로 결속된 corpus-final closure |
 | architecture 문서·계약 예시 | `docs/architecture/**`, `AGENTS.md`, `README.md`, `ROADMAP.md`, 설치되는 object template | `test_architecture_docs.py`, `test_object_contract_templates.py` | 설치 reference를 건드리면 `test_installer.py` + runtime | 불필요 | 불필요 | 불필요 | CLI·kind·operation 집합 드리프트, JSON parse/schema/lint/write-gate 층 구분 |
 
 ## index rebuild 판단
@@ -55,8 +60,9 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 - `tokenize_ko.py`의 색인/질의 토큰 계약
 - embedder 모델, 차원, 정규화, 저장 벡터 계약
 - `search_index.py`의 DB schema, extractor/tokenizer/model version, corpus fingerprint 입력
-- 실제 action이 있는 corpus mutation이 실행된 경우. 현재 transaction은 index DB를 무효화하므로
-  후속 `search`·일반 `eval` 전에 rebuild가 필요하다.
+- 실제 action이 있는 corpus mutation이 실행된 경우. 일반 transaction은 index DB를 무효화하므로
+  후속 `search`·일반 `eval` 전에 rebuild가 필요하다. 단 위의 Task 18 display migration은 파생물
+  보존 정책으로 기존 DB를 유지하고 검증하므로 이 조건에서 제외한다.
 - `ContextProjection`의 indexed payload나 source fingerprint가 바뀐 경우
 
 반대로 router, intent 분류, 답변 gate, 결과 채널 배치, RRF 이후 ranking만 바뀌고 색인 입력과

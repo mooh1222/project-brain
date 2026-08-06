@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from project_brain.foundation import canonical_receipt_bytes
+from project_brain.foundation import canonical_receipt_bytes, capture_corpus_receipt
 from project_brain.mutation import corpus_fingerprint
 from project_brain.task18_verify import (
     ParsedTask18Binding,
@@ -44,7 +44,12 @@ def _parsed_binding(tmp_path: Path) -> ParsedTask18Binding:
     repo_root = (tmp_path / "repo").resolve()
     brain_root = repo_root / "brain"
     snapshot_root = (tmp_path / "snapshot").resolve()
-    for path in (engine_root, brain_root / "objects/code", snapshot_root / "payload/brain/objects/code"):
+    for path in (
+        engine_root,
+        brain_root / "objects/code",
+        brain_root / "raw",
+        snapshot_root / "payload/brain/objects/code",
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
     before = {
@@ -92,17 +97,21 @@ def _parsed_binding(tmp_path: Path) -> ParsedTask18Binding:
         {after["id"]: stored_after},
         source_sha256_by_id={after["id"]: _sha(after_bytes)},
     )
+    raw_tree_sha256 = str(capture_corpus_receipt(brain_root)["raw_tree_sha256"])
     return ParsedTask18Binding(
         path=binding_path,
         sha256=_sha(binding_bytes),
-        value={"pre_mutation_snapshot": {
-            "snapshot_id": "pre",
-            "manifest_sha256": "a" * 64,
-            "file_count": 1,
-            "repo_head": "1" * 40,
-            "engine_head": "2" * 40,
-            "corpus_fingerprint": "3" * 64,
-        }},
+        value={
+            "pre_mutation_snapshot": {
+                "snapshot_id": "pre",
+                "manifest_sha256": "a" * 64,
+                "file_count": 1,
+                "repo_head": "1" * 40,
+                "engine_head": "2" * 40,
+                "corpus_fingerprint": "3" * 64,
+            },
+            "corpus": {"raw_tree_sha256": raw_tree_sha256},
+        },
         engine_root=engine_root,
         repo_root=repo_root,
         brain_root=brain_root,
@@ -260,6 +269,17 @@ def test_post_verify_rejects_non_title_object_change(
         "parse_task18_binding_for_post_verify",
         lambda **kwargs: binding,
     )
+    monkeypatch.setattr(
+        module,
+        "capture_task18_corpus_state",
+        lambda *args: {
+            "corpus": {
+                "raw_tree_sha256": binding.value["corpus"]["raw_tree_sha256"],
+            },
+            "search_index": {},
+            "stale_set": {"sha256": "5" * 64},
+        },
+    )
 
     with pytest.raises(Task18VerificationError, match="non-title"):
         verify_task18_applied(
@@ -276,6 +296,155 @@ def test_post_verify_rejects_non_title_object_change(
             pathspec_output=(tmp_path / "paths.nul").resolve(),
             generated_at="2026-08-06T12:00:00+09:00",
         )
+
+
+def _post_success_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import project_brain.task18_verify as module
+    from project_brain.snapshot import GitDirtReceipt, SnapshotVerification
+
+    raw_tree_sha256 = "4" * 64
+    binding = _parsed_binding(tmp_path)
+    binding = replace(
+        binding,
+        value={
+            **binding.value,
+            "corpus": {"raw_tree_sha256": raw_tree_sha256},
+            "search_index": {},
+            "stale_set": {"sha256": "5" * 64},
+        },
+    )
+    manifest_path = (tmp_path / "display.json").resolve()
+    manifest_bytes = canonical_receipt_bytes({
+        "migration_version": 3,
+        "migration_kind": "display_only",
+        "intent": {},
+        "snapshot_id": "pre",
+        "snapshot_manifest_sha256": "a" * 64,
+        "task18_binding_path": str(binding.path),
+        "task18_binding_sha256": binding.sha256,
+    })
+    manifest_path.write_bytes(manifest_bytes)
+    quote_path = (tmp_path / "quote.json").resolve()
+    quote_ids: list[str] = []
+    quote_path.write_bytes(canonical_receipt_bytes({
+        "quote_debt_ids": quote_ids,
+        "quote_debt_ids_sha256": _json_sha(quote_ids),
+    }))
+    report_path = (binding.repo_root / "task18-post.json").resolve()
+    pathspec = (tmp_path / "paths.nul").resolve()
+    changed = "brain/objects/code/run.json"
+    monkeypatch.setattr(
+        module,
+        "parse_task18_binding_for_post_verify",
+        lambda **kwargs: binding,
+    )
+    stats = module._PostInvariantStats(
+        object_count=1,
+        actual_after_fingerprint=binding.expected_after_corpus_fingerprint,
+        raw_tree_sha256=raw_tree_sha256,
+        reference_edge_count=0,
+        reference_graph_sha256=_json_sha([]),
+        pair_count=0,
+        quote_count=0,
+        quote_ids_sha256=_json_sha([]),
+        symbol_count=0,
+        symbol_ids_sha256=_json_sha([]),
+        search_index={},
+        stale_set_sha256="5" * 64,
+    )
+    monkeypatch.setattr(module, "_assert_post_invariants", lambda *args, **kwargs: stats)
+    monkeypatch.setattr(module, "run_git_bytes", lambda *args: changed.encode() + b"\0")
+    dirt = GitDirtReceipt(
+        str(binding.repo_root), "1" * 40, b"", _sha(b""), 0,
+        b"[]\n", _sha(b"[]\n"),
+    )
+    monkeypatch.setattr(module, "verify_git_dirt_preserved", lambda *args, **kwargs: dirt)
+    monkeypatch.setattr(module, "_parse_binding_bytes", lambda data: {})
+    monkeypatch.setattr(module, "_assert_bound_control_state", lambda *args, **kwargs: None)
+    current_raw = {"sha256": raw_tree_sha256}
+    monkeypatch.setattr(
+        module,
+        "capture_task18_corpus_state",
+        lambda *args: {
+            "corpus": {"raw_tree_sha256": current_raw["sha256"]},
+            "search_index": {},
+            "stale_set": {"sha256": "5" * 64},
+        },
+    )
+    monkeypatch.setattr(module, "REQUIRED_QUOTE_DEBT_COUNT", 0)
+    monkeypatch.setattr(
+        module,
+        "verify_snapshot",
+        lambda *args, **kwargs: SnapshotVerification(
+            True, "pre", "a" * 64, 1, "1" * 40, "2" * 40, "3" * 64,
+        ),
+    )
+    return SimpleNamespace(
+        module=module,
+        binding=binding,
+        current_raw=current_raw,
+        raw_tree_sha256=raw_tree_sha256,
+        report_path=report_path,
+        pathspec=pathspec,
+        args={
+            "binding_path": binding.path,
+            "expected_binding_sha256": binding.sha256,
+            "manifest_path": manifest_path,
+            "expected_manifest_sha256": _sha(manifest_bytes),
+            "quote_debt_path": quote_path,
+            "expected_quote_debt_sha256": _sha(quote_path.read_bytes()),
+            "engine_root": binding.engine_root,
+            "repo_root": binding.repo_root,
+            "brain_root": binding.brain_root,
+            "report_path": report_path,
+            "pathspec_output": pathspec,
+            "generated_at": "2026-08-06T12:00:00+09:00",
+        },
+    )
+
+
+def test_post_verify_rejects_raw_tree_drift_before_post_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    case = _post_success_case(tmp_path, monkeypatch)
+    case.current_raw["sha256"] = "0" * 64
+
+    with pytest.raises(Task18VerificationError, match="raw_tree"):
+        verify_task18_applied(**case.args)
+
+    assert not case.pathspec.exists()
+    assert not case.report_path.exists()
+
+
+def test_post_verify_reverse_tail_rejects_ignored_raw_tree_drift_without_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    case = _post_success_case(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        case.module,
+        "_post_reverse_tail_hook",
+        lambda: case.current_raw.__setitem__("sha256", "0" * 64),
+    )
+
+    with pytest.raises(Task18VerificationError, match="raw_tree"):
+        verify_task18_applied(**case.args)
+
+    assert not case.pathspec.exists()
+    assert not case.report_path.exists()
+
+
+def test_post_verify_report_records_exact_bound_raw_tree_sha256(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    case = _post_success_case(tmp_path, monkeypatch)
+
+    verify_task18_applied(**case.args)
+
+    report = json.loads(case.report_path.read_bytes())
+    assert report["raw_tree_sha256"] == case.raw_tree_sha256
 
 
 def test_post_verify_creates_report_and_nul_pathspec_only_once(
@@ -313,6 +482,7 @@ def test_post_verify_creates_report_and_nul_pathspec_only_once(
     stats = module._PostInvariantStats(
         object_count=1,
         actual_after_fingerprint=binding.expected_after_corpus_fingerprint,
+        raw_tree_sha256=binding.value["corpus"]["raw_tree_sha256"],
         reference_edge_count=0,
         reference_graph_sha256=_json_sha([]),
         pair_count=0,
@@ -337,7 +507,13 @@ def test_post_verify_creates_report_and_nul_pathspec_only_once(
     monkeypatch.setattr(
         module,
         "capture_task18_corpus_state",
-        lambda *args: {"search_index": {}, "stale_set": {"sha256": "5" * 64}},
+        lambda *args: {
+            "corpus": {
+                "raw_tree_sha256": binding.value["corpus"]["raw_tree_sha256"],
+            },
+            "search_index": {},
+            "stale_set": {"sha256": "5" * 64},
+        },
     )
     monkeypatch.setattr(module, "REQUIRED_QUOTE_DEBT_COUNT", 0)
     monkeypatch.setattr(
@@ -500,6 +676,12 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         clock=lambda: "2026-08-06T12:00:00+09:00",
     )
     fixture.install(monkeypatch, module)
+    current_corpus_state = {"value": deepcopy(fixture.corpus_state)}
+    monkeypatch.setattr(
+        module,
+        "capture_task18_corpus_state",
+        lambda *args: deepcopy(current_corpus_state["value"]),
+    )
     monkeypatch.setattr(module, "REQUIRED_TARGET_COUNT", 2)
     monkeypatch.setattr(module, "REQUIRED_QUOTE_DEBT_COUNT", 1)
     monkeypatch.setattr(module, "REQUIRED_NONCANONICAL_SYMBOL_COUNT", 0)
@@ -649,6 +831,7 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "target_ids_sha256": created.value["migration"]["target_ids_sha256"],
         "expected_after_corpus_fingerprint": expected_after,
         "actual_after_corpus_fingerprint": expected_after,
+        "raw_tree_sha256": created.value["corpus"]["raw_tree_sha256"],
         "object_count": 2,
         "changed_paths": changed_paths,
         "update_count": 2,
@@ -715,6 +898,7 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         engine_git=engine_git,
         repo_git=repo_git,
         current_git=current_git,
+        current_corpus_state=current_corpus_state,
         ancestry=ancestry,
         verify_path=verify_path,
         manifest_path=manifest_path,
@@ -816,6 +1000,140 @@ def _write_forged_closure(
     payload = canonical_receipt_bytes(value)
     path.write_bytes(payload)
     return path, _sha(payload)
+
+
+def _write_ignored_raw_drift(fixture, name: str = "drift.md") -> Path:
+    path = fixture.brain_root / "raw" / "sources" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("ignored raw drift\n", encoding="utf-8")
+    fixture.current_corpus_state["value"]["corpus"]["raw_tree_sha256"] = "0" * 64
+    return path
+
+
+def test_closure_create_accepts_post_report_with_exact_bound_raw_tree_sha256(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    _, create_args = _write_post_variant(
+        fixture,
+        tmp_path,
+        "post-with-raw-tree",
+        lambda value: value.__setitem__(
+            "raw_tree_sha256",
+            fixture.created.value["corpus"]["raw_tree_sha256"],
+        ),
+    )
+
+    result = create_task18_closure_receipt(**create_args)
+
+    assert result.ok is True
+
+
+@pytest.mark.parametrize(
+    "invalid_raw_tree",
+    ("0" * 64, True, None),
+)
+def test_closure_create_rejects_invalid_or_unbound_post_raw_tree_sha256(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_raw_tree: object,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    _, create_args = _write_post_variant(
+        fixture,
+        tmp_path,
+        f"bad-post-raw-{invalid_raw_tree!r}",
+        lambda value: value.__setitem__("raw_tree_sha256", invalid_raw_tree),
+    )
+
+    with pytest.raises(Task18VerificationError, match="post_report_binding_mismatch"):
+        create_task18_closure_receipt(**create_args)
+
+
+def test_closure_create_rejects_extra_post_report_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    _, create_args = _write_post_variant(
+        fixture,
+        tmp_path,
+        "extra-post-key",
+        lambda value: value.__setitem__("unexpected", "value"),
+    )
+
+    with pytest.raises(Task18VerificationError, match="post_report_binding_mismatch"):
+        create_task18_closure_receipt(**create_args)
+
+
+def test_closure_create_rejects_current_raw_tree_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    _write_ignored_raw_drift(fixture)
+
+    with pytest.raises(Task18VerificationError, match="raw_tree"):
+        create_task18_closure_receipt(**fixture.create_args)
+
+    assert not fixture.closure.exists()
+
+
+def test_closure_verify_independently_rejects_current_raw_tree_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    result = create_task18_closure_receipt(**fixture.create_args)
+    _write_ignored_raw_drift(fixture)
+    report_path = (tmp_path / "closure-raw-drift-verify.json").resolve()
+
+    with pytest.raises(Task18VerificationError, match="raw_tree"):
+        verify_task18_closure_receipt(
+            closure_path=fixture.closure,
+            expected_closure_sha256=result.closure_sha256,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=report_path,
+        )
+
+    assert not report_path.exists()
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+def test_closure_reverse_tail_rejects_raw_tree_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    if pathway == "verify":
+        result = create_task18_closure_receipt(**fixture.create_args)
+    monkeypatch.setattr(
+        fixture.module,
+        "_closure_reverse_tail_hook",
+        lambda: _write_ignored_raw_drift(fixture, f"tail-{pathway}.md"),
+    )
+
+    if pathway == "create":
+        with pytest.raises(Task18VerificationError, match="raw_tree"):
+            create_task18_closure_receipt(**fixture.create_args)
+        assert not fixture.closure.exists()
+        return
+
+    report_path = (tmp_path / "closure-raw-tail-verify.json").resolve()
+    with pytest.raises(Task18VerificationError, match="raw_tree"):
+        verify_task18_closure_receipt(
+            closure_path=fixture.closure,
+            expected_closure_sha256=result.closure_sha256,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=report_path,
+        )
+    assert not report_path.exists()
 
 
 def _forge_expected_title(binding: dict) -> None:

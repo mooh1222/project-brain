@@ -97,13 +97,26 @@ def build_payload(store: BrainStore) -> dict:
     collisions = {}
     for oid, candidate in code_locator_candidates.items():
         collisions.setdefault(_truncate_label(candidate), []).append(oid)
-    for candidate, object_ids in collisions.items():
+    reserved_labels = set(collisions)
+    used_labels = {
+        candidate
+        for candidate, object_ids in collisions.items()
+        if len(object_ids) == 1
+    }
+    nodes_by_id = {node["id"]: node for node in nodes}
+    for candidate, object_ids in sorted(collisions.items()):
         if len(object_ids) < 2:
             continue
-        for index, oid in enumerate(sorted(object_ids), start=1):
-            suffix = f"·{index}"
-            label = candidate[:30 - len(suffix)] + suffix
-            next(node for node in nodes if node["id"] == oid)["label"] = label
+        suffix_index = 1
+        for oid in sorted(object_ids):
+            while True:
+                suffix = f"·{suffix_index}"
+                suffix_index += 1
+                label = candidate[:30 - len(suffix)] + suffix
+                if label not in reserved_labels and label not in used_labels:
+                    break
+            nodes_by_id[oid]["label"] = label
+            used_labels.add(label)
 
     edge_list = [{"from": f, "to": t} for f, t in graph_edges(store)]
 

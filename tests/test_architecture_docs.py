@@ -283,3 +283,18 @@ def test_task18_migration_boundaries_are_explicit():
         "title만",
     ):
         assert token in contracts
+
+
+@pytest.mark.parametrize("name", ("change-map.md", "runtime-map.md"))
+def test_display_migration_preserve_exception_forbids_rebuild(name: str):
+    text = _read_architecture_doc(name)
+    paragraphs = re.split(r"\n\s*\n", text)
+    matching = [
+        paragraph
+        for paragraph in paragraphs
+        if "DISPLAY_MIGRATION" in paragraph and "PRESERVE" in paragraph
+    ]
+    assert len(matching) == 1
+    paragraph = matching[0]
+    assert "index rebuild를 하지 않는다" in paragraph
+    assert "index DB bytes를 보존" in paragraph
