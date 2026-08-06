@@ -18,10 +18,6 @@ from project_brain.store import BrainStore
 
 GENERATED_AT = "2026-08-06T12:00:00+09:00"
 TARGET_SHA = "target-sha"
-REAL_MEASUREMENT_PATH = Path(
-    "/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/"
-    "task18-remeasurement/measurement.json"
-)
 
 
 def _target_ids_sha256(target_ids: list[str]) -> str:
@@ -244,41 +240,25 @@ def test_quote_inventory_is_canonical_and_deterministic(quote_fixture):
     )
 
 
-def test_actual_canonical_measurement_uses_quote_backlog_schema(quote_fixture):
-    if not REAL_MEASUREMENT_PATH.exists():
-        pytest.skip("BB2 read-only Task 18 measurement fixture is unavailable")
-    measurement_bytes = REAL_MEASUREMENT_PATH.read_bytes()
+def test_canonical_synthetic_measurement_uses_quote_backlog_schema(quote_fixture):
+    measurement_bytes = quote_fixture["measurement_path"].read_bytes()
     measurement = json.loads(measurement_bytes)
     backlog = measurement["quote_backlog"]
 
     assert canonical_receipt_bytes(measurement) == measurement_bytes
-    assert backlog["target_count"] == len(backlog["target_ids"]) == 3307
+    assert set(backlog) == {
+        "target_count",
+        "target_ids",
+        "target_ids_sha256",
+    }
+    assert backlog["target_count"] == len(backlog["target_ids"]) == 5
     assert backlog["target_ids"] == sorted(set(backlog["target_ids"]))
     assert backlog["target_ids_sha256"] == _target_ids_sha256(
         backlog["target_ids"]
     )
-
-    args = {
-        key: value
-        for key, value in quote_fixture.items()
-        if key not in {
-            "expected_titles",
-            "measurement_path",
-            "expected_measurement_sha256",
-        }
-    }
-    with pytest.raises(
-        QuoteDebtError,
-        match="measurement_quote_debt_id_set_mismatch",
-    ):
-        build_quote_debt_inventory(
-            **args,
-            measurement_path=REAL_MEASUREMENT_PATH,
-            expected_measurement_sha256=hashlib.sha256(
-                measurement_bytes
-            ).hexdigest(),
-            generated_at=GENERATED_AT,
-        )
+    assert _build(quote_fixture)["quote_debt_ids_sha256"] == backlog[
+        "target_ids_sha256"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -473,6 +453,29 @@ def test_post_migration_verify_allows_only_bound_title_changes(quote_fixture):
         stale_report=quote_fixture["stale_report"],
         phase="post_migration",
         authorized_titles=quote_fixture["expected_titles"],
+    )
+
+    assert receipt["ok"] is True
+    assert receipt["phase"] == "post_migration"
+
+
+def test_post_migration_accepts_verified_binding_style_authorization_superset(
+    quote_fixture,
+):
+    value = _build(quote_fixture)
+    binding_titles = {
+        **quote_fixture["expected_titles"],
+        "code.ctx.has-quote": "Ns::bound",
+        "evref.ctx.wrong": "Ns::bound",
+    }
+    migrated = _with_titles(quote_fixture["existing"], binding_titles)
+
+    receipt = verify_quote_debt_inventory(
+        value,
+        existing=migrated,
+        stale_report=quote_fixture["stale_report"],
+        phase="post_migration",
+        authorized_titles=binding_titles,
     )
 
     assert receipt["ok"] is True

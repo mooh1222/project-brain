@@ -449,6 +449,8 @@ def _validate_inventory_shape(value: Mapping[str, object]) -> list[Mapping[str, 
 def _authorized_post_rows(
     rows: Sequence[Mapping[str, object]],
     authorized_titles: Mapping[str, str],
+    *,
+    existing: BrainStore,
 ) -> list[dict[str, object]]:
     required_titles: dict[str, str] = {}
     for row in rows:
@@ -462,11 +464,36 @@ def _authorized_post_rows(
         for ref in row["paired_refs"]:
             if ref.get("title") != canonical_title:
                 required_titles[str(ref["id"])] = canonical_title
-    if dict(authorized_titles) != required_titles:
+    if any(
+        authorized_titles.get(object_id) != expected_title
+        for object_id, expected_title in required_titles.items()
+    ):
         _fail(
             "post_migration_authorized_titles_mismatch",
-            "authorization must exactly match every bound title migration",
+            "authorization must contain every required bound title migration",
         )
+
+    # 전체 binding의 진위는 load_task18_post_authorization이 검증한다. 이 계층은
+    # quote inventory 밖의 정상 display target을 재구성하지 않고, extra entry가
+    # 현재 store의 실제 display 객체/title과 맞는지만 최소 방어한다.
+    for object_id in sorted(set(authorized_titles) - set(required_titles)):
+        if not existing.has(object_id):
+            _fail("post_migration_authorization_extra_invalid", object_id)
+        obj = existing.get(object_id)
+        if obj.get("kind") == "CodeLocator":
+            pass
+        elif obj.get("kind") == "EvidenceRef":
+            locator_id = paired_code_locator_id(obj)
+            if (
+                locator_id is None
+                or not existing.has(locator_id)
+                or existing.get(locator_id).get("kind") != "CodeLocator"
+            ):
+                _fail("post_migration_authorization_extra_invalid", object_id)
+        else:
+            _fail("post_migration_authorization_extra_invalid", object_id)
+        if obj.get("title") != authorized_titles[object_id]:
+            _fail("post_migration_authorization_extra_title_mismatch", object_id)
 
     expected_rows = deepcopy(list(rows))
     for row in expected_rows:
@@ -512,7 +539,11 @@ def verify_quote_debt_inventory(
     expected_rows = list(inventory_rows)
     if phase == "post_migration":
         assert authorized_titles is not None
-        expected_rows = _authorized_post_rows(expected_rows, authorized_titles)
+        expected_rows = _authorized_post_rows(
+            expected_rows,
+            authorized_titles,
+            existing=existing,
+        )
     if current_rows != expected_rows:
         _fail(
             "quote_debt_projection_mismatch",
