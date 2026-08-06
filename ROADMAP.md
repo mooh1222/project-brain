@@ -26,7 +26,7 @@
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대·보수적 토큰 근사와 과대 유닛 분할 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
-| L4 적재 | ✅ 3경로 + batch 완료 게이트 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·workflow validator·semantic finalization(2026-07-23) |
+| L4 적재 | ✅ 3경로 + batch 완료 게이트 + P0 적재 무결성 기반 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·workflow validator·semantic finalization(2026-07-23) + coverage·단일 쓰기·receipt·foundation gate(2026-08-05) |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -36,22 +36,20 @@
 
 ## 진행 중
 
-### P0 ingest integrity foundation — 구현 중
+### Task 18 표시 라벨·인용문 부채 — 새 측정 전 차단
 
-신규 적재를 `CoverageContract → 독립 expected planner → MutationService 단일 clock →
-mutation/no-op receipt → foundation gate`로 결속하는 기반을 먼저 구현한다.
+P0 ingest integrity foundation은 완료됐다. 기존
+`2026-08-04-task18-display-labels-and-quote-backlog` 설계·계획·binding은 당시 상태의 역사
+자료이며 실행하지 않는다. P0 handoff의 현재 상태는
+`blocked_pending_new_measurement_design_binding`이다.
 
-**P0 ingest integrity 완료 기준**은 coverage 없는 single/batch pre-write 차단, assembled/direct
-identity 결속, 신규·변경 write semantics, canonical receipt와 복구, 설치 runtime·template parity,
-foundation gate, clean baseline과 BB2 소비 회귀를 모두 통과하는 것이다. Task 13에서 foundation
-판정기와 설치 런타임, target-relative install report, 비변이 gate와 snapshot handoff 검증 경계까지
-합성 repo로 구현했다. 그러나 Task 14 전체 병합·독립 리뷰와 Task 15 실제 BB2 clean baseline,
-두 번 설치, 6개 command gate, snapshot handoff가 남아 있으므로 P0 완료로 표시하지 않는다.
+다음 순서는 현재 engine·BB2 HEAD, `origin/develop`, 표시 라벨 대상, quote backlog를 읽기 전용으로
+다시 측정해 receipt를 남기는 것이다. 그 측정을 입력으로 새 Task 18 설계·계획을 작성하고 사용자
+승인을 받은 뒤에만 binding 생성기·독립 검증기·migration gate를 구현한다. 새 pre-mutation
+snapshot과 최종 binding을 검증하기 전에는 실코퍼스 migration을 시작하지 않는다.
 
-**Task 18 blocked handoff:** P0 기준이 모두 통과하고 새 binding으로 실코퍼스 부채를 다시 측정하기
-전에는 Task 18 label/quote debt migration을 시작하지 않는다. **실코퍼스 migration은 미완료**이며,
-이 엔진 단계에서 기존 BB2 객체를 수정하지 않는다. legacy 객체는 ingest 당시 검토됐지만 지금
-기계적으로 재검증할 수 없는 항목으로 분리해 기록한다.
+기존 legacy 객체는 ingest 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는 항목으로
+기록한다. 이를 “검증된 적 없음”으로 확대 해석하지 않는다.
 
 그 밖의 후보는 아래 "미뤄둔 작업"에 착수 트리거와 함께 있다. 특히 7번(Task 17 복구 번들
 소속과 엔진 흡수)과 8번(옛 앵커 수정을 막는 읽기/쓰기 비대칭)은 별도 후속이다.
@@ -59,6 +57,25 @@ foundation gate, clean baseline과 BB2 소비 회귀를 모두 통과하는 것�
 ---
 
 ## 완료 단계
+
+### P0 ingest integrity foundation — 완료 (2026-08-05)
+
+신규 적재를 `CoverageContract → 독립 expected planner → MutationService 단일 clock →
+mutation/no-op receipt → foundation gate`로 결속했다. coverage 없는 single/batch 쓰기 차단,
+assembled/direct identity 결속, 신규·변경 write semantics, canonical receipt와 복구, 설치
+runtime·template 일치, BB2 비변이 gate와 snapshot handoff까지 완료했다.
+
+- 엔진 완료 HEAD: `e84d4ed371a59de158c65beb9c5b05a2e9bef7f1`
+- BB2 runtime 완료 HEAD: `fbcbc861f9a9b43c3ac483e43b8d706c9c4d2b01`
+- 엔진 전체 회귀: `1808 passed`, subtests `127 passed`; 설치 runtime `120 OK`
+- BB2 gate: 정해진 6개 명령 전부 성공, finalizer·index rebuild 없음
+- corpus objects/raw/index 불변; 허용된 `brain/.brain-local/stale-set.json`만 갱신
+- snapshot: 11,168 files, manifest `0ec3d3874bcb…`; handoff `ok=true`
+- 독립 최종 리뷰: Critical·Important·새 Minor 없음
+
+완료 증거와 이후 문서 커밋의 경계는
+[P0 적재 무결성 완료 보고서](docs/reports/2026-08-06-ingest-integrity-foundation-completion.md)에
+기록했다.
 
 ### 1차 마일스톤 — 검색층 + 라우터 통합
 한국어 형태소 토크나이저 + BM25(FTS5) + bge-m3 벡터 + RRF 융합 + 그래프 1-hop 상호지지

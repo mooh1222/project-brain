@@ -1,10 +1,17 @@
 # Project Brain P0 적재 무결성·히스토리 시간 소유권 설계
 
-**상태:** 사용자 승인됨 · 구현 전
+**상태:** 구현·설치·비변이 gate·snapshot handoff 완료
 **작성일:** 2026-08-05
+**완료일:** 2026-08-05
+**문서 반영일:** 2026-08-06
 **대상 저장소:** Project Brain 엔진 + 설치되는 ingest runtime
-**기준 엔진 HEAD:** `3f95bb06cecd21bf13248f0b6b54d0ee146bbe85`
-**후속 작업:** P0 완료 뒤 새 snapshot/binding에서 Task 18 재설계
+**설계 기준 엔진 HEAD:** `3f95bb06cecd21bf13248f0b6b54d0ee146bbe85`
+**완료 증거 HEAD:** engine `e84d4ed371a59de158c65beb9c5b05a2e9bef7f1` / BB2 `fbcbc861f9a9b43c3ac483e43b8d706c9c4d2b01`
+**완료 보고서:** [2026-08-06-ingest-integrity-foundation-completion.md](../../reports/2026-08-06-ingest-integrity-foundation-completion.md)
+**후속 작업:** 현재 상태를 새로 측정한 뒤 별도 Task 18 설계·계획·snapshot/binding 확정
+
+> 아래 본문은 구현 전에 승인된 설계와 판단 근거를 보존한다. 실제 완료 결과와 검증값은 완료
+> 보고서가 소유한다. 기존 2026-08-04 Task 18 문서와 binding은 역사 자료이며 실행하지 않는다.
 
 ## 1. 목적
 

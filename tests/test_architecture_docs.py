@@ -181,7 +181,7 @@ def test_primary_entrypoints_link_to_architecture_map():
     assert missing == []
 
 
-def test_p0_ingest_integrity_flow_and_deferred_migration_are_explicit():
+def test_p0_ingest_integrity_flow_is_explicit():
     runtime = _read_architecture_doc("runtime-map.md")
     for token in (
         "CoverageContract",
@@ -217,16 +217,6 @@ def test_p0_ingest_integrity_flow_and_deferred_migration_are_explicit():
         "rebuild 불필요",
     ):
         assert token in changes
-
-    roadmap = (ROOT / "ROADMAP.md").read_text(encoding="utf-8")
-    for token in (
-        "P0 ingest integrity 완료 기준",
-        "Task 18",
-        "blocked handoff",
-        "실코퍼스 migration은 미완료",
-    ):
-        assert token in roadmap
-
 
 def test_runtime_map_separates_active_finalization_from_planned_p0_gate():
     runtime = _read_architecture_doc("runtime-map.md")
