@@ -14,7 +14,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
-from project_brain.display_contract import non_title_sha256, paired_code_locator_id
+from project_brain.display_contract import (
+    canonical_locator_title,
+    non_title_sha256,
+    paired_code_locator_id,
+)
 from project_brain.foundation import canonical_receipt_bytes
 from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.store import BrainStore
@@ -69,46 +73,54 @@ def _read_and_verify_measurement(
     return value
 
 
-def _measurement_quote_debt_ids(measurement: Mapping[str, object]) -> list[str]:
-    """measurement receipt에서 quote debt ID 목록을 한 가지 의미로 꺼낸다.
+def _quote_debt_ids_sha256(target_ids: Sequence[str]) -> str:
+    data = json.dumps(
+        list(target_ids),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
-    초기 측정 산출물의 평면 필드와 section 형식을 모두 읽되, 둘이 함께 있으면
-    같은 값이어야 한다. 형식 호환이 measurement 의미를 느슨하게 만들지 않도록
-    최종 목록은 정렬·중복 없음까지 강제한다.
-    """
-    candidates: list[object] = []
-    if "quote_debt_ids" in measurement:
-        candidates.append(measurement["quote_debt_ids"])
-    section = measurement.get("quote_debt")
-    if isinstance(section, Mapping):
-        for key in ("quote_debt_ids", "locator_ids", "ids"):
-            if key in section:
-                candidates.append(section[key])
-    if not candidates:
-        _fail("measurement_quote_debt_ids_missing")
 
-    normalized: list[list[str]] = []
-    for candidate in candidates:
-        if (
-            not isinstance(candidate, Sequence)
-            or isinstance(candidate, (str, bytes, bytearray))
-            or not all(isinstance(value, str) and value for value in candidate)
-        ):
-            _fail("measurement_quote_debt_ids_invalid")
-        values = list(candidate)
-        if values != sorted(values) or len(values) != len(set(values)):
-            _fail("measurement_quote_debt_ids_not_canonical")
-        normalized.append(values)
-    if any(values != normalized[0] for values in normalized[1:]):
-        _fail("measurement_quote_debt_ids_conflict")
-    return normalized[0]
+def _measurement_quote_debt(
+    measurement: Mapping[str, object],
+) -> tuple[list[str], str]:
+    """고정 measurement의 quote_backlog ID/count/hash를 검증해 반환한다."""
+    backlog = measurement.get("quote_backlog")
+    if not isinstance(backlog, Mapping):
+        _fail("measurement_quote_backlog_missing")
+    target_ids = backlog.get("target_ids")
+    if (
+        not isinstance(target_ids, Sequence)
+        or isinstance(target_ids, (str, bytes, bytearray))
+        or not all(isinstance(value, str) and value for value in target_ids)
+    ):
+        _fail("measurement_quote_debt_ids_invalid")
+    values = list(target_ids)
+    if values != sorted(values) or len(values) != len(set(values)):
+        _fail("measurement_quote_debt_ids_not_canonical")
+
+    target_count = backlog.get("target_count")
+    if (
+        isinstance(target_count, bool)
+        or not isinstance(target_count, int)
+        or target_count != len(values)
+    ):
+        _fail("measurement_quote_debt_count_mismatch")
+    target_ids_sha256 = backlog.get("target_ids_sha256")
+    computed_sha256 = _quote_debt_ids_sha256(values)
+    if target_ids_sha256 != computed_sha256:
+        _fail("measurement_quote_debt_ids_sha256_mismatch")
+    return values, computed_sha256
 
 
 def _report_locator_ids(
     stale_report: Mapping[str, object],
     field: str,
 ) -> frozenset[str]:
-    rows = stale_report.get(field, [])
+    rows = stale_report[field]
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
         _fail("stale_report_invalid", f"{field} must be an array")
     ids: set[str] = set()
@@ -122,10 +134,131 @@ def _report_locator_ids(
     return frozenset(ids)
 
 
+def _string_array(value: object) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
+        and all(isinstance(item, str) and item for item in value)
+    )
+
+
+def _require_stale_row_strings(
+    row: Mapping[str, object],
+    fields: Sequence[str],
+    *,
+    row_name: str,
+) -> None:
+    if not all(isinstance(row.get(field), str) and row.get(field) for field in fields):
+        _fail("stale_report_invalid", f"{row_name} requires {list(fields)!r}")
+
+
+def _validate_fresh_stale_report(stale_report: Mapping[str, object]) -> None:
+    required = {
+        "target_head",
+        "candidates",
+        "locator_group",
+        "unmerged_anchors",
+        "coverage",
+    }
+    if not isinstance(stale_report, Mapping) or not required <= set(stale_report):
+        _fail("stale_report_invalid", "fresh stale-check report keys are required")
+    if not isinstance(stale_report.get("target_head"), str) or not stale_report[
+        "target_head"
+    ]:
+        _fail("stale_report_invalid", "target_head must be a non-empty string")
+
+    for field in ("candidates", "locator_group", "unmerged_anchors"):
+        rows = stale_report[field]
+        if not isinstance(rows, Sequence) or isinstance(
+            rows, (str, bytes, bytearray)
+        ):
+            _fail("stale_report_invalid", f"{field} must be an array")
+
+    for row in stale_report["candidates"]:
+        if not isinstance(row, Mapping):
+            _fail("stale_report_invalid", "candidate row must be an object")
+        _require_stale_row_strings(row, ("mapping_id",), row_name="candidate")
+        if row.get("mapping_key") is not None and not isinstance(
+            row.get("mapping_key"), str
+        ):
+            _fail("stale_report_invalid", "candidate mapping_key is invalid")
+        stale_locators = row.get("stale_locators")
+        if not isinstance(stale_locators, Sequence) or isinstance(
+            stale_locators, (str, bytes, bytearray)
+        ):
+            _fail("stale_report_invalid", "candidate stale_locators is invalid")
+        for stale_locator in stale_locators:
+            if not isinstance(stale_locator, Mapping):
+                _fail("stale_report_invalid", "stale locator must be an object")
+            _require_stale_row_strings(
+                stale_locator,
+                ("locator_id", "path", "change_type", "from_commit"),
+                row_name="stale locator",
+            )
+
+    target_head = stale_report["target_head"]
+    for row in stale_report["locator_group"]:
+        if not isinstance(row, Mapping):
+            _fail("stale_report_invalid", "locator_group row must be an object")
+        _require_stale_row_strings(
+            row,
+            ("locator_id", "path", "from_commit", "target_head", "change_type"),
+            row_name="locator_group",
+        )
+        if row.get("target_head") != target_head:
+            _fail("stale_report_invalid", "locator row target_head mismatch")
+        for field in (
+            "blocking_affected_mapping_ids",
+            "nonblocking_affected_mapping_ids",
+        ):
+            if not _string_array(row.get(field)):
+                _fail("stale_report_invalid", f"locator_group {field} is invalid")
+
+    for row in stale_report["unmerged_anchors"]:
+        if not isinstance(row, Mapping):
+            _fail("stale_report_invalid", "unmerged row must be an object")
+        _require_stale_row_strings(
+            row,
+            ("locator_id", "path", "from_commit", "reason"),
+            row_name="unmerged anchor",
+        )
+        if row.get("reason") not in {"not_ancestor", "anchor_unverifiable"}:
+            _fail("stale_report_invalid", "unmerged reason is invalid")
+        for field in (
+            "blocking_affected_mapping_ids",
+            "nonblocking_affected_mapping_ids",
+        ):
+            if not _string_array(row.get(field)):
+                _fail("stale_report_invalid", f"unmerged {field} is invalid")
+
+    coverage = stale_report["coverage"]
+    if not isinstance(coverage, Mapping) or not {
+        "covered_mappings",
+        "uncovered_mappings",
+    } <= set(coverage):
+        _fail("stale_report_invalid", "coverage shape is invalid")
+    if not _string_array(coverage.get("covered_mappings")):
+        _fail("stale_report_invalid", "covered_mappings is invalid")
+    uncovered = coverage.get("uncovered_mappings")
+    if not isinstance(uncovered, Sequence) or isinstance(
+        uncovered, (str, bytes, bytearray)
+    ):
+        _fail("stale_report_invalid", "uncovered_mappings is invalid")
+    for row in uncovered:
+        if (
+            not isinstance(row, Mapping)
+            or not isinstance(row.get("mapping_id"), str)
+            or row.get("skipped_reason") != "no_code_locator_ids"
+            or not isinstance(row.get("has_code_evidence_ref"), bool)
+        ):
+            _fail("stale_report_invalid", "uncovered mapping row is invalid")
+
+
 def _assert_stale_target(
     stale_report: Mapping[str, object],
     target_revision_sha: object,
 ) -> None:
+    _validate_fresh_stale_report(stale_report)
     if (
         not isinstance(target_revision_sha, str)
         or not target_revision_sha
@@ -212,15 +345,15 @@ def _build_sorted_quote_debt_rows(
 def _verify_measurement_id_sets(
     measurement: Mapping[str, object],
     rows: Sequence[Mapping[str, object]],
-) -> list[str]:
-    measured_ids = _measurement_quote_debt_ids(measurement)
+) -> tuple[list[str], str]:
+    measured_ids, measured_ids_sha256 = _measurement_quote_debt(measurement)
     current_ids = [str(row["locator_id"]) for row in rows]
     if measured_ids != current_ids:
         _fail(
             "measurement_quote_debt_id_set_mismatch",
             f"measurement={measured_ids!r}, current={current_ids!r}",
         )
-    return measured_ids
+    return measured_ids, measured_ids_sha256
 
 
 def build_quote_debt_inventory(
@@ -242,7 +375,9 @@ def build_quote_debt_inventory(
         Path(measurement_path), expected_measurement_sha256
     )
     rows = _build_sorted_quote_debt_rows(existing, stale_report=stale_report)
-    quote_debt_ids = _verify_measurement_id_sets(measurement, rows)
+    quote_debt_ids, quote_debt_ids_sha256 = _verify_measurement_id_sets(
+        measurement, rows
+    )
     value: dict[str, object] = {
         "version": 1,
         "purpose": "legacy_code_locator_quote_debt",
@@ -258,6 +393,7 @@ def build_quote_debt_inventory(
         "measurement_sha256": expected_measurement_sha256,
         "generated_at": generated_at,
         "quote_debt_ids": quote_debt_ids,
+        "quote_debt_ids_sha256": quote_debt_ids_sha256,
         "rows": rows,
     }
     canonical_receipt_bytes(value)
@@ -280,8 +416,16 @@ def _validate_inventory_shape(value: Mapping[str, object]) -> list[Mapping[str, 
     ):
         _fail("inventory_quote_debt_ids_invalid")
     locator_ids = [row.get("locator_id") for row in rows]
-    if locator_ids != list(quote_debt_ids) or locator_ids != sorted(locator_ids):
+    if (
+        locator_ids != list(quote_debt_ids)
+        or locator_ids != sorted(locator_ids)
+        or len(locator_ids) != len(set(locator_ids))
+    ):
         _fail("inventory_not_canonical", "row and quote debt ID order differ")
+    if value.get("quote_debt_ids_sha256") != _quote_debt_ids_sha256(
+        list(quote_debt_ids)
+    ):
+        _fail("inventory_quote_debt_ids_sha256_mismatch")
     for row in rows:
         axes = row.get("axes")
         if not isinstance(axes, Mapping) or set(axes) != set(_AXIS_KEYS):
@@ -306,21 +450,33 @@ def _authorized_post_rows(
     rows: Sequence[Mapping[str, object]],
     authorized_titles: Mapping[str, str],
 ) -> list[dict[str, object]]:
-    bound_ids: set[str] = set()
+    required_titles: dict[str, str] = {}
+    for row in rows:
+        canonical_title = canonical_locator_title({
+            "id": row["locator_id"],
+            "path": row.get("path"),
+            "symbol": row.get("symbol"),
+        })
+        if row.get("title") != canonical_title:
+            required_titles[str(row["locator_id"])] = canonical_title
+        for ref in row["paired_refs"]:
+            if ref.get("title") != canonical_title:
+                required_titles[str(ref["id"])] = canonical_title
+    if dict(authorized_titles) != required_titles:
+        _fail(
+            "post_migration_authorized_titles_mismatch",
+            "authorization must exactly match every bound title migration",
+        )
+
     expected_rows = deepcopy(list(rows))
     for row in expected_rows:
         locator_id = row["locator_id"]
-        bound_ids.add(locator_id)
         if locator_id in authorized_titles:
             row["title"] = authorized_titles[locator_id]
         for ref in row["paired_refs"]:
             ref_id = ref["id"]
-            bound_ids.add(ref_id)
             if ref_id in authorized_titles:
                 ref["title"] = authorized_titles[ref_id]
-    extra = sorted(set(authorized_titles) - bound_ids)
-    if extra:
-        _fail("post_migration_unbound_title_authorization", repr(extra))
     return expected_rows
 
 

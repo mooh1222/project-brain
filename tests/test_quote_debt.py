@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,75 @@ from project_brain.store import BrainStore
 
 GENERATED_AT = "2026-08-06T12:00:00+09:00"
 TARGET_SHA = "target-sha"
+REAL_MEASUREMENT_PATH = Path(
+    "/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/"
+    "task18-remeasurement/measurement.json"
+)
+
+
+def _target_ids_sha256(target_ids: list[str]) -> str:
+    payload = json.dumps(
+        target_ids,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _measurement_value(target_ids: list[str]) -> dict[str, object]:
+    return {
+        "quote_backlog": {
+            "target_count": len(target_ids),
+            "target_ids": target_ids,
+            "target_ids_sha256": _target_ids_sha256(target_ids),
+        }
+    }
+
+
+def _fresh_stale_report() -> dict[str, object]:
+    return {
+        "target_head": TARGET_SHA,
+        "candidates": [
+            {
+                "mapping_id": "mapping.ctx.stale",
+                "mapping_key": "stale",
+                "stale_locators": [
+                    {
+                        "locator_id": "code.ctx.stale",
+                        "path": "src/Stale.cpp",
+                        "change_type": "M",
+                        "from_commit": "commit-stale",
+                    }
+                ],
+            }
+        ],
+        "locator_group": [
+            {
+                "locator_id": "code.ctx.stale",
+                "path": "src/Stale.cpp",
+                "from_commit": "commit-stale",
+                "target_head": TARGET_SHA,
+                "change_type": "M",
+                "blocking_affected_mapping_ids": ["mapping.ctx.stale"],
+                "nonblocking_affected_mapping_ids": [],
+            }
+        ],
+        "unmerged_anchors": [
+            {
+                "locator_id": "code.ctx.unmerged",
+                "path": "src/Unmerged.cpp",
+                "from_commit": "commit-unmerged",
+                "reason": "not_ancestor",
+                "blocking_affected_mapping_ids": [],
+                "nonblocking_affected_mapping_ids": [],
+            }
+        ],
+        "coverage": {
+            "covered_mappings": ["mapping.ctx.stale"],
+            "uncovered_mappings": [],
+        },
+    }
 
 
 def _locator(
@@ -125,7 +195,7 @@ def quote_fixture(tmp_path: Path) -> dict[str, object]:
     existing = BrainStore({obj["id"]: obj for obj in objects})
     quote_debt_ids = sorted(locator["id"] for locator in locators)
     measurement_path = tmp_path / "measurement.json"
-    measurement_bytes = canonical_receipt_bytes({"quote_debt_ids": quote_debt_ids})
+    measurement_bytes = canonical_receipt_bytes(_measurement_value(quote_debt_ids))
     measurement_path.write_bytes(measurement_bytes)
     expected_titles = {
         locator["id"]: locator["symbol"]
@@ -139,16 +209,7 @@ def quote_fixture(tmp_path: Path) -> dict[str, object]:
         "existing": existing,
         "measurement_path": measurement_path,
         "expected_measurement_sha256": hashlib.sha256(measurement_bytes).hexdigest(),
-        "stale_report": {
-            "target_head": TARGET_SHA,
-            "locator_group": [{"locator_id": "code.ctx.stale"}],
-            "unmerged_anchors": [
-                {
-                    "locator_id": "code.ctx.unmerged",
-                    "reason": "not_ancestor",
-                }
-            ],
-        },
+        "stale_report": _fresh_stale_report(),
         "engine_sha": "engine-sha",
         "repo_sha": "repo-sha",
         "target_revision_sha": TARGET_SHA,
@@ -178,6 +239,99 @@ def test_quote_inventory_is_canonical_and_deterministic(quote_fixture):
         "code.ctx.stale",
         "code.ctx.unmerged",
     ]
+    assert first["quote_debt_ids_sha256"] == _target_ids_sha256(
+        first["quote_debt_ids"]
+    )
+
+
+def test_actual_canonical_measurement_uses_quote_backlog_schema(quote_fixture):
+    if not REAL_MEASUREMENT_PATH.exists():
+        pytest.skip("BB2 read-only Task 18 measurement fixture is unavailable")
+    measurement_bytes = REAL_MEASUREMENT_PATH.read_bytes()
+    measurement = json.loads(measurement_bytes)
+    backlog = measurement["quote_backlog"]
+
+    assert canonical_receipt_bytes(measurement) == measurement_bytes
+    assert backlog["target_count"] == len(backlog["target_ids"]) == 3307
+    assert backlog["target_ids"] == sorted(set(backlog["target_ids"]))
+    assert backlog["target_ids_sha256"] == _target_ids_sha256(
+        backlog["target_ids"]
+    )
+
+    args = {
+        key: value
+        for key, value in quote_fixture.items()
+        if key not in {
+            "expected_titles",
+            "measurement_path",
+            "expected_measurement_sha256",
+        }
+    }
+    with pytest.raises(
+        QuoteDebtError,
+        match="measurement_quote_debt_id_set_mismatch",
+    ):
+        build_quote_debt_inventory(
+            **args,
+            measurement_path=REAL_MEASUREMENT_PATH,
+            expected_measurement_sha256=hashlib.sha256(
+                measurement_bytes
+            ).hexdigest(),
+            generated_at=GENERATED_AT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_code"),
+    [
+        (
+            lambda backlog: backlog.update(target_count=999),
+            "measurement_quote_debt_count_mismatch",
+        ),
+        (
+            lambda backlog: backlog.update(target_ids_sha256="0" * 64),
+            "measurement_quote_debt_ids_sha256_mismatch",
+        ),
+        (
+            lambda backlog: backlog.update(
+                target_ids=list(reversed(backlog["target_ids"]))
+            ),
+            "measurement_quote_debt_ids_not_canonical",
+        ),
+        (
+            lambda backlog: backlog.update(
+                target_ids=[*backlog["target_ids"], backlog["target_ids"][0]],
+                target_count=backlog["target_count"] + 1,
+            ),
+            "measurement_quote_debt_ids_not_canonical",
+        ),
+    ],
+    ids=["count", "id-hash", "order", "duplicate"],
+)
+def test_quote_inventory_rejects_invalid_measurement_backlog_metadata(
+    quote_fixture,
+    mutate,
+    expected_code,
+):
+    measurement_path = quote_fixture["measurement_path"]
+    measurement = json.loads(measurement_path.read_bytes())
+    mutate(measurement["quote_backlog"])
+    measurement_bytes = canonical_receipt_bytes(measurement)
+    measurement_path.write_bytes(measurement_bytes)
+    args = {
+        key: value
+        for key, value in quote_fixture.items()
+        if key not in {"expected_titles", "expected_measurement_sha256"}
+    }
+
+    with pytest.raises(QuoteDebtError, match=expected_code):
+        build_quote_debt_inventory(
+            **args,
+            expected_measurement_sha256=hashlib.sha256(
+                measurement_bytes
+            ).hexdigest(),
+            generated_at=GENERATED_AT,
+        )
 
 
 def test_quote_inventory_records_five_debt_axes_and_locator_fields(quote_fixture):
@@ -239,7 +393,7 @@ def test_quote_inventory_rejects_measurement_sha_mismatch(quote_fixture):
 def test_quote_inventory_rejects_measurement_id_set_mismatch(quote_fixture):
     measurement_path = quote_fixture["measurement_path"]
     measurement_bytes = canonical_receipt_bytes(
-        {"quote_debt_ids": ["code.ctx.not-current-debt"]}
+        _measurement_value(["code.ctx.not-current-debt"])
     )
     measurement_path.write_bytes(measurement_bytes)
     args = {
@@ -263,6 +417,26 @@ def test_quote_inventory_requires_stale_report_for_exact_target_revision(quote_f
     }
 
     with pytest.raises(QuoteDebtError, match="target"):
+        _build(quote_fixture)
+
+
+def test_quote_inventory_rejects_stale_set_cache_like_input(quote_fixture):
+    quote_fixture["stale_report"] = {
+        "target_head": TARGET_SHA,
+        "computed_at": "2026-08-06T12:00:00+09:00",
+        "stale_by_mapping": {},
+    }
+
+    with pytest.raises(QuoteDebtError, match="stale_report"):
+        _build(quote_fixture)
+
+
+def test_quote_inventory_rejects_incomplete_fresh_stale_report_row(quote_fixture):
+    stale_report = deepcopy(quote_fixture["stale_report"])
+    stale_report["locator_group"] = [{"locator_id": "code.ctx.stale"}]
+    quote_fixture["stale_report"] = stale_report
+
+    with pytest.raises(QuoteDebtError, match="stale_report"):
         _build(quote_fixture)
 
 
@@ -305,6 +479,54 @@ def test_post_migration_verify_allows_only_bound_title_changes(quote_fixture):
     assert receipt["phase"] == "post_migration"
 
 
+def test_post_migration_rejects_empty_authorization_on_pre_state(quote_fixture):
+    value = _build(quote_fixture)
+
+    with pytest.raises(QuoteDebtError, match="post_migration_authorized_titles"):
+        verify_quote_debt_inventory(
+            value,
+            existing=quote_fixture["existing"],
+            stale_report=quote_fixture["stale_report"],
+            phase="post_migration",
+            authorized_titles={},
+        )
+
+
+def test_post_migration_rejects_partial_authorization_and_partial_store(
+    quote_fixture,
+):
+    value = _build(quote_fixture)
+    partial_titles = {"code.ctx.stale": "Ns::stale"}
+    partially_migrated = _with_titles(quote_fixture["existing"], partial_titles)
+
+    with pytest.raises(QuoteDebtError, match="post_migration_authorized_titles"):
+        verify_quote_debt_inventory(
+            value,
+            existing=partially_migrated,
+            stale_report=quote_fixture["stale_report"],
+            phase="post_migration",
+            authorized_titles=partial_titles,
+        )
+
+
+def test_post_migration_rejects_noncanonical_expected_title(quote_fixture):
+    value = _build(quote_fixture)
+    wrong_titles = {
+        **quote_fixture["expected_titles"],
+        "code.ctx.stale": "Wrong::title",
+    }
+    wrongly_migrated = _with_titles(quote_fixture["existing"], wrong_titles)
+
+    with pytest.raises(QuoteDebtError, match="post_migration_authorized_titles"):
+        verify_quote_debt_inventory(
+            value,
+            existing=wrongly_migrated,
+            stale_report=quote_fixture["stale_report"],
+            phase="post_migration",
+            authorized_titles=wrong_titles,
+        )
+
+
 def test_post_migration_requires_authorization_and_rejects_payload_drift(quote_fixture):
     value = _build(quote_fixture)
     with pytest.raises(QuoteDebtError, match="post_migration"):
@@ -345,3 +567,15 @@ def test_canonical_json_round_trip_remains_verifiable(quote_fixture):
         stale_report=quote_fixture["stale_report"],
         phase="pre_migration",
     )["ok"] is True
+
+
+def test_inventory_verifier_rejects_quote_debt_id_hash_mismatch(quote_fixture):
+    value = {**_build(quote_fixture), "quote_debt_ids_sha256": "0" * 64}
+
+    with pytest.raises(QuoteDebtError, match="inventory_quote_debt_ids_sha256"):
+        verify_quote_debt_inventory(
+            value,
+            existing=quote_fixture["existing"],
+            stale_report=quote_fixture["stale_report"],
+            phase="pre_migration",
+        )
