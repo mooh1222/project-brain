@@ -36,7 +36,7 @@
 
 ## 진행 중
 
-### Task 18 표시 제목·인용문 부채 — 새 설계 검토 대기
+### Task 18 표시 제목·인용문 부채 — 구현 계획 검토 대기
 
 P0 ingest integrity foundation은 완료됐다. 기존
 `2026-08-04-task18-display-labels-and-quote-backlog` 설계·계획·binding은 당시 상태의 역사
@@ -48,9 +48,12 @@ CodeLocator 제목 3,305개, quote 부채 3,307개, paired EvidenceRef 제목 3,
 현재 판단은 [Task 18 재설계](docs/superpowers/specs/2026-08-06-task18-display-labels-and-quote-debt-redesign.md)에
 기록했다.
 
-현재 gate는 `blocked_pending_design_approval_plan_and_binding`이다. 새 설계를 사용자에게 검토받은
-뒤에만 구현 계획을 작성한다. 그 계획과 engine·BB2 최종 HEAD를 결속한 새 pre-mutation snapshot과
-final binding을 독립 검증하기 전에는 migration plan/apply나 실코퍼스 변경을 시작하지 않는다.
+새 설계는 2026-08-06 사용자 승인을 받았다. 현재 gate는
+`blocked_pending_plan_approval_and_binding`이며, 새
+[구현 계획](docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md)을 사용자에게
+검토받은 뒤에만 구현을 시작한다. 구현 완료 뒤 engine·BB2 최종 HEAD를 결속한 새 pre-mutation
+snapshot과 final binding을 독립 검증하기 전에는 migration plan/apply나 실코퍼스 변경을 시작하지
+않는다.
 
 기존 legacy 객체는 ingest 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는 항목으로
 기록한다. 이를 “검증된 적 없음”으로 확대 해석하지 않는다.
