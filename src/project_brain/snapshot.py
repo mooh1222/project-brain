@@ -1116,6 +1116,29 @@ def resolve_exact_commit(root: Path, ref: str) -> str:
     return _decode_exact_sha(payload, code="local_ref_invalid")
 
 
+def _decode_exact_commit_sha_output(
+    payload: bytes,
+    *,
+    commit_sha: str,
+    root: Path,
+) -> str:
+    expected = commit_sha.encode("ascii") + b"\n"
+    if not isinstance(payload, bytes) or payload != expected:
+        _fail(
+            "commit_sha_invalid",
+            "Git commit output must exactly equal commit_sha followed by LF",
+            paths=(Path(root),),
+        )
+    resolved = payload[:-1].decode("ascii")
+    if resolved != commit_sha:
+        _fail(
+            "commit_sha_invalid",
+            "resolved commit SHA does not exactly match commit_sha",
+            paths=(Path(root),),
+        )
+    return resolved
+
+
 def resolve_exact_commit_sha(root: Path, commit_sha: str) -> str:
     """Verify that one exact lowercase SHA names the same commit object."""
 
@@ -1138,21 +1161,11 @@ def resolve_exact_commit_sha(root: Path, commit_sha: str) -> str:
             f"cannot verify exact commit SHA {commit_sha}",
             paths=exc.paths,
         ) from exc
-    rows = payload.splitlines()
-    if len(rows) != 1:
-        _fail(
-            "commit_sha_invalid",
-            "Git commit output is not exactly one SHA row",
-            paths=(Path(root),),
-        )
-    resolved = _decode_exact_sha(rows[0], code="commit_sha_invalid")
-    if resolved != commit_sha:
-        _fail(
-            "commit_sha_invalid",
-            "resolved commit SHA does not exactly match commit_sha",
-            paths=(Path(root),),
-        )
-    return resolved
+    return _decode_exact_commit_sha_output(
+        payload,
+        commit_sha=commit_sha,
+        root=Path(root),
+    )
 
 
 def ls_remote_exact_commit(

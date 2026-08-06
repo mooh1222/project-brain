@@ -123,16 +123,24 @@ def test_resolve_exact_commit_sha_uses_safe_exact_git_invocation(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "payload_template",
     [
-        b"a" * 40 + b"\n" + b"a" * 40 + b"\n",
-        b"A" * 40 + b"\n",
-        b" " + b"a" * 40 + b"\n",
-        b"a" * 40 + b"\n\n",
+        b" {sha}\n",
+        b"{sha} \n",
+        b"\t{sha}\t\n",
+        b"\n{sha}\n",
+        b"{sha}\n{sha}\n",
+        b"{sha}",
+        b"{sha}\n\n",
+        b"{sha}\r\n",
     ],
 )
-def test_resolve_exact_commit_sha_rejects_non_exact_git_output(tmp_path, payload):
+def test_resolve_exact_commit_sha_rejects_non_exact_git_output(
+    tmp_path,
+    payload_template,
+):
     root, head = _clean_git_repo(tmp_path)
+    payload = payload_template.replace(b"{sha}", head.encode("ascii"))
     with mock.patch.object(snapshot, "run_git_bytes", return_value=payload):
         with pytest.raises(SnapshotError) as caught:
             snapshot.resolve_exact_commit_sha(root, head)
