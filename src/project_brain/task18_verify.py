@@ -15,6 +15,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 
@@ -741,7 +742,7 @@ def _read_display_manifest(path: Path, expected_sha256: str, binding: ParsedTask
     value = _canonical_document(path, expected_sha256, "display_manifest")
     if (
         set(value) != _DISPLAY_MANIFEST_KEYS
-        or value.get("migration_version") != 3
+        or not _exact_int(value.get("migration_version"), expected=3)
         or value.get("migration_kind") != "display_only"
         or not isinstance(value.get("intent"), Mapping)
         or value.get("task18_binding_path") != str(binding.path)
@@ -841,6 +842,88 @@ def _exact_int(value: object, *, expected: int | None = None, minimum: int | Non
     return minimum is None or value >= minimum
 
 
+def _valid_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not value or "T" not in value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _canonical_value_equal(left: object, right: object) -> bool:
+    try:
+        return json.dumps(
+            left,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8") == json.dumps(
+            right,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return False
+
+
+def _closure_snapshot_sources(
+    binding: Mapping[str, object],
+    *,
+    label: str,
+) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
+    snapshot = binding.get("pre_mutation_snapshot")
+    if not isinstance(snapshot, Mapping):
+        _fail("binding_schema_invalid", "pre_mutation_snapshot missing")
+    snapshot_root = Path(str(snapshot.get("path")))
+    try:
+        manifest_data, _ = read_regular_no_follow(snapshot_root / "manifest.json")
+    except SnapshotError as exc:
+        raise _dependency(exc) from exc
+    manifest = _strict_json(manifest_data, f"{label}_snapshot_manifest_invalid")
+    files = manifest.get("files") if isinstance(manifest, Mapping) else None
+    if not isinstance(files, Sequence) or isinstance(files, (str, bytes, bytearray)):
+        _fail(f"{label}_snapshot_manifest_invalid")
+    sources: dict[str, tuple[str, bytes, Mapping[str, object]]] = {}
+    for entry in files:
+        if not isinstance(entry, Mapping) or entry.get("scope") != "brain":
+            continue
+        relative = entry.get("path")
+        snapshot_relative = entry.get("snapshot_path")
+        if (
+            not isinstance(relative, str)
+            or not isinstance(snapshot_relative, str)
+            or Path(relative).is_absolute()
+            or Path(snapshot_relative).is_absolute()
+            or ".." in Path(relative).parts
+            or ".." in Path(snapshot_relative).parts
+            or not any(
+                relative.startswith(f"{directory}/")
+                for directory in BrainStore._KIND_DIR.values()
+            )
+        ):
+            continue
+        try:
+            payload, _ = read_regular_no_follow(snapshot_root / snapshot_relative)
+        except SnapshotError as exc:
+            raise _dependency(exc) from exc
+        if (
+            entry.get("sha256") != hashlib.sha256(payload).hexdigest()
+            or not _exact_int(entry.get("size"), expected=len(payload))
+        ):
+            _fail(f"{label}_snapshot_object_receipt_mismatch", relative)
+        value = _strict_json(payload, f"{label}_snapshot_object_invalid")
+        object_id = value.get("id") if isinstance(value, Mapping) else None
+        if not isinstance(object_id, str) or not object_id or object_id in sources:
+            _fail(f"{label}_snapshot_object_set_invalid", str(object_id))
+        sources[object_id] = (relative, payload, value)
+    return sources
+
+
 def _final_corpus_evidence(
     *,
     brain_root: Path,
@@ -882,6 +965,322 @@ def _final_corpus_evidence(
             reference_edge_count=edge_count,
             reference_graph_sha256=graph_sha,
         )
+
+
+def _validate_create_closure_semantics(
+    *,
+    binding: Mapping[str, object],
+    manifest: Mapping[str, object],
+    brain_root: Path,
+) -> None:
+    migration = binding.get("migration")
+    snapshot = binding.get("pre_mutation_snapshot")
+    if not isinstance(migration, Mapping) or not isinstance(snapshot, Mapping):
+        _fail("binding_schema_invalid")
+    bound_targets = migration.get("targets")
+    if not isinstance(bound_targets, Sequence) or isinstance(
+        bound_targets, (str, bytes, bytearray),
+    ):
+        _fail("binding_schema_invalid")
+    before = _closure_snapshot_sources(binding, label="create")
+    with corpus_lock(brain_root, exclusive=False):
+        assert_corpus_readable(brain_root)
+        final = _live_object_sources_all(brain_root)
+    if set(before) != set(final) or any(
+        before[object_id][0] != final[object_id][0]
+        for object_id in before
+    ):
+        _fail("closure_semantic_object_set_mismatch")
+
+    locators = {
+        object_id: source[2]
+        for object_id, source in before.items()
+        if source[2].get("kind") == "CodeLocator"
+    }
+    expected_targets: list[dict[str, object]] = []
+    after_by_id = {
+        object_id: dict(source[2])
+        for object_id, source in before.items()
+    }
+    for object_id in sorted(before):
+        _, source_bytes, obj = before[object_id]
+        kind = obj.get("kind")
+        paired: str | None = None
+        expected_title: str | None = None
+        if kind == "CodeLocator":
+            title = canonical_locator_title(obj)
+            if obj.get("title") != title:
+                expected_title = title
+        elif kind == "EvidenceRef":
+            paired = paired_code_locator_id(obj)
+            locator = locators.get(paired) if paired is not None else None
+            if locator is not None:
+                title = canonical_locator_title(locator)
+                if obj.get("title") != title:
+                    expected_title = title
+        if expected_title is None:
+            continue
+        expected_targets.append({
+            "id": object_id,
+            "kind": kind,
+            "paired_locator_id": paired,
+            "before_object_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "before_non_title_sha256": non_title_sha256(obj),
+            "expected_title": expected_title,
+        })
+        after_by_id[object_id]["title"] = expected_title
+
+    expected_target_ids = [row["id"] for row in expected_targets]
+    before_store = _store_from_sources(before)
+    after_store = BrainStore(after_by_id)
+    if (
+        not _canonical_value_equal(list(bound_targets), expected_targets)
+        or migration.get("target_ids_sha256") != _json_sha(expected_target_ids)
+        or migration.get("targets_sha256") != _json_sha(expected_targets)
+        or migration.get("before_corpus_fingerprint")
+        != corpus_fingerprint(before_store)
+        or migration.get("expected_after_corpus_fingerprint")
+        != corpus_fingerprint(after_store)
+    ):
+        _fail("closure_binding_plan_mismatch")
+
+    target_ids = set(expected_target_ids)
+    for object_id in sorted(before):
+        before_path, before_bytes, before_obj = before[object_id]
+        final_path, final_bytes, final_obj = final[object_id]
+        if before_path != final_path:
+            _fail("closure_final_path_mismatch", object_id)
+        if object_id not in target_ids:
+            if final_bytes != before_bytes:
+                _fail("closure_final_non_target_changed", object_id)
+            continue
+        expected_after = after_by_id[object_id]
+        if (
+            final_obj.get("title") != expected_after.get("title")
+            or non_title_sha256(final_obj) != non_title_sha256(before_obj)
+            or final_bytes != BrainStore.object_bytes(expected_after)
+        ):
+            _fail("closure_final_target_mismatch", object_id)
+    if corpus_fingerprint(_store_from_sources(final)) != corpus_fingerprint(after_store):
+        _fail("closure_final_fingerprint_mismatch")
+
+    before_inputs = [dict(before[str(row["id"])][2]) for row in expected_targets]
+    after_outputs = [dict(after_by_id[str(row["id"])]) for row in expected_targets]
+    source_hashes = {
+        str(row["id"]): hashlib.sha256(before[str(row["id"])][1]).hexdigest()
+        for row in expected_targets
+    }
+    expected_intent = {
+        "intent_version": 1,
+        "operation": "display_migration",
+        "engine_sha": snapshot.get("engine_head"),
+        "request": {
+            "objects": before_inputs,
+            "delete_ids": [],
+            "renames": {},
+            "preconditions": {
+                str(obj["id"]): hashlib.sha256(
+                    BrainStore.object_bytes(obj),
+                ).hexdigest()
+                for obj in before_inputs
+            },
+            "expected_corpus_fingerprint": corpus_fingerprint(before_store),
+            "context_id": None,
+            "external_reference_rewrites": {},
+            "external_reference_rewrite_bindings": [],
+            "auxiliary_updates": [],
+            "canonical_repair_intents": [],
+            "canonical_repair_reference_collapses": [],
+            "canonical_repair_binding": None,
+        },
+        "preview": {
+            "after_objects": after_outputs,
+            "after_sha256_by_id": {
+                str(obj["id"]): hashlib.sha256(
+                    BrainStore.object_bytes(obj),
+                ).hexdigest()
+                for obj in after_outputs
+            },
+            "actions": [{
+                "action": "update",
+                "object_id": obj["id"],
+                "object_kind": obj["kind"],
+                "source_id": obj["id"],
+                "timestamp_policy": "preserve",
+            } for obj in before_inputs],
+            "reference_rewrites": [],
+            "external_reference_bindings": [],
+            "before_fingerprint": corpus_fingerprint(before_store),
+            "expected_after_fingerprint": corpus_fingerprint(after_store),
+            "source_sha256_by_id": source_hashes,
+        },
+    }
+    if not _canonical_value_equal(manifest.get("intent"), expected_intent):
+        _fail("display_manifest_intent_mismatch")
+
+
+def _verify_closure_semantics_independent(
+    *,
+    binding: Mapping[str, object],
+    manifest: Mapping[str, object],
+    brain_root: Path,
+) -> None:
+    migration = binding.get("migration")
+    snapshot = binding.get("pre_mutation_snapshot")
+    if not isinstance(migration, Mapping) or not isinstance(snapshot, Mapping):
+        _fail("binding_schema_invalid")
+    supplied_targets = migration.get("targets")
+    if not isinstance(supplied_targets, Sequence) or isinstance(
+        supplied_targets, (str, bytes, bytearray),
+    ):
+        _fail("binding_schema_invalid")
+    snapshot_sources = _closure_snapshot_sources(binding, label="verify")
+    with corpus_lock(brain_root, exclusive=False):
+        assert_corpus_readable(brain_root)
+        live_sources = _live_object_sources_all(brain_root)
+    snapshot_ids = sorted(snapshot_sources)
+    if snapshot_ids != sorted(live_sources) or any(
+        snapshot_sources[object_id][0] != live_sources[object_id][0]
+        for object_id in snapshot_ids
+    ):
+        _fail("closure_semantic_object_set_mismatch")
+
+    locator_by_id = {
+        object_id: item[2]
+        for object_id, item in snapshot_sources.items()
+        if item[2].get("kind") == "CodeLocator"
+    }
+    rebuilt_targets: list[dict[str, object]] = []
+    rebuilt_after = {
+        object_id: dict(item[2])
+        for object_id, item in snapshot_sources.items()
+    }
+    for object_id in snapshot_ids:
+        _, payload, obj = snapshot_sources[object_id]
+        object_kind = obj.get("kind")
+        locator_id = None
+        canonical_title = None
+        if object_kind == "CodeLocator":
+            candidate = canonical_locator_title(obj)
+            if obj.get("title") != candidate:
+                canonical_title = candidate
+        if object_kind == "EvidenceRef":
+            locator_id = paired_code_locator_id(obj)
+            locator = locator_by_id.get(locator_id) if locator_id else None
+            if locator is not None:
+                candidate = canonical_locator_title(locator)
+                if obj.get("title") != candidate:
+                    canonical_title = candidate
+        if canonical_title is None:
+            continue
+        row = {
+            "id": object_id,
+            "kind": object_kind,
+            "paired_locator_id": locator_id,
+            "before_object_sha256": hashlib.sha256(payload).hexdigest(),
+            "before_non_title_sha256": non_title_sha256(obj),
+            "expected_title": canonical_title,
+        }
+        rebuilt_targets.append(row)
+        rebuilt_after[object_id]["title"] = canonical_title
+
+    rebuilt_ids = [row["id"] for row in rebuilt_targets]
+    snapshot_store = _store_from_sources(snapshot_sources)
+    planned_after_store = BrainStore(rebuilt_after)
+    rebuilt_before_fingerprint = corpus_fingerprint(snapshot_store)
+    rebuilt_after_fingerprint = corpus_fingerprint(planned_after_store)
+    if (
+        not _canonical_value_equal(list(supplied_targets), rebuilt_targets)
+        or migration.get("target_ids_sha256") != _json_sha(rebuilt_ids)
+        or migration.get("targets_sha256") != _json_sha(rebuilt_targets)
+        or migration.get("before_corpus_fingerprint")
+        != rebuilt_before_fingerprint
+        or migration.get("expected_after_corpus_fingerprint")
+        != rebuilt_after_fingerprint
+    ):
+        _fail("closure_binding_plan_mismatch")
+
+    rebuilt_id_set = set(rebuilt_ids)
+    for object_id in snapshot_ids:
+        _, original_bytes, original = snapshot_sources[object_id]
+        _, live_bytes, live = live_sources[object_id]
+        if object_id not in rebuilt_id_set:
+            if live_bytes != original_bytes:
+                _fail("closure_final_non_target_changed", object_id)
+            continue
+        planned = rebuilt_after[object_id]
+        if (
+            live.get("title") != planned.get("title")
+            or non_title_sha256(live) != non_title_sha256(original)
+            or live_bytes != BrainStore.object_bytes(planned)
+        ):
+            _fail("closure_final_target_mismatch", object_id)
+    if corpus_fingerprint(_store_from_sources(live_sources)) != rebuilt_after_fingerprint:
+        _fail("closure_final_fingerprint_mismatch")
+
+    request_objects = [
+        dict(snapshot_sources[str(row["id"])][2])
+        for row in rebuilt_targets
+    ]
+    preview_objects = [
+        dict(rebuilt_after[str(row["id"])])
+        for row in rebuilt_targets
+    ]
+    independent_source_hashes = {
+        str(row["id"]): hashlib.sha256(
+            snapshot_sources[str(row["id"])][1],
+        ).hexdigest()
+        for row in rebuilt_targets
+    }
+    independently_rebuilt_intent = {
+        "intent_version": 1,
+        "operation": "display_migration",
+        "engine_sha": snapshot.get("engine_head"),
+        "request": {
+            "objects": request_objects,
+            "delete_ids": [],
+            "renames": {},
+            "preconditions": {
+                str(obj["id"]): hashlib.sha256(
+                    BrainStore.object_bytes(obj),
+                ).hexdigest()
+                for obj in request_objects
+            },
+            "expected_corpus_fingerprint": rebuilt_before_fingerprint,
+            "context_id": None,
+            "external_reference_rewrites": {},
+            "external_reference_rewrite_bindings": [],
+            "auxiliary_updates": [],
+            "canonical_repair_intents": [],
+            "canonical_repair_reference_collapses": [],
+            "canonical_repair_binding": None,
+        },
+        "preview": {
+            "after_objects": preview_objects,
+            "after_sha256_by_id": {
+                str(obj["id"]): hashlib.sha256(
+                    BrainStore.object_bytes(obj),
+                ).hexdigest()
+                for obj in preview_objects
+            },
+            "actions": [{
+                "action": "update",
+                "object_id": obj["id"],
+                "object_kind": obj["kind"],
+                "source_id": obj["id"],
+                "timestamp_policy": "preserve",
+            } for obj in request_objects],
+            "reference_rewrites": [],
+            "external_reference_bindings": [],
+            "before_fingerprint": rebuilt_before_fingerprint,
+            "expected_after_fingerprint": rebuilt_after_fingerprint,
+            "source_sha256_by_id": independent_source_hashes,
+        },
+    }
+    if not _canonical_value_equal(
+        manifest.get("intent"), independently_rebuilt_intent,
+    ):
+        _fail("display_manifest_intent_mismatch")
 
 
 def _compare_snapshot_before_to_live(
@@ -1521,7 +1920,7 @@ def _closure_artifacts(
     assert isinstance(snapshot, Mapping)
     if (
         set(manifest_doc.value) != _DISPLAY_MANIFEST_KEYS
-        or manifest_doc.value.get("migration_version") != 3
+        or not _exact_int(manifest_doc.value.get("migration_version"), expected=3)
         or manifest_doc.value.get("migration_kind") != "display_only"
         or manifest_doc.value.get("task18_binding_path") != str(binding_path)
         or manifest_doc.value.get("task18_binding_sha256") != expected_binding_sha256
@@ -1530,6 +1929,11 @@ def _closure_artifacts(
         != snapshot["manifest_sha256"]
     ):
         _fail("display_manifest_binding_mismatch")
+    _validate_create_closure_semantics(
+        binding=binding,
+        manifest=manifest_doc.value,
+        brain_root=brain_root,
+    )
     post_doc, post_receipt = _artifact_document(
         post_report_path, expected_post_report_sha256, "post_report",
     )
@@ -1580,7 +1984,7 @@ def _verify_closure_artifacts_independent(
     snapshot = binding.get("pre_mutation_snapshot")
     if not isinstance(snapshot, Mapping) or (
         set(manifest_doc.value) != _DISPLAY_MANIFEST_KEYS
-        or manifest_doc.value.get("migration_version") != 3
+        or not _exact_int(manifest_doc.value.get("migration_version"), expected=3)
         or manifest_doc.value.get("migration_kind") != "display_only"
         or not isinstance(manifest_doc.value.get("intent"), Mapping)
         or manifest_doc.value.get("task18_binding_path") != str(binding_path)
@@ -1590,6 +1994,11 @@ def _verify_closure_artifacts_independent(
         != snapshot.get("manifest_sha256")
     ):
         _fail("display_manifest_binding_mismatch")
+    _verify_closure_semantics_independent(
+        binding=binding,
+        manifest=manifest_doc.value,
+        brain_root=brain_root,
+    )
 
     post_path = Path(str(post_receipt["path"]))
     post_doc, current_post_receipt = _artifact_document(
@@ -1776,6 +2185,8 @@ def create_task18_closure_receipt(
     engine_root = _exact_absolute(engine_root, "engine_root")
     repo_root = _exact_absolute(repo_root, "repo_root")
     brain_root = _exact_absolute(brain_root, "brain_root")
+    if not _valid_timestamp(generated_at):
+        _fail("closure_created_at_invalid")
     _preflight_output(report_path, "report")
     if _GIT_SHA.fullmatch(expected_engine_head) is None or _GIT_SHA.fullmatch(expected_repo_head) is None:
         _fail("expected_head_invalid")
@@ -1946,6 +2357,7 @@ def verify_task18_closure_receipt(
         set(value) != _CLOSURE_KEYS
         or not _exact_int(value.get("version"), expected=1)
         or value.get("purpose") != "task18-final-closure"
+        or not _valid_timestamp(value.get("created_at"))
     ):
         _fail("closure_schema_invalid")
     roots = value.get("roots")

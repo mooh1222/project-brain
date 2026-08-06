@@ -509,13 +509,92 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "engine_head": snapshot.engine_head,
         "corpus_fingerprint": snapshot.corpus_fingerprint,
     }))
+    pre_snapshot_root = Path(created.value["pre_mutation_snapshot"]["path"])
+    snapshot_files = []
+    for relative in (
+        "objects/code/legacy-locator-name.json",
+        "objects/evidence_refs/legacy-ref-name.json",
+    ):
+        source = brain_root / relative
+        payload = source.read_bytes()
+        snapshot_relative = f"payload/brain/{relative}"
+        target = pre_snapshot_root / snapshot_relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        snapshot_files.append({
+            "scope": "brain",
+            "path": relative,
+            "snapshot_path": snapshot_relative,
+            "sha256": _sha(payload),
+            "size": len(payload),
+            "copied": True,
+        })
+    (pre_snapshot_root / "manifest.json").write_bytes(canonical_receipt_bytes({
+        "files": snapshot_files,
+    }))
+    targets = created.value["migration"]["targets"]
+    before_objects = [dict(fixture.store.get(row["id"])) for row in targets]
+    after_objects = [
+        {**before, "title": target["expected_title"]}
+        for before, target in zip(before_objects, targets, strict=True)
+    ]
+    source_sha_by_id = {
+        obj["id"]: fixture.store.source_sha256(obj["id"])
+        for obj in before_objects
+    }
+    intent = {
+        "intent_version": 1,
+        "operation": "display_migration",
+        "engine_sha": created.value["pre_mutation_snapshot"]["engine_head"],
+        "request": {
+            "objects": before_objects,
+            "delete_ids": [],
+            "renames": {},
+            "preconditions": source_sha_by_id,
+            "expected_corpus_fingerprint": created.value["migration"][
+                "before_corpus_fingerprint"
+            ],
+            "context_id": None,
+            "external_reference_rewrites": {},
+            "external_reference_rewrite_bindings": [],
+            "auxiliary_updates": [],
+            "canonical_repair_intents": [],
+            "canonical_repair_reference_collapses": [],
+            "canonical_repair_binding": None,
+        },
+        "preview": {
+            "after_objects": after_objects,
+            "after_sha256_by_id": {
+                obj["id"]: _sha(BrainStore.object_bytes(obj))
+                for obj in after_objects
+            },
+            "actions": [{
+                "action": "update",
+                "object_id": obj["id"],
+                "object_kind": obj["kind"],
+                "source_id": obj["id"],
+                "timestamp_policy": "preserve",
+            } for obj in before_objects],
+            "reference_rewrites": [],
+            "external_reference_bindings": [],
+            "before_fingerprint": created.value["migration"][
+                "before_corpus_fingerprint"
+            ],
+            "expected_after_fingerprint": created.value["migration"][
+                "expected_after_corpus_fingerprint"
+            ],
+            "source_sha256_by_id": source_sha_by_id,
+        },
+    }
     manifest_path = (tmp_path / "manifest.json").resolve()
     manifest_path.write_bytes(canonical_receipt_bytes({
         "migration_version": 3,
         "migration_kind": "display_only",
-        "intent": {},
+        "intent": intent,
         "snapshot_id": created.value["pre_mutation_snapshot"]["snapshot_id"],
-        "snapshot_manifest_sha256": created.value["pre_mutation_snapshot"]["manifest_sha256"],
+        "snapshot_manifest_sha256": created.value["pre_mutation_snapshot"][
+            "manifest_sha256"
+        ],
         "task18_binding_path": str(created.path),
         "task18_binding_sha256": created.sha256,
     }))
@@ -630,25 +709,270 @@ def _write_post_variant(fixture, tmp_path: Path, name: str, mutate) -> tuple[Pat
                   "report_path": (tmp_path / f"{name}-closure.json").resolve()}
 
 
+def _write_linked_artifact_variant(
+    fixture,
+    tmp_path: Path,
+    name: str,
+    *,
+    mutate_binding=None,
+    mutate_manifest=None,
+):
+    binding_value = deepcopy(fixture.created.value)
+    if mutate_binding is not None:
+        mutate_binding(binding_value)
+    binding_path = (tmp_path / f"{name}-binding.json").resolve()
+    binding_path.write_bytes(canonical_receipt_bytes(binding_value))
+    binding_sha = _sha(binding_path.read_bytes())
+
+    manifest_value = json.loads(fixture.manifest_path.read_bytes())
+    manifest_value["task18_binding_path"] = str(binding_path)
+    manifest_value["task18_binding_sha256"] = binding_sha
+    if mutate_manifest is not None:
+        mutate_manifest(manifest_value)
+    manifest_path = (tmp_path / f"{name}-manifest.json").resolve()
+    manifest_path.write_bytes(canonical_receipt_bytes(manifest_value))
+    manifest_sha = _sha(manifest_path.read_bytes())
+
+    post_value = deepcopy(fixture.post_value)
+    post_value["binding"] = {"path": str(binding_path), "sha256": binding_sha}
+    post_value["display_manifest"] = {
+        "path": str(manifest_path),
+        "sha256": manifest_sha,
+    }
+    post_value["target_ids_sha256"] = binding_value["migration"][
+        "target_ids_sha256"
+    ]
+    post_path = (tmp_path / f"{name}-post.json").resolve()
+    post_path.write_bytes(canonical_receipt_bytes(post_value))
+    post_sha = _sha(post_path.read_bytes())
+    return SimpleNamespace(
+        binding_path=binding_path,
+        manifest_path=manifest_path,
+        post_path=post_path,
+        create_args={
+            **fixture.create_args,
+            "binding_path": binding_path,
+            "expected_binding_sha256": binding_sha,
+            "manifest_path": manifest_path,
+            "expected_manifest_sha256": manifest_sha,
+            "post_report_path": post_path,
+            "expected_post_report_sha256": post_sha,
+            "report_path": (tmp_path / f"{name}-closure.json").resolve(),
+        },
+    )
+
+
 def _write_forged_closure(
     fixture,
     result,
     tmp_path: Path,
     *,
+    binding_path: Path | None = None,
+    manifest_path: Path | None = None,
     post_path: Path | None = None,
     mutate=None,
 ) -> tuple[Path, str]:
     value = json.loads(fixture.closure.read_bytes())
-    if post_path is not None:
-        value["artifacts"]["post_report"] = dict(
-            fixture.module.capture_bound_file(post_path)
-        )
+    for label, path in (
+        ("binding", binding_path),
+        ("display_manifest", manifest_path),
+        ("post_report", post_path),
+    ):
+        if path is not None:
+            value["artifacts"][label] = dict(
+                fixture.module.capture_bound_file(path)
+            )
     if mutate is not None:
         mutate(value)
     path = (tmp_path / f"forged-{len(list(tmp_path.glob('forged-*.json')))}.json").resolve()
     payload = canonical_receipt_bytes(value)
     path.write_bytes(payload)
     return path, _sha(payload)
+
+
+def _forge_expected_title(binding: dict) -> None:
+    targets = binding["migration"]["targets"]
+    targets[0]["expected_title"] = "FORGED TITLE"
+    binding["migration"]["targets_sha256"] = _json_sha(targets)
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+def test_closure_rejects_rebound_forged_binding_target_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    linked = _write_linked_artifact_variant(
+        fixture,
+        tmp_path,
+        f"forged-target-{pathway}",
+        mutate_binding=_forge_expected_title,
+    )
+    if pathway == "create":
+        with pytest.raises(
+            Task18VerificationError,
+            match="closure_binding_plan_mismatch",
+        ):
+            create_task18_closure_receipt(**linked.create_args)
+        return
+
+    result = create_task18_closure_receipt(**fixture.create_args)
+    closure_path, closure_sha = _write_forged_closure(
+        fixture,
+        result,
+        tmp_path,
+        binding_path=linked.binding_path,
+        manifest_path=linked.manifest_path,
+        post_path=linked.post_path,
+    )
+    with pytest.raises(
+        Task18VerificationError,
+        match="closure_binding_plan_mismatch",
+    ):
+        verify_task18_closure_receipt(
+            closure_path=closure_path,
+            expected_closure_sha256=closure_sha,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "forged-target-verify-report.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+def test_closure_rejects_rebound_forged_manifest_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    linked = _write_linked_artifact_variant(
+        fixture,
+        tmp_path,
+        f"forged-intent-{pathway}",
+        mutate_manifest=lambda value: value.__setitem__("intent", {"forged": True}),
+    )
+    if pathway == "create":
+        with pytest.raises(
+            Task18VerificationError,
+            match="display_manifest_intent_mismatch",
+        ):
+            create_task18_closure_receipt(**linked.create_args)
+        return
+
+    result = create_task18_closure_receipt(**fixture.create_args)
+    closure_path, closure_sha = _write_forged_closure(
+        fixture,
+        result,
+        tmp_path,
+        binding_path=linked.binding_path,
+        manifest_path=linked.manifest_path,
+        post_path=linked.post_path,
+    )
+    with pytest.raises(
+        Task18VerificationError,
+        match="display_manifest_intent_mismatch",
+    ):
+        verify_task18_closure_receipt(
+            closure_path=closure_path,
+            expected_closure_sha256=closure_sha,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "forged-intent-verify-report.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+@pytest.mark.parametrize("invalid_version", (True, 3.0))
+def test_closure_rejects_non_integer_display_manifest_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+    invalid_version: object,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    linked = _write_linked_artifact_variant(
+        fixture,
+        tmp_path,
+        f"manifest-version-{pathway}-{invalid_version!r}",
+        mutate_manifest=lambda value: value.__setitem__(
+            "migration_version", invalid_version,
+        ),
+    )
+    if pathway == "create":
+        with pytest.raises(
+            Task18VerificationError,
+            match="display_manifest_binding_mismatch",
+        ):
+            create_task18_closure_receipt(**linked.create_args)
+        return
+
+    result = create_task18_closure_receipt(**fixture.create_args)
+    closure_path, closure_sha = _write_forged_closure(
+        fixture,
+        result,
+        tmp_path,
+        binding_path=linked.binding_path,
+        manifest_path=linked.manifest_path,
+        post_path=linked.post_path,
+    )
+    with pytest.raises(
+        Task18VerificationError,
+        match="display_manifest_binding_mismatch",
+    ):
+        verify_task18_closure_receipt(
+            closure_path=closure_path,
+            expected_closure_sha256=closure_sha,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "manifest-version-verify-report.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+@pytest.mark.parametrize(
+    "invalid_created_at",
+    (False, None, 7, "", "2026-08-06", "not-time"),
+)
+def test_closure_rejects_invalid_created_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+    invalid_created_at: object,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    if pathway == "create":
+        with pytest.raises(
+            Task18VerificationError,
+            match="closure_created_at_invalid",
+        ):
+            create_task18_closure_receipt(**{
+                **fixture.create_args,
+                "generated_at": invalid_created_at,
+            })
+        return
+
+    result = create_task18_closure_receipt(**fixture.create_args)
+    closure_path, closure_sha = _write_forged_closure(
+        fixture,
+        result,
+        tmp_path,
+        mutate=lambda value: value.__setitem__(
+            "created_at", invalid_created_at,
+        ),
+    )
+    with pytest.raises(Task18VerificationError, match="closure_schema_invalid"):
+        verify_task18_closure_receipt(
+            closure_path=closure_path,
+            expected_closure_sha256=closure_sha,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "created-at-verify-report.json").resolve(),
+        )
 
 
 def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
