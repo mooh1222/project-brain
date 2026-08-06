@@ -3076,14 +3076,169 @@ def test_legacy_locator_without_symbol_uses_deterministic_display_fallback(tmp_p
     old.pop("symbol")
     _write_raw(brain_root, old)
 
-    result = _plan(
+    store = BrainStore.load(brain_root)
+    request = _request(
         brain_root,
-        [old],
+        (old,),
         operation=MutationOperation.DISPLAY_MIGRATION,
+        preconditions={
+            old["id"]: hashlib.sha256(BrainStore.object_bytes(old)).hexdigest(),
+        },
+        expected_corpus_fingerprint=corpus_fingerprint(store),
+    )
+    result = MutationService(clock=lambda: T).plan(
+        request.objects,
+        request=request,
     )
 
     assert result.ok is True
     assert result.after["title"] == "Foo.cpp:legacy"
+
+
+def _display_evidence_ref(locator_id: str) -> dict:
+    ref = evidence_ref("evref.neutral.display")
+    ref.update({
+        "title": "legacy evidence display",
+        "ref_type": "code_locator",
+        "locator": {"code_locator_id": locator_id},
+    })
+    return ref
+
+
+def _display_request(brain_root: Path) -> MutationRequest:
+    store = BrainStore.load(brain_root)
+    objects = tuple(
+        obj
+        for obj in store.all()
+        if obj["kind"] in {"CodeLocator", "EvidenceRef"}
+    )
+    return _request(
+        brain_root,
+        objects,
+        operation=MutationOperation.DISPLAY_MIGRATION,
+        preconditions={
+            obj["id"]: hashlib.sha256(BrainStore.object_bytes(obj)).hexdigest()
+            for obj in objects
+        },
+        expected_corpus_fingerprint=corpus_fingerprint(store),
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "drop_paired_ref",
+        "add_unpaired_ref",
+        "add_create",
+        "change_summary",
+        "rewrite_locator",
+        "add_delete",
+        "add_rename",
+        "add_auxiliary_update",
+        "add_external_reference_rewrite",
+        "wrong_precondition",
+        "wrong_before_fingerprint",
+    ],
+)
+def test_display_migration_rejects_non_exact_closure(tmp_path, tamper):
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(
+        object_id="code.neutral.display",
+        title="legacy locator display",
+        quote=None,
+    )
+    ref = _display_evidence_ref(locator["id"])
+    for obj in (locator, manifest(), ref):
+        _write_raw(brain_root, obj)
+    request = _display_request(brain_root)
+    objects = list(request.objects)
+
+    if tamper == "drop_paired_ref":
+        objects = [obj for obj in objects if obj["kind"] != "EvidenceRef"]
+        request = replace(request, objects=tuple(objects))
+    elif tamper == "add_unpaired_ref":
+        extra = evidence_ref("evref.neutral.extra")
+        _write_raw(brain_root, extra)
+        objects.append(extra)
+        request = replace(request, objects=tuple(objects))
+    elif tamper == "add_create":
+        objects.append(_code_locator(
+            object_id="code.neutral.created",
+            title="legacy created display",
+            quote=None,
+        ))
+        request = replace(request, objects=tuple(objects))
+    elif tamper == "change_summary":
+        objects[-1] = {**objects[-1], "summary": "rewritten"}
+        request = replace(request, objects=tuple(objects))
+    elif tamper == "rewrite_locator":
+        objects[0] = {**objects[0], "path": "Other.cpp"}
+        request = replace(request, objects=tuple(objects))
+    elif tamper == "add_delete":
+        request = replace(request, delete_ids=(ref["id"],))
+    elif tamper == "add_rename":
+        request = replace(request, renames={locator["id"]: "code.neutral.new"})
+    elif tamper == "add_auxiliary_update":
+        request = replace(request, auxiliary_updates=(AuxiliaryFileUpdate(
+            path="eval_scenarios.json",
+            before_sha256="a" * 64,
+            after_sha256="b" * 64,
+            after_bytes=b"{}",
+        ),))
+    elif tamper == "add_external_reference_rewrite":
+        request = replace(
+            request,
+            external_reference_rewrites={locator["id"]: "code.neutral.new"},
+        )
+    elif tamper == "wrong_precondition":
+        request = replace(
+            request,
+            preconditions={**request.preconditions, locator["id"]: "0" * 64},
+        )
+    else:
+        request = replace(request, expected_corpus_fingerprint="0" * 64)
+
+    result = MutationService().preview(request.objects, request=request)
+
+    assert (result.ok, result.error_code) == (False, "display_contract_invalid")
+
+
+def test_display_migration_preserves_paired_object_timestamps_exactly(tmp_path):
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(
+        object_id="code.neutral.display",
+        title="legacy locator display",
+        quote=None,
+        verified_at="2022-01-03T00:00:00Z",
+    )
+    locator.update({
+        "created_at": "2022-01-01T00:00:00Z",
+        "updated_at": "2022-01-02T00:00:00Z",
+    })
+    ref = _display_evidence_ref(locator["id"])
+    ref.update({
+        "created_at": "2023-01-01T00:00:00Z",
+        "updated_at": "2023-01-02T00:00:00Z",
+    })
+    for obj in (locator, manifest(), ref):
+        _write_raw(brain_root, obj)
+    request = _display_request(brain_root)
+
+    result = MutationService(
+        clock=lambda: "2099-01-01T00:00:00+09:00",
+    ).plan(request.objects, request=request)
+
+    assert result.ok is True
+    before = {obj["id"]: obj for obj in request.objects}
+    for after in result.after_objects:
+        fields = ("created_at", "updated_at", "verified_at")
+        assert {
+            field: after.get(field)
+            for field in fields
+        } == {
+            field: before[after["id"]].get(field)
+            for field in fields
+        }
 
 
 def test_unchanged_preexisting_id_problem_is_temporarily_grandfathered(tmp_path):

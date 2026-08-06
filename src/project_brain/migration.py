@@ -8,12 +8,17 @@ import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from project_brain.corpus_io import (
     CorpusIOError,
     inspect_tracked_file,
     read_tracked_file_bytes,
+)
+from project_brain.display_contract import (
+    canonical_locator_title,
+    non_title_sha256,
+    paired_code_locator_id,
 )
 from project_brain.eval_harness import ASSERTION_KEYS
 from project_brain.hash_utils import stable_json
@@ -771,27 +776,29 @@ def plan_id_migration(
     )
 
 
-def _canonical_locator_title(locator: Mapping[str, object]) -> str:
-    symbol = locator.get("symbol")
-    if isinstance(symbol, str) and symbol:
-        return symbol
-    path = locator.get("path")
-    basename = (
-        PurePosixPath(path).name
-        if isinstance(path, str) and path
-        else "unknown"
-    )
-    object_id = str(locator.get("id", ""))
-    anchor_key = object_id.rsplit(".", 1)[-1] or "unknown"
-    return f"{basename}:{anchor_key}"
-
-
-def _non_title_hash(obj: Mapping[str, object]) -> str:
-    return hashlib.sha256(stable_json({
-        key: value
-        for key, value in obj.items()
-        if key != "title"
-    }).encode("utf-8")).hexdigest()
+def _display_migration_inputs(
+    existing_by_id: Mapping[str, dict],
+) -> tuple[dict, ...]:
+    locators = {
+        object_id: obj
+        for object_id, obj in existing_by_id.items()
+        if obj.get("kind") == "CodeLocator"
+    }
+    inputs: list[dict] = []
+    for object_id in sorted(existing_by_id):
+        obj = existing_by_id[object_id]
+        if obj.get("kind") == "CodeLocator":
+            if obj.get("title") != canonical_locator_title(obj):
+                inputs.append(dict(obj))
+            continue
+        locator_id = paired_code_locator_id(obj)
+        locator = locators.get(locator_id) if locator_id is not None else None
+        if (
+            locator is not None
+            and obj.get("title") != canonical_locator_title(locator)
+        ):
+            inputs.append(dict(obj))
+    return tuple(inputs)
 
 
 def plan_display_migration(
@@ -811,15 +818,26 @@ def plan_display_migration(
         snapshot=snapshot,
     )
     validate_live_snapshot_corpus(existing, snapshot)
-    existing_by_id = {obj["id"]: obj for obj in existing.all()}
-    inputs = tuple(
-        dict(obj)
-        for object_id, obj in sorted(existing_by_id.items())
-        if (
-            obj.get("kind") == "CodeLocator"
-            and obj.get("title") != _canonical_locator_title(obj)
-        )
+    return plan_display_migration_unbound(
+        existing=existing,
+        brain_root=brain_root,
+        repo_context=repo_context,
+        engine_sha=engine_sha,
+        snapshot=snapshot,
     )
+
+
+def plan_display_migration_unbound(
+    *,
+    existing: BrainStore,
+    brain_root: Path,
+    repo_context: RepoContext,
+    engine_sha: str,
+    snapshot: SnapshotVerification,
+) -> MigrationPlan:
+    """이미 검증된 저장소와 migration 결속으로 display plan을 만든다."""
+    existing_by_id = {obj["id"]: obj for obj in existing.all()}
+    inputs = _display_migration_inputs(existing_by_id)
     request = MutationRequest(
         operation=MutationOperation.DISPLAY_MIGRATION,
         brain_root=brain_root,
@@ -840,7 +858,7 @@ def plan_display_migration(
         )
     for after in mutation_plan.after_objects:
         before = existing_by_id[after["id"]]
-        if _non_title_hash(before) != _non_title_hash(after):
+        if non_title_sha256(before) != non_title_sha256(after):
             _fail(
                 "display_payload_changed",
                 f"{after['id']}: display migration changed a non-title field",

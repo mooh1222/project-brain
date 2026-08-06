@@ -13,6 +13,7 @@ import pytest
 from project_brain.migration import (
     MigrationError,
     MigrationRow,
+    _display_migration_inputs,
     apply_migration_artifact,
     canonical_payload_hash_pair,
     create_migration_artifact,
@@ -1001,7 +1002,9 @@ def test_id_plan_rejects_merge_or_non_one_to_one_mapping(
     assert caught.value.code == error_code
 
 
-def test_display_plan_changes_only_code_locator_title(tmp_path):
+def test_display_plan_builds_exact_locator_and_paired_evidence_ref_closure(
+    tmp_path,
+):
     brain_root = tmp_path / "brain"
     with_symbol = _code_locator(
         object_id="code.neutral.with-symbol",
@@ -1018,8 +1021,20 @@ def test_display_plan_changes_only_code_locator_title(tmp_path):
     without_symbol.pop("symbol")
     source_manifest = manifest()
     ref = evidence_ref("evref.neutral.display")
-    ref["title"] = "EvidenceRef title is not a target"
-    for obj in (with_symbol, without_symbol, source_manifest, ref):
+    ref.update({
+        "title": "legacy evidence display",
+        "ref_type": "code_locator",
+        "locator": {"code_locator_id": with_symbol["id"]},
+    })
+    unpaired = evidence_ref("evref.neutral.unpaired")
+    unpaired["title"] = "not a code locator ref"
+    for obj in (
+        with_symbol,
+        without_symbol,
+        source_manifest,
+        ref,
+        unpaired,
+    ):
         _write_raw(brain_root, obj)
     snapshot, repo_root, engine_root, engine_head = _trusted_snapshot_for(
         brain_root,
@@ -1034,11 +1049,23 @@ def test_display_plan_changes_only_code_locator_title(tmp_path):
         snapshot=snapshot,
     )
 
+    assert [
+        (obj["kind"], obj["id"], obj["title"])
+        for obj in plan.mutation_plan.after_objects
+    ] == [
+        ("CodeLocator", without_symbol["id"], "Legacy.cpp:legacy"),
+        ("CodeLocator", with_symbol["id"], "Namespace::Run"),
+        ("EvidenceRef", ref["id"], "Namespace::Run"),
+    ]
+    before = {
+        with_symbol["id"]: with_symbol,
+        without_symbol["id"]: without_symbol,
+        ref["id"]: ref,
+    }
+    assert unpaired["id"] not in {
+        obj["id"] for obj in plan.mutation_plan.after_objects
+    }
     after = {obj["id"]: obj for obj in plan.mutation_plan.after_objects}
-    assert after[with_symbol["id"]]["title"] == "Namespace::Run"
-    assert after[without_symbol["id"]]["title"] == "Legacy.cpp:legacy"
-    assert ref["id"] not in after
-    before = {with_symbol["id"]: with_symbol, without_symbol["id"]: without_symbol}
     for object_id, migrated in after.items():
         assert {
             key: value
@@ -1049,6 +1076,58 @@ def test_display_plan_changes_only_code_locator_title(tmp_path):
             for key, value in before[object_id].items()
             if key != "title"
         }
+
+
+@pytest.mark.parametrize(
+    ("excluded_id", "ref_type", "locator_payload"),
+    [
+        ("evidence.ctx.unpaired", "code_locator", {"section": "1"}),
+        (
+            "evidence.ctx.dangling",
+            "code_locator",
+            {"code_locator_id": "code.ctx.missing"},
+        ),
+        (
+            "evidence.ctx.spec",
+            "spec_section",
+            {"code_locator_id": "code.ctx.a"},
+        ),
+    ],
+)
+def test_display_selection_excludes_nonpaired_evidence_refs(
+    excluded_id,
+    ref_type,
+    locator_payload,
+):
+    locator = {
+        "id": "code.ctx.a",
+        "kind": "CodeLocator",
+        "title": "legacy locator",
+        "symbol": "Ns::run",
+    }
+    paired = {
+        "id": "evidence.ctx.paired",
+        "kind": "EvidenceRef",
+        "title": "legacy paired",
+        "ref_type": "code_locator",
+        "locator": {"code_locator_id": locator["id"]},
+    }
+    excluded = {
+        **paired,
+        "id": excluded_id,
+        "ref_type": ref_type,
+        "locator": locator_payload,
+    }
+
+    selected = _display_migration_inputs({
+        obj["id"]: obj
+        for obj in (locator, paired, excluded)
+    })
+
+    assert [obj["id"] for obj in selected] == [
+        "code.ctx.a",
+        "evidence.ctx.paired",
+    ]
 
 
 def test_apply_recomputes_manifest_and_rejects_canonical_hash_tampering(

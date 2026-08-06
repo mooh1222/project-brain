@@ -446,6 +446,43 @@ def test_preserve_operation_matrix_keeps_source_temporal_values_exact(operation)
     }
 
 
+def test_display_migration_preserves_evidence_ref_lifecycle_values_exactly():
+    before = {
+        "id": "evref.neutral.locator",
+        "kind": "EvidenceRef",
+        "title": "old",
+        "created_at": "2022-01-01T00:00:00Z",
+        "updated_at": "2022-01-02T00:00:00Z",
+    }
+    after = {
+        **before,
+        "title": "new",
+        "created_at": "tampered-created_at",
+        "updated_at": "tampered-updated_at",
+    }
+    actions = classify_object_actions(
+        operation="display_migration",
+        existing_by_id={before["id"]: before},
+        transformed_by_id={after["id"]: after},
+        delete_ids=(),
+        rename_pairs=(),
+        verified_reference_rewrites=(),
+    )
+
+    stamped = apply_timestamp_policy(
+        [after],
+        actions=actions,
+        existing_by_id={before["id"]: before},
+        operation="display_migration",
+        verified_object_ids=(),
+        event_time=EVENT_TIME,
+    )[0]
+
+    assert actions[0].timestamp_policy is TimestampPolicy.PRESERVE
+    assert stamped["created_at"] == before["created_at"]
+    assert stamped["updated_at"] == before["updated_at"]
+
+
 @pytest.mark.parametrize("operation", ["ingest", "promote", "promote_auto"])
 def test_live_operations_reject_verified_reference_rewrite_action(operation):
     before = mapping(evidence_refs=["evref.neutral.old"])

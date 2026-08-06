@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from project_brain.canonical_merge import (
     CollisionMergeError,
@@ -38,6 +38,11 @@ from project_brain.coverage import (
     normalize_coverage,
     object_identities,
     plan_expected_objects,
+)
+from project_brain.display_contract import (
+    canonical_locator_title,
+    non_title_sha256,
+    paired_code_locator_id,
 )
 from project_brain.hash_utils import stable_json
 from project_brain.id_grammar import IdGrammarError, parse_id
@@ -905,6 +910,18 @@ class MutationService:
             existing_store = _existing_store
         existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
 
+        display_expected_after: tuple[dict, ...] = ()
+        if request.operation is MutationOperation.DISPLAY_MIGRATION:
+            display_expected_after, display_error = (
+                _validate_display_migration_request(
+                    request,
+                    existing_by_id=existing_by_id,
+                    inputs=inputs,
+                )
+            )
+            if display_error is not None:
+                return display_error
+
         if request.operation in {
             MutationOperation.INGEST,
             MutationOperation.CONTEXT_REPLACE,
@@ -1094,18 +1111,30 @@ class MutationService:
                                 and request.operation
                                 is MutationOperation.MARK_CHECKED
                             )
-                            else _canonical_locator_title(planned)
+                            else canonical_locator_title(planned)
                         )
                     elif previous is not None:
                         planned["verified_at"] = previous.get("verified_at")
                         planned["title"] = (
-                            _canonical_locator_title(planned)
+                            canonical_locator_title(planned)
                             if (
                                 request.operation
                                 is MutationOperation.DISPLAY_MIGRATION
                             )
                             else previous.get("title")
                         )
+                elif (
+                    request.operation is MutationOperation.DISPLAY_MIGRATION
+                    and planned.get("kind") == "EvidenceRef"
+                ):
+                    locator_id = paired_code_locator_id(planned)
+                    locator = (
+                        existing_by_id.get(locator_id)
+                        if locator_id is not None
+                        else None
+                    )
+                    if locator is not None:
+                        planned["title"] = canonical_locator_title(locator)
                 planned_inputs.append(planned)
 
         # 8) 기존 객체 precondition과 before hash.
@@ -1158,6 +1187,15 @@ class MutationService:
             unstamped_inputs.append(unstamped)
         planned_inputs = unstamped_inputs
         planned_by_id = {obj["id"]: obj for obj in planned_inputs}
+
+        if (
+            request.operation is MutationOperation.DISPLAY_MIGRATION
+            and tuple(planned_inputs) != display_expected_after
+        ):
+            return _failure(
+                "display_contract_invalid",
+                "display migration after objects must be exact title-only closure",
+            )
 
         before_fingerprint = _corpus_fingerprint(existing_by_id)
         if (
@@ -1669,6 +1707,125 @@ def _validate_batch_binding_brain_root(
     return None
 
 
+def _display_migration_closure(
+    existing_by_id: Mapping[str, dict],
+) -> tuple[tuple[dict, ...], tuple[dict, ...]]:
+    """live store에서 display before/after closure를 독립적으로 계산한다."""
+    locators = {
+        object_id: obj
+        for object_id, obj in existing_by_id.items()
+        if obj.get("kind") == "CodeLocator"
+    }
+    before: list[dict] = []
+    after: list[dict] = []
+    for object_id in sorted(existing_by_id):
+        obj = existing_by_id[object_id]
+        title: str | None = None
+        if obj.get("kind") == "CodeLocator":
+            canonical = canonical_locator_title(obj)
+            if obj.get("title") != canonical:
+                title = canonical
+        else:
+            locator_id = paired_code_locator_id(obj)
+            locator = (
+                locators.get(locator_id)
+                if locator_id is not None
+                else None
+            )
+            if locator is not None:
+                canonical = canonical_locator_title(locator)
+                if obj.get("title") != canonical:
+                    title = canonical
+        if title is None:
+            continue
+        before_obj = dict(obj)
+        after_obj = {**before_obj, "title": title}
+        before.append(before_obj)
+        after.append(after_obj)
+    return tuple(before), tuple(after)
+
+
+def _validate_display_migration_request(
+    request: MutationRequest,
+    *,
+    existing_by_id: Mapping[str, dict],
+    inputs: tuple[dict, ...],
+) -> tuple[tuple[dict, ...], MutationPlanResult | None]:
+    expected_before, expected_after = _display_migration_closure(
+        existing_by_id,
+    )
+    hidden_actions = [
+        name
+        for name, value in (
+            ("delete_ids", request.delete_ids),
+            ("renames", request.renames),
+            ("auxiliary_updates", request.auxiliary_updates),
+            (
+                "external_reference_rewrites",
+                request.external_reference_rewrites,
+            ),
+            (
+                "external_reference_rewrite_bindings",
+                request.external_reference_rewrite_bindings,
+            ),
+            ("context_id", request.context_id),
+            ("batch_binding", request.batch_binding),
+            ("coverage", request.coverage),
+            ("build_binding", request.build_binding),
+            ("canonical_repair_intents", request.canonical_repair_intents),
+            (
+                "canonical_repair_reference_collapses",
+                request.canonical_repair_reference_collapses,
+            ),
+            ("canonical_repair_binding", request.canonical_repair_binding),
+        )
+        if value
+    ]
+    if hidden_actions:
+        return (), _failure(
+            "display_contract_invalid",
+            "display migration forbids non-title actions: "
+            + ", ".join(hidden_actions),
+        )
+    if not _json_exact(list(inputs), list(expected_before)):
+        return (), _failure(
+            "display_contract_invalid",
+            "display migration inputs must exactly match live display closure",
+        )
+    expected_preconditions = {
+        obj["id"]: _object_hash(obj)
+        for obj in expected_before
+    }
+    if not _json_exact(dict(request.preconditions), expected_preconditions):
+        return (), _failure(
+            "display_contract_invalid",
+            "display migration preconditions must exactly bind the closure",
+        )
+    if (
+        request.expected_corpus_fingerprint
+        != _corpus_fingerprint(existing_by_id)
+    ):
+        return (), _failure(
+            "display_contract_invalid",
+            "display migration must exactly bind the live corpus fingerprint",
+        )
+    if any(
+        before_obj.get("id") != after_obj.get("id")
+        or before_obj.get("kind") != after_obj.get("kind")
+        or non_title_sha256(before_obj) != non_title_sha256(after_obj)
+        for before_obj, after_obj in zip(
+            expected_before,
+            expected_after,
+            strict=True,
+        )
+    ):
+        return (), _failure(
+            "display_contract_invalid",
+            "display migration after closure must change title only",
+        )
+    return expected_after, None
+
+
 def _validate_auxiliary_updates(
     request: MutationRequest,
 ) -> MutationPlanResult | None:
@@ -1936,6 +2093,11 @@ def _validate_request_shape(
             request.external_reference_rewrites
             and request.operation is not MutationOperation.CONTEXT_REPLACE
         ):
+            if request.operation is MutationOperation.DISPLAY_MIGRATION:
+                return None, _failure(
+                    "display_contract_invalid",
+                    "display migration forbids external reference rewrites",
+                )
             raise ValueError(
                 "external_reference_rewrites are allowed only for context_replace"
             )
@@ -1957,6 +2119,11 @@ def _validate_request_shape(
                 or request.external_reference_rewrite_bindings
             )
         ):
+            if request.operation is MutationOperation.DISPLAY_MIGRATION:
+                return None, _failure(
+                    "display_contract_invalid",
+                    "display migration forbids context and reference rewrite bindings",
+                )
             raise ValueError(
                 "context_id and external reference bindings are allowed only "
                 "for context_replace"
@@ -2159,25 +2326,6 @@ def _object_hash(obj: Mapping[str, object]) -> str:
 
 def _stable_object_hash(obj: Mapping[str, object]) -> str:
     return hashlib.sha256(stable_json(dict(obj)).encode("utf-8")).hexdigest()
-
-
-def _canonical_locator_title(locator: Mapping[str, object]) -> str:
-    symbol = locator.get("symbol")
-    if isinstance(symbol, str) and symbol:
-        return symbol
-    path = locator.get("path")
-    basename = (
-        PurePosixPath(path).name
-        if isinstance(path, str) and path
-        else "unknown"
-    )
-    object_id = locator.get("id")
-    anchor_key = (
-        object_id.rsplit(".", 1)[-1]
-        if isinstance(object_id, str) and object_id
-        else "unknown"
-    )
-    return f"{basename}:{anchor_key}"
 
 
 def _corpus_fingerprint(objects: Mapping[str, Mapping[str, object]]) -> str:
