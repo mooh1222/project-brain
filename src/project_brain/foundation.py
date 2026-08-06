@@ -704,38 +704,59 @@ def _runtime_inventory(repo_root: Path) -> dict[str, object]:
     return {"manifest_sha256": manifest_receipt["sha256"], "managed_files": managed}
 
 
-def _capture_corpus(brain_root: Path) -> tuple[dict[str, object], dict[str, object]]:
+def capture_corpus_receipt(brain_root: Path) -> dict[str, object]:
+    """Capture the objects/raw trees and mutation-layer corpus fingerprint."""
+
+    brain_root = Path(brain_root)
     objects = _scan_tree_receipt(brain_root / "objects")
     raw = _scan_tree_receipt(brain_root / "raw")
     store = BrainStore.load(brain_root)
     mutation_fingerprint = mutation.corpus_fingerprint(store)
-    live_fingerprint = search_index.compute_corpus_fingerprint(store, brain_root)
     objects_after = _scan_tree_receipt(brain_root / "objects")
     raw_after = _scan_tree_receipt(brain_root / "raw")
     if objects.sha256 != objects_after.sha256 or raw.sha256 != raw_after.sha256:
         _fail("corpus_changed_during_capture", "corpus changed during foundation capture")
+    return {
+        "mutation_fingerprint": mutation_fingerprint,
+        "objects_tree_sha256": objects.sha256,
+        "raw_tree_sha256": raw.sha256,
+    }
+
+
+def capture_search_index_receipt(brain_root: Path) -> dict[str, object]:
+    """Capture live/meta fingerprints and the bound search-index DB hash."""
+
+    brain_root = Path(brain_root)
+    store = BrainStore.load(brain_root)
+    live_fingerprint = search_index.compute_corpus_fingerprint(store, brain_root)
     db_before = _file_receipt(brain_root, ".brain-local/index.db")
     meta_fingerprint = search_index.read_meta_fingerprint(brain_root / ".brain-local/index.db")
     db_after = _file_receipt(brain_root, ".brain-local/index.db")
     if db_before != db_after:
         _fail("index_changed_during_capture", "index DB changed during foundation capture")
+    return {
+        "live_corpus_fingerprint": live_fingerprint,
+        "meta_corpus_fingerprint": meta_fingerprint,
+        "db_file_sha256": db_before["sha256"],
+    }
+
+
+def _capture_corpus(brain_root: Path) -> tuple[dict[str, object], dict[str, object]]:
     return (
-        {
-            "mutation_fingerprint": mutation_fingerprint,
-            "objects_tree_sha256": objects.sha256,
-            "raw_tree_sha256": raw.sha256,
-        },
-        {
-            "live_corpus_fingerprint": live_fingerprint,
-            "meta_corpus_fingerprint": meta_fingerprint,
-            "db_file_sha256": db_before["sha256"],
-        },
+        capture_corpus_receipt(brain_root),
+        capture_search_index_receipt(brain_root),
     )
 
 
-def _stale_receipt(brain_root: Path) -> dict[str, object]:
+def capture_stale_set_receipt(brain_root: Path) -> dict[str, object]:
+    """Capture the optional stale-set file hash."""
+
     receipt = _file_receipt(brain_root, ".brain-local/stale-set.json", optional=True)
     return {"sha256": receipt["sha256"]}
+
+
+def _stale_receipt(brain_root: Path) -> dict[str, object]:
+    return capture_stale_set_receipt(brain_root)
 
 
 def capture_foundation_baseline(

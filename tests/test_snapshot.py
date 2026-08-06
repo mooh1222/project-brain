@@ -20,6 +20,7 @@ from project_brain.snapshot import (
     SnapshotError,
     SnapshotRequest,
     create_snapshot,
+    read_regular_no_follow,
     restore_snapshot,
     verify_snapshot,
 )
@@ -100,6 +101,30 @@ def _dirty_git_repo(tmp_path: Path) -> Path:
 
 def _manifest_rows(receipt) -> list[dict]:
     return json.loads(receipt.content_manifest_bytes)
+
+
+def test_read_regular_no_follow_returns_bytes_and_mode(tmp_path):
+    path = (tmp_path / "bound.json").resolve()
+    path.write_bytes(b"{}\n")
+
+    assert read_regular_no_follow(path) == (b"{}\n", 0o644)
+
+
+def test_read_regular_no_follow_rejects_symlink_leaf_and_parent(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_bytes(b"{}\n")
+    leaf = tmp_path / "leaf.json"
+    leaf.symlink_to(target)
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    (real_parent / "target.json").write_bytes(b"{}\n")
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+    for path in (leaf, linked_parent / "target.json"):
+        with pytest.raises(SnapshotError) as exc:
+            read_regular_no_follow(path)
+        assert exc.value.code == "symlink_forbidden"
 
 
 def test_verify_git_root_clean_returns_exact_head_and_empty_status(tmp_path):

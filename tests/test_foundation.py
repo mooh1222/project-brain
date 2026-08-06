@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from project_brain import foundation
+from project_brain import foundation, search_index
 from project_brain.foundation import (
     FoundationError,
     atomic_create_bound_receipt,
@@ -20,7 +20,10 @@ from project_brain.foundation import (
     BB2_MANAGED_SKILL_ROOTS,
     build_foundation_handoff,
     canonical_receipt_bytes,
+    capture_corpus_receipt,
     capture_foundation_baseline,
+    capture_search_index_receipt,
+    capture_stale_set_receipt,
     capture_tree_receipt,
     foundation_command_specs,
     run_foundation_gate,
@@ -31,6 +34,7 @@ from project_brain.foundation import (
     verify_foundation_invariants,
 )
 from project_brain.snapshot import SnapshotRequest, create_snapshot, verify_snapshot
+from project_brain.store import BrainStore
 
 
 def _write(path: Path, data: bytes) -> None:
@@ -236,6 +240,33 @@ def test_baseline_has_exact_top_level_shape(foundation_fixture):
     assert baseline["engine"]["entrypoint"] == "project_brain.cli:main"
     assert baseline["engine"]["status_porcelain_v1_z_base64"] == ""
     assert baseline["bb2"]["status_porcelain_v1_z_base64"]
+
+
+def test_public_task18_corpus_receipts_are_low_level_and_exact(foundation_fixture):
+    store = BrainStore.load(foundation_fixture.brain)
+    live_fingerprint = search_index.compute_corpus_fingerprint(
+        store, foundation_fixture.brain
+    )
+    with sqlite3.connect(foundation_fixture.index_db) as connection:
+        connection.execute(
+            "UPDATE meta SET corpus_fingerprint = ?", (live_fingerprint,)
+        )
+
+    corpus = capture_corpus_receipt(foundation_fixture.brain)
+    index = capture_search_index_receipt(foundation_fixture.brain)
+    stale = capture_stale_set_receipt(foundation_fixture.brain)
+
+    assert set(corpus) == {
+        "mutation_fingerprint",
+        "objects_tree_sha256",
+        "raw_tree_sha256",
+    }
+    assert index == {
+        "live_corpus_fingerprint": live_fingerprint,
+        "meta_corpus_fingerprint": live_fingerprint,
+        "db_file_sha256": _sha(foundation_fixture.index_db.read_bytes()),
+    }
+    assert stale == {"sha256": _sha(foundation_fixture.stale_set.read_bytes())}
 
 
 def test_baseline_verifier_rejects_boolean_version(foundation_fixture):

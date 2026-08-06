@@ -262,6 +262,92 @@ def _read_regular(root: Path, relative: str) -> bytes:
         os.close(descriptor)
 
 
+def read_regular_no_follow(path: Path) -> tuple[bytes, int]:
+    """Read one exact absolute regular file while rejecting symlink traversal."""
+
+    path = Path(path)
+    if (
+        not path.is_absolute()
+        or path != Path(os.path.abspath(path))
+        or path.name in {"", ".", ".."}
+    ):
+        _fail(
+            "source_path_invalid",
+            f"file path must be exact normalized absolute: {path}",
+            paths=(path,),
+        )
+    parent_fd = _open_absolute_directory(path.parent, create=False)
+    file_fd: int | None = None
+    try:
+        try:
+            before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            file_fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            code = (
+                "symlink_forbidden"
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}
+                else "source_unavailable"
+            )
+            _fail(code, f"cannot open {path}: {exc}", paths=(path,))
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(opened.st_mode):
+            _fail(
+                "source_type_invalid",
+                f"source is not a regular file: {path}",
+                paths=(path,),
+            )
+        if not _same_stat(before, opened):
+            _fail(
+                "source_fingerprint_changed",
+                f"file changed while opening: {path}",
+                paths=(path,),
+            )
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        after = os.fstat(file_fd)
+        try:
+            rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            _fail(
+                "source_fingerprint_changed",
+                f"file changed after reading: {path}: {exc}",
+                paths=(path,),
+            )
+        rebound_parent_fd = _open_absolute_directory(path.parent, create=False)
+        try:
+            parent_after = os.fstat(rebound_parent_fd)
+            parent_before = os.fstat(parent_fd)
+        finally:
+            os.close(rebound_parent_fd)
+        if (
+            not _same_stat(opened, after)
+            or not _same_stat(opened, rebound)
+            or size != opened.st_size
+            or (parent_before.st_dev, parent_before.st_ino)
+            != (parent_after.st_dev, parent_after.st_ino)
+        ):
+            _fail(
+                "source_fingerprint_changed",
+                f"file changed while reading: {path}",
+                paths=(path,),
+            )
+        return b"".join(chunks), stat.S_IMODE(opened.st_mode)
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
 def _hash_regular(root: Path, relative: str) -> tuple[str, int]:
     descriptor = _open_relative_regular(root, relative)
     try:
@@ -924,6 +1010,190 @@ def _git_status_bytes(root: Path, *, label: str) -> bytes:
             paths=(root,),
         )
     return result.stdout
+
+
+def run_git_bytes(root: Path, *args: str) -> bytes:
+    """Run one read-only Git command against an exact repository root."""
+
+    root = Path(root)
+    _required_git_head(root, label="task18_root")
+    if not args or any(not isinstance(arg, str) or "\0" in arg for arg in args):
+        _fail("git_command_invalid", "Git arguments must be non-NUL strings")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError) as exc:
+        _fail(
+            "git_command_invalid",
+            f"Git command failed: {exc}",
+            paths=(root,),
+        )
+    if result.returncode != 0:
+        _fail(
+            "git_command_invalid",
+            f"Git command failed with exit {result.returncode}",
+            paths=(root,),
+        )
+    return result.stdout
+
+
+def decode_nul_paths(payload: bytes) -> tuple[str, ...]:
+    """Decode a terminated NUL path list without treating newlines as records."""
+
+    if not isinstance(payload, bytes) or (payload and not payload.endswith(b"\0")):
+        _fail("git_path_list_invalid", "Git NUL path list is unterminated")
+    raw_paths = payload.split(b"\0")
+    if raw_paths and raw_paths[-1] == b"":
+        raw_paths.pop()
+    decoded: list[str] = []
+    for raw_path in raw_paths:
+        _git_dirt_path(raw_path)
+        decoded.append(os.fsdecode(raw_path))
+    return tuple(decoded)
+
+
+def _validate_ref(value: str, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("refs/")
+        or "\0" in value
+        or value.endswith("^{commit}")
+    ):
+        _fail("git_ref_invalid", f"{label} must be one full refs/ name")
+    try:
+        checked = subprocess.run(
+            ["git", "check-ref-format", value],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError) as exc:
+        _fail("git_ref_invalid", f"cannot validate {label}: {exc}")
+    if checked.returncode != 0:
+        _fail("git_ref_invalid", f"{label} is not a valid full ref")
+    return value
+
+
+def _decode_exact_sha(payload: bytes, *, code: str) -> str:
+    try:
+        value = payload.decode("ascii").strip()
+    except UnicodeError:
+        _fail(code, "Git commit output is not ASCII")
+    if _GIT_SHA.fullmatch(value) is None:
+        _fail(code, "Git commit output is not one lowercase 40-hex SHA")
+    return value
+
+
+def resolve_exact_commit(root: Path, ref: str) -> str:
+    """Resolve one full local ref to exactly one commit SHA."""
+
+    ref = _validate_ref(ref, label="local_ref")
+    try:
+        payload = run_git_bytes(root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    except SnapshotError as exc:
+        raise SnapshotError(
+            "local_ref_invalid",
+            f"cannot resolve exact local ref {ref}",
+            paths=exc.paths,
+        ) from exc
+    return _decode_exact_sha(payload, code="local_ref_invalid")
+
+
+def ls_remote_exact_commit(
+    root: Path,
+    remote: str,
+    remote_ref: str,
+) -> str:
+    """Resolve one exact remote ref, rejecting missing or duplicate output."""
+
+    remote_ref = _validate_ref(remote_ref, label="remote_ref")
+    if (
+        not isinstance(remote, str)
+        or not remote
+        or remote.startswith("-")
+        or "\0" in remote
+        or any(character.isspace() for character in remote)
+    ):
+        _fail("remote_ref_invalid", "remote must be one safe Git remote name")
+    try:
+        payload = run_git_bytes(
+            root,
+            "ls-remote",
+            "--refs",
+            "--exit-code",
+            remote,
+            remote_ref,
+        )
+    except SnapshotError as exc:
+        raise SnapshotError(
+            "remote_ref_invalid",
+            f"cannot resolve exact remote ref {remote_ref}",
+            paths=exc.paths,
+        ) from exc
+    rows = payload.splitlines()
+    expected_suffix = b"\t" + remote_ref.encode("utf-8")
+    if len(rows) != 1 or not rows[0].endswith(expected_suffix):
+        _fail("remote_ref_invalid", "remote did not return exactly the requested ref")
+    raw_sha, returned_ref = rows[0].split(b"\t", 1)
+    if returned_ref != remote_ref.encode("utf-8"):
+        _fail("remote_ref_invalid", "remote returned a different ref")
+    return _decode_exact_sha(raw_sha, code="remote_ref_invalid")
+
+
+def require_commit_is_ancestor(
+    root: Path,
+    commit_sha: str,
+    descendant: str,
+) -> None:
+    """Require one exact commit SHA to be reachable from a full ref or HEAD."""
+
+    if not isinstance(commit_sha, str) or _GIT_SHA.fullmatch(commit_sha) is None:
+        _fail("committed_input_invalid", "commit_sha must be lowercase 40-hex")
+    if descendant == "HEAD":
+        descendant_sha = _required_git_head(Path(root), label="task18_root")
+    else:
+        descendant_sha = resolve_exact_commit(root, descendant)
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                commit_sha,
+                descendant_sha,
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError) as exc:
+        _fail("committed_input_invalid", f"cannot check commit ancestry: {exc}")
+    if result.returncode != 0:
+        _fail("committed_input_not_ancestor", "commit_sha is not an ancestor")
+
+
+def git_show_blob(root: Path, commit_sha: str, relative_path: Path) -> bytes:
+    """Read one blob from an exact commit without consulting the worktree."""
+
+    if not isinstance(commit_sha, str) or _GIT_SHA.fullmatch(commit_sha) is None:
+        _fail("committed_input_invalid", "commit_sha must be lowercase 40-hex")
+    raw_path = os.fspath(relative_path)
+    if not isinstance(raw_path, str) or not raw_path:
+        _fail("committed_input_path_invalid", "relative_path must be text")
+    pure = PurePosixPath(raw_path)
+    if pure.is_absolute() or pure.as_posix() in {"", "."} or ".." in pure.parts:
+        _fail("committed_input_path_invalid", "relative_path is unsafe")
+    try:
+        return run_git_bytes(root, "show", f"{commit_sha}:{pure.as_posix()}")
+    except SnapshotError as exc:
+        raise SnapshotError(
+            "committed_input_invalid",
+            f"cannot read committed input {pure.as_posix()}",
+            paths=exc.paths,
+        ) from exc
 
 
 def _git_dirt_path(raw_path: bytes) -> tuple[bytes, ...]:
