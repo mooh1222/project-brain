@@ -36,17 +36,21 @@
 
 ## 진행 중
 
-### Task 18 표시 라벨·인용문 부채 — 새 측정 전 차단
+### Task 18 표시 제목·인용문 부채 — 새 설계 검토 대기
 
 P0 ingest integrity foundation은 완료됐다. 기존
 `2026-08-04-task18-display-labels-and-quote-backlog` 설계·계획·binding은 당시 상태의 역사
-자료이며 실행하지 않는다. P0 handoff의 현재 상태는
-`blocked_pending_new_measurement_design_binding`이다.
+자료이며 실행하지 않는다.
 
-다음 순서는 현재 engine·BB2 HEAD, `origin/develop`, 표시 라벨 대상, quote backlog를 읽기 전용으로
-다시 측정해 receipt를 남기는 것이다. 그 측정을 입력으로 새 Task 18 설계·계획을 작성하고 사용자
-승인을 받은 뒤에만 binding 생성기·독립 검증기·migration gate를 구현한다. 새 pre-mutation
-snapshot과 최종 binding을 검증하기 전에는 실코퍼스 migration을 시작하지 않는다.
+2026-08-06 현재 engine·BB2 HEAD와 `origin/develop`, 표시 제목 대상, quote backlog를 읽기 전용으로
+다시 측정해 canonical receipt를 남겼다. corpus·raw·index는 P0 handoff와 같고, 현재 대상은
+CodeLocator 제목 3,305개, quote 부채 3,307개, paired EvidenceRef 제목 3,186개다. receipt와
+현재 판단은 [Task 18 재설계](docs/superpowers/specs/2026-08-06-task18-display-labels-and-quote-debt-redesign.md)에
+기록했다.
+
+현재 gate는 `blocked_pending_design_approval_plan_and_binding`이다. 새 설계를 사용자에게 검토받은
+뒤에만 구현 계획을 작성한다. 그 계획과 engine·BB2 최종 HEAD를 결속한 새 pre-mutation snapshot과
+final binding을 독립 검증하기 전에는 migration plan/apply나 실코퍼스 변경을 시작하지 않는다.
 
 기존 legacy 객체는 ingest 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는 항목으로
 기록한다. 이를 “검증된 적 없음”으로 확대 해석하지 않는다.
