@@ -5,6 +5,7 @@
 CDN(unpkg)에서 받으므로 파이썬 의존성은 없고, 보려면 인터넷 연결이 필요하다.
 """
 import json
+from pathlib import PurePosixPath
 
 from project_brain.graph import edges as graph_edges
 from project_brain.store import BrainStore
@@ -32,6 +33,22 @@ TIP_FIELDS = ["body", "summary", "definition", "meaning", "canonical_summary",
               "boundary_summary", "decision", "scope"]
 
 
+def _truncate_label(label: str) -> str:
+    """vis-network 노드 라벨의 30자 표시 제한을 적용한다."""
+    return label if len(label) <= 30 else label[:29] + "…"
+
+
+def _code_locator_label_candidate(obj: dict, object_id: str) -> str:
+    """CodeLocator를 path와 symbol에 기대지 않고 구분할 수 있는 라벨 후보로 만든다."""
+    anchor_key = object_id.rsplit(".", 1)[-1]
+    symbol = obj.get("symbol")
+    if isinstance(symbol, str) and symbol:
+        return f"{anchor_key} · {symbol.rsplit('::', 1)[-1]}"
+    path = obj.get("path")
+    basename = PurePosixPath(path).name if isinstance(path, str) and path else "unknown"
+    return f"{basename}:{anchor_key}"
+
+
 def build_payload(store: BrainStore) -> dict:
     """store → vis-network payload {nodes, edges, details, kinds, groups}.
 
@@ -40,20 +57,31 @@ def build_payload(store: BrainStore) -> dict:
     objs = [o for o in store.all() if isinstance(o, dict) and o.get("id")]
 
     nodes, details, kinds = [], {}, {}
+    code_locator_candidates = {}
     for o in objs:
         oid = o["id"]
         kind = o.get("kind", "?")
         status = o.get("status", "")
         kinds[kind] = kinds.get(kind, 0) + 1
 
-        label = next((str(o[f]) for f in LABEL_FIELDS if o.get(f)), oid.split(".")[-1])
-        if len(label) > 30:
-            label = label[:29] + "…"
+        if kind == "CodeLocator":
+            label = _code_locator_label_candidate(o, oid)
+            code_locator_candidates[oid] = label
+        else:
+            label = next((str(o[f]) for f in LABEL_FIELDS if o.get(f)), oid.split(".")[-1])
+        label = _truncate_label(label)
 
         tip = [f"[{kind}] {status}".strip()]
         body = next((str(o[f]) for f in TIP_FIELDS if o.get(f)), "")
         if body:
             tip.append(body[:160] + ("…" if len(body) > 160 else ""))
+        if kind == "CodeLocator":
+            symbol = o.get("symbol")
+            path = o.get("path")
+            if isinstance(symbol, str) and symbol:
+                tip.append(symbol)
+            if isinstance(path, str) and path:
+                tip.append(path)
 
         nodes.append({
             "id": oid,
@@ -65,6 +93,17 @@ def build_payload(store: BrainStore) -> dict:
             "shapeProperties": {"borderDashes": [5, 5] if status == "candidate" else False},
         })
         details[oid] = {**o, "display_only": True}
+
+    collisions = {}
+    for oid, candidate in code_locator_candidates.items():
+        collisions.setdefault(_truncate_label(candidate), []).append(oid)
+    for candidate, object_ids in collisions.items():
+        if len(object_ids) < 2:
+            continue
+        for index, oid in enumerate(sorted(object_ids), start=1):
+            suffix = f"·{index}"
+            label = candidate[:30 - len(suffix)] + suffix
+            next(node for node in nodes if node["id"] == oid)["label"] = label
 
     edge_list = [{"from": f, "to": t} for f, t in graph_edges(store)]
 

@@ -51,6 +51,54 @@ class TestNodeLabel(unittest.TestCase):
         node = build_payload(store)["nodes"][0]
         self.assertEqual(node["label"], "tail")
 
+    def test_code_locator_labels_stay_unique_after_thirty_character_limit(self):
+        # 긴 공통 anchor_key와 같은 symbol도 graph에서 서로 구분돼야 한다.
+        store = _store(
+            _obj(
+                "code.demo.shared-prefix-that-is-very-very-long-a",
+                "CodeLocator",
+                path="src/first.cpp",
+                symbol="Ns::Widget::run",
+            ),
+            _obj(
+                "code.demo.shared-prefix-that-is-very-very-long-b",
+                "CodeLocator",
+                path="src/second.cpp",
+                symbol="Ns::Widget::run",
+            ),
+        )
+        labels = [
+            node["label"]
+            for node in build_payload(store)["nodes"]
+            if node["group"] == "CodeLocator"
+        ]
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertTrue(all(len(label) <= 30 for label in labels))
+
+    def test_code_locator_tooltip_contains_full_symbol_and_path(self):
+        store = _store(
+            _obj(
+                "code.demo.widget-run",
+                "CodeLocator",
+                path="src/widget.cpp",
+                symbol="Ns::Widget::run",
+            )
+        )
+        node = build_payload(store)["nodes"][0]
+        self.assertIn("Ns::Widget::run", node["title"])
+        self.assertIn("src/widget.cpp", node["title"])
+
+    def test_code_locator_without_symbol_uses_path_and_anchor_key(self):
+        store = _store(
+            _obj(
+                "code.demo.widget-anchor",
+                "CodeLocator",
+                path="src/widget.cpp",
+            )
+        )
+        node = build_payload(store)["nodes"][0]
+        self.assertEqual(node["label"], "widget.cpp:widget-anchor")
+
 
 class TestRenderHtml(unittest.TestCase):
     def test_injects_payload_and_no_placeholder_left(self):
