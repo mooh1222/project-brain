@@ -3241,6 +3241,41 @@ def test_display_migration_preserves_paired_object_timestamps_exactly(tmp_path):
         }
 
 
+def test_display_migration_apply_preserves_derived_files_byte_for_byte(tmp_path):
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(
+        object_id="code.neutral.display",
+        title="legacy locator display",
+        quote=None,
+    )
+    ref = _display_evidence_ref(locator["id"])
+    for obj in (locator, manifest(), ref):
+        _write_raw(brain_root, obj)
+    local = brain_root / ".brain-local"
+    local.mkdir(parents=True, exist_ok=True)
+    before_derived = {
+        name: payload
+        for name, payload in (
+            ("index.db", b"index-bytes"),
+            ("index.db-wal", b"wal-bytes"),
+            ("index.db-shm", b"shm-bytes"),
+            ("index.db-journal", b"journal-bytes"),
+            ("stale-set.json", b'{"stale":true}\n'),
+        )
+    }
+    for name, payload in before_derived.items():
+        (local / name).write_bytes(payload)
+    request = _display_request(brain_root)
+
+    result = MutationService().apply(request.objects, request=request)
+
+    assert result.ok is True
+    assert {
+        name: (local / name).read_bytes()
+        for name in before_derived
+    } == before_derived
+
+
 def test_unchanged_preexisting_id_problem_is_temporarily_grandfathered(tmp_path):
     brain_root = tmp_path / "brain"
     legacy = _legacy_invalid_context()

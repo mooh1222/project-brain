@@ -22,6 +22,7 @@ from project_brain.code_verify import (
 )
 from project_brain.corpus_io import (
     CorpusIOError,
+    DerivedFilePolicy,
     apply_transaction,
     corpus_lock,
     read_tracked_file_bytes,
@@ -549,6 +550,11 @@ class MutationService:
             request.brain_root,
             manifest=_transaction_manifest(result.manifest),
             after_files=after_files,
+            derived_policy=(
+                DerivedFilePolicy.PRESERVE
+                if request.operation is MutationOperation.DISPLAY_MIGRATION
+                else DerivedFilePolicy.INVALIDATE
+            ),
             failure_injector=failure_injector,
         )
         return replace(result, outcome=MutationOutcome.COMMITTED)

@@ -18,6 +18,11 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from project_brain.display_contract import (
+    canonical_locator_title,
+    non_title_sha256,
+    paired_code_locator_id,
+)
 from project_brain.transaction_receipt import (
     BatchBinding,
     LegacyBatchBindingV1,
@@ -38,6 +43,26 @@ class JournalState(StrEnum):
     COMMITTED = "committed"
     ROLLED_BACK = "rolled_back"
     RECOVERY_REQUIRED = "recovery_required"
+
+
+class DerivedFilePolicy(StrEnum):
+    INVALIDATE = "invalidate"
+    PRESERVE = "preserve"
+
+
+def normalized_derived_policy(
+    journal: Mapping[str, object],
+) -> DerivedFilePolicy:
+    """Return the effective derived-file policy for journal v1 or v2."""
+    version = journal.get("version")
+    if version == 1:
+        return DerivedFilePolicy.INVALIDATE
+    if version != 2:
+        raise ValueError("journal version must be 1 or 2")
+    try:
+        return DerivedFilePolicy(journal.get("derived_policy"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("journal derived_policy is invalid") from exc
 
 
 class ReceiptVerificationMode(StrEnum):
@@ -2650,10 +2675,17 @@ def apply_transaction(
     *,
     manifest: Mapping[str, object],
     after_files: Mapping[str, bytes],
+    derived_policy: DerivedFilePolicy = DerivedFilePolicy.INVALIDATE,
     failure_injector: Callable[[str], None] | None = None,
     preparation_injector: Callable[[str], None] | None = None,
 ) -> None:
     """Apply one validated mutation using only root-anchored writes."""
+    try:
+        policy = DerivedFilePolicy(derived_policy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "derived_policy must be invalidate or preserve"
+        ) from exc
     active = _CORPUS_LOCK_SCOPE.get()
     if active is None:
         with corpus_lock(brain_root, exclusive=True):
@@ -2661,6 +2693,7 @@ def apply_transaction(
                 brain_root,
                 manifest=manifest,
                 after_files=after_files,
+                derived_policy=policy,
                 failure_injector=failure_injector,
                 preparation_injector=preparation_injector,
             )
@@ -2679,6 +2712,12 @@ def apply_transaction(
     journal: dict[str, Any] | None = None
     try:
             _validate_manifest_model(manifest, transaction_id)
+            if policy is DerivedFilePolicy.PRESERVE:
+                _validate_preserve_derived_request(
+                    brain_root,
+                    manifest,
+                    after_files,
+                )
             batch_binding = normalize_batch_binding(
                 manifest.get("batch_binding")
             )
@@ -2691,19 +2730,26 @@ def apply_transaction(
                 anchored.inspect_file(relative_path)
                 for relative_path in _DERIVED_PATHS
             ]
+            derived_to_mutate = (
+                derived
+                if policy is DerivedFilePolicy.INVALIDATE
+                else []
+            )
+            before_derived_fingerprint = _inventory_fingerprint(derived)
             journal = {
-                "version": 1,
+                "version": 2,
                 "transaction_id": transaction_id,
                 "state": JournalState.PREPARING.value,
                 "manifest": dict(manifest),
                 "entries": entries,
                 "derived": derived,
-                "before_derived_fingerprint": _inventory_fingerprint(
-                    derived
-                ),
+                "before_derived_fingerprint": before_derived_fingerprint,
                 "expected_after_derived_fingerprint": (
-                    _empty_derived_fingerprint()
+                    before_derived_fingerprint
+                    if policy is DerivedFilePolicy.PRESERVE
+                    else _empty_derived_fingerprint()
                 ),
+                "derived_policy": policy.value,
                 "applied": [],
                 "batch_binding": batch_binding_dict(batch_binding),
             }
@@ -2798,13 +2844,13 @@ def apply_transaction(
             )
             before_parents = _transaction_parent_fds(
                 before_fd,
-                (*entries, *derived),
+                (*entries, *derived_to_mutate),
                 expected_device=anchored.device,
                 owned_fds=owned_fds,
             )
             snapshot_parents = _transaction_parent_fds(
                 snapshots_fd,
-                (*entries, *derived),
+                (*entries, *derived_to_mutate),
                 expected_device=anchored.device,
                 owned_fds=owned_fds,
             )
@@ -2824,7 +2870,7 @@ def apply_transaction(
             _verify_live_bindings(anchored, live_parents)
             _revalidate_case_only_renames(anchored, case_only_bindings)
 
-            for entry in (*entries, *derived):
+            for entry in (*entries, *derived_to_mutate):
                 if not entry["had_before"]:
                     continue
                 live_parent, live_name = live_parents[entry["path"]]
@@ -2932,7 +2978,7 @@ def apply_transaction(
                     )
                     scope.verify_lexical_bindings()
 
-            for entry in derived:
+            for entry in derived_to_mutate:
                 live_parent, live_name = live_parents[entry["path"]]
                 anchored.verify_binding(live_parent)
                 current = _file_stat_at(live_parent.fd, live_name)
@@ -3264,6 +3310,113 @@ def _build_entries_anchored(
     return entries, case_only_bindings
 
 
+def _validate_preserve_derived_request(
+    brain_root: Path,
+    manifest: Mapping[str, object],
+    after_files: Mapping[str, bytes],
+) -> None:
+    """Allow preservation only for the exact live display-title closure."""
+    if manifest.get("operation") != "display_migration":
+        raise CorpusIOError(
+            "derived_preserve_invalid",
+            "derived files may be preserved only for display_migration",
+        )
+    forbidden_actions = (
+        "creates",
+        "deletes",
+        "renames",
+        "reference_rewrites",
+        "auxiliary_updates",
+    )
+    if any(manifest.get(field_name) for field_name in forbidden_actions):
+        raise CorpusIOError(
+            "derived_preserve_invalid",
+            "display preservation permits update actions only",
+        )
+
+    from project_brain.store import BrainStore, StoreLoadError
+
+    try:
+        store = BrainStore.load_unlocked(brain_root)
+    except StoreLoadError as exc:
+        raise CorpusIOError(
+            "derived_preserve_invalid",
+            f"display closure could not be loaded: {exc}",
+            paths=exc.paths,
+        ) from exc
+    existing_by_id = {obj["id"]: obj for obj in store.all()}
+    locators = {
+        object_id: obj
+        for object_id, obj in existing_by_id.items()
+        if obj.get("kind") == "CodeLocator"
+    }
+    expected_after_by_id: dict[str, dict[str, object]] = {}
+    for object_id in sorted(existing_by_id):
+        before_obj = existing_by_id[object_id]
+        canonical_title: str | None = None
+        if before_obj.get("kind") == "CodeLocator":
+            candidate = canonical_locator_title(before_obj)
+            if before_obj.get("title") != candidate:
+                canonical_title = candidate
+        else:
+            locator_id = paired_code_locator_id(before_obj)
+            locator = locators.get(locator_id) if locator_id is not None else None
+            if locator is not None:
+                candidate = canonical_locator_title(locator)
+                if before_obj.get("title") != candidate:
+                    canonical_title = candidate
+        if canonical_title is not None:
+            expected_after_by_id[object_id] = {
+                **before_obj,
+                "title": canonical_title,
+            }
+
+    updates = manifest.get("updates")
+    if not isinstance(updates, (list, tuple)) or not expected_after_by_id:
+        raise CorpusIOError(
+            "derived_preserve_invalid",
+            "display preservation requires a non-empty update closure",
+        )
+    update_by_id = {
+        action.get("object_id"): action
+        for action in updates
+        if isinstance(action, Mapping)
+    }
+    if (
+        len(update_by_id) != len(updates)
+        or set(update_by_id) != set(expected_after_by_id)
+    ):
+        raise CorpusIOError(
+            "derived_preserve_invalid",
+            "updates do not exactly match the live display closure",
+        )
+    for object_id, expected_after in expected_after_by_id.items():
+        before_obj = existing_by_id[object_id]
+        action = update_by_id[object_id]
+        assert isinstance(action, Mapping)
+        expected_path = BrainStore.object_path(
+            brain_root,
+            before_obj,
+        ).relative_to(brain_root).as_posix()
+        payload = after_files.get(expected_path)
+        before_sha256 = store.source_sha256(object_id)
+        if (
+            action.get("path") != expected_path
+            or action.get("before_sha256") != before_sha256
+            or not isinstance(payload, bytes)
+            or payload != BrainStore.object_bytes(expected_after)
+            or action.get("after_sha256")
+            != hashlib.sha256(payload or b"").hexdigest()
+            or before_obj.get("id") != expected_after.get("id")
+            or before_obj.get("kind") != expected_after.get("kind")
+            or non_title_sha256(before_obj) != non_title_sha256(expected_after)
+        ):
+            raise CorpusIOError(
+                "derived_preserve_invalid",
+                f"{object_id}: display update is not title-only and canonical",
+            )
+
+
 def _empty_derived_fingerprint() -> str:
     return _inventory_fingerprint([
         {
@@ -3510,6 +3663,11 @@ def _rollback_transaction_anchored(
     assert isinstance(raw_derived, list)
     entries = tuple(dict(entry) for entry in raw_entries)
     derived = tuple(dict(entry) for entry in raw_derived)
+    derived_to_restore = (
+        derived
+        if normalized_derived_policy(journal) is DerivedFilePolicy.INVALIDATE
+        else ()
+    )
     live_parents = _pin_live_parents(
         anchored,
         (*entries, *derived),
@@ -3551,7 +3709,7 @@ def _rollback_transaction_anchored(
             os.unlink(live_name, dir_fd=live_parent.fd)
             os.fsync(live_parent.fd)
 
-    for entry in (*entries, *derived):
+    for entry in (*entries, *derived_to_restore):
         relative_path = str(entry["path"])
         live_parent, live_name = live_parents[relative_path]
         anchored.verify_binding(live_parent)
@@ -3701,7 +3859,7 @@ def _validate_journal_model(
     *,
     legacy_manifest_read: bool = False,
 ) -> None:
-    required_fields = {
+    base_fields = {
         "version",
         "transaction_id",
         "state",
@@ -3713,13 +3871,18 @@ def _validate_journal_model(
         "applied",
         "batch_binding",
     }
-    if (
-        not required_fields.issubset(journal)
-        or set(journal) - required_fields - {"recovery_error"}
+    version = journal.get("version")
+    if version == 1:
+        required_fields = base_fields
+    elif version == 2:
+        required_fields = base_fields | {"derived_policy"}
+    else:
+        raise ValueError("version must be 1 or 2")
+    if not required_fields.issubset(journal) or (
+        set(journal) - required_fields - {"recovery_error"}
     ):
         raise ValueError("journal keys do not match the contract")
-    if journal.get("version") != 1:
-        raise ValueError("version must be 1")
+    policy = normalized_derived_policy(journal)
     if _SHA256.fullmatch(transaction_id) is None:
         raise ValueError("transaction_id must be a lowercase SHA-256")
     state = JournalState(journal.get("state"))
@@ -3808,7 +3971,12 @@ def _validate_journal_model(
         }
         for relative_path in _DERIVED_PATHS
     ]
-    if expected_after_derived != _inventory_fingerprint(absent_derived):
+    required_after_derived = (
+        before_derived
+        if policy is DerivedFilePolicy.PRESERVE
+        else _inventory_fingerprint(absent_derived)
+    )
+    if expected_after_derived != required_after_derived:
         raise ValueError("expected after derived fingerprint is invalid")
 
     applied = journal.get("applied")
@@ -3821,7 +3989,11 @@ def _validate_journal_model(
     allowed = {
         *(f"before:{entry['path']}" for entry in entries),
         *(f"live:{entry['path']}" for entry in entries),
-        *(f"derived:{entry['path']}" for entry in derived),
+        *(
+            f"derived:{entry['path']}"
+            for entry in derived
+            if policy is DerivedFilePolicy.INVALIDATE
+        ),
     }
     if not set(applied).issubset(allowed):
         raise ValueError("applied contains an unknown marker")
@@ -3840,7 +4012,10 @@ def _validate_journal_model(
             *(
                 f"derived:{entry['path']}"
                 for entry in derived
-                if entry["had_before"]
+                if (
+                    policy is DerivedFilePolicy.INVALIDATE
+                    and entry["had_before"]
+                )
             ),
         }
         if not required.issubset(applied):
@@ -4246,11 +4421,15 @@ def _verify_committed_state(
         after=True,
         exact_paths=_case_only_paths_from_journal(journal),
     )
-    for relative_path in _DERIVED_PATHS:
-        if anchored.inspect_file(relative_path)["had_before"]:
-            raise ValueError(
-                f"derived file was not invalidated: {relative_path}"
-            )
+    policy = normalized_derived_policy(journal)
+    if policy is DerivedFilePolicy.INVALIDATE:
+        for relative_path in _DERIVED_PATHS:
+            if anchored.inspect_file(relative_path)["had_before"]:
+                raise ValueError(
+                    f"derived file was not invalidated: {relative_path}"
+                )
+    else:
+        _verify_inventory(anchored, journal.get("derived"))
     current_derived = [
         anchored.inspect_file(relative_path)
         for relative_path in _DERIVED_PATHS

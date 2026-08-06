@@ -48,11 +48,13 @@ from project_brain.transaction_receipt import (
     receipt_from_result,
 )
 from tests.coverage_helpers import direct_coverage
-from tests.test_ingest import candidate_term, context
+from tests.test_ingest import candidate_term, context, manifest
 from tests.test_mutation import (
     _canonical_repair_binding,
     _collision_merge_request,
     _code_locator,
+    _display_evidence_ref,
+    _display_request,
     _mapping_repair_request,
 )
 
@@ -102,6 +104,15 @@ def _canonical_test_json_bytes(value: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _journal_payload_as_v1(
+    journal: dict[str, object],
+) -> dict[str, object]:
+    assert journal["version"] == 2
+    assert journal.pop("derived_policy") == "invalidate"
+    journal["version"] = 1
+    return journal
 
 
 def _hold_stable_lock_in_child(brain_root, ready, release) -> None:
@@ -260,6 +271,7 @@ def _downgrade_committed_batch_to_legacy_v1(
         allow_legacy_v1=True,
     )
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    _journal_payload_as_v1(journal)
     manifest = journal["manifest"]
     for field_name in (
         "coverage_sha256",
@@ -339,6 +351,7 @@ def _downgrade_binding_only_to_task8_v1(
         allow_legacy_v1=True,
     )
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    _journal_payload_as_v1(journal)
     journal["batch_binding"] = legacy_payload
     journal["manifest"]["batch_binding"] = legacy_payload
     manifest_sha256 = hashlib.sha256(
@@ -390,6 +403,43 @@ def _seed_derived_files(brain_root: Path) -> None:
         ("stale-set.json", b'{"stale":true}\n'),
     ):
         (local / name).write_bytes(payload)
+
+
+def _derived_bytes(brain_root: Path) -> dict[str, bytes | None]:
+    local = brain_root / ".brain-local"
+    return {
+        name: (path.read_bytes() if path.is_file() else None)
+        for name in (
+            "index.db",
+            "index.db-wal",
+            "index.db-shm",
+            "index.db-journal",
+            "stale-set.json",
+        )
+        for path in (local / name,)
+    }
+
+
+def _display_transaction_inputs(tmp_path: Path):
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(
+        object_id="code.neutral.display",
+        title="legacy locator display",
+        quote=None,
+    )
+    ref = _display_evidence_ref(locator["id"])
+    for obj in (locator, manifest(), ref):
+        _write_object(brain_root, obj)
+    _seed_derived_files(brain_root)
+    request = _display_request(brain_root)
+    planned = _service().plan(request.objects, request=request)
+    assert planned.ok and planned.manifest is not None
+    after_by_id = {obj["id"]: obj for obj in planned.after_objects}
+    after_files = {
+        action["path"]: BrainStore.object_bytes(after_by_id[action["object_id"]])
+        for action in planned.manifest.updates
+    }
+    return brain_root, request, planned, after_files
 
 
 def _state_fingerprint(brain_root: Path) -> str:
@@ -1220,6 +1270,7 @@ def _historical_context_replace_journal(
         / "journal.json"
     )
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    _journal_payload_as_v1(journal)
     journal["state"] = state
     assert journal["manifest"].pop("canonical_repair_binding") is None
     if state == JournalState.ROLLED_BACK.value:
@@ -1733,6 +1784,7 @@ def test_historical_committed_batch_receipt_preserves_original_manifest_sha(
     )
     intent_path = brain_root / batch_intent_relative_path(binding)
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    _journal_payload_as_v1(journal)
     assert journal["manifest"].pop("canonical_repair_binding") is None
     historical_manifest_bytes = (
         json.dumps(
@@ -2329,6 +2381,232 @@ def test_apply_uses_the_required_stage_order_and_invalidates_derived_files(
     assert journal["state"] == "committed"
     assert len(journal["before_derived_fingerprint"]) == 64
     assert len(journal["expected_after_derived_fingerprint"]) == 64
+
+
+def test_display_migration_preserves_derived_files_byte_for_byte(tmp_path):
+    brain_root, _request, planned, after_files = _display_transaction_inputs(
+        tmp_path
+    )
+    before = _derived_bytes(brain_root)
+
+    apply_transaction(
+        brain_root,
+        manifest=_journal_manifest(planned.manifest),
+        after_files=after_files,
+        derived_policy="preserve",
+    )
+
+    assert _derived_bytes(brain_root) == before
+    journal = json.loads(
+        (
+            brain_root
+            / ".brain-local"
+            / "transactions"
+            / planned.manifest.transaction_id
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["version"] == 2
+    assert journal["derived_policy"] == "preserve"
+    assert (
+        journal["expected_after_derived_fingerprint"]
+        == journal["before_derived_fingerprint"]
+    )
+    assert not any(marker.startswith("derived:") for marker in journal["applied"])
+
+
+def test_display_migration_preserves_derived_with_noncanonical_source_bytes(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    locator = _code_locator(
+        object_id="code.neutral.display",
+        title="legacy locator display",
+        quote=None,
+    )
+    ref = _display_evidence_ref(locator["id"])
+    for obj in (locator, manifest(), ref):
+        _write_object(brain_root, obj)
+    locator_path = BrainStore.object_path(brain_root, locator)
+    locator_path.write_text(
+        json.dumps(locator, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    _seed_derived_files(brain_root)
+    before_derived = _derived_bytes(brain_root)
+    request = _display_request(brain_root)
+
+    result = _service().apply(request.objects, request=request)
+
+    assert result.ok is True
+    assert _derived_bytes(brain_root) == before_derived
+
+
+def test_display_migration_failure_rolls_back_objects_and_preserves_derived_files(
+    tmp_path,
+):
+    brain_root, request, planned, _after_files = _display_transaction_inputs(
+        tmp_path
+    )
+    before_objects = {
+        obj["id"]: BrainStore.object_bytes(obj)
+        for obj in request.objects
+    }
+    before_derived = _derived_bytes(brain_root)
+
+    with pytest.raises(InjectedCrash, match="after_first_live_replace"):
+        _service().apply(
+            request.objects,
+            request=request,
+            failure_injector=_crash_at("after_first_live_replace"),
+        )
+    recovered = recover_unfinished_transaction(brain_root)
+
+    assert recovered.recovered_transaction_ids == (
+        planned.manifest.transaction_id,
+    )
+    store = BrainStore.load(brain_root)
+    assert {
+        object_id: BrainStore.object_bytes(store.get(object_id))
+        for object_id in before_objects
+    } == before_objects
+    assert _derived_bytes(brain_root) == before_derived
+
+
+@pytest.mark.parametrize("tamper", ("non_display", "non_title"))
+def test_preserve_derived_policy_rejects_non_display_or_non_title_transactions(
+    tmp_path,
+    tamper,
+):
+    brain_root, _request, planned, after_files = _display_transaction_inputs(
+        tmp_path
+    )
+    manifest_payload = _journal_manifest(planned.manifest)
+    if tamper == "non_display":
+        manifest_payload["operation"] = "projection"
+    else:
+        action = planned.manifest.updates[0]
+        after_obj = json.loads(after_files[action["path"]])
+        after_obj["summary"] = "non-title drift"
+        payload = BrainStore.object_bytes(after_obj)
+        after_files[action["path"]] = payload
+        next(
+            update
+            for update in manifest_payload["updates"]
+            if update["path"] == action["path"]
+        )["after_sha256"] = hashlib.sha256(payload).hexdigest()
+
+    with pytest.raises((ValueError, CorpusIOError)):
+        apply_transaction(
+            brain_root,
+            manifest=manifest_payload,
+            after_files=after_files,
+            derived_policy="preserve",
+        )
+
+    transactions = brain_root / ".brain-local" / "transactions"
+    assert not transactions.exists() or not tuple(
+        transactions.rglob("journal.json")
+    )
+
+
+def _downgrade_derived_journal_to_v1(journal_path: Path) -> dict[str, object]:
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    _journal_payload_as_v1(journal)
+    journal_path.write_bytes(_canonical_test_json_bytes(journal))
+    return journal
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    (
+        "after_temp_fsync",
+        "after_journal_prepared",
+        "after_state_committing",
+        "after_first_before_rename",
+        "after_first_live_replace",
+        "after_derived_invalidation",
+    ),
+)
+def test_unfinished_v1_legacy_journal_derived_recovers_as_invalidate_after_upgrade(
+    tmp_path,
+    failure_point,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    _seed_derived_files(brain_root)
+    before_state = _state_fingerprint(brain_root)
+    request = _request(brain_root, (after,))
+    planned = _service().plan((after,), request=request)
+    assert planned.ok and planned.manifest is not None
+
+    with pytest.raises(InjectedCrash, match=failure_point):
+        _service().apply(
+            (after,),
+            request=request,
+            failure_injector=_crash_at(failure_point),
+        )
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / planned.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = _downgrade_derived_journal_to_v1(journal_path)
+
+    corpus_io._validate_journal_model(
+        journal,
+        planned.manifest.transaction_id,
+    )
+    assert corpus_io.normalized_derived_policy(journal).value == "invalidate"
+    recovered = recover_unfinished_transaction(brain_root)
+
+    assert recovered.recovered_transaction_ids == (
+        planned.manifest.transaction_id,
+    )
+    assert _state_fingerprint(brain_root) == before_state
+
+
+@pytest.mark.parametrize("terminal_state", ("committed", "rolled_back"))
+def test_terminal_v1_legacy_journal_derived_remains_readable_after_upgrade(
+    tmp_path,
+    terminal_state,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    _seed_derived_files(brain_root)
+    request = _request(brain_root, (after,))
+    planned = _service().plan((after,), request=request)
+    assert planned.ok and planned.manifest is not None
+    if terminal_state == "committed":
+        result = _service().apply((after,), request=request)
+        assert result.ok
+    else:
+        with pytest.raises(InjectedCrash):
+            _service().apply(
+                (after,),
+                request=request,
+                failure_injector=_crash_at("after_first_live_replace"),
+            )
+        recover_unfinished_transaction(brain_root)
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / planned.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = _downgrade_derived_journal_to_v1(journal_path)
+
+    corpus_io._validate_journal_model(
+        journal,
+        planned.manifest.transaction_id,
+    )
+    assert corpus_io.normalized_derived_policy(journal).value == "invalidate"
+    assert_corpus_readable(brain_root)
 
 
 def test_noop_apply_preserves_derived_files_and_creates_no_transaction(
