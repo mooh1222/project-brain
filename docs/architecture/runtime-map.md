@@ -126,6 +126,12 @@ flowchart LR
     PostVerify --> Closure[corpus-final snapshot · closure]
 ```
 
+정본 CLI에서 quote inventory 생성은 `--target-revision`으로 exact commit을 고정하고,
+binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corpus-snapshot`,
+`--snapshot-verify`, `--expected-engine-head`, `--expected-bb2-head`를 함께 결속해
+`--report` 자체를 closure receipt로 만든다. 독립 검증은 같은 receipt를 `--closure`로
+받으며 생성 시각을 다시 입력받지 않는다.
+
 ## 저장면과 권위
 
 | 저장면 | 쓰는 주체 | 권위와 수명 | 다시 만드는 방법 |

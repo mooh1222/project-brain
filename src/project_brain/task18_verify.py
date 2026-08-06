@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from project_brain.corpus_io import CorpusIOError, read_tracked_json_files
+from project_brain.corpus_io import (
+    CorpusIOError,
+    assert_corpus_readable,
+    corpus_lock,
+    read_tracked_json_files,
+)
 from project_brain.display_contract import (
     canonical_locator_title,
     non_title_sha256,
@@ -31,6 +36,8 @@ from project_brain.foundation import (
 )
 from project_brain.lint import lint_store
 from project_brain.mutation import corpus_fingerprint
+from project_brain.objbase import now_kst
+from project_brain.reference_fields import iter_object_refs
 from project_brain.snapshot import (
     SnapshotError,
     capture_git_dirt_receipt,
@@ -91,6 +98,16 @@ _DISPLAY_MANIFEST_KEYS = {
     "snapshot_manifest_sha256", "task18_binding_path",
     "task18_binding_sha256",
 }
+_POST_REPORT_KEYS = {
+    "version", "purpose", "generated_at", "binding", "display_manifest",
+    "quote_debt", "target_ids_sha256", "expected_after_corpus_fingerprint",
+    "actual_after_corpus_fingerprint", "object_count", "changed_paths",
+    "update_count", "create_count", "delete_count", "rename_count",
+    "reference_graph", "lint_problem_count", "pairs", "quote_debt_state",
+    "noncanonical_symbol_state", "search_index", "stale_set_sha256", "git",
+    "quote_debt_unchanged", "noncanonical_symbols_unchanged",
+    "index_db_unchanged", "user_dirt_preserved",
+}
 _CLOSURE_KEYS = {
     "version", "purpose", "created_at", "roots", "corpus_final_snapshot",
     "artifacts", "heads", "git", "committed_docs",
@@ -109,6 +126,14 @@ _CLOSURE_GIT_KEYS = {
 _CLOSURE_DOC_KEYS = {"completion_report", "roadmap"}
 REQUIRED_CODE_LOCATOR_COUNT = 3305
 REQUIRED_EVIDENCE_REF_COUNT = 3186
+REQUIRED_TARGET_COUNT = 6491
+REQUIRED_QUOTE_DEBT_COUNT = 3307
+REQUIRED_NONCANONICAL_SYMBOL_COUNT = 289
+REQUIRED_PAIR_COUNT = 3202
+_SNAPSHOT_VERIFY_RECEIPT_KEYS = {
+    "ok", "snapshot_id", "manifest_sha256", "file_count", "repo_head",
+    "engine_head", "corpus_fingerprint",
+}
 
 
 class Task18VerificationError(RuntimeError):
@@ -161,6 +186,29 @@ class Task18ClosureResult:
     report_path: Path
     report_sha256: str
     ok: bool = True
+
+
+@dataclass(frozen=True)
+class Task18JsonDocument:
+    data: bytes
+    value: Mapping[str, object]
+    sha256: str
+    mode: int
+
+
+@dataclass(frozen=True)
+class _PostInvariantStats:
+    object_count: int
+    actual_after_fingerprint: str
+    reference_edge_count: int
+    reference_graph_sha256: str
+    pair_count: int
+    quote_count: int
+    quote_ids_sha256: str
+    symbol_count: int
+    symbol_ids_sha256: str
+    search_index: Mapping[str, object]
+    stale_set_sha256: str
 
 
 def _fail(code: str, detail: str = "") -> None:
@@ -218,21 +266,52 @@ def _strict_json(data: bytes, code: str) -> object:
         _fail(code, str(exc))
 
 
-def _canonical_document(path: Path, expected_sha256: str, label: str) -> Mapping[str, object]:
+def read_task18_json_bytes(
+    path: Path,
+    *,
+    expected_sha256: str | None,
+    label: str,
+) -> Task18JsonDocument:
     try:
-        data, _ = read_regular_no_follow(path)
+        data, mode = read_regular_no_follow(path)
     except SnapshotError as exc:
         raise _dependency(exc) from exc
-    if hashlib.sha256(data).hexdigest() != expected_sha256:
+    actual_sha256 = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
         _fail(f"{label}_sha256_mismatch")
     value = _strict_json(data, f"{label}_json_invalid")
+    if not isinstance(value, Mapping):
+        _fail(f"{label}_json_invalid", "document must be a JSON object")
+    return Task18JsonDocument(data=data, value=value, sha256=actual_sha256, mode=mode)
+
+
+def read_task18_canonical_document(
+    path: Path,
+    expected_sha256: str,
+    *,
+    label: str,
+) -> Mapping[str, object]:
+    document = read_task18_json_bytes(
+        path,
+        expected_sha256=expected_sha256,
+        label=label,
+    )
+    value = document.value
     try:
-        canonical = canonical_receipt_bytes(value) if isinstance(value, Mapping) else None
+        canonical = canonical_receipt_bytes(value)
     except FoundationError as exc:
         raise _dependency(exc) from exc
-    if not isinstance(value, Mapping) or canonical != data:
+    if canonical != document.data:
         _fail(f"{label}_json_invalid", "document must be canonical JSON")
     return value
+
+
+def _canonical_document(path: Path, expected_sha256: str, label: str) -> Mapping[str, object]:
+    return read_task18_canonical_document(
+        path,
+        expected_sha256,
+        label=label,
+    )
 
 
 def _decode_bound_bytes(section: Mapping[str, object], field: str) -> bytes:
@@ -269,6 +348,49 @@ def _valid_file_receipt(value: object, *, committed: bool = False) -> bool:
             )
         )
     )
+
+
+def _valid_snapshot_verify_receipt(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == _SNAPSHOT_VERIFY_RECEIPT_KEYS
+        and value.get("ok") is True
+        and isinstance(value.get("snapshot_id"), str)
+        and bool(value.get("snapshot_id"))
+        and type(value.get("file_count")) is int
+        and int(value["file_count"]) >= 0
+        and all(
+            isinstance(value.get(key), str)
+            and _GIT_SHA.fullmatch(str(value[key])) is not None
+            for key in ("repo_head", "engine_head")
+        )
+        and all(
+            isinstance(value.get(key), str)
+            and _SHA256.fullmatch(str(value[key])) is not None
+            for key in ("manifest_sha256", "corpus_fingerprint")
+        )
+    )
+
+
+def _read_bound_file_once(
+    bound: Mapping[str, object],
+    *,
+    label: str,
+) -> bytes:
+    path = Path(str(bound["path"]))
+    try:
+        data, mode = read_regular_no_follow(path)
+    except SnapshotError as exc:
+        raise _dependency(exc) from exc
+    current = {
+        "path": str(path),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+        "mode": mode,
+    }
+    if current != {key: bound[key] for key in _FILE_KEYS}:
+        _fail(f"{label}_drift")
+    return data
 
 
 def _parse_binding_bytes(data: bytes) -> Mapping[str, object]:
@@ -398,7 +520,8 @@ def _parse_binding_bytes(data: bytes) -> Mapping[str, object]:
         != sum(row.get("kind") == "EvidenceRef" for row in targets)
         or migration.get("code_locator_count") != REQUIRED_CODE_LOCATOR_COUNT
         or migration.get("evidence_ref_count") != REQUIRED_EVIDENCE_REF_COUNT
-        or len(targets)
+        or len(targets) != REQUIRED_TARGET_COUNT
+        or REQUIRED_TARGET_COUNT
         != REQUIRED_CODE_LOCATOR_COUNT + REQUIRED_EVIDENCE_REF_COUNT
     ):
         _fail("binding_schema_invalid", "migration summary differs")
@@ -406,6 +529,17 @@ def _parse_binding_bytes(data: bytes) -> Mapping[str, object]:
         if (
             row.get("kind") not in {"CodeLocator", "EvidenceRef"}
             or not isinstance(row.get("expected_title"), str)
+            or (
+                row.get("kind") == "CodeLocator"
+                and row.get("paired_locator_id") is not None
+            )
+            or (
+                row.get("kind") == "EvidenceRef"
+                and (
+                    not isinstance(row.get("paired_locator_id"), str)
+                    or not row.get("paired_locator_id")
+                )
+            )
             or not all(
                 isinstance(row.get(key), str)
                 and _SHA256.fullmatch(str(row[key])) is not None
@@ -424,11 +558,11 @@ def _assert_bound_control_state(value: Mapping[str, object], *, engine_root: Pat
     assert isinstance(snapshot_section, Mapping)
     assert isinstance(target, Mapping)
     try:
+        bound_input_bytes: dict[str, bytes] = {}
         for label in _INPUT_KEYS - {"design", "plan"}:
             bound = inputs[label]
             assert isinstance(bound, Mapping)
-            if capture_bound_file(Path(str(bound["path"]))) != bound:
-                _fail(f"{label}_drift")
+            bound_input_bytes[label] = _read_bound_file_once(bound, label=label)
         for label in ("design", "plan"):
             bound = inputs[label]
             assert isinstance(bound, Mapping)
@@ -467,8 +601,31 @@ def _assert_bound_control_state(value: Mapping[str, object], *, engine_root: Pat
     bb2_bound = value["bb2"]
     assert isinstance(engine_bound, Mapping)
     assert isinstance(bb2_bound, Mapping)
+    verify_bound = inputs["snapshot_verify_receipt"]
+    assert isinstance(verify_bound, Mapping)
+    verify_value = _strict_json(
+        bound_input_bytes["snapshot_verify_receipt"],
+        "snapshot_verify_receipt_json_invalid",
+    )
     if (
-        snapshot.ok is not True
+        not isinstance(verify_value, Mapping)
+        or canonical_receipt_bytes(verify_value)
+        != bound_input_bytes["snapshot_verify_receipt"]
+    ):
+        _fail("snapshot_verify_receipt_json_invalid")
+    expected_verify = {
+        "ok": True,
+        "snapshot_id": snapshot.snapshot_id,
+        "manifest_sha256": snapshot.manifest_sha256,
+        "file_count": snapshot.file_count,
+        "repo_head": snapshot.repo_head,
+        "engine_head": snapshot.engine_head,
+        "corpus_fingerprint": snapshot.corpus_fingerprint,
+    }
+    if (
+        not _valid_snapshot_verify_receipt(verify_value)
+        or verify_value != expected_verify
+        or snapshot.ok is not True
         or snapshot.snapshot_id != snapshot_section["snapshot_id"]
         or snapshot.repo_head != snapshot_section["repo_head"]
         or snapshot.engine_head != snapshot_section["engine_head"]
@@ -586,26 +743,31 @@ def _read_display_manifest(path: Path, expected_sha256: str, binding: ParsedTask
     return value
 
 
-def _snapshot_object_sources(binding: ParsedTask18Binding) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
-    manifest_path = binding.snapshot_root / "manifest.json"
+def _snapshot_object_sources_all(
+    binding: ParsedTask18Binding,
+) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
     try:
-        manifest_data, _ = read_regular_no_follow(manifest_path)
+        manifest_data, _ = read_regular_no_follow(binding.snapshot_root / "manifest.json")
     except SnapshotError as exc:
         raise _dependency(exc) from exc
     manifest = _strict_json(manifest_data, "snapshot_manifest_invalid")
     files = manifest.get("files") if isinstance(manifest, Mapping) else None
     if not isinstance(files, Sequence) or isinstance(files, (str, bytes, bytearray)):
         _fail("snapshot_manifest_invalid")
-    wanted = {str(row["id"]) for row in binding.migration_targets}
     result: dict[str, tuple[str, bytes, Mapping[str, object]]] = {}
     for entry in files:
         if not isinstance(entry, Mapping) or entry.get("scope") != "brain":
             continue
         relative = entry.get("path")
         snapshot_relative = entry.get("snapshot_path")
-        if not isinstance(relative, str) or not isinstance(snapshot_relative, str):
-            _fail("snapshot_manifest_invalid")
-        if not any(relative.startswith(f"{directory}/") for directory in BrainStore._KIND_DIR.values()):
+        if (
+            not isinstance(relative, str)
+            or not isinstance(snapshot_relative, str)
+            or not any(
+                relative.startswith(f"{directory}/")
+                for directory in BrainStore._KIND_DIR.values()
+            )
+        ):
             continue
         try:
             payload, _ = read_regular_no_follow(binding.snapshot_root / snapshot_relative)
@@ -613,17 +775,15 @@ def _snapshot_object_sources(binding: ParsedTask18Binding) -> dict[str, tuple[st
             raise _dependency(exc) from exc
         value = _strict_json(payload, "snapshot_object_invalid")
         object_id = value.get("id") if isinstance(value, Mapping) else None
-        if object_id not in wanted:
-            continue
-        if object_id in result:
-            _fail("snapshot_target_duplicate", str(object_id))
-        result[str(object_id)] = (relative, payload, value)
-    if set(result) != wanted:
-        _fail("snapshot_target_set_mismatch", repr(sorted(wanted - set(result))))
+        if not isinstance(object_id, str) or not object_id or object_id in result:
+            _fail("snapshot_object_set_invalid", str(object_id))
+        result[object_id] = (relative, payload, value)
     return result
 
 
-def _live_object_sources(brain_root: Path, wanted: set[str]) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
+def _live_object_sources_all(
+    brain_root: Path,
+) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
     try:
         files = read_tracked_json_files(brain_root, BrainStore._KIND_DIR.values())
     except CorpusIOError as exc:
@@ -632,28 +792,71 @@ def _live_object_sources(brain_root: Path, wanted: set[str]) -> dict[str, tuple[
     for path, payload in files:
         value = _strict_json(payload, "live_object_invalid")
         object_id = value.get("id") if isinstance(value, Mapping) else None
-        if object_id not in wanted:
-            continue
-        if object_id in result:
-            _fail("live_target_duplicate", str(object_id))
-        result[str(object_id)] = (path.relative_to(brain_root).as_posix(), payload, value)
-    if set(result) != wanted:
-        _fail("live_target_set_mismatch", repr(sorted(wanted - set(result))))
+        if not isinstance(object_id, str) or not object_id or object_id in result:
+            _fail("live_object_set_invalid", str(object_id))
+        result[object_id] = (path.relative_to(brain_root).as_posix(), payload, value)
     return result
 
 
-def _compare_snapshot_before_to_live(binding: ParsedTask18Binding) -> tuple[str, ...]:
-    before = _snapshot_object_sources(binding)
-    wanted = set(before)
-    live = _live_object_sources(binding.brain_root, wanted)
+def _store_from_sources(
+    sources: Mapping[str, tuple[str, bytes, Mapping[str, object]]],
+) -> BrainStore:
+    return BrainStore(
+        {object_id: dict(item[2]) for object_id, item in sources.items()},
+        source_sha256_by_id={
+            object_id: hashlib.sha256(item[1]).hexdigest()
+            for object_id, item in sources.items()
+        },
+    )
+
+
+def _reference_graph(store: BrainStore) -> tuple[int, str]:
+    rows = sorted(
+        (str(obj["id"]), ref.pointer, ref.object_id)
+        for obj in store.all()
+        for ref in iter_object_refs(obj)
+    )
+    return len(rows), _json_sha(rows)
+
+
+def _compare_snapshot_before_to_live(
+    binding: ParsedTask18Binding,
+) -> tuple[tuple[str, ...], BrainStore, BrainStore]:
+    before = _snapshot_object_sources_all(binding)
+    live = _live_object_sources_all(binding.brain_root)
+    before_ids = set(before)
+    live_ids = set(live)
+    if before_ids != live_ids:
+        _fail(
+            "object_set_changed",
+            repr({"creates": sorted(live_ids - before_ids), "deletes": sorted(before_ids - live_ids)}),
+        )
+    renamed = sorted(
+        object_id for object_id in before_ids if before[object_id][0] != live[object_id][0]
+    )
+    if renamed:
+        _fail("object_paths_changed", repr(renamed))
     target_by_id = {str(row["id"]): row for row in binding.migration_targets}
+    changed_ids = {
+        object_id
+        for object_id in before_ids
+        if before[object_id][1] != live[object_id][1]
+    }
+    if changed_ids != set(target_by_id):
+        _fail(
+            "changed_target_set_mismatch",
+            repr(sorted(changed_ids ^ set(target_by_id))),
+        )
     changed_paths: list[str] = []
-    for object_id in sorted(wanted):
+    expected_locator_titles = {
+        object_id: str(row["expected_title"])
+        for object_id, row in target_by_id.items()
+        if row["kind"] == "CodeLocator"
+    }
+    for object_id in sorted(target_by_id):
         before_path, before_bytes, before_obj = before[object_id]
         live_path, _, live_obj = live[object_id]
         target = target_by_id[object_id]
-        if before_path != live_path:
-            _fail("target_path_changed", object_id)
         if hashlib.sha256(before_bytes).hexdigest() != target["before_object_sha256"]:
             _fail("snapshot_before_hash_mismatch", object_id)
         if before_obj.get("kind") != target["kind"] or live_obj.get("kind") != target["kind"]:
@@ -664,8 +867,24 @@ def _compare_snapshot_before_to_live(binding: ParsedTask18Binding) -> tuple[str,
             _fail("non-title change", object_id)
         if live_obj.get("title") != target["expected_title"]:
             _fail("title_mismatch", object_id)
-        changed_paths.append((binding.brain_root / live_path).relative_to(binding.repo_root).as_posix())
-    return tuple(changed_paths)
+        paired = target.get("paired_locator_id")
+        if target["kind"] == "CodeLocator":
+            if paired is not None or target["expected_title"] != canonical_locator_title(live_obj):
+                _fail("target_pair_binding_mismatch", object_id)
+        elif (
+            paired_code_locator_id(before_obj) != paired
+            or paired_code_locator_id(live_obj) != paired
+            or expected_locator_titles.get(str(paired)) != target["expected_title"]
+        ):
+            _fail("target_pair_binding_mismatch", object_id)
+        changed_paths.append(
+            (binding.brain_root / live_path).relative_to(binding.repo_root).as_posix()
+        )
+    before_store = _store_from_sources(before)
+    live_store = _store_from_sources(live)
+    if _reference_graph(before_store) != _reference_graph(live_store):
+        _fail("reference_graph_changed")
+    return tuple(changed_paths), before_store, live_store
 
 
 def _quote_inventory(path: Path, expected_sha256: str) -> tuple[Mapping[str, object], list[str]]:
@@ -676,6 +895,7 @@ def _quote_inventory(path: Path, expected_sha256: str) -> tuple[Mapping[str, obj
         or isinstance(ids, (str, bytes, bytearray))
         or not all(isinstance(item, str) and item for item in ids)
         or list(ids) != sorted(ids)
+        or len(ids) != REQUIRED_QUOTE_DEBT_COUNT
         or value.get("quote_debt_ids_sha256") != _json_sha(list(ids))
     ):
         _fail("quote_debt_inventory_invalid")
@@ -692,41 +912,6 @@ def _noncanonical_symbol_ids(store: BrainStore) -> list[str]:
     )
 
 
-def _snapshot_store(binding: ParsedTask18Binding) -> BrainStore:
-    objects: dict[str, dict] = {}
-    for _, payload, value in _snapshot_object_sources_all(binding):
-        assert isinstance(value, Mapping)
-        object_id = value.get("id")
-        if not isinstance(object_id, str) or object_id in objects:
-            _fail("snapshot_object_set_invalid")
-        objects[object_id] = dict(value)
-    return BrainStore(objects)
-
-
-def _snapshot_object_sources_all(binding: ParsedTask18Binding):
-    manifest_data, _ = read_regular_no_follow(binding.snapshot_root / "manifest.json")
-    manifest = _strict_json(manifest_data, "snapshot_manifest_invalid")
-    files = manifest.get("files") if isinstance(manifest, Mapping) else None
-    if not isinstance(files, Sequence) or isinstance(files, (str, bytes, bytearray)):
-        _fail("snapshot_manifest_invalid")
-    for entry in files:
-        if not isinstance(entry, Mapping) or entry.get("scope") != "brain":
-            continue
-        relative = entry.get("path")
-        snapshot_relative = entry.get("snapshot_path")
-        if (
-            not isinstance(relative, str)
-            or not isinstance(snapshot_relative, str)
-            or not any(relative.startswith(f"{directory}/") for directory in BrainStore._KIND_DIR.values())
-        ):
-            continue
-        payload, _ = read_regular_no_follow(binding.snapshot_root / snapshot_relative)
-        value = _strict_json(payload, "snapshot_object_invalid")
-        if not isinstance(value, Mapping):
-            _fail("snapshot_object_invalid")
-        yield relative, payload, value
-
-
 def _paired_title_mismatches(store: BrainStore) -> list[str]:
     locators = {obj["id"]: obj for obj in store.by_kind("CodeLocator")}
     mismatches: list[str] = []
@@ -741,13 +926,13 @@ def _paired_title_mismatches(store: BrainStore) -> list[str]:
 def _assert_post_invariants(
     binding: ParsedTask18Binding,
     *,
+    before_store: BrainStore,
+    live_store: BrainStore,
     quote_debt_path: Path,
     expected_quote_debt_sha256: str,
-) -> None:
+) -> _PostInvariantStats:
     _, quote_ids = _quote_inventory(quote_debt_path, expected_quote_debt_sha256)
     try:
-        before_store = _snapshot_store(binding)
-        live_store = BrainStore.load(binding.brain_root)
         state = capture_task18_corpus_state(binding.brain_root)
     except Exception as exc:
         raise _dependency(exc) from exc
@@ -766,7 +951,9 @@ def _assert_post_invariants(
     }
     if live_quote_ids != quote_ids or before_quote_presence != live_quote_presence:
         _fail("quote_debt_changed")
-    if _noncanonical_symbol_ids(before_store) != _noncanonical_symbol_ids(live_store):
+    before_symbols = _noncanonical_symbol_ids(before_store)
+    live_symbols = _noncanonical_symbol_ids(live_store)
+    if live_symbols != before_symbols or len(live_symbols) != REQUIRED_NONCANONICAL_SYMBOL_COUNT:
         _fail("noncanonical_symbols_changed")
     if len(before_store.all()) != len(live_store.all()):
         _fail("object_count_changed")
@@ -774,7 +961,11 @@ def _assert_post_invariants(
         _fail("after_corpus_fingerprint_mismatch")
     if lint_store(live_store, binding.repo_root):
         _fail("lint_not_clean")
-    if _paired_title_mismatches(live_store):
+    pair_count = sum(
+        paired_code_locator_id(obj) is not None
+        for obj in live_store.by_kind("EvidenceRef")
+    )
+    if pair_count != REQUIRED_PAIR_COUNT or _paired_title_mismatches(live_store):
         _fail("paired_title_mismatch")
     bound_search = binding.value.get("search_index")
     bound_stale = binding.value.get("stale_set")
@@ -785,30 +976,59 @@ def _assert_post_invariants(
         or state.get("stale_set") != bound_stale
     ):
         _fail("index_or_stale_state_changed")
+    edge_count, graph_sha = _reference_graph(live_store)
+    search_index = state["search_index"]
+    stale_set = state["stale_set"]
+    assert isinstance(search_index, Mapping)
+    assert isinstance(stale_set, Mapping)
+    return _PostInvariantStats(
+        object_count=len(live_store.all()),
+        actual_after_fingerprint=corpus_fingerprint(live_store),
+        reference_edge_count=edge_count,
+        reference_graph_sha256=graph_sha,
+        pair_count=pair_count,
+        quote_count=len(quote_ids),
+        quote_ids_sha256=_json_sha(quote_ids),
+        symbol_count=len(live_symbols),
+        symbol_ids_sha256=_json_sha(live_symbols),
+        search_index=dict(search_index),
+        stale_set_sha256=str(stale_set["sha256"]),
+    )
 
 
 def _atomic_create_pathspec(path: Path, paths: Sequence[str]) -> str:
-    path = _exact_absolute(path, "pathspec_output")
+    from project_brain.foundation import _create_at, _preflight_absent, _validate_output_path
+
     payload = b"".join(os.fsencode(value) + b"\0" for value in paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    parent_fd = -1
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
-        _fail("pathspec_exists", str(path))
-    except OSError as exc:
-        _fail("pathspec_create_failed", str(exc))
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except Exception:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        raise
+        parent_fd, name = _validate_output_path(path, label="pathspec")
+        _preflight_absent(parent_fd, name, label="pathspec")
+        _create_at(parent_fd, name, payload, label="pathspec")
+    except FoundationError as exc:
+        raise _dependency(exc) from exc
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _preflight_output(path: Path, label: str) -> None:
+    from project_brain.foundation import _preflight_absent, _validate_output_path
+
+    parent_fd = -1
+    try:
+        parent_fd, name = _validate_output_path(path, label=label)
+        _preflight_absent(parent_fd, name, label=label)
+    except FoundationError as exc:
+        raise _dependency(exc) from exc
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _post_reverse_tail_hook() -> None:
+    """Deterministic test seam immediately before the reverse tail."""
 
 
 def verify_task18_applied(
@@ -828,10 +1048,8 @@ def verify_task18_applied(
 ) -> Task18PostVerification:
     report_path = _exact_absolute(report_path, "report_path")
     pathspec_output = _exact_absolute(pathspec_output, "pathspec_output")
-    if report_path.exists():
-        _fail("report_exists", str(report_path))
-    if pathspec_output.exists():
-        _fail("pathspec_exists", str(pathspec_output))
+    _preflight_output(report_path, "report")
+    _preflight_output(pathspec_output, "pathspec")
     binding = parse_task18_binding_for_post_verify(
         binding_path=binding_path,
         expected_binding_sha256=expected_binding_sha256,
@@ -839,35 +1057,96 @@ def verify_task18_applied(
         repo_root=repo_root,
         brain_root=brain_root,
     )
-    _read_display_manifest(Path(manifest_path), expected_manifest_sha256, binding)
-    changed_paths = _compare_snapshot_before_to_live(binding)
-    _assert_post_invariants(
-        binding,
-        quote_debt_path=Path(quote_debt_path),
-        expected_quote_debt_sha256=expected_quote_debt_sha256,
-    )
-    try:
-        brain_objects = (binding.brain_root / "objects").relative_to(binding.repo_root).as_posix()
-        git_changed = set(
-            decode_nul_paths(
-                run_git_bytes(
-                    binding.repo_root,
-                    "diff", "--name-only", "-z", "HEAD", "--", brain_objects,
-                )
+    manifest_path = _exact_absolute(Path(manifest_path), "manifest_path")
+    quote_debt_path = _exact_absolute(Path(quote_debt_path), "quote_debt_path")
+    with corpus_lock(binding.brain_root, exclusive=False):
+        assert_corpus_readable(binding.brain_root)
+        _read_display_manifest(manifest_path, expected_manifest_sha256, binding)
+        changed_paths, before_store, live_store = _compare_snapshot_before_to_live(binding)
+        stats = _assert_post_invariants(
+            binding,
+            before_store=before_store,
+            live_store=live_store,
+            quote_debt_path=quote_debt_path,
+            expected_quote_debt_sha256=expected_quote_debt_sha256,
+        )
+        try:
+            brain_objects = (binding.brain_root / "objects").relative_to(binding.repo_root).as_posix()
+            git_changed = set(decode_nul_paths(run_git_bytes(
+                binding.repo_root, "diff", "--name-only", "-z", "HEAD", "--", brain_objects,
+            )))
+            if git_changed != set(changed_paths):
+                _fail("git_target_path_mismatch", repr(sorted(git_changed ^ set(changed_paths))))
+            allowed = list(changed_paths)
+            if report_path.is_relative_to(binding.repo_root):
+                allowed.append(report_path.relative_to(binding.repo_root).as_posix())
+            dirt = verify_git_dirt_preserved(
+                binding.repo_root,
+                baseline_status_bytes=binding.baseline_status_bytes,
+                baseline_content_manifest_bytes=binding.baseline_dirt_manifest_bytes,
+                label="task18_post_apply",
+                allowed_extra_paths=tuple(sorted(allowed)),
             )
+        except Exception as exc:
+            raise _dependency(exc) from exc
+        _post_reverse_tail_hook()
+        tail_binding = read_task18_json_bytes(
+            binding.path,
+            expected_sha256=binding.sha256,
+            label="binding",
         )
-        if git_changed != set(changed_paths):
-            _fail("git_target_path_mismatch", repr(sorted(git_changed ^ set(changed_paths))))
-        allowed = tuple(sorted((*changed_paths, report_path.relative_to(binding.repo_root).as_posix())))
-        verify_git_dirt_preserved(
-            binding.repo_root,
-            baseline_status_bytes=binding.baseline_status_bytes,
-            baseline_content_manifest_bytes=binding.baseline_dirt_manifest_bytes,
-            label="task18_post_apply",
-            allowed_extra_paths=allowed,
+        _parse_binding_bytes(tail_binding.data)
+        _assert_bound_control_state(
+            binding.value,
+            engine_root=binding.engine_root,
+            repo_root=binding.repo_root,
         )
-    except Exception as exc:
-        raise _dependency(exc) from exc
+        _read_display_manifest(manifest_path, expected_manifest_sha256, binding)
+        _quote_inventory(quote_debt_path, expected_quote_debt_sha256)
+        snapshot = verify_snapshot(
+            binding.snapshot_root,
+            expected_manifest_sha256=binding.snapshot_manifest_sha256,
+        )
+        snapshot_bound = binding.value["pre_mutation_snapshot"]
+        assert isinstance(snapshot_bound, Mapping)
+        if _expected_snapshot_verify(snapshot) != {
+            "ok": True,
+            "snapshot_id": snapshot_bound["snapshot_id"],
+            "manifest_sha256": snapshot_bound["manifest_sha256"],
+            "file_count": snapshot_bound["file_count"],
+            "repo_head": snapshot_bound["repo_head"],
+            "engine_head": snapshot_bound["engine_head"],
+            "corpus_fingerprint": snapshot_bound["corpus_fingerprint"],
+        }:
+            _fail("snapshot_drift")
+        tail_paths, _, tail_store = _compare_snapshot_before_to_live(binding)
+        if tail_paths != changed_paths or corpus_fingerprint(tail_store) != binding.expected_after_corpus_fingerprint:
+            _fail("corpus_changed_during_post_verify")
+        try:
+            tail_state = capture_task18_corpus_state(binding.brain_root)
+        except Exception as exc:
+            raise _dependency(exc) from exc
+        if (
+            tail_state.get("search_index") != stats.search_index
+            or not isinstance(tail_state.get("stale_set"), Mapping)
+            or tail_state["stale_set"].get("sha256") != stats.stale_set_sha256
+        ):
+            _fail("index_or_stale_state_changed_during_post_verify")
+        try:
+            tail_dirt = verify_git_dirt_preserved(
+                binding.repo_root,
+                baseline_status_bytes=binding.baseline_status_bytes,
+                baseline_content_manifest_bytes=binding.baseline_dirt_manifest_bytes,
+                label="task18_post_apply_tail",
+                allowed_extra_paths=tuple(sorted(allowed)),
+            )
+        except Exception as exc:
+            raise _dependency(exc) from exc
+        if (
+            tail_dirt.status_bytes != dirt.status_bytes
+            or tail_dirt.content_manifest_bytes != dirt.content_manifest_bytes
+        ):
+            _fail("git_dirt_changed_during_post_verify")
     report = {
         "version": 1,
         "purpose": "task18-post-apply-verification",
@@ -876,16 +1155,45 @@ def verify_task18_applied(
         "display_manifest": {"path": str(manifest_path), "sha256": expected_manifest_sha256},
         "quote_debt": {"path": str(quote_debt_path), "sha256": expected_quote_debt_sha256},
         "target_ids_sha256": binding.target_ids_sha256,
+        "expected_after_corpus_fingerprint": binding.expected_after_corpus_fingerprint,
+        "actual_after_corpus_fingerprint": stats.actual_after_fingerprint,
+        "object_count": stats.object_count,
         "changed_paths": list(changed_paths),
         "update_count": len(changed_paths),
+        "create_count": 0,
+        "delete_count": 0,
+        "rename_count": 0,
+        "reference_graph": {
+            "edge_count": stats.reference_edge_count,
+            "sha256": stats.reference_graph_sha256,
+            "unchanged": True,
+        },
+        "lint_problem_count": 0,
+        "pairs": {"total": stats.pair_count, "mismatch_count": 0},
+        "quote_debt_state": {
+            "count": stats.quote_count,
+            "ids_sha256": stats.quote_ids_sha256,
+        },
+        "noncanonical_symbol_state": {
+            "count": stats.symbol_count,
+            "ids_sha256": stats.symbol_ids_sha256,
+        },
+        "search_index": dict(stats.search_index),
+        "stale_set_sha256": stats.stale_set_sha256,
+        "git": {
+            "baseline_status_sha256": hashlib.sha256(binding.baseline_status_bytes).hexdigest(),
+            "baseline_dirt_content_sha256": hashlib.sha256(binding.baseline_dirt_manifest_bytes).hexdigest(),
+            "current_status_sha256": dirt.status_sha256,
+            "current_dirt_content_sha256": dirt.content_manifest_sha256,
+        },
         "quote_debt_unchanged": True,
         "noncanonical_symbols_unchanged": True,
         "index_db_unchanged": True,
         "user_dirt_preserved": True,
     }
     try:
-        report_sha = atomic_create_receipt(report_path, report)
         _atomic_create_pathspec(pathspec_output, changed_paths)
+        report_sha = atomic_create_receipt(report_path, report)
     except Exception as exc:
         raise _dependency(exc) from exc
     return Task18PostVerification(
@@ -899,12 +1207,32 @@ def verify_task18_applied(
     )
 
 
-def _artifact_receipt(path: Path, expected_sha256: str, label: str) -> dict[str, object]:
+def _artifact_document(
+    path: Path,
+    expected_sha256: str,
+    label: str,
+) -> tuple[Task18JsonDocument, dict[str, object]]:
     path = _exact_absolute(path, label)
-    receipt = dict(capture_bound_file(path))
-    if receipt["sha256"] != expected_sha256:
-        _fail(f"{label}_sha256_mismatch")
-    return receipt
+    document = read_task18_json_bytes(
+        path,
+        expected_sha256=expected_sha256,
+        label=label,
+    )
+    try:
+        if canonical_receipt_bytes(document.value) != document.data:
+            _fail(f"{label}_json_invalid", "document must be canonical JSON")
+    except FoundationError as exc:
+        raise _dependency(exc) from exc
+    return document, {
+        "path": str(path),
+        "sha256": document.sha256,
+        "size": len(document.data),
+        "mode": document.mode,
+    }
+
+
+def _artifact_receipt(path: Path, expected_sha256: str, label: str) -> dict[str, object]:
+    return _artifact_document(path, expected_sha256, label)[1]
 
 
 def _committed_doc(root: Path, path: Path, head: str, label: str) -> dict[str, object]:
@@ -932,9 +1260,222 @@ def _current_git_closure(engine_root: Path, repo_root: Path) -> tuple[object, ob
     return engine, repo
 
 
+def _closure_binding(
+    *,
+    path: Path,
+    expected_sha256: str,
+    engine_root: Path,
+    repo_root: Path,
+    brain_root: Path,
+) -> tuple[Mapping[str, object], dict[str, object]]:
+    document, receipt = _artifact_document(path, expected_sha256, "binding")
+    value = _parse_binding_bytes(document.data)
+    roots = value["roots"]
+    if roots != {
+        "engine": str(engine_root),
+        "bb2": str(repo_root),
+        "brain": str(brain_root),
+    }:
+        _fail("binding_roots_mismatch")
+    return value, receipt
+
+
+def _expected_snapshot_verify(snapshot: object) -> dict[str, object]:
+    return {
+        "ok": True,
+        "snapshot_id": snapshot.snapshot_id,
+        "manifest_sha256": snapshot.manifest_sha256,
+        "file_count": snapshot.file_count,
+        "repo_head": snapshot.repo_head,
+        "engine_head": snapshot.engine_head,
+        "corpus_fingerprint": snapshot.corpus_fingerprint,
+    }
+
+
+def _assert_closure_post_report(
+    value: Mapping[str, object],
+    *,
+    binding_path: Path,
+    binding_sha256: str,
+    manifest_path: Path,
+    manifest_sha256: str,
+    binding: Mapping[str, object],
+) -> None:
+    migration = binding["migration"]
+    search_index = binding["search_index"]
+    stale_set = binding["stale_set"]
+    inputs = binding["inputs"]
+    bb2 = binding["bb2"]
+    assert isinstance(migration, Mapping)
+    assert isinstance(search_index, Mapping)
+    assert isinstance(stale_set, Mapping)
+    assert isinstance(inputs, Mapping)
+    assert isinstance(bb2, Mapping)
+    pairs = value.get("pairs")
+    quote = value.get("quote_debt_state")
+    symbols = value.get("noncanonical_symbol_state")
+    graph = value.get("reference_graph")
+    git = value.get("git")
+    quote_input = inputs["quote_debt"]
+    assert isinstance(quote_input, Mapping)
+    _, bound_quote_ids = _quote_inventory(
+        Path(str(quote_input["path"])),
+        str(quote_input["sha256"]),
+    )
+    if (
+        set(value) != _POST_REPORT_KEYS
+        or value.get("version") != 1
+        or value.get("purpose") != "task18-post-apply-verification"
+        or not isinstance(value.get("generated_at"), str)
+        or not value.get("generated_at")
+        or value.get("binding") != {"path": str(binding_path), "sha256": binding_sha256}
+        or value.get("display_manifest")
+        != {"path": str(manifest_path), "sha256": manifest_sha256}
+        or value.get("target_ids_sha256") != migration["target_ids_sha256"]
+        or value.get("expected_after_corpus_fingerprint")
+        != migration["expected_after_corpus_fingerprint"]
+        or value.get("actual_after_corpus_fingerprint")
+        != migration["expected_after_corpus_fingerprint"]
+        or value.get("quote_debt")
+        != {"path": quote_input["path"], "sha256": quote_input["sha256"]}
+        or type(value.get("object_count")) is not int
+        or int(value["object_count"]) < REQUIRED_TARGET_COUNT
+        or value.get("update_count") != REQUIRED_TARGET_COUNT
+        or value.get("create_count") != 0
+        or value.get("delete_count") != 0
+        or value.get("rename_count") != 0
+        or not isinstance(value.get("changed_paths"), list)
+        or len(value["changed_paths"]) != REQUIRED_TARGET_COUNT
+        or len(set(value["changed_paths"])) != REQUIRED_TARGET_COUNT
+        or not all(
+            isinstance(path, str) and path.startswith("brain/objects/")
+            for path in value["changed_paths"]
+        )
+        or value.get("lint_problem_count") != 0
+        or not isinstance(pairs, Mapping)
+        or pairs != {"total": REQUIRED_PAIR_COUNT, "mismatch_count": 0}
+        or not isinstance(quote, Mapping)
+        or set(quote) != {"count", "ids_sha256"}
+        or quote.get("count") != REQUIRED_QUOTE_DEBT_COUNT
+        or quote.get("ids_sha256") != _json_sha(bound_quote_ids)
+        or not isinstance(quote.get("ids_sha256"), str)
+        or _SHA256.fullmatch(str(quote["ids_sha256"])) is None
+        or not isinstance(symbols, Mapping)
+        or set(symbols) != {"count", "ids_sha256"}
+        or symbols.get("count") != REQUIRED_NONCANONICAL_SYMBOL_COUNT
+        or not isinstance(symbols.get("ids_sha256"), str)
+        or _SHA256.fullmatch(str(symbols["ids_sha256"])) is None
+        or not isinstance(graph, Mapping)
+        or set(graph) != {"edge_count", "sha256", "unchanged"}
+        or graph.get("unchanged") is not True
+        or type(graph.get("edge_count")) is not int
+        or int(graph["edge_count"]) < 0
+        or not isinstance(graph.get("sha256"), str)
+        or _SHA256.fullmatch(str(graph["sha256"])) is None
+        or value.get("search_index") != search_index
+        or value.get("stale_set_sha256") != stale_set["sha256"]
+        or not isinstance(git, Mapping)
+        or set(git) != {
+            "baseline_status_sha256", "baseline_dirt_content_sha256",
+            "current_status_sha256", "current_dirt_content_sha256",
+        }
+        or git.get("baseline_status_sha256") != bb2["status_sha256"]
+        or git.get("baseline_dirt_content_sha256") != bb2["dirt_content_sha256"]
+        or not all(
+            isinstance(git.get(key), str)
+            and _SHA256.fullmatch(str(git[key])) is not None
+            for key in git
+        )
+        or any(
+            value.get(label) is not True
+            for label in (
+                "quote_debt_unchanged",
+                "noncanonical_symbols_unchanged",
+                "index_db_unchanged",
+                "user_dirt_preserved",
+            )
+        )
+    ):
+        _fail("post_report_binding_mismatch")
+
+
+def _closure_artifacts(
+    *,
+    binding_path: Path,
+    expected_binding_sha256: str,
+    manifest_path: Path,
+    expected_manifest_sha256: str,
+    post_report_path: Path,
+    expected_post_report_sha256: str,
+    engine_root: Path,
+    repo_root: Path,
+    brain_root: Path,
+) -> tuple[Mapping[str, object], dict[str, dict[str, object]]]:
+    binding, binding_receipt = _closure_binding(
+        path=binding_path,
+        expected_sha256=expected_binding_sha256,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    manifest_doc, manifest_receipt = _artifact_document(
+        manifest_path, expected_manifest_sha256, "display_manifest",
+    )
+    snapshot = binding["pre_mutation_snapshot"]
+    assert isinstance(snapshot, Mapping)
+    if (
+        set(manifest_doc.value) != _DISPLAY_MANIFEST_KEYS
+        or manifest_doc.value.get("migration_version") != 3
+        or manifest_doc.value.get("migration_kind") != "display_only"
+        or manifest_doc.value.get("task18_binding_path") != str(binding_path)
+        or manifest_doc.value.get("task18_binding_sha256") != expected_binding_sha256
+        or manifest_doc.value.get("snapshot_id") != snapshot["snapshot_id"]
+        or manifest_doc.value.get("snapshot_manifest_sha256")
+        != snapshot["manifest_sha256"]
+    ):
+        _fail("display_manifest_binding_mismatch")
+    post_doc, post_receipt = _artifact_document(
+        post_report_path, expected_post_report_sha256, "post_report",
+    )
+    _assert_closure_post_report(
+        post_doc.value,
+        binding_path=binding_path,
+        binding_sha256=expected_binding_sha256,
+        manifest_path=manifest_path,
+        manifest_sha256=expected_manifest_sha256,
+        binding=binding,
+    )
+    return binding, {
+        "binding": binding_receipt,
+        "display_manifest": manifest_receipt,
+        "post_report": post_receipt,
+    }
+
+
+def _assert_baseline_git(
+    binding: Mapping[str, object],
+    engine_git: object,
+    repo_git: object,
+) -> None:
+    engine = binding["engine"]
+    bb2 = binding["bb2"]
+    assert isinstance(engine, Mapping)
+    assert isinstance(bb2, Mapping)
+    if (
+        engine_git.status_bytes != _decode_bound_bytes(engine, "status_bytes_base64")
+        or engine_git.content_manifest_bytes != _decode_bound_bytes(engine, "dirt_manifest_base64")
+        or repo_git.status_bytes != _decode_bound_bytes(bb2, "status_bytes_base64")
+        or repo_git.content_manifest_bytes != _decode_bound_bytes(bb2, "dirt_manifest_base64")
+    ):
+        _fail("closure_user_dirt_drift")
+
+
+def _closure_reverse_tail_hook() -> None:
+    """Deterministic test seam immediately before closure output creation."""
+
+
 def create_task18_closure_receipt(
     *,
-    closure_path: Path,
     report_path: Path,
     corpus_final_snapshot_root: Path,
     expected_snapshot_manifest_sha256: str,
@@ -951,17 +1492,17 @@ def create_task18_closure_receipt(
     brain_root: Path,
     completion_report_path: Path,
     roadmap_path: Path,
+    expected_engine_head: str,
+    expected_repo_head: str,
     generated_at: str,
 ) -> Task18ClosureResult:
-    closure_path = _exact_absolute(closure_path, "closure_path")
     report_path = _exact_absolute(report_path, "report_path")
     engine_root = _exact_absolute(engine_root, "engine_root")
     repo_root = _exact_absolute(repo_root, "repo_root")
     brain_root = _exact_absolute(brain_root, "brain_root")
-    if closure_path.exists():
-        _fail("closure_exists", str(closure_path))
-    if report_path.exists():
-        _fail("report_exists", str(report_path))
+    _preflight_output(report_path, "report")
+    if _GIT_SHA.fullmatch(expected_engine_head) is None or _GIT_SHA.fullmatch(expected_repo_head) is None:
+        _fail("expected_head_invalid")
     try:
         snapshot = verify_snapshot(
             _exact_absolute(corpus_final_snapshot_root, "corpus_final_snapshot_root"),
@@ -970,27 +1511,42 @@ def create_task18_closure_receipt(
     except Exception as exc:
         raise _dependency(exc) from exc
     engine_git, repo_git = _current_git_closure(engine_root, repo_root)
-    if snapshot.repo_head != repo_git.head:
-        _fail("corpus_head_mismatch")
-    verify_receipt = _artifact_receipt(
+    binding, artifacts = _closure_artifacts(
+        binding_path=_exact_absolute(binding_path, "binding"),
+        expected_binding_sha256=expected_binding_sha256,
+        manifest_path=_exact_absolute(manifest_path, "display_manifest"),
+        expected_manifest_sha256=expected_manifest_sha256,
+        post_report_path=_exact_absolute(post_report_path, "post_report"),
+        expected_post_report_sha256=expected_post_report_sha256,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    _assert_baseline_git(binding, engine_git, repo_git)
+    binding_engine = binding["engine"]
+    migration = binding["migration"]
+    assert isinstance(binding_engine, Mapping)
+    assert isinstance(migration, Mapping)
+    if (
+        engine_git.head != expected_engine_head
+        or repo_git.head != expected_repo_head
+        or snapshot.repo_head != expected_repo_head
+        or snapshot.engine_head != binding_engine["head"]
+        or snapshot.corpus_fingerprint != migration["expected_after_corpus_fingerprint"]
+    ):
+        _fail("closure_heads_or_corpus_mismatch")
+    verify_doc, verify_receipt = _artifact_document(
         snapshot_verify_receipt_path,
         expected_snapshot_verify_receipt_sha256,
         "snapshot_verify_receipt",
     )
-    verify_value = _canonical_document(
-        Path(snapshot_verify_receipt_path),
-        expected_snapshot_verify_receipt_sha256,
-        "snapshot_verify_receipt",
-    )
-    if verify_value != {
-        "ok": True,
-        "snapshot_id": snapshot.snapshot_id,
-        "manifest_sha256": snapshot.manifest_sha256,
-        "file_count": snapshot.file_count,
-    }:
+    if (
+        not _valid_snapshot_verify_receipt(verify_doc.value)
+        or verify_doc.value != _expected_snapshot_verify(snapshot)
+    ):
         _fail("snapshot_verify_receipt_mismatch")
-    completion = _committed_doc(engine_root, completion_report_path, engine_git.head, "completion_report")
-    roadmap = _committed_doc(engine_root, roadmap_path, engine_git.head, "roadmap")
+    completion = _committed_doc(engine_root, completion_report_path, expected_engine_head, "completion_report")
+    roadmap = _committed_doc(engine_root, roadmap_path, expected_engine_head, "roadmap")
     value = {
         "version": 1,
         "purpose": "task18-final-closure",
@@ -1003,15 +1559,11 @@ def create_task18_closure_receipt(
             "file_count": snapshot.file_count,
             "verify_receipt": verify_receipt,
         },
-        "artifacts": {
-            "binding": _artifact_receipt(binding_path, expected_binding_sha256, "binding"),
-            "display_manifest": _artifact_receipt(manifest_path, expected_manifest_sha256, "display_manifest"),
-            "post_report": _artifact_receipt(post_report_path, expected_post_report_sha256, "post_report"),
-        },
+        "artifacts": artifacts,
         "heads": {
             "implementation": snapshot.engine_head,
             "corpus": snapshot.repo_head,
-            "docs": engine_git.head,
+            "docs": expected_engine_head,
         },
         "git": {
             "engine_cached_empty": True,
@@ -1023,17 +1575,56 @@ def create_task18_closure_receipt(
         },
         "committed_docs": {"completion_report": completion, "roadmap": roadmap},
     }
+    _closure_reverse_tail_hook()
     try:
-        closure_sha = atomic_create_receipt(closure_path, value)
-    except FoundationError as exc:
+        tail_snapshot = verify_snapshot(
+            Path(corpus_final_snapshot_root),
+            expected_manifest_sha256=expected_snapshot_manifest_sha256,
+        )
+    except Exception as exc:
         raise _dependency(exc) from exc
-    return verify_task18_closure_receipt(
-        closure_path=closure_path,
-        expected_closure_sha256=closure_sha,
+    tail_engine_git, tail_repo_git = _current_git_closure(engine_root, repo_root)
+    tail_verify_doc, tail_verify_receipt = _artifact_document(
+        Path(snapshot_verify_receipt_path),
+        expected_snapshot_verify_receipt_sha256,
+        "snapshot_verify_receipt",
+    )
+    tail_binding, tail_artifacts = _closure_artifacts(
+        binding_path=Path(binding_path),
+        expected_binding_sha256=expected_binding_sha256,
+        manifest_path=Path(manifest_path),
+        expected_manifest_sha256=expected_manifest_sha256,
+        post_report_path=Path(post_report_path),
+        expected_post_report_sha256=expected_post_report_sha256,
         engine_root=engine_root,
         repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    _assert_baseline_git(tail_binding, tail_engine_git, tail_repo_git)
+    if (
+        tail_snapshot != snapshot
+        or tail_engine_git != engine_git
+        or tail_repo_git != repo_git
+        or tail_verify_receipt != verify_receipt
+        or tail_verify_doc.value != _expected_snapshot_verify(tail_snapshot)
+        or tail_artifacts != artifacts
+        or _committed_doc(
+            engine_root, completion_report_path, expected_engine_head, "completion_report",
+        ) != completion
+        or _committed_doc(
+            engine_root, roadmap_path, expected_engine_head, "roadmap",
+        ) != roadmap
+    ):
+        _fail("closure_state_changed_during_create")
+    try:
+        closure_sha = atomic_create_receipt(report_path, value)
+    except FoundationError as exc:
+        raise _dependency(exc) from exc
+    return Task18ClosureResult(
+        closure_path=report_path,
+        closure_sha256=closure_sha,
         report_path=report_path,
-        generated_at=generated_at,
+        report_sha256=closure_sha,
     )
 
 
@@ -1043,14 +1634,13 @@ def verify_task18_closure_receipt(
     expected_closure_sha256: str,
     engine_root: Path,
     repo_root: Path,
+    brain_root: Path,
     report_path: Path,
-    generated_at: str,
 ) -> Task18ClosureResult:
     """생성 payload builder를 쓰지 않고 closure와 현재 상태를 다시 계산한다."""
     closure_path = _exact_absolute(closure_path, "closure_path")
     report_path = _exact_absolute(report_path, "report_path")
-    if report_path.exists():
-        _fail("report_exists", str(report_path))
+    _preflight_output(report_path, "report")
     value = _canonical_document(closure_path, expected_closure_sha256, "closure")
     if (
         set(value) != _CLOSURE_KEYS
@@ -1099,7 +1689,8 @@ def verify_task18_closure_receipt(
         _fail("closure_schema_invalid")
     engine_root = _exact_absolute(engine_root, "engine_root")
     repo_root = _exact_absolute(repo_root, "repo_root")
-    if roots.get("engine") != str(engine_root) or roots.get("bb2") != str(repo_root):
+    brain_root = _exact_absolute(brain_root, "brain_root")
+    if roots != {"engine": str(engine_root), "bb2": str(repo_root), "brain": str(brain_root)}:
         _fail("closure_roots_mismatch")
     try:
         snapshot = verify_snapshot(
@@ -1126,22 +1717,40 @@ def verify_task18_closure_receipt(
         str(verify_receipt["sha256"]),
         "snapshot_verify_receipt",
     )
-    if verify_value != {
-        "ok": True,
-        "snapshot_id": snapshot.snapshot_id,
-        "manifest_sha256": snapshot.manifest_sha256,
-        "file_count": snapshot.file_count,
-    }:
+    if (
+        not _valid_snapshot_verify_receipt(verify_value)
+        or verify_value != _expected_snapshot_verify(snapshot)
+    ):
         _fail("snapshot_verify_receipt_mismatch")
-    for label in ("binding", "display_manifest", "post_report"):
-        receipt = artifacts.get(label)
-        if not isinstance(receipt, Mapping) or capture_bound_file(Path(str(receipt["path"]))) != receipt:
-            _fail(f"{label}_drift")
+    binding_receipt = artifacts.get("binding")
+    manifest_receipt = artifacts.get("display_manifest")
+    post_receipt = artifacts.get("post_report")
+    assert isinstance(binding_receipt, Mapping)
+    assert isinstance(manifest_receipt, Mapping)
+    assert isinstance(post_receipt, Mapping)
+    binding, current_artifacts = _closure_artifacts(
+        binding_path=Path(str(binding_receipt["path"])),
+        expected_binding_sha256=str(binding_receipt["sha256"]),
+        manifest_path=Path(str(manifest_receipt["path"])),
+        expected_manifest_sha256=str(manifest_receipt["sha256"]),
+        post_report_path=Path(str(post_receipt["path"])),
+        expected_post_report_sha256=str(post_receipt["sha256"]),
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    if current_artifacts != artifacts:
+        _fail("closure_artifact_drift")
+    _assert_baseline_git(binding, engine_git, repo_git)
+    binding_engine = binding["engine"]
+    migration = binding["migration"]
+    assert isinstance(binding_engine, Mapping)
+    assert isinstance(migration, Mapping)
     if heads != {
         "implementation": snapshot.engine_head,
         "corpus": snapshot.repo_head,
         "docs": engine_git.head,
-    } or repo_git.head != snapshot.repo_head:
+    } or repo_git.head != snapshot.repo_head or snapshot.engine_head != binding_engine["head"] or snapshot.corpus_fingerprint != migration["expected_after_corpus_fingerprint"]:
         _fail("closure_heads_drift")
     if git != {
         "engine_cached_empty": True,
@@ -1160,10 +1769,24 @@ def verify_task18_closure_receipt(
         current = _committed_doc(engine_root, path, engine_git.head, label)
         if current != receipt:
             _fail("committed_docs_drift", label)
+    _closure_reverse_tail_hook()
+    tail_closure = read_task18_json_bytes(
+        closure_path,
+        expected_sha256=expected_closure_sha256,
+        label="closure",
+    )
+    try:
+        if canonical_receipt_bytes(tail_closure.value) != tail_closure.data:
+            _fail("closure_json_invalid")
+    except FoundationError as exc:
+        raise _dependency(exc) from exc
+    tail_engine_git, tail_repo_git = _current_git_closure(engine_root, repo_root)
+    if tail_engine_git != engine_git or tail_repo_git != repo_git:
+        _fail("closure_state_changed_during_verify")
     report = {
         "version": 1,
         "purpose": "task18-final-closure-verification",
-        "generated_at": generated_at,
+        "generated_at": now_kst(),
         "ok": True,
         "closure": {"path": str(closure_path), "sha256": expected_closure_sha256},
     }

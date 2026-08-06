@@ -217,6 +217,11 @@ quote inventory에 든 legacy CodeLocator는 `reviewed at ingest, not mechanical
 뜻이지, 처음부터 검토되지 않았다는 뜻이 아니다. display migration은 이 quote ID와 quote 필드의
 존재 여부, 비정본 symbol ID, reference graph, lint, index DB bytes를 바꾸지 않는다.
 
+post report는 3,305 CodeLocator와 3,186 EvidenceRef, 합계 6,491건의 update-only 변경을
+hard gate로 기록한다. quote debt 3,307건, 비정본 symbol 289건, paired EvidenceRef 3,202건과
+mismatch 0도 실제 계산값으로 남긴다. closure는 이 report를 binding·display manifest·최종
+snapshot의 corpus fingerprint와 교차 결속하므로, 같은 모양의 무관한 JSON artifact로 바꿀 수 없다.
+
 ## 정상 연결 그래프
 
 `object-graph.complete.template.json`은 다음 6개 reviewed 객체를 한 연결 요소로 만든다.

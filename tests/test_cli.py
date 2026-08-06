@@ -14,9 +14,10 @@ import stat
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -4013,3 +4014,251 @@ class TestCliShow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _canonical_task18_cli_args(tmp_path: Path) -> dict[tuple[str, str], list[str]]:
+    root = tmp_path.resolve()
+    engine = (root / "engine").resolve()
+    repo = (root / "repo").resolve()
+    brain = repo / "brain"
+    for path in (engine, brain):
+        path.mkdir(parents=True, exist_ok=True)
+    sha = "a" * 64
+    head = "b" * 40
+    roots = [
+        "--brain-root", str(brain),
+        "--repo-root", str(repo),
+        "--engine-root", str(engine),
+    ]
+    binding = [
+        "--task18-binding", str(root / "binding.json"),
+        "--expected-task18-binding-sha256", sha,
+    ]
+    display_common = roots + binding
+    return {
+        ("quote-debt", "build"): [
+            "--brain-root", str(brain),
+            "--repo-root", str(repo),
+            "--target-revision", head,
+            "--measurement", str(root / "measurement.json"),
+            "--expected-measurement-sha256", sha,
+            "--generated-at", "2026-08-06T12:00:00+09:00",
+            "--output", str(root / "quote-debt.json"),
+        ],
+        ("quote-debt", "verify"): [
+            "--brain-root", str(brain),
+            "--inventory", str(root / "quote-debt.json"),
+            "--expected-inventory-sha256", sha,
+            "--stale-report", str(root / "stale.json"),
+            "--phase", "pre_migration",
+            "--report", str(root / "quote-verify.json"),
+        ],
+        ("display", "binding-create"): roots + [
+            "--binding", str(root / "binding.json"),
+            "--expected-engine-head", head,
+            "--expected-repo-head", head,
+            "--expected-engine-status-sha256", sha,
+            "--expected-engine-dirt-content-sha256", sha,
+            "--expected-repo-status-sha256", sha,
+            "--expected-repo-dirt-content-sha256", sha,
+            "--local-target-ref", "refs/remotes/origin/develop",
+            "--remote", "origin",
+            "--remote-target-ref", "refs/heads/develop",
+            "--target-revision-sha", head,
+            "--p0-handoff", str(root / "p0.json"),
+            "--expected-p0-handoff-sha256", sha,
+            "--measurement", str(root / "measurement.json"),
+            "--expected-measurement-sha256", sha,
+            "--design", str(engine / "design.md"),
+            "--design-commit-sha", head,
+            "--expected-design-file-sha256", sha,
+            "--plan", str(engine / "plan.md"),
+            "--plan-commit-sha", head,
+            "--expected-plan-file-sha256", sha,
+            "--quote-debt", str(root / "quote.json"),
+            "--expected-quote-debt-sha256", sha,
+            "--snapshot-root", str(root / "pre"),
+            "--expected-snapshot-manifest-sha256", sha,
+            "--snapshot-verify-receipt", str(root / "pre-verify.json"),
+            "--expected-snapshot-verify-receipt-sha256", sha,
+            "--generated-at", "2026-08-06T12:00:00+09:00",
+        ],
+        ("display", "binding-verify"): display_common + [
+            "--report", str(root / "binding-verify.json"),
+        ],
+        ("display", "plan"): display_common + [
+            "--manifest", str(root / "display.json"),
+            "--report", str(root / "plan-report.json"),
+        ],
+        ("display", "verify-plan"): display_common + [
+            "--manifest", str(root / "display.json"),
+            "--expected-manifest-sha256", sha,
+            "--report", str(root / "verify-plan-report.json"),
+        ],
+        ("display", "apply"): display_common + [
+            "--manifest", str(root / "display.json"),
+            "--expected-manifest-sha256", sha,
+            "--report", str(root / "apply-report.json"),
+        ],
+        ("display", "post-verify"): display_common + [
+            "--manifest", str(root / "display.json"),
+            "--expected-manifest-sha256", sha,
+            "--quote-debt", str(root / "quote.json"),
+            "--expected-quote-debt-sha256", sha,
+            "--pathspec-output", str(root / "paths.zlist"),
+            "--generated-at", "2026-08-06T12:00:00+09:00",
+            "--report", str(root / "post.json"),
+        ],
+        ("display", "closure-create"): roots + binding + [
+            "--corpus-snapshot", str(root / "final"),
+            "--expected-snapshot-manifest-sha256", sha,
+            "--snapshot-verify", str(root / "final-verify.json"),
+            "--expected-snapshot-verify-sha256", sha,
+            "--display-manifest", str(root / "display.json"),
+            "--expected-display-manifest-sha256", sha,
+            "--post-report", str(root / "post.json"),
+            "--expected-post-report-sha256", sha,
+            "--completion-report", str(engine / "completion.md"),
+            "--roadmap", str(engine / "ROADMAP.md"),
+            "--expected-engine-head", head,
+            "--expected-bb2-head", head,
+            "--generated-at", "2026-08-06T12:00:00+09:00",
+            "--report", str(root / "closure.json"),
+        ],
+        ("display", "closure-verify"): roots + [
+            "--closure", str(root / "closure.json"),
+            "--expected-closure-sha256", sha,
+            "--report", str(root / "closure-verify.json"),
+        ],
+    }
+
+
+def test_all_ten_task18_canonical_actions_parse_and_dispatch(tmp_path: Path):
+    commands = _canonical_task18_cli_args(tmp_path)
+    assert len(commands) == 10
+    with mock.patch("project_brain.cli._run_task18_migration", return_value=0) as run:
+        for (mode, action), args in commands.items():
+            run.reset_mock()
+            assert cli._run_migration([mode, action, *args]) == 0
+            parsed = run.call_args.args[0]
+            assert (parsed.mode, parsed.action) == (mode, action)
+
+
+def test_all_ten_task18_canonical_actions_reach_their_service_seams(tmp_path: Path):
+    commands = _canonical_task18_cli_args(tmp_path)
+    sha = "a" * 64
+    head = "b" * 40
+    service_patches = {
+        ("quote-debt", "build"): "project_brain.quote_debt.build_quote_debt_inventory",
+        ("quote-debt", "verify"): "project_brain.quote_debt.verify_quote_debt_inventory",
+        ("display", "binding-create"): "project_brain.task18_binding.create_task18_binding",
+        ("display", "binding-verify"): "project_brain.task18_binding_verify.verify_task18_binding",
+        ("display", "plan"): "project_brain.migration.plan_display_migration",
+        ("display", "verify-plan"): "project_brain.migration.verify_display_migration_artifact",
+        ("display", "apply"): "project_brain.migration.apply_display_migration_artifact",
+        ("display", "post-verify"): "project_brain.task18_verify.verify_task18_applied",
+        ("display", "closure-create"): "project_brain.task18_verify.create_task18_closure_receipt",
+        ("display", "closure-verify"): "project_brain.task18_verify.verify_task18_closure_receipt",
+    }
+    return_values = {
+        ("quote-debt", "build"): {"quote_debt_ids": []},
+        ("quote-debt", "verify"): {"ok": True},
+        ("display", "binding-create"): SimpleNamespace(
+            path=Path(commands[("display", "binding-create")][
+                commands[("display", "binding-create")].index("--binding") + 1
+            ]),
+            sha256=sha,
+        ),
+        ("display", "binding-verify"): SimpleNamespace(
+            path="binding.json", sha256=sha, migration_targets=(),
+        ),
+        ("display", "plan"): SimpleNamespace(request=SimpleNamespace(objects=[])),
+        ("display", "verify-plan"): SimpleNamespace(ok=True),
+        ("display", "apply"): SimpleNamespace(
+            transaction_id="tx", action_count=0, snapshot_id="snapshot",
+        ),
+        ("display", "post-verify"): SimpleNamespace(
+            report_path=tmp_path / "post.json", report_sha256=sha, update_count=0,
+        ),
+        ("display", "closure-create"): SimpleNamespace(
+            ok=True, closure_path=tmp_path / "closure.json", closure_sha256=sha,
+        ),
+        ("display", "closure-verify"): SimpleNamespace(
+            ok=True,
+            closure_path=tmp_path / "closure.json",
+            closure_sha256=sha,
+            report_path=tmp_path / "closure-verify.json",
+            report_sha256=sha,
+        ),
+    }
+    with ExitStack() as stack:
+        services = {
+            key: stack.enter_context(mock.patch(path, return_value=return_values[key]))
+            for key, path in service_patches.items()
+        }
+        stack.enter_context(mock.patch(
+            "project_brain.foundation.atomic_create_receipt", return_value=sha,
+        ))
+        stack.enter_context(mock.patch(
+            "project_brain.cli._atomic_create_bytes_exclusive", return_value=sha,
+        ))
+        stack.enter_context(mock.patch(
+            "project_brain.migration.create_display_migration_artifact",
+            return_value=SimpleNamespace(manifest_bytes=b"{}\n", manifest_sha256=sha),
+        ))
+        stack.enter_context(mock.patch("project_brain.store.BrainStore.load", return_value=SimpleNamespace()))
+        stack.enter_context(mock.patch("project_brain.snapshot.resolve_exact_commit", return_value=head))
+        stack.enter_context(mock.patch("project_brain.snapshot.verify_git_root_head", return_value=head))
+        stack.enter_context(mock.patch("project_brain.stale_check.make_git_runner", return_value=object()))
+        stack.enter_context(mock.patch("project_brain.stale_check.stale_check", return_value={}))
+        stack.enter_context(mock.patch(
+            "project_brain.task18_verify.read_task18_canonical_document", return_value={},
+        ))
+        stack.enter_context(mock.patch(
+            "project_brain.task18_verify.read_task18_json_bytes",
+            return_value=SimpleNamespace(data=b"{}\n", value={}),
+        ))
+        for key, args in commands.items():
+            with redirect_stdout(io.StringIO()):
+                assert cli._run_migration([*key, *args]) == 0
+            services[key].assert_called_once()
+
+
+def test_binding_create_canonical_command_dispatches_generated_at_as_clock(
+    tmp_path: Path,
+):
+    from project_brain.task18_binding import Task18BindingCreateResult
+
+    args = _canonical_task18_cli_args(tmp_path)[("display", "binding-create")]
+    binding_path = Path(args[args.index("--binding") + 1])
+    generated_at = args[args.index("--generated-at") + 1]
+    created = Task18BindingCreateResult(binding_path, "c" * 64, {})
+    with mock.patch(
+        "project_brain.task18_binding.create_task18_binding",
+        return_value=created,
+    ) as create, redirect_stdout(io.StringIO()):
+        assert cli._run_migration(["display", "binding-create", *args]) == 0
+    request = create.call_args.args[0]
+    assert request.binding_path == binding_path
+    assert create.call_args.kwargs["clock"]() == generated_at
+    assert binding_path == Path(args[args.index("--binding") + 1])
+
+
+def test_closure_verify_canonical_command_needs_no_generated_at(tmp_path: Path):
+    from project_brain.task18_verify import Task18ClosureResult
+
+    args = _canonical_task18_cli_args(tmp_path)[("display", "closure-verify")]
+    report = Path(args[args.index("--report") + 1])
+    closure = Path(args[args.index("--closure") + 1])
+    result = Task18ClosureResult(
+        closure_path=closure,
+        closure_sha256="a" * 64,
+        report_path=report,
+        report_sha256="d" * 64,
+    )
+    with mock.patch(
+        "project_brain.task18_verify.verify_task18_closure_receipt",
+        return_value=result,
+    ) as verify, redirect_stdout(io.StringIO()):
+        assert cli._run_migration(["display", "closure-verify", *args]) == 0
+    assert "generated_at" not in verify.call_args.kwargs

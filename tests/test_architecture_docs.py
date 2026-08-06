@@ -256,6 +256,16 @@ def test_task18_migration_boundaries_are_explicit():
         "closure",
     ):
         assert token in runtime
+    for option in (
+        "--target-revision",
+        "--binding",
+        "--corpus-snapshot",
+        "--snapshot-verify",
+        "--closure",
+        "--expected-engine-head",
+        "--expected-bb2-head",
+    ):
+        assert option in runtime
 
     changes = _read_architecture_doc("change-map.md")
     for token in (
