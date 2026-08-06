@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from project_brain.corpus_io import CorpusIOError, read_tracked_json_files
 from project_brain.display_contract import (
     canonical_locator_title,
     non_title_sha256,
@@ -21,6 +22,7 @@ from project_brain.foundation import (
     atomic_create_receipt,
     canonical_receipt_bytes,
 )
+from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.mutation import corpus_fingerprint
 from project_brain.objbase import now_kst
 from project_brain.snapshot import (
@@ -220,6 +222,27 @@ def _json_sha(value: object) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _strict_json(data: bytes, *, label: str) -> object:
+    def pairs(values: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in values:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            data,
+            object_pairs_hook=pairs,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON value: {value}")
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        _fail(f"{label}_json_invalid", str(exc))
+
+
 def _read_canonical_json(
     path: Path,
     *,
@@ -231,12 +254,16 @@ def _read_canonical_json(
         _fail(f"{label}_sha256_mismatch")
     try:
         data, mode = read_regular_no_follow(path)
-        value = json.loads(data)
-    except (SnapshotError, UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json(data, label=label)
+    except SnapshotError as exc:
         _fail(f"{label}_json_invalid", str(exc))
     if hashlib.sha256(data).hexdigest() != expected_sha256:
         _fail(f"{label}_changed_during_capture")
-    if not isinstance(value, Mapping) or canonical_receipt_bytes(value) != data:
+    try:
+        canonical = canonical_receipt_bytes(value) if isinstance(value, Mapping) else None
+    except FoundationError as exc:
+        _fail(f"{label}_json_invalid", exc.detail)
+    if not isinstance(value, Mapping) or canonical != data:
         _fail(f"{label}_json_invalid", "document must be canonical JSON object")
     if receipt != {
         "path": str(path),
@@ -307,7 +334,8 @@ def _measurement_sections(
     display_ids = _ids(display.get("target_ids"), label="display")
     display_hash = _json_sha(display_ids)
     if (
-        display.get("target_count") != len(display_ids)
+        type(display.get("target_count")) is not int
+        or display.get("target_count") != len(display_ids)
         or display.get("target_ids_sha256") != display_hash
     ):
         _fail("measurement_closure_mismatch", "display metadata differs")
@@ -317,7 +345,8 @@ def _measurement_sections(
     quote_ids = _ids(quote.get("target_ids"), label="quote debt")
     quote_hash = _json_sha(quote_ids)
     if (
-        quote.get("target_count") != len(quote_ids)
+        type(quote.get("target_count")) is not int
+        or quote.get("target_count") != len(quote_ids)
         or quote.get("target_ids_sha256") != quote_hash
     ):
         _fail("measurement_closure_mismatch", "quote debt metadata differs")
@@ -327,7 +356,12 @@ def _measurement_sections(
 def _inventory_quote_ids(
     inventory: Mapping[str, object],
 ) -> tuple[list[str], str]:
-    if set(inventory) != _QUOTE_INVENTORY_KEYS:
+    if (
+        set(inventory) != _QUOTE_INVENTORY_KEYS
+        or type(inventory.get("version")) is not int
+        or inventory.get("version") != 1
+        or inventory.get("purpose") != "legacy_code_locator_quote_debt"
+    ):
         _fail("quote_debt_inventory_invalid", "inventory exact shape differs")
     ids = _ids(inventory.get("quote_debt_ids"), label="inventory quote debt")
     digest = _json_sha(ids)
@@ -421,10 +455,7 @@ def _live_closure(
 
 def _assert_target_dirt_disjoint(
     *,
-    store: BrainStore,
-    targets: Sequence[Mapping[str, object]],
-    brain_root: Path,
-    repo_root: Path,
+    target_paths: Mapping[str, str],
     bb2_git: GitDirtReceipt,
 ) -> None:
     try:
@@ -434,17 +465,75 @@ def _assert_target_dirt_disjoint(
     if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
         _fail("bb2_dirt_manifest_invalid")
     dirt_paths = {row.get("path") for row in rows}
-    target_paths: set[str] = set()
-    for target in targets:
-        obj = store.get(str(target["id"]))
-        try:
-            relative = BrainStore.object_path(brain_root, obj).relative_to(repo_root)
-        except (KeyError, ValueError) as exc:
-            _fail("migration_target_path_invalid", str(exc))
-        target_paths.add(relative.as_posix())
-    overlap = sorted(target_paths & dirt_paths)
+    overlap = sorted(set(target_paths.values()) & dirt_paths)
     if overlap:
         _fail("target_overlaps_user_dirt", repr(overlap))
+
+
+def _scan_target_sources(
+    *,
+    brain_root: Path,
+    repo_root: Path,
+    targets: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    """실제 corpus 파일에서 target ID별 repo 상대 경로를 결속한다."""
+    expected = {str(row.get("id")): row for row in targets}
+    if len(expected) != len(targets):
+        _fail("migration_target_source_invalid", "duplicate target ID")
+    for object_id, row in expected.items():
+        kind = row.get("kind")
+        try:
+            parse_id(object_id, str(kind))
+        except (IdGrammarError, TypeError) as exc:
+            _fail("migration_target_source_invalid", f"{object_id}: {exc}")
+    found: dict[str, str] = {}
+    try:
+        files = read_tracked_json_files(
+            brain_root,
+            set(BrainStore._KIND_DIR.values()),
+        )
+    except CorpusIOError as exc:
+        _fail("migration_target_source_invalid", exc.detail)
+    for path, data in files:
+        try:
+            if (
+                not path.is_absolute()
+                or path != Path(os.path.abspath(path))
+                or not path.is_relative_to(brain_root)
+                or not path.is_relative_to(repo_root)
+            ):
+                _fail("migration_target_source_invalid", f"unsafe source path: {path}")
+            brain_relative = path.relative_to(brain_root)
+            repo_relative = path.relative_to(repo_root)
+            if (
+                brain_relative.as_posix() in {"", "."}
+                or repo_relative.as_posix() in {"", "."}
+                or ".." in brain_relative.parts
+                or ".." in repo_relative.parts
+                or path.suffix != ".json"
+            ):
+                _fail("migration_target_source_invalid", f"unsafe source path: {path}")
+            value = _strict_json(data, label="migration_target_source")
+        except Task18BindingError as exc:
+            _fail("migration_target_source_invalid", exc.detail or exc.code)
+        if not isinstance(value, Mapping):
+            _fail("migration_target_source_invalid", f"non-object source: {path}")
+        object_id = value.get("id")
+        if object_id not in expected:
+            continue
+        if object_id in found:
+            _fail("migration_target_source_invalid", f"duplicate source: {object_id}")
+        row = expected[str(object_id)]
+        digest = hashlib.sha256(data).hexdigest()
+        if value.get("kind") != row.get("kind") or digest != row.get(
+            "before_object_sha256"
+        ):
+            _fail("migration_target_source_invalid", f"source mismatch: {object_id}")
+        found[str(object_id)] = repo_relative.as_posix()
+    missing = sorted(set(expected) - set(found))
+    if missing:
+        _fail("migration_target_source_invalid", f"missing sources: {missing!r}")
+    return found
 
 
 def _input_value(
@@ -472,6 +561,67 @@ def _dependency_error(exc: Exception) -> Task18BindingError:
     if isinstance(exc, (SnapshotError, FoundationError, Task18StateError, StoreLoadError)):
         return Task18BindingError(exc.code, getattr(exc, "detail", ""))
     return Task18BindingError("binding_state_capture_failed", str(exc))
+
+
+def _recheck_before_create(
+    request: Task18BindingRequest,
+    *,
+    input_receipts: Mapping[str, Mapping[str, object]],
+    snapshot: SnapshotVerification,
+    corpus_state: Mapping[str, object],
+    remote: object,
+    engine_git: GitDirtReceipt,
+    bb2_git: GitDirtReceipt,
+    engine_cached: Sequence[str],
+    bb2_cached: Sequence[str],
+) -> None:
+    """출력 파일을 만들기 직전에 장시간 수집 구간 drift를 다시 확인한다."""
+    paths = {
+        "p0_handoff": request.p0_handoff_path,
+        "measurement": request.measurement_path,
+        "design": request.design_path,
+        "plan": request.plan_path,
+        "quote_debt": request.quote_debt_path,
+        "snapshot_verify_receipt": request.snapshot_verify_receipt_path,
+    }
+    try:
+        final_inputs = {
+            label: capture_bound_file(path)
+            for label, path in paths.items()
+        }
+        final_snapshot = verify_snapshot(
+            request.snapshot_root,
+            expected_manifest_sha256=request.expected_snapshot_manifest_sha256,
+        )
+        final_corpus = capture_task18_corpus_state(request.brain_root)
+        final_remote = capture_remote_ref(
+            request.repo_root,
+            local_ref=request.local_target_ref,
+            remote=request.remote,
+            remote_ref=request.remote_target_ref,
+        )
+        final_engine_cached = capture_cached_paths(request.engine_root)
+        final_bb2_cached = capture_cached_paths(request.repo_root)
+        final_engine_git = capture_git_dirt_receipt(
+            request.engine_root,
+            label="engine",
+        )
+        final_bb2_git = capture_git_dirt_receipt(request.repo_root, label="bb2")
+    except Exception as exc:
+        if isinstance(exc, Task18BindingError):
+            raise
+        raise _dependency_error(exc) from exc
+    if (
+        final_inputs != input_receipts
+        or final_snapshot != snapshot
+        or final_corpus != corpus_state
+        or final_remote != remote
+        or tuple(final_engine_cached) != tuple(engine_cached)
+        or tuple(final_bb2_cached) != tuple(bb2_cached)
+        or final_engine_git != engine_git
+        or final_bb2_git != bb2_git
+    ):
+        _fail("state_changed_before_binding")
 
 
 def create_task18_binding(
@@ -597,11 +747,13 @@ def create_task18_binding(
         or len(targets) != REQUIRED_CODE_LOCATOR_COUNT + REQUIRED_EVIDENCE_REF_COUNT
     ):
         _fail("measurement_closure_mismatch")
-    _assert_target_dirt_disjoint(
-        store=store,
-        targets=targets,
+    target_paths = _scan_target_sources(
         brain_root=request.brain_root,
         repo_root=request.repo_root,
+        targets=targets,
+    )
+    _assert_target_dirt_disjoint(
+        target_paths=target_paths,
         bb2_git=bb2_git,
     )
     before_fingerprint = corpus_fingerprint(store)
@@ -694,6 +846,24 @@ def create_task18_binding(
         or not value["created_at"]
     ):
         _fail("binding_schema_invalid")
+    _recheck_before_create(
+        request,
+        input_receipts={
+            "p0_handoff": p0_receipt,
+            "measurement": measurement_receipt,
+            "design": design_file,
+            "plan": plan_file,
+            "quote_debt": quote_receipt,
+            "snapshot_verify_receipt": snapshot_verify_file,
+        },
+        snapshot=snapshot,
+        corpus_state=corpus_state,
+        remote=remote,
+        engine_git=engine_git,
+        bb2_git=bb2_git,
+        engine_cached=engine_cached,
+        bb2_cached=bb2_cached,
+    )
     try:
         binding_sha256 = atomic_create_receipt(request.binding_path, value)
     except FoundationError as exc:

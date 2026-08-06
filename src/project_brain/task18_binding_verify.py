@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from project_brain.corpus_io import CorpusIOError, read_tracked_json_files
 from project_brain.display_contract import (
     canonical_locator_title,
     non_title_sha256,
@@ -21,6 +22,7 @@ from project_brain.foundation import (
     FoundationError,
     canonical_receipt_bytes,
 )
+from project_brain.id_grammar import IdGrammarError, parse_id
 from project_brain.mutation import corpus_fingerprint
 from project_brain.snapshot import (
     GitDirtReceipt,
@@ -189,6 +191,27 @@ def _decode_base64(value: object, label: str) -> bytes:
     return data
 
 
+def _strict_json(data: bytes, *, code: str) -> object:
+    def pairs(values: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in values:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            data,
+            object_pairs_hook=pairs,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON value: {value}")
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        _fail(code, str(exc))
+
+
 def _valid_file_receipt(value: object, *, committed: bool) -> bool:
     keys = _COMMITTED_FILE_KEYS if committed else _FILE_KEYS
     if not isinstance(value, Mapping) or set(value) != keys:
@@ -215,14 +238,16 @@ def _valid_file_receipt(value: object, *, committed: bool) -> bool:
 
 
 def _parse_binding(data: bytes) -> Mapping[str, object]:
+    value = _strict_json(data, code="binding_json_invalid")
     try:
-        value = json.loads(data)
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        _fail("binding_json_invalid", str(exc))
-    if not isinstance(value, Mapping) or canonical_receipt_bytes(value) != data:
+        canonical = canonical_receipt_bytes(value) if isinstance(value, Mapping) else None
+    except FoundationError as exc:
+        _fail("binding_json_invalid", exc.detail)
+    if not isinstance(value, Mapping) or canonical != data:
         _fail("binding_json_invalid", "binding must be a canonical JSON object")
     if (
         set(value) != _TOP_KEYS
+        or type(value.get("version")) is not int
         or value.get("version") != 1
         or value.get("purpose") != "task18-display-labels-and-quote-debt-final-binding"
         or value.get("task18_allowed") is not True
@@ -369,6 +394,7 @@ def _parse_binding(data: bytes) -> Mapping[str, object]:
         or len(target_ids) != len(set(target_ids))
         or migration.get("target_ids_sha256") != _json_sha(target_ids)
         or migration.get("targets_sha256") != _json_sha(targets)
+        or type(migration.get("total_count")) is not int
         or migration.get("total_count") != len(targets)
         or type(migration.get("code_locator_count")) is not int
         or type(migration.get("evidence_ref_count")) is not int
@@ -397,12 +423,16 @@ def _read_document(path: Path, expected: Mapping[str, object], label: str) -> Ma
         _fail(f"{label}_drift")
     try:
         data, mode = read_regular_no_follow(path)
-        value = json.loads(data)
-    except (SnapshotError, UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json(data, code=f"{label}_drift")
+    except SnapshotError as exc:
         _fail(f"{label}_drift", str(exc))
+    try:
+        canonical = canonical_receipt_bytes(value) if isinstance(value, Mapping) else None
+    except FoundationError as exc:
+        _fail(f"{label}_drift", exc.detail)
     if (
         not isinstance(value, Mapping)
-        or canonical_receipt_bytes(value) != data
+        or canonical != data
         or hashlib.sha256(data).hexdigest() != expected.get("sha256")
         or len(data) != expected.get("size")
         or mode != expected.get("mode")
@@ -437,8 +467,10 @@ def _measurement_contract(value: Mapping[str, object]) -> tuple[list[str], list[
     quote_ids = _id_list(quote.get("target_ids"), "quote debt")
     pair_hash = pairs.get("pair_rows_sha256")
     if (
-        display.get("target_count") != len(display_ids)
+        type(display.get("target_count")) is not int
+        or display.get("target_count") != len(display_ids)
         or display.get("target_ids_sha256") != _json_sha(display_ids)
+        or type(quote.get("target_count")) is not int
         or quote.get("target_count") != len(quote_ids)
         or quote.get("target_ids_sha256") != _json_sha(quote_ids)
         or not isinstance(pair_hash, str)
@@ -449,7 +481,12 @@ def _measurement_contract(value: Mapping[str, object]) -> tuple[list[str], list[
 
 
 def _inventory_contract(value: Mapping[str, object]) -> list[str]:
-    if set(value) != _QUOTE_INVENTORY_KEYS:
+    if (
+        set(value) != _QUOTE_INVENTORY_KEYS
+        or type(value.get("version")) is not int
+        or value.get("version") != 1
+        or value.get("purpose") != "legacy_code_locator_quote_debt"
+    ):
         _fail("quote_debt_inventory_invalid")
     ids = _id_list(value.get("quote_debt_ids"), "inventory quote debt")
     rows = value.get("rows")
@@ -560,10 +597,7 @@ def _git_mapping(receipt: GitDirtReceipt, cached: Sequence[str]) -> dict[str, ob
 
 def _assert_dirt_disjoint(
     *,
-    store: BrainStore,
-    targets: Sequence[Mapping[str, object]],
-    brain_root: Path,
-    repo_root: Path,
+    target_paths: Mapping[str, str],
     receipt: GitDirtReceipt,
 ) -> None:
     try:
@@ -573,21 +607,148 @@ def _assert_dirt_disjoint(
     if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
         _fail("bb2_dirt_manifest_invalid")
     dirt = {row.get("path") for row in rows}
-    target_paths = {
-        BrainStore.object_path(brain_root, store.get(str(target["id"])))
-        .relative_to(repo_root)
-        .as_posix()
-        for target in targets
-    }
-    overlap = sorted(dirt & target_paths)
+    overlap = sorted(dirt & set(target_paths.values()))
     if overlap:
         _fail("target_overlaps_user_dirt", repr(overlap))
+
+
+def _resolve_target_source_paths(
+    *,
+    brain_root: Path,
+    repo_root: Path,
+    targets: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    """검증기 자체 순회로 실제 target source 경로와 bytes를 확인한다."""
+    required: dict[str, Mapping[str, object]] = {}
+    for row in targets:
+        object_id = row.get("id")
+        kind = row.get("kind")
+        if not isinstance(object_id, str) or object_id in required:
+            _fail("migration_target_source_invalid", "invalid or duplicate target ID")
+        try:
+            parse_id(object_id, str(kind))
+        except (IdGrammarError, TypeError) as exc:
+            _fail("migration_target_source_invalid", f"{object_id}: {exc}")
+        required[object_id] = row
+    resolved: dict[str, str] = {}
+    try:
+        scanned = read_tracked_json_files(
+            brain_root,
+            BrainStore._KIND_DIR.values(),
+        )
+    except CorpusIOError as exc:
+        _fail("migration_target_source_invalid", exc.detail)
+    for absolute, payload in scanned:
+        if (
+            not absolute.is_absolute()
+            or absolute != Path(os.path.abspath(absolute))
+            or not absolute.is_relative_to(brain_root)
+            or not absolute.is_relative_to(repo_root)
+            or absolute.suffix != ".json"
+        ):
+            _fail("migration_target_source_invalid", f"unsafe source path: {absolute}")
+        brain_relative = absolute.relative_to(brain_root)
+        repo_relative = absolute.relative_to(repo_root)
+        if (
+            ".." in brain_relative.parts
+            or ".." in repo_relative.parts
+            or brain_relative.as_posix() in {"", "."}
+        ):
+            _fail("migration_target_source_invalid", f"unsafe source path: {absolute}")
+        parsed = _strict_json(payload, code="migration_target_source_invalid")
+        if not isinstance(parsed, Mapping):
+            _fail("migration_target_source_invalid", f"non-object source: {absolute}")
+        object_id = parsed.get("id")
+        if object_id not in required:
+            continue
+        assert isinstance(object_id, str)
+        if object_id in resolved:
+            _fail("migration_target_source_invalid", f"duplicate source: {object_id}")
+        row = required[object_id]
+        if (
+            parsed.get("kind") != row.get("kind")
+            or hashlib.sha256(payload).hexdigest()
+            != row.get("before_object_sha256")
+        ):
+            _fail("migration_target_source_invalid", f"source mismatch: {object_id}")
+        resolved[object_id] = repo_relative.as_posix()
+    unresolved = sorted(set(required) - set(resolved))
+    if unresolved:
+        _fail("migration_target_source_invalid", f"missing sources: {unresolved!r}")
+    return resolved
 
 
 def _dependency_error(exc: Exception) -> Task18BindingError:
     if isinstance(exc, (SnapshotError, FoundationError, Task18StateError, StoreLoadError)):
         return Task18BindingError(exc.code, getattr(exc, "detail", ""))
     return Task18BindingError("binding_state_capture_failed", str(exc))
+
+
+def _recheck_before_return(
+    *,
+    binding_path: Path,
+    expected_binding_sha256: str,
+    engine_root: Path,
+    repo_root: Path,
+    brain_root: Path,
+    inputs: Mapping[str, Mapping[str, object]],
+    snapshot_binding: Mapping[str, object],
+    target_binding: Mapping[str, object],
+    snapshot: object,
+    corpus_state: Mapping[str, object],
+    remote: object,
+    engine_cached: Sequence[str],
+    bb2_cached: Sequence[str],
+    engine_git: GitDirtReceipt,
+    bb2_git: GitDirtReceipt,
+) -> None:
+    expected_files = {
+        label: {
+            "path": receipt["path"],
+            "sha256": receipt["sha256"],
+            "size": receipt["size"],
+            "mode": receipt["mode"],
+        }
+        for label, receipt in inputs.items()
+    }
+    try:
+        final_files = {
+            label: capture_bound_file(Path(str(receipt["path"])))
+            for label, receipt in inputs.items()
+        }
+        final_snapshot = verify_snapshot(
+            Path(str(snapshot_binding["path"])),
+            expected_manifest_sha256=str(snapshot_binding["manifest_sha256"]),
+        )
+        final_corpus = capture_task18_corpus_state(brain_root)
+        final_remote = capture_remote_ref(
+            repo_root,
+            local_ref=str(target_binding["local_ref"]),
+            remote=str(target_binding["remote"]),
+            remote_ref=str(target_binding["remote_ref"]),
+        )
+        final_bb2_cached = capture_cached_paths(repo_root)
+        final_engine_cached = capture_cached_paths(engine_root)
+        final_bb2_git = capture_git_dirt_receipt(repo_root, label="bb2")
+        final_engine_git = capture_git_dirt_receipt(engine_root, label="engine")
+        final_binding_bytes, _ = read_regular_no_follow(binding_path)
+    except Exception as exc:
+        if isinstance(exc, Task18BindingError):
+            raise
+        raise _dependency_error(exc) from exc
+    if (
+        final_files != expected_files
+        or final_snapshot != snapshot
+        or final_corpus != corpus_state
+        or final_remote != remote
+        or tuple(final_engine_cached) != tuple(engine_cached)
+        or tuple(final_bb2_cached) != tuple(bb2_cached)
+        or final_engine_git != engine_git
+        or final_bb2_git != bb2_git
+        or hashlib.sha256(final_binding_bytes).hexdigest()
+        != expected_binding_sha256
+    ):
+        _fail("state_changed_during_verification")
 
 
 def verify_task18_binding(
@@ -770,13 +931,12 @@ def verify_task18_binding(
         _fail("engine_state_drift")
     if _git_mapping(bb2_git, bb2_cached) != value["bb2"]:
         _fail("bb2_state_drift")
-    _assert_dirt_disjoint(
-        store=store,
-        targets=targets,
+    target_paths = _resolve_target_source_paths(
         brain_root=brain_root,
         repo_root=repo_root,
-        receipt=bb2_git,
+        targets=targets,
     )
+    _assert_dirt_disjoint(target_paths=target_paths, receipt=bb2_git)
     locator_count = sum(row["kind"] == "CodeLocator" for row in targets)
     ref_count = sum(row["kind"] == "EvidenceRef" for row in targets)
     migration = value["migration"]
@@ -796,6 +956,23 @@ def verify_task18_binding(
         or migration != expected_migration
     ):
         _fail("migration_binding_drift")
+    _recheck_before_return(
+        binding_path=binding_path,
+        expected_binding_sha256=expected_binding_sha256,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+        inputs=inputs,
+        snapshot_binding=snapshot_binding,
+        target_binding=target_binding,
+        snapshot=snapshot,
+        corpus_state=corpus_state,
+        remote=remote,
+        engine_cached=engine_cached,
+        bb2_cached=bb2_cached,
+        engine_git=engine_git,
+        bb2_git=bb2_git,
+    )
     return Task18BindingVerification(
         path=str(binding_path),
         sha256=expected_binding_sha256,

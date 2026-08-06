@@ -126,6 +126,12 @@ def task18_fixture(tmp_path: Path) -> SyntheticTask18:
         for object_id, obj in objects.items()
     }
     store = BrainStore(objects, source_sha256_by_id=source_hashes)
+    actual_locator_path = brain_root / "objects/code/legacy-locator-name.json"
+    actual_ref_path = brain_root / "objects/evidence_refs/legacy-ref-name.json"
+    actual_locator_path.parent.mkdir(parents=True)
+    actual_ref_path.parent.mkdir(parents=True)
+    actual_locator_path.write_bytes(BrainStore.object_bytes(locator))
+    actual_ref_path.write_bytes(BrainStore.object_bytes(ref))
 
     p0_path = repo_root / ".snapshots" / "p0-handoff.json"
     measurement_path = repo_root / ".snapshots" / "measurement.json"
@@ -395,7 +401,7 @@ def test_create_and_verify_reject_target_path_overlapping_baseline_user_dirt(
 ):
     import project_brain.task18_binding as create_module
 
-    dirty_path = "brain/objects/code/code.ctx.run.json"
+    dirty_path = "brain/objects/code/legacy-locator-name.json"
     manifest = (
         json.dumps(
             [{
@@ -432,6 +438,314 @@ def test_create_and_verify_reject_target_path_overlapping_baseline_user_dirt(
 
     with pytest.raises(Task18BindingError, match="target_overlaps_user_dirt"):
         create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+
+
+def test_create_rejects_unsafe_target_id_in_actual_source_scan(
+    task18_fixture: SyntheticTask18,
+):
+    import project_brain.task18_binding as module
+
+    source_sha = _sha(BrainStore.object_bytes(task18_fixture.store.get("code.ctx.run")))
+
+    with pytest.raises(Task18BindingError, match="migration_target_source_invalid"):
+        module._scan_target_sources(
+            brain_root=task18_fixture.request.brain_root,
+            repo_root=task18_fixture.request.repo_root,
+            targets=[{
+                "id": "../unsafe",
+                "kind": "CodeLocator",
+                "before_object_sha256": source_sha,
+            }],
+        )
+
+
+@pytest.mark.parametrize("case", ["missing", "duplicate"])
+def test_create_source_scan_rejects_missing_or_duplicate_target_source(
+    task18_fixture: SyntheticTask18,
+    case: str,
+):
+    import project_brain.task18_binding as module
+
+    locator = task18_fixture.store.get("code.ctx.run")
+    source_sha = _sha(BrainStore.object_bytes(locator))
+    target = {
+        "id": "code.ctx.run" if case == "duplicate" else "code.ctx.missing",
+        "kind": "CodeLocator",
+        "before_object_sha256": source_sha,
+    }
+    if case == "duplicate":
+        duplicate = (
+            task18_fixture.request.brain_root
+            / "objects/code/second-noncanonical-name.json"
+        )
+        duplicate.write_bytes(BrainStore.object_bytes(locator))
+
+    with pytest.raises(Task18BindingError, match="migration_target_source_invalid"):
+        module._scan_target_sources(
+            brain_root=task18_fixture.request.brain_root,
+            repo_root=task18_fixture.request.repo_root,
+            targets=[target],
+        )
+
+
+def test_create_rejects_inventory_ids_that_drift_from_measurement(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as module
+
+    inventory = json.loads(task18_fixture.request.quote_debt_path.read_bytes())
+    inventory["quote_debt_ids"] = []
+    inventory["quote_debt_ids_sha256"] = _json_sha([])
+    inventory["rows"] = []
+    data = canonical_receipt_bytes(inventory)
+    task18_fixture.request.quote_debt_path.write_bytes(data)
+    task18_fixture.request = Task18BindingRequest(**{
+        **task18_fixture.request.__dict__,
+        "expected_quote_debt_sha256": _sha(data),
+    })
+    task18_fixture.install(monkeypatch, module)
+
+    with pytest.raises(Task18BindingError, match="measurement_closure_mismatch"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+
+
+def test_create_normalizes_nan_input_to_task18_binding_error(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as module
+
+    data = b'{"display_labels":NaN}\n'
+    task18_fixture.request.measurement_path.write_bytes(data)
+    task18_fixture.request = Task18BindingRequest(**{
+        **task18_fixture.request.__dict__,
+        "expected_measurement_sha256": _sha(data),
+    })
+    task18_fixture.install(monkeypatch, module)
+
+    with pytest.raises(Task18BindingError, match="measurement_json_invalid"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+
+
+@pytest.mark.parametrize(
+    "input_name",
+    [
+        "p0_handoff_path",
+        "measurement_path",
+        "design_path",
+        "plan_path",
+        "quote_debt_path",
+        "snapshot_verify_receipt_path",
+    ],
+)
+def test_verifier_rejects_each_bound_input_drift_explicitly(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+    input_name: str,
+):
+    import project_brain.task18_binding as create_module
+    import project_brain.task18_binding_verify as verify_module
+
+    task18_fixture.install(monkeypatch, create_module)
+    result = create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    path = getattr(task18_fixture.request, input_name)
+    path.write_bytes(path.read_bytes() + b"drift\n")
+    task18_fixture.install(monkeypatch, verify_module)
+
+    with pytest.raises(Task18BindingError):
+        verify_task18_binding(
+            binding_path=result.path,
+            expected_binding_sha256=result.sha256,
+            engine_root=task18_fixture.request.engine_root,
+            repo_root=task18_fixture.request.repo_root,
+            brain_root=task18_fixture.request.brain_root,
+        )
+
+
+def test_generator_rechecks_staged_paths_immediately_before_create(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as module
+
+    task18_fixture.install(monkeypatch, module)
+    calls = 0
+
+    def cached(root: Path):
+        nonlocal calls
+        calls += 1
+        if calls > 2 and root == task18_fixture.request.repo_root:
+            return ("newly-staged.json",)
+        return ()
+
+    monkeypatch.setattr(module, "capture_cached_paths", cached)
+
+    with pytest.raises(Task18BindingError, match="state_changed_before_binding"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    assert not task18_fixture.request.binding_path.exists()
+
+
+def test_generator_rechecks_corpus_immediately_before_create(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as module
+
+    task18_fixture.install(monkeypatch, module)
+    calls = 0
+
+    def corpus(root: Path):
+        nonlocal calls
+        calls += 1
+        value = deepcopy(task18_fixture.corpus_state)
+        if calls > 1:
+            value["corpus"]["objects_tree_sha256"] = "0" * 64
+        return value
+
+    monkeypatch.setattr(module, "capture_task18_corpus_state", corpus)
+
+    with pytest.raises(Task18BindingError, match="state_changed_before_binding"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    assert not task18_fixture.request.binding_path.exists()
+
+
+def test_generator_rechecks_input_immediately_before_create(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as module
+
+    task18_fixture.install(monkeypatch, module)
+    original_snapshot = module.verify_snapshot
+    calls = 0
+
+    def snapshot(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original_snapshot(*args, **kwargs)
+        if calls == 1:
+            task18_fixture.request.p0_handoff_path.write_bytes(b"late drift\n")
+        return result
+
+    monkeypatch.setattr(module, "verify_snapshot", snapshot)
+
+    with pytest.raises(Task18BindingError, match="state_changed_before_binding"):
+        create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    assert not task18_fixture.request.binding_path.exists()
+
+
+def test_verifier_rejects_noncanonical_actual_target_path_in_bound_dirt(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_binding as create_module
+    import project_brain.task18_binding_verify as verify_module
+
+    task18_fixture.install(monkeypatch, create_module)
+    result = create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    dirty_path = "brain/objects/code/legacy-locator-name.json"
+    status = b" M " + dirty_path.encode() + b"\0"
+    manifest = (
+        json.dumps(
+            [{
+                "path": dirty_path,
+                "status": " M",
+                "type": "regular",
+                "mode": 0o644,
+                "size": 1,
+                "content_sha256": "8" * 64,
+            }],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    task18_fixture.bb2_git = GitDirtReceipt(
+        task18_fixture.bb2_git.root,
+        task18_fixture.bb2_git.head,
+        status,
+        _sha(status),
+        1,
+        manifest,
+        _sha(manifest),
+    )
+    forged = deepcopy(result.value)
+    forged["bb2"].update({
+        "status_bytes_base64": __import__("base64").b64encode(status).decode(),
+        "status_sha256": _sha(status),
+        "dirt_manifest_base64": __import__("base64").b64encode(manifest).decode(),
+        "dirt_content_sha256": _sha(manifest),
+    })
+    forged_path = result.path.with_name("forged-binding.json")
+    forged_bytes = canonical_receipt_bytes(forged)
+    forged_path.write_bytes(forged_bytes)
+    task18_fixture.install(monkeypatch, verify_module)
+
+    with pytest.raises(Task18BindingError, match="target_overlaps_user_dirt"):
+        verify_task18_binding(
+            binding_path=forged_path,
+            expected_binding_sha256=_sha(forged_bytes),
+            engine_root=task18_fixture.request.engine_root,
+            repo_root=task18_fixture.request.repo_root,
+            brain_root=task18_fixture.request.brain_root,
+        )
+
+
+@pytest.mark.parametrize("drift", ["staged", "corpus", "input"])
+def test_verifier_rechecks_state_immediately_before_return(
+    task18_fixture: SyntheticTask18,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+):
+    import project_brain.task18_binding as create_module
+    import project_brain.task18_binding_verify as verify_module
+
+    task18_fixture.install(monkeypatch, create_module)
+    result = create_task18_binding(task18_fixture.request, clock=_fixed_clock)
+    task18_fixture.install(monkeypatch, verify_module)
+    if drift == "staged":
+        calls = 0
+
+        def cached(root: Path):
+            nonlocal calls
+            calls += 1
+            if calls > 2 and root == task18_fixture.request.repo_root:
+                return ("late-stage.json",)
+            return ()
+
+        monkeypatch.setattr(verify_module, "capture_cached_paths", cached)
+    elif drift == "corpus":
+        calls = 0
+
+        def corpus(root: Path):
+            nonlocal calls
+            calls += 1
+            value = deepcopy(task18_fixture.corpus_state)
+            if calls > 1:
+                value["stale_set"]["sha256"] = "0" * 64
+            return value
+
+        monkeypatch.setattr(verify_module, "capture_task18_corpus_state", corpus)
+    else:
+        original = verify_module._current_migration
+
+        def current(store: BrainStore):
+            value = original(store)
+            task18_fixture.request.p0_handoff_path.write_bytes(b"late input drift\n")
+            return value
+
+        monkeypatch.setattr(verify_module, "_current_migration", current)
+
+    with pytest.raises(Task18BindingError, match="state_changed_during_verification"):
+        verify_task18_binding(
+            binding_path=result.path,
+            expected_binding_sha256=result.sha256,
+            engine_root=task18_fixture.request.engine_root,
+            repo_root=task18_fixture.request.repo_root,
+            brain_root=task18_fixture.request.brain_root,
+        )
 
 
 @pytest.mark.parametrize(
