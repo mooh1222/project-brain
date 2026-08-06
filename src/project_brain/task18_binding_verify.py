@@ -145,6 +145,15 @@ _QUOTE_INVENTORY_KEYS = {
     "quote_debt_ids_sha256",
     "rows",
 }
+_SNAPSHOT_VERIFY_KEYS = {
+    "ok",
+    "snapshot_id",
+    "manifest_sha256",
+    "file_count",
+    "repo_head",
+    "engine_head",
+    "corpus_fingerprint",
+}
 
 
 @dataclass(frozen=True)
@@ -499,6 +508,31 @@ def _inventory_contract(value: Mapping[str, object]) -> list[str]:
     ):
         _fail("quote_debt_inventory_invalid")
     return ids
+
+
+def _valid_snapshot_verify_document(value: Mapping[str, object]) -> bool:
+    if set(value) != _SNAPSHOT_VERIFY_KEYS or value.get("ok") is not True:
+        return False
+    snapshot_id = value.get("snapshot_id")
+    file_count = value.get("file_count")
+    if (
+        not isinstance(snapshot_id, str)
+        or not snapshot_id
+        or type(file_count) is not int
+        or file_count < 0
+    ):
+        return False
+    digest_fields = ("manifest_sha256", "corpus_fingerprint")
+    head_fields = ("repo_head", "engine_head")
+    return all(
+        isinstance(value.get(field), str)
+        and _SHA256.fullmatch(str(value[field])) is not None
+        for field in digest_fields
+    ) and all(
+        isinstance(value.get(field), str)
+        and re.fullmatch(r"[0-9a-f]{40}", str(value[field])) is not None
+        for field in head_fields
+    )
 
 
 def _current_migration(
@@ -892,7 +926,7 @@ def verify_task18_binding(
         != inputs["measurement"]["sha256"]
     ):
         _fail("quote_debt_measurement_mismatch")
-    if snapshot_verify != {
+    expected_snapshot_verify = {
         "ok": True,
         "snapshot_id": snapshot.snapshot_id,
         "manifest_sha256": snapshot.manifest_sha256,
@@ -900,7 +934,11 @@ def verify_task18_binding(
         "repo_head": snapshot.repo_head,
         "engine_head": snapshot.engine_head,
         "corpus_fingerprint": snapshot.corpus_fingerprint,
-    }:
+    }
+    if (
+        not _valid_snapshot_verify_document(snapshot_verify)
+        or snapshot_verify != expected_snapshot_verify
+    ):
         _fail("snapshot_verify_receipt_mismatch")
     before_fingerprint = corpus_fingerprint(store)
     if snapshot_binding != {

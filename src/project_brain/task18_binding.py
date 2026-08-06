@@ -88,6 +88,15 @@ _QUOTE_INVENTORY_KEYS = {
     "quote_debt_ids_sha256",
     "rows",
 }
+_SNAPSHOT_VERIFY_RECEIPT_KEYS = {
+    "ok",
+    "snapshot_id",
+    "manifest_sha256",
+    "file_count",
+    "repo_head",
+    "engine_head",
+    "corpus_fingerprint",
+}
 
 
 class Task18BindingError(RuntimeError):
@@ -376,6 +385,27 @@ def _inventory_quote_ids(
     ):
         _fail("quote_debt_inventory_invalid", "inventory rows differ from IDs")
     return ids, digest
+
+
+def _snapshot_verify_receipt_has_exact_schema(
+    value: Mapping[str, object],
+) -> bool:
+    return (
+        set(value) == _SNAPSHOT_VERIFY_RECEIPT_KEYS
+        and value.get("ok") is True
+        and isinstance(value.get("snapshot_id"), str)
+        and bool(value.get("snapshot_id"))
+        and type(value.get("file_count")) is int
+        and value["file_count"] >= 0
+        and isinstance(value.get("manifest_sha256"), str)
+        and _SHA256.fullmatch(str(value["manifest_sha256"])) is not None
+        and isinstance(value.get("repo_head"), str)
+        and _GIT_SHA.fullmatch(str(value["repo_head"])) is not None
+        and isinstance(value.get("engine_head"), str)
+        and _GIT_SHA.fullmatch(str(value["engine_head"])) is not None
+        and isinstance(value.get("corpus_fingerprint"), str)
+        and _SHA256.fullmatch(str(value["corpus_fingerprint"])) is not None
+    )
 
 
 def _live_closure(
@@ -776,7 +806,10 @@ def create_task18_binding(
         "engine_head": snapshot.engine_head,
         "corpus_fingerprint": snapshot.corpus_fingerprint,
     }
-    if verify_receipt != expected_verify_receipt:
+    if (
+        not _snapshot_verify_receipt_has_exact_schema(verify_receipt)
+        or verify_receipt != expected_verify_receipt
+    ):
         _fail("snapshot_verify_receipt_mismatch")
     if (
         snapshot.ok is not True

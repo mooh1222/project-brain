@@ -322,6 +322,14 @@ def _mutate_snapshot_verify_receipt(
         value["engine_head"] = "1" * 40
     elif case == "corpus_fingerprint":
         value["corpus_fingerprint"] = "2" * 64
+    elif case == "ok_int":
+        value["ok"] = 1
+    elif case == "ok_float":
+        value["ok"] = 1.0
+    elif case == "file_count_float":
+        value["file_count"] = 7.0
+    elif case == "file_count_bool":
+        value["file_count"] = True
     else:  # pragma: no cover - static parametrization
         raise AssertionError(case)
 
@@ -360,7 +368,17 @@ def test_create_task18_binding_records_exact_inputs_and_display_closure(
 
 @pytest.mark.parametrize(
     "case",
-    ["missing", "extra", "repo_head", "engine_head", "corpus_fingerprint"],
+    [
+        "missing",
+        "extra",
+        "repo_head",
+        "engine_head",
+        "corpus_fingerprint",
+        "ok_int",
+        "ok_float",
+        "file_count_float",
+        "file_count_bool",
+    ],
 )
 def test_generator_rejects_invalid_production_snapshot_verify_receipt(
     task18_fixture: SyntheticTask18,
@@ -382,7 +400,17 @@ def test_generator_rejects_invalid_production_snapshot_verify_receipt(
 
 @pytest.mark.parametrize(
     "case",
-    ["missing", "extra", "repo_head", "engine_head", "corpus_fingerprint"],
+    [
+        "missing",
+        "extra",
+        "repo_head",
+        "engine_head",
+        "corpus_fingerprint",
+        "ok_int",
+        "ok_float",
+        "file_count_float",
+        "file_count_bool",
+    ],
 )
 def test_independent_verifier_rejects_invalid_production_snapshot_verify_receipt(
     task18_fixture: SyntheticTask18,
