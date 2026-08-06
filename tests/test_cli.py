@@ -3949,85 +3949,66 @@ class TestCliShow(unittest.TestCase):
         )
         self.assertEqual(err.getvalue(), "")
 
-    def test_display_migration_cli_normalizes_only_locator_titles(self):
-        from project_brain.snapshot import SnapshotVerification
-        from tests.test_mutation import _code_locator
+    def test_display_plan_and_apply_require_absolute_binding_and_expected_sha(self):
+        for action in ("plan", "verify-plan", "apply"):
+            out = io.StringIO()
+            err = io.StringIO()
+            with mock.patch("sys.argv", [
+                "cli", "migration", "display", action,
+                "--brain-root", "/tmp/brain",
+            ]), redirect_stdout(out), redirect_stderr(err):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("--task18-binding", err.getvalue())
+            self.assertIn(
+                "--expected-task18-binding-sha256",
+                err.getvalue(),
+            )
 
-        brain = (self.root / "display-brain").resolve()
-        input_dir = self.root / "display-inputs"
-        input_dir.mkdir()
-        locator = _code_locator(
-            object_id="code.neutral.display",
-            title="semantic label",
-            symbol="Display::Run",
-            quote=None,
-        )
-        BrainStore.save_object(brain, locator)
-        manifest_file = input_dir / "display-migration.manifest.json"
-        snapshot_receipt = "b" * 64
-        repo_head = "c" * 40
-        verification = SnapshotVerification(
-            ok=True,
-            snapshot_id="trusted-display-snapshot",
-            manifest_sha256=snapshot_receipt,
-            file_count=1,
-            repo_head=repo_head,
-            engine_head=ENGINE_ARGS[1],
-            corpus_fingerprint=corpus_fingerprint(BrainStore.load(brain)),
-        )
-        snapshot_root = input_dir / "snapshot"
-
-        plan_out = io.StringIO()
-        with mock.patch(
-            "project_brain.migration.verify_snapshot",
-            return_value=verification,
-        ), mock.patch(
-            "project_brain.migration.verify_git_root_head",
-            side_effect=lambda root, label: (
-                repo_head if label == "repo_root" else ENGINE_ARGS[1]
-            ),
-        ), mock.patch("sys.argv", [
-            "cli", "migration", "display", "plan",
-            "--brain-root", str(brain),
+    def test_task18_cli_refuses_existing_report_before_action(self):
+        report = (self.root / "existing-report.json").resolve()
+        report.write_text("do not replace\n", encoding="utf-8")
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "display", "binding-verify",
+            "--brain-root", str(self.root.resolve()),
             "--repo-root", str(self.root.resolve()),
-            "--engine-root", str(input_dir.resolve()),
-            "--snapshot-root", str(snapshot_root),
-            "--expected-snapshot-manifest-sha256", snapshot_receipt,
-            "--manifest", str(manifest_file),
-            *ENGINE_ARGS,
-        ]), redirect_stdout(plan_out):
-            self.assertEqual(cli.main(), 0, plan_out.getvalue())
-        planned = json.loads(plan_out.getvalue())
-        self.assertEqual(
-            BrainStore.load(brain).get(locator["id"])["title"],
-            "semantic label",
-        )
+            "--engine-root", str(self.root.resolve()),
+            "--task18-binding", str((self.root / "missing.json").resolve()),
+            "--expected-task18-binding-sha256", "a" * 64,
+            "--report", str(report),
+        ]), redirect_stdout(out), redirect_stderr(err):
+            result = cli.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(json.loads(out.getvalue())["error_code"], "report_exists")
+        self.assertEqual(report.read_text(encoding="utf-8"), "do not replace\n")
+        self.assertEqual(err.getvalue(), "")
 
-        apply_out = io.StringIO()
-        with mock.patch(
-            "project_brain.migration.verify_snapshot",
-            return_value=verification,
-        ), mock.patch(
-            "project_brain.migration.verify_git_root_head",
-            side_effect=lambda root, label: (
-                repo_head if label == "repo_root" else ENGINE_ARGS[1]
-            ),
-        ), mock.patch("sys.argv", [
-            "cli", "migration", "display", "apply",
-            "--brain-root", str(brain),
+    def test_generic_apply_cannot_dispatch_display_manifest(self):
+        manifest = (self.root / "display-v3.json").resolve()
+        manifest.write_text(json.dumps({
+            "migration_version": 3,
+            "migration_kind": "display_only",
+        }), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch("sys.argv", [
+            "cli", "migration", "id", "apply",
+            "--brain-root", str(self.root.resolve()),
             "--repo-root", str(self.root.resolve()),
-            "--engine-root", str(input_dir.resolve()),
-            "--snapshot-root", str(snapshot_root),
-            "--expected-snapshot-manifest-sha256", snapshot_receipt,
-            "--manifest", str(manifest_file),
-            "--expected-manifest-sha256", planned["manifest_sha256"],
+            "--engine-root", str(self.root.resolve()),
+            "--snapshot-root", str(self.root.resolve()),
+            "--expected-snapshot-manifest-sha256", "a" * 64,
+            "--manifest", str(manifest),
+            "--expected-manifest-sha256", hashlib.sha256(
+                manifest.read_bytes()
+            ).hexdigest(),
             *ENGINE_ARGS,
-        ]), redirect_stdout(apply_out):
-            self.assertEqual(cli.main(), 0, apply_out.getvalue())
-        self.assertEqual(
-            BrainStore.load(brain).get(locator["id"])["title"],
-            "Display::Run",
-        )
+        ]), redirect_stdout(out):
+            result = cli.main()
+        self.assertEqual(result, 1)
+        self.assertIn("display artifact requires", out.getvalue())
 
 
 if __name__ == "__main__":

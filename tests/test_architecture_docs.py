@@ -243,3 +243,33 @@ def test_runtime_map_separates_active_finalization_from_planned_p0_gate():
         "index rebuild를 호출하지 않는다",
     ):
         assert statement in runtime
+
+
+def test_task18_migration_boundaries_are_explicit():
+    runtime = _read_architecture_doc("runtime-map.md")
+    for token in (
+        "quote inventory",
+        "pre-snapshot",
+        "binding",
+        "verify-plan",
+        "post-verify",
+        "closure",
+    ):
+        assert token in runtime
+
+    changes = _read_architecture_doc("change-map.md")
+    for token in (
+        "task18_verify.py",
+        "task18_binding.py",
+        "quote_debt.py",
+        "display migration",
+    ):
+        assert token in changes
+
+    contracts = _read_architecture_doc("data-contracts.md")
+    for token in (
+        "paired locator/ref title",
+        "reviewed at ingest, not mechanically re-checkable now",
+        "title만",
+    ):
+        assert token in contracts

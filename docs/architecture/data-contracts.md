@@ -204,6 +204,19 @@ CodeLocator 외 kind에도 읽기 호환과 신규 쓰기의 비대칭이 있다
 `BrainStore.load()`가 JSON을 읽을 수 있다는 사실과 `MutationService`가 새 정본으로 받아들인다는
 사실을 분리해서 말해야 한다.
 
+### Task 18 표시 migration과 legacy quote
+
+Task 18의 `paired locator/ref title` 불변식은 중첩 `locator.code_locator_id`로 연결된
+EvidenceRef와 CodeLocator가 같은 canonical symbol title을 가져야 한다는 뜻이다. binding은 변경할
+두 객체 집합, 각 before object SHA, title을 뺀 hash, 기대 title을 함께 고정한다. 적용 뒤 검증은
+snapshot before와 live corpus의 경로·객체 수를 다시 맞추고 **title만** 달라졌는지 확인한다. 일반
+ID migration manifest나 binding 밖 객체는 이 쓰기 권한을 얻지 않는다.
+
+quote inventory에 든 legacy CodeLocator는 `reviewed at ingest, not mechanically re-checkable now`로
+해석한다. 즉 적재 당시 검토됐지만 현재 `verified_quote`가 없어 기계적으로 다시 대조할 수 없다는
+뜻이지, 처음부터 검토되지 않았다는 뜻이 아니다. display migration은 이 quote ID와 quote 필드의
+존재 여부, 비정본 symbol ID, reference graph, lint, index DB bytes를 바꾸지 않는다.
+
 ## 정상 연결 그래프
 
 `object-graph.complete.template.json`은 다음 6개 reviewed 객체를 한 연결 요소로 만든다.

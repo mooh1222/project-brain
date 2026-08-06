@@ -17,8 +17,12 @@
   "subcommand_paths": [
     "context-replace apply", "context-replace plan", "graph export", "graph isolated",
     "index rebuild", "migration canonical-repair apply", "migration canonical-repair plan",
-    "migration display apply", "migration display plan", "migration id apply",
-    "migration id plan", "projection build-reuse", "projection refresh",
+    "migration display apply", "migration display binding-create",
+    "migration display binding-verify", "migration display closure-create",
+    "migration display closure-verify", "migration display plan",
+    "migration display post-verify", "migration display verify-plan",
+    "migration id apply", "migration id plan", "migration quote-debt build",
+    "migration quote-debt verify", "projection build-reuse", "projection refresh",
     "session list", "session mark-processed", "snapshot create", "snapshot restore",
     "snapshot verify"
   ],
@@ -32,21 +36,27 @@
     "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
-    "src/project_brain/lint.py", "src/project_brain/mutation.py",
+    "src/project_brain/lint.py", "src/project_brain/migration.py",
+    "src/project_brain/mutation.py", "src/project_brain/quote_debt.py",
     "src/project_brain/reference_fields.py", "src/project_brain/router.py",
     "src/project_brain/schema.py", "src/project_brain/search.py",
     "src/project_brain/search_index.py", "src/project_brain/session.py",
     "src/project_brain/snapshot.py", "src/project_brain/store.py",
-    "src/project_brain/surface.py"
+    "src/project_brain/surface.py", "src/project_brain/task18_binding.py",
+    "src/project_brain/task18_binding_verify.py", "src/project_brain/task18_state.py",
+    "src/project_brain/task18_verify.py"
   ],
   "test_paths": [
     "tests/test_architecture_docs.py", "tests/test_assembly.py", "tests/test_audit.py",
     "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
     "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_id_grammar.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
-    "tests/test_migration.py", "tests/test_mutation.py", "tests/test_router.py",
+    "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
+    "tests/test_router.py",
     "tests/test_schema.py", "tests/test_search.py", "tests/test_search_index.py",
-    "tests/test_session.py", "tests/test_snapshot.py", "tests/test_stale_check.py"
+    "tests/test_session.py", "tests/test_snapshot.py", "tests/test_stale_check.py",
+    "tests/test_task18_binding.py", "tests/test_task18_binding_verify.py",
+    "tests/test_task18_state.py", "tests/test_task18_verify.py"
   ],
   "doc_paths": [
     "AGENTS.md", "README.md", "ROADMAP.md", "docs/design-canonical.md",
@@ -106,6 +116,14 @@ flowchart LR
 
     Config --> Auxiliary[session · snapshot · plan manifest · install · doctor]
     Auxiliary --> Artifacts[코퍼스 밖 산출물 또는 복구 artifact]
+
+    Config --> QuoteInventory[Task 18 quote inventory]
+    QuoteInventory --> PreSnapshot[pre-snapshot]
+    PreSnapshot --> Task18Binding[Task 18 binding]
+    Task18Binding --> DisplayPlan[plan · verify-plan]
+    DisplayPlan --> DisplayApply[apply]
+    DisplayApply --> PostVerify[post-verify]
+    PostVerify --> Closure[corpus-final snapshot · closure]
 ```
 
 ## 저장면과 권위
@@ -121,6 +139,7 @@ flowchart LR
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
 | context-replace/migration manifest | 각 `plan` 명령 | exact SHA와 live precondition을 후속 apply에 묶는 파일. 그 자체가 객체 정본은 아님 | 같은 입력과 precondition에서 다시 plan |
 | snapshot | `snapshot create`, migration plan | 적용 전 복구 증거. `snapshot restore`는 brain 복구 전용 | create/verify로 새 snapshot 작성·검증 |
+| Task 18 quote inventory·binding·report·closure | `migration quote-debt ...`, `migration display ...` | quote inventory → pre-snapshot → binding → plan/verify-plan/apply → post-verify → corpus-final snapshot/closure 순서를 SHA와 create-only report로 묶는 control artifact | 같은 입력을 새 경로에 다시 생성하되 기존 report를 덮어쓰지 않음 |
 | graph HTML | `graph export` | 사람이 보는 점검 산출물 | 다시 export |
 | `.project-brain.json`, 설치 스킬, 설치 manifest | `install`, `bootstrap` | 프로젝트 연결 설정과 에이전트 사용면 | installer 소유권·보존 규칙에 따라 재실행 |
 | 모델 cache | `doctor --download`, 실모델 색인 | 외부 모델 로컬 cache | 다시 download/load |
@@ -191,7 +210,7 @@ session marker, build 결과, plan manifest, index, cache도 객체 mutation으�
 | `projection_repair` | `projection refresh` | 현재 source hash로 projection을 수리 |
 | `context_replace` | `context-replace apply` | plan manifest에 묶인 컨텍스트 객체 집합 교체 |
 | `id_only_migration` | `migration id apply` | snapshot·manifest에 묶인 ID·참조 migration. 필요하면 `eval_scenarios.json`도 같은 transaction의 auxiliary update로 갱신 |
-| `display_migration` | `migration display apply` | 표시 필드 migration |
+| `display_migration` | `migration display apply` | Task 18 binding과 검증된 v3 manifest에 묶인 표시 필드 migration. 일반 `migration id apply`는 이 manifest를 받을 수 없음 |
 | `canonical_repair` | `migration canonical-repair apply` | 분류·결정 원장과 결속한 canonical 복구 |
 
 `context-replace plan`은 `MutationService.plan()` 결과를 외부 manifest로 고정하고, apply는 그
@@ -309,7 +328,8 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 | `snapshot` | `snapshot create`, `snapshot verify`, `snapshot restore` |
 | `context-replace` | `context-replace plan`, `context-replace apply` |
 | `migration id` | `migration id plan`, `migration id apply` |
-| `migration display` | `migration display plan`, `migration display apply` |
+| `migration quote-debt` | `migration quote-debt build`, `migration quote-debt verify` |
+| `migration display` | `migration display binding-create`, `binding-verify`, `plan`, `verify-plan`, `apply`, `post-verify`, `closure-create`, `closure-verify` |
 | `migration canonical-repair` | `migration canonical-repair plan`, `migration canonical-repair apply` |
 
 ## 점검·공유 계약

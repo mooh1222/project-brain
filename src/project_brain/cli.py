@@ -2293,10 +2293,326 @@ def _run_context_replace(argv) -> int:
         return 1
 
 
+def _task18_add_roots(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--brain-root", required=True)
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--engine-root", required=True)
+
+
+def _task18_add_binding(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--task18-binding", required=True)
+    parser.add_argument("--expected-task18-binding-sha256", required=True)
+
+
+def _task18_add_report(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--report", required=True)
+
+
+def _task18_report_preflight(args) -> Path:
+    report = Path(args.report)
+    if not report.is_absolute() or report != Path(os.path.abspath(report)):
+        raise ValueError("report_path_invalid: --report must be exact absolute")
+    if report.exists():
+        raise FileExistsError(f"report_exists: {report}")
+    return report
+
+
+def _atomic_create_bytes_exclusive(path: Path, payload: bytes, *, label: str) -> str:
+    path = Path(path)
+    if not path.is_absolute() or path != Path(os.path.abspath(path)):
+        raise ValueError(f"{label}_path_invalid: path must be exact absolute")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise FileExistsError(f"{label}_exists: {path}") from exc
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _run_task18_migration(args, report_path: Path) -> int:
+    from project_brain.foundation import atomic_create_receipt
+    from project_brain.migration import (
+        apply_display_migration_artifact,
+        create_display_migration_artifact,
+        plan_display_migration,
+        verify_display_migration_artifact,
+    )
+    from project_brain.quote_debt import (
+        build_quote_debt_inventory,
+        verify_quote_debt_inventory,
+    )
+    from project_brain.task18_binding import (
+        Task18BindingRequest,
+        create_task18_binding,
+    )
+    from project_brain.task18_binding_verify import verify_task18_binding
+    from project_brain.task18_verify import (
+        create_task18_closure_receipt,
+        load_task18_post_authorization,
+        verify_task18_applied,
+        verify_task18_closure_receipt,
+    )
+
+    if args.mode == "quote-debt":
+        brain_root = Path(args.brain_root)
+        stale_report = _read_json_argument(args.stale_report, {})
+        if args.action == "build":
+            value = build_quote_debt_inventory(
+                BrainStore.load(brain_root),
+                measurement_path=Path(args.measurement),
+                expected_measurement_sha256=args.expected_measurement_sha256,
+                stale_report=stale_report,
+                engine_sha=args.engine_sha,
+                repo_sha=args.repo_sha,
+                target_revision_sha=args.target_revision_sha,
+                brain_root=brain_root,
+                index_db_path=Path(args.index_db),
+                generated_at=args.generated_at,
+            )
+            report_sha = atomic_create_receipt(report_path, value)
+            payload = {
+                "ok": True,
+                "report": str(report_path),
+                "report_sha256": report_sha,
+                "quote_debt_count": len(value["quote_debt_ids"]),
+            }
+        else:
+            inventory = _read_json_argument(args.inventory, {})
+            if hashlib.sha256(Path(args.inventory).read_bytes()).hexdigest() != args.expected_inventory_sha256:
+                raise ValueError("inventory_sha256_mismatch")
+            authorized = None
+            if args.phase == "post_migration":
+                authorization = load_task18_post_authorization(
+                    binding_path=Path(args.task18_binding),
+                    expected_binding_sha256=args.expected_task18_binding_sha256,
+                    engine_root=Path(args.engine_root),
+                    repo_root=Path(args.repo_root),
+                    brain_root=brain_root,
+                )
+                authorized = authorization.expected_titles
+            result = verify_quote_debt_inventory(
+                inventory,
+                existing=BrainStore.load(brain_root),
+                stale_report=stale_report,
+                phase=args.phase,
+                authorized_titles=authorized,
+            )
+            report_sha = atomic_create_receipt(report_path, result)
+            payload = {**result, "report": str(report_path), "report_sha256": report_sha}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    engine_root = Path(args.engine_root)
+    repo_root = Path(args.repo_root)
+    brain_root = Path(args.brain_root)
+    if args.action == "binding-create":
+        request = Task18BindingRequest(
+            binding_path=Path(args.task18_binding),
+            engine_root=engine_root,
+            repo_root=repo_root,
+            brain_root=brain_root,
+            expected_engine_head=args.expected_engine_head,
+            expected_repo_head=args.expected_repo_head,
+            expected_engine_status_sha256=args.expected_engine_status_sha256,
+            expected_engine_dirt_content_sha256=args.expected_engine_dirt_content_sha256,
+            expected_repo_status_sha256=args.expected_repo_status_sha256,
+            expected_repo_dirt_content_sha256=args.expected_repo_dirt_content_sha256,
+            local_target_ref=args.local_target_ref,
+            remote=args.remote,
+            remote_target_ref=args.remote_target_ref,
+            target_revision_sha=args.target_revision_sha,
+            p0_handoff_path=Path(args.p0_handoff),
+            expected_p0_handoff_sha256=args.expected_p0_handoff_sha256,
+            measurement_path=Path(args.measurement),
+            expected_measurement_sha256=args.expected_measurement_sha256,
+            design_path=Path(args.design),
+            design_commit_sha=args.design_commit_sha,
+            expected_design_file_sha256=args.expected_design_file_sha256,
+            plan_path=Path(args.plan),
+            plan_commit_sha=args.plan_commit_sha,
+            expected_plan_file_sha256=args.expected_plan_file_sha256,
+            quote_debt_path=Path(args.quote_debt),
+            expected_quote_debt_sha256=args.expected_quote_debt_sha256,
+            snapshot_root=Path(args.snapshot_root),
+            expected_snapshot_manifest_sha256=args.expected_snapshot_manifest_sha256,
+            snapshot_verify_receipt_path=Path(args.snapshot_verify_receipt),
+            expected_snapshot_verify_receipt_sha256=args.expected_snapshot_verify_receipt_sha256,
+        )
+        result = create_task18_binding(request)
+        report = {
+            "ok": True,
+            "action": "binding-create",
+            "binding": str(result.path),
+            "binding_sha256": result.sha256,
+        }
+        report_sha = atomic_create_receipt(report_path, report)
+        payload = {**report, "report": str(report_path), "report_sha256": report_sha}
+    elif args.action == "binding-verify":
+        result = verify_task18_binding(
+            binding_path=Path(args.task18_binding),
+            expected_binding_sha256=args.expected_task18_binding_sha256,
+            engine_root=engine_root,
+            repo_root=repo_root,
+            brain_root=brain_root,
+        )
+        report = {
+            "ok": True,
+            "action": "binding-verify",
+            "binding": result.path,
+            "binding_sha256": result.sha256,
+            "target_count": len(result.migration_targets),
+        }
+        report_sha = atomic_create_receipt(report_path, report)
+        payload = {**report, "report": str(report_path), "report_sha256": report_sha}
+    elif args.action == "plan":
+        plan = plan_display_migration(
+            existing=BrainStore.load(brain_root),
+            brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+            task18_binding_path=Path(args.task18_binding),
+            expected_task18_binding_sha256=args.expected_task18_binding_sha256,
+        )
+        artifact = create_display_migration_artifact(plan)
+        manifest_path = Path(args.manifest)
+        _atomic_create_bytes_exclusive(manifest_path, artifact.manifest_bytes, label="manifest")
+        report = {
+            "ok": True,
+            "action": "plan",
+            "manifest": str(manifest_path),
+            "manifest_sha256": artifact.manifest_sha256,
+            "target_count": len(plan.request.objects),
+        }
+        report_sha = atomic_create_receipt(report_path, report)
+        payload = {**report, "report": str(report_path), "report_sha256": report_sha}
+    elif args.action == "verify-plan":
+        verified = verify_display_migration_artifact(
+            manifest_bytes=Path(args.manifest).read_bytes(),
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            task18_binding_path=Path(args.task18_binding),
+            expected_task18_binding_sha256=args.expected_task18_binding_sha256,
+            brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+        )
+        report = {
+            "ok": verified.ok,
+            "action": "verify-plan",
+            "manifest": str(Path(args.manifest)),
+            "manifest_sha256": args.expected_manifest_sha256,
+        }
+        report_sha = atomic_create_receipt(report_path, report)
+        payload = {**report, "report": str(report_path), "report_sha256": report_sha}
+    elif args.action == "apply":
+        result = apply_display_migration_artifact(
+            manifest_bytes=Path(args.manifest).read_bytes(),
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            task18_binding_path=Path(args.task18_binding),
+            expected_task18_binding_sha256=args.expected_task18_binding_sha256,
+            brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+        )
+        report = {
+            "ok": True,
+            "action": "apply",
+            "transaction_id": result.transaction_id,
+            "action_count": result.action_count,
+            "snapshot_id": result.snapshot_id,
+        }
+        report_sha = atomic_create_receipt(report_path, report)
+        payload = {**report, "report": str(report_path), "report_sha256": report_sha}
+    elif args.action == "post-verify":
+        result = verify_task18_applied(
+            binding_path=Path(args.task18_binding),
+            expected_binding_sha256=args.expected_task18_binding_sha256,
+            manifest_path=Path(args.manifest),
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            quote_debt_path=Path(args.quote_debt),
+            expected_quote_debt_sha256=args.expected_quote_debt_sha256,
+            engine_root=engine_root,
+            repo_root=repo_root,
+            brain_root=brain_root,
+            report_path=report_path,
+            pathspec_output=Path(args.pathspec_output),
+            generated_at=args.generated_at,
+        )
+        payload = {
+            "ok": True,
+            "action": "post-verify",
+            "report": str(result.report_path),
+            "report_sha256": result.report_sha256,
+            "update_count": result.update_count,
+        }
+    elif args.action == "closure-create":
+        result = create_task18_closure_receipt(
+            closure_path=Path(args.closure_receipt),
+            report_path=report_path,
+            corpus_final_snapshot_root=Path(args.snapshot_root),
+            expected_snapshot_manifest_sha256=args.expected_snapshot_manifest_sha256,
+            snapshot_verify_receipt_path=Path(args.snapshot_verify_receipt),
+            expected_snapshot_verify_receipt_sha256=args.expected_snapshot_verify_receipt_sha256,
+            binding_path=Path(args.task18_binding),
+            expected_binding_sha256=args.expected_task18_binding_sha256,
+            manifest_path=Path(args.manifest),
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            post_report_path=Path(args.post_report),
+            expected_post_report_sha256=args.expected_post_report_sha256,
+            engine_root=engine_root,
+            repo_root=repo_root,
+            brain_root=brain_root,
+            completion_report_path=Path(args.completion_report),
+            roadmap_path=Path(args.roadmap),
+            generated_at=args.generated_at,
+        )
+        payload = {
+            "ok": result.ok,
+            "action": "closure-create",
+            "closure_receipt": str(result.closure_path),
+            "closure_receipt_sha256": result.closure_sha256,
+            "report": str(result.report_path),
+            "report_sha256": result.report_sha256,
+        }
+    else:
+        result = verify_task18_closure_receipt(
+            closure_path=Path(args.closure_receipt),
+            expected_closure_sha256=args.expected_closure_sha256,
+            engine_root=engine_root,
+            repo_root=repo_root,
+            report_path=report_path,
+            generated_at=args.generated_at,
+        )
+        payload = {
+            "ok": result.ok,
+            "action": "closure-verify",
+            "closure_receipt": str(result.closure_path),
+            "closure_receipt_sha256": result.closure_sha256,
+            "report": str(result.report_path),
+            "report_sha256": result.report_sha256,
+        }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_migration(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli migration")
     modes = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("id", "display"):
+    for mode in ("id",):
         mode_parser = modes.add_parser(mode)
         actions = mode_parser.add_subparsers(dest="action", required=True)
         plan = actions.add_parser("plan")
@@ -2310,8 +2626,7 @@ def _run_migration(argv) -> int:
         )
         plan.add_argument("--manifest", required=True)
         plan.add_argument("--engine-sha", required=True)
-        if mode == "id":
-            plan.add_argument("--renames-file", required=True)
+        plan.add_argument("--renames-file", required=True)
         apply = actions.add_parser("apply")
         apply.add_argument("--brain-root", required=True)
         apply.add_argument("--repo-root", required=True)
@@ -2324,6 +2639,93 @@ def _run_migration(argv) -> int:
         apply.add_argument("--manifest", required=True)
         apply.add_argument("--expected-manifest-sha256", required=True)
         apply.add_argument("--engine-sha", required=True)
+    quote_debt = modes.add_parser("quote-debt")
+    quote_actions = quote_debt.add_subparsers(dest="action", required=True)
+    quote_build = quote_actions.add_parser("build")
+    quote_build.add_argument("--brain-root", required=True)
+    quote_build.add_argument("--measurement", required=True)
+    quote_build.add_argument("--expected-measurement-sha256", required=True)
+    quote_build.add_argument("--stale-report", required=True)
+    quote_build.add_argument("--engine-sha", required=True)
+    quote_build.add_argument("--repo-sha", required=True)
+    quote_build.add_argument("--target-revision-sha", required=True)
+    quote_build.add_argument("--index-db", required=True)
+    quote_build.add_argument("--generated-at", required=True)
+    _task18_add_report(quote_build)
+    quote_verify = quote_actions.add_parser("verify")
+    quote_verify.add_argument("--brain-root", required=True)
+    quote_verify.add_argument("--inventory", required=True)
+    quote_verify.add_argument("--expected-inventory-sha256", required=True)
+    quote_verify.add_argument("--stale-report", required=True)
+    quote_verify.add_argument(
+        "--phase",
+        required=True,
+        choices=("pre_migration", "post_migration"),
+    )
+    quote_verify.add_argument("--engine-root")
+    quote_verify.add_argument("--repo-root")
+    quote_verify.add_argument("--task18-binding")
+    quote_verify.add_argument("--expected-task18-binding-sha256")
+    _task18_add_report(quote_verify)
+
+    display = modes.add_parser("display")
+    display_actions = display.add_subparsers(dest="action", required=True)
+    binding_create = display_actions.add_parser("binding-create")
+    _task18_add_roots(binding_create)
+    _task18_add_binding(binding_create)
+    for name in (
+        "expected-engine-head", "expected-repo-head",
+        "expected-engine-status-sha256", "expected-engine-dirt-content-sha256",
+        "expected-repo-status-sha256", "expected-repo-dirt-content-sha256",
+        "local-target-ref", "remote", "remote-target-ref", "target-revision-sha",
+        "p0-handoff", "expected-p0-handoff-sha256", "measurement",
+        "expected-measurement-sha256", "design", "design-commit-sha",
+        "expected-design-file-sha256", "plan", "plan-commit-sha",
+        "expected-plan-file-sha256", "quote-debt", "expected-quote-debt-sha256",
+        "snapshot-root", "expected-snapshot-manifest-sha256",
+        "snapshot-verify-receipt", "expected-snapshot-verify-receipt-sha256",
+    ):
+        binding_create.add_argument(f"--{name}", required=True)
+    _task18_add_report(binding_create)
+    binding_verify = display_actions.add_parser("binding-verify")
+    _task18_add_roots(binding_verify)
+    _task18_add_binding(binding_verify)
+    _task18_add_report(binding_verify)
+    for action in ("plan", "verify-plan", "apply"):
+        action_parser = display_actions.add_parser(action)
+        _task18_add_roots(action_parser)
+        _task18_add_binding(action_parser)
+        action_parser.add_argument("--manifest", required=True)
+        if action != "plan":
+            action_parser.add_argument("--expected-manifest-sha256", required=True)
+        _task18_add_report(action_parser)
+    post = display_actions.add_parser("post-verify")
+    _task18_add_roots(post)
+    _task18_add_binding(post)
+    post.add_argument("--manifest", required=True)
+    post.add_argument("--expected-manifest-sha256", required=True)
+    post.add_argument("--quote-debt", required=True)
+    post.add_argument("--expected-quote-debt-sha256", required=True)
+    post.add_argument("--pathspec-output", required=True)
+    post.add_argument("--generated-at", required=True)
+    _task18_add_report(post)
+    closure_create = display_actions.add_parser("closure-create")
+    _task18_add_roots(closure_create)
+    _task18_add_binding(closure_create)
+    for name in (
+        "closure-receipt", "snapshot-root", "expected-snapshot-manifest-sha256",
+        "snapshot-verify-receipt", "expected-snapshot-verify-receipt-sha256",
+        "manifest", "expected-manifest-sha256", "post-report",
+        "expected-post-report-sha256", "completion-report", "roadmap", "generated-at",
+    ):
+        closure_create.add_argument(f"--{name}", required=True)
+    _task18_add_report(closure_create)
+    closure_verify = display_actions.add_parser("closure-verify")
+    _task18_add_roots(closure_verify)
+    closure_verify.add_argument("--closure-receipt", required=True)
+    closure_verify.add_argument("--expected-closure-sha256", required=True)
+    closure_verify.add_argument("--generated-at", required=True)
+    _task18_add_report(closure_verify)
     canonical = modes.add_parser("canonical-repair")
     canonical_actions = canonical.add_subparsers(
         dest="action",
@@ -2357,6 +2759,37 @@ def _run_migration(argv) -> int:
                 required=True,
             )
     args = parser.parse_args(argv)
+
+    if args.mode in {"quote-debt", "display"}:
+        try:
+            report_path = _task18_report_preflight(args)
+            if (
+                args.mode == "quote-debt"
+                and args.action == "verify"
+                and args.phase == "post_migration"
+                and not all(
+                    getattr(args, name, None)
+                    for name in (
+                        "engine_root", "repo_root", "task18_binding",
+                        "expected_task18_binding_sha256",
+                    )
+                )
+            ):
+                raise ValueError("post_migration_requires_task18_binding")
+            return _run_task18_migration(args, report_path)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            detail = getattr(exc, "detail", None)
+            if code is None:
+                message = str(exc)
+                code = message.split(":", 1)[0]
+                detail = message.split(":", 1)[1].strip() if ":" in message else message
+            print(json.dumps({
+                "ok": False,
+                "error_code": code or "task18_migration_failed",
+                "error": detail or str(exc),
+            }, ensure_ascii=False, indent=2))
+            return 1
 
     from project_brain.canonical_repair import (
         CanonicalRepairError,
