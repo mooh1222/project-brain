@@ -875,7 +875,10 @@ def _closure_snapshot_sources(
     binding: Mapping[str, object],
     *,
     label: str,
-) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
+) -> tuple[
+    dict[str, tuple[str, bytes, Mapping[str, object]]],
+    str,
+]:
     snapshot = binding.get("pre_mutation_snapshot")
     if not isinstance(snapshot, Mapping):
         _fail("binding_schema_invalid", "pre_mutation_snapshot missing")
@@ -921,7 +924,7 @@ def _closure_snapshot_sources(
         if not isinstance(object_id, str) or not object_id or object_id in sources:
             _fail(f"{label}_snapshot_object_set_invalid", str(object_id))
         sources[object_id] = (relative, payload, value)
-    return sources
+    return sources, hashlib.sha256(manifest_data).hexdigest()
 
 
 def _final_corpus_evidence(
@@ -982,7 +985,12 @@ def _validate_create_closure_semantics(
         bound_targets, (str, bytes, bytearray),
     ):
         _fail("binding_schema_invalid")
-    before = _closure_snapshot_sources(binding, label="create")
+    before, actual_manifest_sha256 = _closure_snapshot_sources(
+        binding,
+        label="create",
+    )
+    if actual_manifest_sha256 != snapshot.get("manifest_sha256"):
+        _fail("create_snapshot_manifest_sha256_mismatch")
     with corpus_lock(brain_root, exclusive=False):
         assert_corpus_readable(brain_root)
         final = _live_object_sources_all(brain_root)
@@ -1134,7 +1142,11 @@ def _verify_closure_semantics_independent(
         supplied_targets, (str, bytes, bytearray),
     ):
         _fail("binding_schema_invalid")
-    snapshot_sources = _closure_snapshot_sources(binding, label="verify")
+    snapshot_sources, independently_read_manifest_sha256 = (
+        _closure_snapshot_sources(binding, label="verify")
+    )
+    if independently_read_manifest_sha256 != snapshot.get("manifest_sha256"):
+        _fail("verify_snapshot_manifest_sha256_mismatch")
     with corpus_lock(brain_root, exclusive=False):
         assert_corpus_readable(brain_root)
         live_sources = _live_object_sources_all(brain_root)

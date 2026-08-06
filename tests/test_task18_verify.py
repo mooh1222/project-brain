@@ -435,6 +435,55 @@ def test_post_verify_creates_report_and_nul_pathspec_only_once(
         )
 
 
+def _materialize_pre_snapshot(fixture) -> Path:
+    pre_snapshot_root = fixture.request.snapshot_root
+    snapshot_files = []
+    for relative in (
+        "objects/code/legacy-locator-name.json",
+        "objects/evidence_refs/legacy-ref-name.json",
+    ):
+        source = fixture.request.brain_root / relative
+        payload = source.read_bytes()
+        snapshot_relative = f"payload/brain/{relative}"
+        target = pre_snapshot_root / snapshot_relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        snapshot_files.append({
+            "scope": "brain",
+            "path": relative,
+            "snapshot_path": snapshot_relative,
+            "sha256": _sha(payload),
+            "size": len(payload),
+            "copied": True,
+        })
+    manifest_path = pre_snapshot_root / "manifest.json"
+    manifest_bytes = canonical_receipt_bytes({"files": snapshot_files})
+    manifest_path.write_bytes(manifest_bytes)
+    manifest_sha = _sha(manifest_bytes)
+    fixture.snapshot = replace(
+        fixture.snapshot,
+        manifest_sha256=manifest_sha,
+        file_count=len(snapshot_files),
+    )
+    verify_path = fixture.request.snapshot_verify_receipt_path
+    verify_bytes = canonical_receipt_bytes({
+        "ok": True,
+        "snapshot_id": fixture.snapshot.snapshot_id,
+        "manifest_sha256": fixture.snapshot.manifest_sha256,
+        "file_count": fixture.snapshot.file_count,
+        "repo_head": fixture.snapshot.repo_head,
+        "engine_head": fixture.snapshot.engine_head,
+        "corpus_fingerprint": fixture.snapshot.corpus_fingerprint,
+    })
+    verify_path.write_bytes(verify_bytes)
+    fixture.request = replace(
+        fixture.request,
+        expected_snapshot_manifest_sha256=manifest_sha,
+        expected_snapshot_verify_receipt_sha256=_sha(verify_bytes),
+    )
+    return manifest_path
+
+
 def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import project_brain.task18_binding as create_module
     import project_brain.task18_verify as module
@@ -444,6 +493,7 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from tests.test_task18_binding import task18_fixture as fixture_definition
 
     fixture = fixture_definition.__wrapped__(tmp_path)
+    pre_snapshot_manifest_path = _materialize_pre_snapshot(fixture)
     fixture.install(monkeypatch, create_module)
     created = create_task18_binding(
         fixture.request,
@@ -508,29 +558,6 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "repo_head": snapshot.repo_head,
         "engine_head": snapshot.engine_head,
         "corpus_fingerprint": snapshot.corpus_fingerprint,
-    }))
-    pre_snapshot_root = Path(created.value["pre_mutation_snapshot"]["path"])
-    snapshot_files = []
-    for relative in (
-        "objects/code/legacy-locator-name.json",
-        "objects/evidence_refs/legacy-ref-name.json",
-    ):
-        source = brain_root / relative
-        payload = source.read_bytes()
-        snapshot_relative = f"payload/brain/{relative}"
-        target = pre_snapshot_root / snapshot_relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
-        snapshot_files.append({
-            "scope": "brain",
-            "path": relative,
-            "snapshot_path": snapshot_relative,
-            "sha256": _sha(payload),
-            "size": len(payload),
-            "copied": True,
-        })
-    (pre_snapshot_root / "manifest.json").write_bytes(canonical_receipt_bytes({
-        "files": snapshot_files,
     }))
     targets = created.value["migration"]["targets"]
     before_objects = [dict(fixture.store.get(row["id"])) for row in targets]
@@ -680,6 +707,7 @@ def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return SimpleNamespace(
         module=module,
         created=created,
+        pre_snapshot_manifest_path=pre_snapshot_manifest_path,
         snapshot=snapshot,
         engine_root=engine_root,
         repo_root=repo_root,
@@ -881,6 +909,71 @@ def test_closure_rejects_rebound_forged_manifest_intent(
             repo_root=fixture.repo_root,
             brain_root=fixture.brain_root,
             report_path=(tmp_path / "forged-intent-verify-report.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+def test_closure_rejects_pre_snapshot_manifest_bytes_not_bound_by_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    bound_snapshot = fixture.created.value["pre_mutation_snapshot"]
+    assert _sha(fixture.pre_snapshot_manifest_path.read_bytes()) == bound_snapshot[
+        "manifest_sha256"
+    ]
+    if pathway == "verify":
+        result = create_task18_closure_receipt(**fixture.create_args)
+    manifest = json.loads(fixture.pre_snapshot_manifest_path.read_bytes())
+    manifest["forged_but_entries_unchanged"] = True
+    fixture.pre_snapshot_manifest_path.write_bytes(
+        canonical_receipt_bytes(manifest),
+    )
+
+    expected_code = f"{pathway}_snapshot_manifest_sha256_mismatch"
+    if pathway == "create":
+        with pytest.raises(Task18VerificationError, match=expected_code):
+            create_task18_closure_receipt(**fixture.create_args)
+        return
+
+    with pytest.raises(Task18VerificationError, match=expected_code):
+        verify_task18_closure_receipt(
+            closure_path=fixture.closure,
+            expected_closure_sha256=result.closure_sha256,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "snapshot-manifest-sha-report.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize("pathway", ("create", "verify"))
+def test_closure_distinguishes_duplicate_key_snapshot_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pathway: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    if pathway == "verify":
+        result = create_task18_closure_receipt(**fixture.create_args)
+    fixture.pre_snapshot_manifest_path.write_bytes(
+        b'{"files":[],"files":[]}\n',
+    )
+    expected_code = f"{pathway}_snapshot_manifest_invalid"
+    if pathway == "create":
+        with pytest.raises(Task18VerificationError, match=expected_code):
+            create_task18_closure_receipt(**fixture.create_args)
+        return
+
+    with pytest.raises(Task18VerificationError, match=expected_code):
+        verify_task18_closure_receipt(
+            closure_path=fixture.closure,
+            expected_closure_sha256=result.closure_sha256,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "snapshot-manifest-duplicate-report.json").resolve(),
         )
 
 
