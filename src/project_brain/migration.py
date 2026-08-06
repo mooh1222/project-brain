@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 from project_brain.corpus_io import (
@@ -42,6 +43,10 @@ from project_brain.snapshot import (
     verify_snapshot,
 )
 from project_brain.store import BrainStore
+from project_brain.task18_binding_verify import (
+    Task18BindingVerification,
+    verify_task18_binding,
+)
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -61,6 +66,15 @@ _INDEX_PATHS = (
     ".brain-local/index.db-shm",
     ".brain-local/index.db-journal",
 )
+DISPLAY_ARTIFACT_KEYS = {
+    "migration_version",
+    "migration_kind",
+    "intent",
+    "snapshot_id",
+    "snapshot_manifest_sha256",
+    "task18_binding_path",
+    "task18_binding_sha256",
+}
 
 
 @dataclass(frozen=True)
@@ -91,6 +105,8 @@ class MigrationPlan:
     rows: tuple[MigrationRow, ...]
     snapshot_id: str
     snapshot_manifest_sha256: str
+    binding_path: Path | None = None
+    binding_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +121,13 @@ class MigrationApplyResult:
     transaction_id: str
     action_count: int
     snapshot_id: str
+
+
+@dataclass(frozen=True)
+class MigrationArtifactVerification:
+    ok: bool
+    artifact: Mapping[str, object]
+    plan: MigrationPlan
 
 
 def _fail(code: str, detail: str) -> None:
@@ -807,24 +830,158 @@ def plan_display_migration(
     brain_root: Path,
     repo_root: Path,
     engine_root: Path,
-    engine_sha: str,
+    task18_binding_path: Path,
+    expected_task18_binding_sha256: str,
+) -> MigrationPlan:
+    binding_path = _validate_task18_binding_caller(
+        task18_binding_path,
+        expected_task18_binding_sha256,
+    )
+    binding = verify_task18_binding(
+        binding_path=binding_path,
+        expected_binding_sha256=expected_task18_binding_sha256,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    _validate_verified_task18_binding(
+        binding,
+        binding_path=binding_path,
+        binding_sha256=expected_task18_binding_sha256,
+    )
+    snapshot = _verify_task18_snapshot(binding)
+    return _build_bound_display_plan(
+        existing=existing,
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        binding=binding,
+        snapshot=snapshot,
+    )
+
+
+def _validate_task18_binding_caller(
+    binding_path: Path,
+    binding_sha256: str,
+) -> Path:
+    path = Path(binding_path)
+    if (
+        not path.is_absolute()
+        or path != Path(os.path.abspath(path))
+        or not isinstance(binding_sha256, str)
+        or _SHA256.fullmatch(binding_sha256) is None
+    ):
+        _fail(
+            "task18_binding_invalid",
+            "display artifact requires an exact binding path and SHA",
+        )
+    return path
+
+
+def _validate_verified_task18_binding(
+    binding: Task18BindingVerification,
+    *,
+    binding_path: Path,
+    binding_sha256: str,
+) -> None:
+    if (
+        not isinstance(binding, Task18BindingVerification)
+        or binding.path != str(binding_path)
+        or binding.sha256 != binding_sha256
+        or binding.task18_allowed is not True
+    ):
+        _fail(
+            "task18_binding_mismatch",
+            "verified Task 18 binding differs from the caller binding",
+        )
+
+
+def _verify_task18_snapshot(
+    binding: Task18BindingVerification,
+) -> SnapshotVerification:
+    try:
+        snapshot = verify_snapshot(
+            binding.snapshot_root,
+            expected_manifest_sha256=binding.snapshot_manifest_sha256,
+        )
+    except SnapshotError as exc:
+        _fail(exc.code, exc.detail)
+    validate_snapshot_binding(snapshot)
+    if snapshot.manifest_sha256 != binding.snapshot_manifest_sha256:
+        _fail(
+            "snapshot_binding_mismatch",
+            "verified snapshot differs from the Task 18 binding",
+        )
+    return snapshot
+
+
+def _build_bound_display_plan(
+    *,
+    existing: BrainStore,
+    brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
+    binding: Task18BindingVerification,
     snapshot: SnapshotVerification,
 ) -> MigrationPlan:
     repo_context = trusted_migration_context(
         brain_root=brain_root,
         repo_root=repo_root,
         engine_root=engine_root,
-        engine_sha=engine_sha,
+        engine_sha=snapshot.engine_head,
         snapshot=snapshot,
     )
     validate_live_snapshot_corpus(existing, snapshot)
-    return plan_display_migration_unbound(
+    unbound = plan_display_migration_unbound(
         existing=existing,
         brain_root=brain_root,
         repo_context=repo_context,
-        engine_sha=engine_sha,
+        engine_sha=snapshot.engine_head,
         snapshot=snapshot,
     )
+    _validate_bound_display_targets(existing, unbound, binding)
+    return replace(
+        unbound,
+        binding_path=Path(binding.path),
+        binding_sha256=binding.sha256,
+    )
+
+
+def _validate_bound_display_targets(
+    existing: BrainStore,
+    plan: MigrationPlan,
+    binding: Task18BindingVerification,
+) -> None:
+    before_by_id = {
+        str(obj["id"]): obj
+        for obj in plan.request.objects
+    }
+    after_by_id = {
+        str(obj["id"]): obj
+        for obj in plan.mutation_plan.after_objects
+    }
+    targets: list[dict[str, object]] = []
+    for object_id in sorted(before_by_id):
+        before = before_by_id[object_id]
+        after = after_by_id.get(object_id)
+        if after is None:
+            _fail(
+                "manifest_revalidation_failed",
+                f"{object_id}: display plan has no bound after object",
+            )
+        targets.append({
+            "id": object_id,
+            "kind": before.get("kind"),
+            "paired_locator_id": paired_code_locator_id(before),
+            "before_object_sha256": existing.source_sha256(object_id),
+            "before_non_title_sha256": non_title_sha256(before),
+            "expected_title": after.get("title"),
+        })
+    if tuple(targets) != tuple(binding.migration_targets):
+        _fail(
+            "manifest_revalidation_failed",
+            "live display plan differs from the verified Task 18 targets",
+        )
 
 
 def plan_display_migration_unbound(
@@ -874,6 +1031,11 @@ def plan_display_migration_unbound(
 
 
 def create_migration_artifact(plan: MigrationPlan) -> MigrationArtifact:
+    if plan.migration_kind != "id_only":
+        _fail(
+            "display_artifact_requires_task18_binding",
+            "display artifact requires the Task 18 bound v3 interface",
+        )
     intent, _, _ = canonical_unstamped_intent(
         plan.request,
         plan.mutation_plan,
@@ -891,6 +1053,206 @@ def create_migration_artifact(plan: MigrationPlan) -> MigrationArtifact:
         manifest=artifact,
         manifest_bytes=payload,
         manifest_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def create_display_migration_artifact(
+    plan: MigrationPlan,
+) -> MigrationArtifact:
+    if (
+        not isinstance(plan, MigrationPlan)
+        or plan.migration_kind != "display_only"
+        or not isinstance(plan.binding_path, Path)
+        or not isinstance(plan.binding_sha256, str)
+        or not isinstance(plan.snapshot_id, str)
+        or _SNAPSHOT_ID.fullmatch(plan.snapshot_id) is None
+        or not isinstance(plan.snapshot_manifest_sha256, str)
+        or _SHA256.fullmatch(plan.snapshot_manifest_sha256) is None
+    ):
+        _fail(
+            "display_plan_unbound",
+            "display artifact requires a Task 18 bound plan",
+        )
+    binding_path = _validate_task18_binding_caller(
+        plan.binding_path,
+        plan.binding_sha256,
+    )
+    intent, _, _ = canonical_unstamped_intent(
+        plan.request,
+        plan.mutation_plan,
+    )
+    artifact = {
+        "migration_version": 3,
+        "migration_kind": "display_only",
+        "intent": intent,
+        "snapshot_id": plan.snapshot_id,
+        "snapshot_manifest_sha256": plan.snapshot_manifest_sha256,
+        "task18_binding_path": str(binding_path),
+        "task18_binding_sha256": plan.binding_sha256,
+    }
+    payload = _canonical_json_bytes(artifact)
+    return MigrationArtifact(
+        manifest=artifact,
+        manifest_bytes=payload,
+        manifest_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def _parse_display_artifact(
+    manifest_bytes: bytes,
+    expected_manifest_sha256: str,
+) -> dict:
+    if (
+        not isinstance(manifest_bytes, bytes)
+        or not isinstance(expected_manifest_sha256, str)
+        or _SHA256.fullmatch(expected_manifest_sha256) is None
+        or hashlib.sha256(manifest_bytes).hexdigest()
+        != expected_manifest_sha256
+    ):
+        _fail(
+            "manifest_sha256_mismatch",
+            "manifest bytes do not match the trusted receipt",
+        )
+    try:
+        artifact = json.loads(manifest_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        _fail("display_manifest_invalid", str(exc))
+    if not isinstance(artifact, dict) or set(artifact) != DISPLAY_ARTIFACT_KEYS:
+        _fail(
+            "display_manifest_invalid",
+            "display migration artifact keys are invalid",
+        )
+    if (
+        artifact["migration_version"] != 3
+        or artifact["migration_kind"] != "display_only"
+        or not isinstance(artifact["intent"], dict)
+        or not isinstance(artifact["snapshot_id"], str)
+        or _SNAPSHOT_ID.fullmatch(artifact["snapshot_id"]) is None
+        or not isinstance(artifact["snapshot_manifest_sha256"], str)
+        or _SHA256.fullmatch(artifact["snapshot_manifest_sha256"]) is None
+        or not isinstance(artifact["task18_binding_path"], str)
+        or not isinstance(artifact["task18_binding_sha256"], str)
+        or _SHA256.fullmatch(artifact["task18_binding_sha256"]) is None
+    ):
+        _fail(
+            "display_manifest_invalid",
+            "display migration artifact payload is invalid",
+        )
+    return artifact
+
+
+def verify_display_migration_artifact(
+    *,
+    manifest_bytes: bytes,
+    expected_manifest_sha256: str,
+    task18_binding_path: Path,
+    expected_task18_binding_sha256: str,
+    brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
+) -> MigrationArtifactVerification:
+    artifact = _parse_display_artifact(
+        manifest_bytes,
+        expected_manifest_sha256,
+    )
+    binding_path = _validate_task18_binding_caller(
+        task18_binding_path,
+        expected_task18_binding_sha256,
+    )
+    if (
+        artifact["task18_binding_path"] != str(binding_path)
+        or artifact["task18_binding_sha256"]
+        != expected_task18_binding_sha256
+    ):
+        _fail(
+            "task18_binding_mismatch",
+            "display manifest binding differs from the caller binding",
+        )
+    binding = verify_task18_binding(
+        binding_path=binding_path,
+        expected_binding_sha256=expected_task18_binding_sha256,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    _validate_verified_task18_binding(
+        binding,
+        binding_path=binding_path,
+        binding_sha256=expected_task18_binding_sha256,
+    )
+    snapshot = _verify_task18_snapshot(binding)
+    if (
+        artifact["snapshot_id"] != snapshot.snapshot_id
+        or artifact["snapshot_manifest_sha256"]
+        != snapshot.manifest_sha256
+    ):
+        _fail(
+            "snapshot_binding_mismatch",
+            "display manifest snapshot differs from the bound snapshot",
+        )
+    replanned = _build_bound_display_plan(
+        existing=BrainStore.load(brain_root),
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        binding=binding,
+        snapshot=snapshot,
+    )
+    expected = create_display_migration_artifact(replanned)
+    if expected.manifest_bytes != manifest_bytes:
+        _fail(
+            "manifest_revalidation_failed",
+            "live replan differs from the supplied display artifact",
+        )
+    return MigrationArtifactVerification(
+        ok=True,
+        artifact=artifact,
+        plan=replanned,
+    )
+
+
+def apply_display_migration_artifact(
+    *,
+    manifest_bytes: bytes,
+    expected_manifest_sha256: str,
+    task18_binding_path: Path,
+    expected_task18_binding_sha256: str,
+    brain_root: Path,
+    repo_root: Path,
+    engine_root: Path,
+) -> MigrationApplyResult:
+    verified = verify_display_migration_artifact(
+        manifest_bytes=manifest_bytes,
+        expected_manifest_sha256=expected_manifest_sha256,
+        task18_binding_path=task18_binding_path,
+        expected_task18_binding_sha256=expected_task18_binding_sha256,
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+    )
+    intent = verified.artifact["intent"]
+    assert isinstance(intent, dict)
+    intent_payload = _canonical_json_bytes(intent)
+    result = MutationService().apply_bound_intent(
+        request=verified.plan.request,
+        artifact_intent=intent,
+        expected_intent_sha256=hashlib.sha256(intent_payload).hexdigest(),
+    )
+    if not result.ok or result.manifest is None:
+        _fail(
+            result.error_code or "mutation_apply_failed",
+            result.detail or "display migration mutation failed",
+        )
+    return MigrationApplyResult(
+        transaction_id=result.manifest.transaction_id,
+        action_count=(
+            len(result.manifest.creates)
+            + len(result.manifest.updates)
+            + len(result.manifest.deletes)
+            + len(result.manifest.renames)
+            + len(result.manifest.auxiliary_updates)
+        ),
+        snapshot_id=verified.plan.snapshot_id,
     )
 
 
@@ -912,6 +1274,17 @@ def _parse_artifact(
         artifact = json.loads(manifest_bytes)
     except (UnicodeError, json.JSONDecodeError) as exc:
         _fail("manifest_invalid", str(exc))
+    if (
+        isinstance(artifact, dict)
+        and (
+            artifact.get("migration_kind") == "display_only"
+            or artifact.get("migration_version") == 3
+        )
+    ):
+        _fail(
+            "display_artifact_requires_task18_binding",
+            "display artifact requires the Task 18 bound v3 interface",
+        )
     expected_keys = {
         "migration_version",
         "migration_kind",
@@ -924,7 +1297,7 @@ def _parse_artifact(
         _fail("manifest_invalid", "migration artifact keys are invalid")
     if (
         artifact["migration_version"] != 2
-        or artifact["migration_kind"] not in {"id_only", "display_only"}
+        or artifact["migration_kind"] != "id_only"
         or not isinstance(artifact["rows"], list)
         or not isinstance(artifact["intent"], dict)
     ):
@@ -978,35 +1351,25 @@ def apply_migration_artifact(
         snapshot=snapshot,
     )
     existing = BrainStore.load(brain_root)
-    if artifact["migration_kind"] == "id_only":
-        renames: dict[str, str] = {}
-        for row in artifact["rows"]:
-            if (
-                not isinstance(row, dict)
-                or set(row) != {field.name for field in fields(MigrationRow)}
-                or not isinstance(row.get("old_id"), str)
-                or not isinstance(row.get("new_id"), str)
-            ):
-                _fail("manifest_invalid", "migration row is invalid")
-            renames[row["old_id"]] = row["new_id"]
-        replanned = plan_id_migration(
-            existing=existing,
-            brain_root=brain_root,
-            repo_root=repo_root,
-            engine_root=engine_root,
-            engine_sha=engine_sha,
-            renames=renames,
-            snapshot=snapshot,
-        )
-    else:
-        replanned = plan_display_migration(
-            existing=existing,
-            brain_root=brain_root,
-            repo_root=repo_root,
-            engine_root=engine_root,
-            engine_sha=engine_sha,
-            snapshot=snapshot,
-        )
+    renames: dict[str, str] = {}
+    for row in artifact["rows"]:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {field.name for field in fields(MigrationRow)}
+            or not isinstance(row.get("old_id"), str)
+            or not isinstance(row.get("new_id"), str)
+        ):
+            _fail("manifest_invalid", "migration row is invalid")
+        renames[row["old_id"]] = row["new_id"]
+    replanned = plan_id_migration(
+        existing=existing,
+        brain_root=brain_root,
+        repo_root=repo_root,
+        engine_root=engine_root,
+        engine_sha=engine_sha,
+        renames=renames,
+        snapshot=snapshot,
+    )
     expected = create_migration_artifact(replanned)
     if expected.manifest_bytes != manifest_bytes:
         _fail(

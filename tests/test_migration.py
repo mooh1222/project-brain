@@ -10,22 +10,29 @@ from unittest import mock
 
 import pytest
 
+from project_brain.display_contract import non_title_sha256
 from project_brain.migration import (
     MigrationError,
     MigrationRow,
     _display_migration_inputs,
+    apply_display_migration_artifact,
     apply_migration_artifact,
     canonical_payload_hash_pair,
+    create_display_migration_artifact,
     create_migration_artifact,
     plan_display_migration,
+    plan_display_migration_unbound,
     plan_id_migration,
     trusted_migration_context,
     validate_live_snapshot_corpus,
     validate_snapshot_binding,
+    verify_display_migration_artifact,
 )
 from project_brain.mutation import corpus_fingerprint
 from project_brain.store import BrainStore
-from project_brain.snapshot import SnapshotVerification
+from project_brain.snapshot import SnapshotError, SnapshotVerification
+from project_brain.task18_binding import Task18BindingError
+from project_brain.task18_binding_verify import Task18BindingVerification
 from tests.test_ingest import (
     candidate_term,
     context,
@@ -203,6 +210,79 @@ def _id_plan(brain_root: Path, renames: dict[str, str]):
         renames=renames,
         snapshot=snapshot,
     )
+
+
+def _bound_display_case(tmp_path: Path) -> dict:
+    brain_root = (tmp_path / "brain").resolve()
+    locator = _code_locator(
+        object_id="code.neutral.display",
+        symbol="Namespace::Run",
+        title="legacy display",
+        quote=None,
+    )
+    _write_raw(brain_root, locator)
+    snapshot, repo_root, engine_root, _ = _trusted_snapshot_for(brain_root)
+    binding_path = (tmp_path / "task18-binding.json").resolve()
+    binding_bytes = b'{"fixture":true}\n'
+    binding_path.write_bytes(binding_bytes)
+    binding_sha256 = hashlib.sha256(binding_bytes).hexdigest()
+    binding = Task18BindingVerification(
+        path=str(binding_path),
+        sha256=binding_sha256,
+        task18_allowed=True,
+        snapshot_root=(tmp_path / "snapshot").resolve(),
+        snapshot_manifest_sha256=snapshot.manifest_sha256,
+        migration_targets=({
+            "id": locator["id"],
+            "kind": "CodeLocator",
+            "paired_locator_id": None,
+            "before_object_sha256": BrainStore.load(
+                brain_root
+            ).source_sha256(locator["id"]),
+            "before_non_title_sha256": non_title_sha256(locator),
+            "expected_title": "Namespace::Run",
+        },),
+    )
+    with (
+        mock.patch(
+            "project_brain.migration.verify_task18_binding",
+            return_value=binding,
+        ),
+        mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=snapshot,
+        ),
+    ):
+        plan = plan_display_migration(
+            existing=BrainStore.load(brain_root),
+            brain_root=brain_root,
+            repo_root=repo_root,
+            engine_root=engine_root,
+            task18_binding_path=binding_path,
+            expected_task18_binding_sha256=binding_sha256,
+        )
+    artifact = create_display_migration_artifact(plan)
+    verify_args = {
+        "manifest_bytes": artifact.manifest_bytes,
+        "expected_manifest_sha256": artifact.manifest_sha256,
+        "task18_binding_path": binding_path,
+        "expected_task18_binding_sha256": binding_sha256,
+        "brain_root": brain_root,
+        "repo_root": repo_root,
+        "engine_root": engine_root,
+    }
+    return {
+        "artifact": artifact,
+        "binding": binding,
+        "binding_path": binding_path,
+        "binding_sha256": binding_sha256,
+        "brain_root": brain_root,
+        "repo_root": repo_root,
+        "engine_root": engine_root,
+        "locator": locator,
+        "snapshot": snapshot,
+        "verify_args": verify_args,
+    }
 
 
 def _target_derived_review_plan_args(
@@ -1040,11 +1120,17 @@ def test_display_plan_builds_exact_locator_and_paired_evidence_ref_closure(
         brain_root,
     )
 
-    plan = plan_display_migration(
-        existing=BrainStore.load(brain_root),
+    repo_context = trusted_migration_context(
         brain_root=brain_root,
         repo_root=repo_root,
         engine_root=engine_root,
+        engine_sha=engine_head,
+        snapshot=snapshot,
+    )
+    plan = plan_display_migration_unbound(
+        existing=BrainStore.load(brain_root),
+        brain_root=brain_root,
+        repo_context=repo_context,
         engine_sha=engine_head,
         snapshot=snapshot,
     )
@@ -1128,6 +1214,215 @@ def test_display_selection_excludes_nonpaired_evidence_refs(
         "code.ctx.a",
         "evidence.ctx.paired",
     ]
+
+
+def test_display_artifact_records_exact_binding_and_snapshot(tmp_path):
+    case = _bound_display_case(tmp_path)
+    artifact = case["artifact"]
+
+    assert set(artifact.manifest) == {
+        "migration_version",
+        "migration_kind",
+        "intent",
+        "snapshot_id",
+        "snapshot_manifest_sha256",
+        "task18_binding_path",
+        "task18_binding_sha256",
+    }
+    assert artifact.manifest["migration_version"] == 3
+    assert artifact.manifest["migration_kind"] == "display_only"
+    assert artifact.manifest["task18_binding_path"] == str(
+        case["binding_path"]
+    )
+    assert artifact.manifest["task18_binding_sha256"] == case[
+        "binding_sha256"
+    ]
+    assert artifact.manifest["snapshot_id"] == case["snapshot"].snapshot_id
+    assert artifact.manifest["snapshot_manifest_sha256"] == case[
+        "snapshot"
+    ].manifest_sha256
+
+
+def test_display_verify_checks_manifest_sha_before_json_parse(tmp_path):
+    case = _bound_display_case(tmp_path)
+
+    with pytest.raises(MigrationError) as caught:
+        verify_display_migration_artifact(
+            **{
+                **case["verify_args"],
+                "manifest_bytes": b"not-json",
+                "expected_manifest_sha256": "0" * 64,
+            }
+        )
+
+    assert caught.value.code == "manifest_sha256_mismatch"
+
+
+def test_display_verify_reverifies_binding_snapshot_and_live_plan(tmp_path):
+    case = _bound_display_case(tmp_path)
+    with (
+        mock.patch(
+            "project_brain.migration.verify_task18_binding",
+            return_value=case["binding"],
+        ) as binding_verify,
+        mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=case["snapshot"],
+        ) as snapshot_verify,
+    ):
+        result = verify_display_migration_artifact(**case["verify_args"])
+
+    assert result.ok is True
+    assert result.artifact == case["artifact"].manifest
+    assert result.plan.binding_path == case["binding_path"]
+    binding_verify.assert_called_once()
+    snapshot_verify.assert_called_once_with(
+        case["binding"].snapshot_root,
+        expected_manifest_sha256=case["binding"].snapshot_manifest_sha256,
+    )
+
+    drifted = {**case["locator"], "title": "drifted display"}
+    _write_raw(case["brain_root"], drifted)
+    drift_snapshot = replace(
+        case["snapshot"],
+        corpus_fingerprint=corpus_fingerprint(
+            BrainStore.load(case["brain_root"])
+        ),
+    )
+    with (
+        mock.patch(
+            "project_brain.migration.verify_task18_binding",
+            return_value=case["binding"],
+        ),
+        mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=drift_snapshot,
+        ),
+        pytest.raises(MigrationError, match="revalidation"),
+    ):
+        verify_display_migration_artifact(**case["verify_args"])
+
+
+def test_display_verify_rejects_caller_binding_before_fresh_verifier(
+    tmp_path,
+):
+    case = _bound_display_case(tmp_path)
+    different_path = (tmp_path / "different-binding.json").resolve()
+
+    with (
+        mock.patch(
+            "project_brain.migration.verify_task18_binding"
+        ) as binding_verify,
+        pytest.raises(MigrationError, match="binding"),
+    ):
+        verify_display_migration_artifact(
+            **{
+                **case["verify_args"],
+                "task18_binding_path": different_path,
+            }
+        )
+
+    binding_verify.assert_not_called()
+
+
+@pytest.mark.parametrize("drift", ["binding", "snapshot"])
+def test_display_apply_reverifies_bound_state_before_mutation(tmp_path, drift):
+    case = _bound_display_case(tmp_path)
+    before = {
+        path: path.read_bytes()
+        for path in case["brain_root"].rglob("*.json")
+    }
+    if drift == "binding":
+        binding_patch = mock.patch(
+            "project_brain.migration.verify_task18_binding",
+            side_effect=Task18BindingError("engine_state_drift"),
+        )
+        snapshot_patch = mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=case["snapshot"],
+        )
+        expected_error = Task18BindingError
+    else:
+        binding_patch = mock.patch(
+            "project_brain.migration.verify_task18_binding",
+            return_value=case["binding"],
+        )
+        snapshot_patch = mock.patch(
+            "project_brain.migration.verify_snapshot",
+            side_effect=SnapshotError("snapshot_drift", "changed"),
+        )
+        expected_error = MigrationError
+
+    with binding_patch, snapshot_patch, pytest.raises(expected_error):
+        apply_display_migration_artifact(**case["verify_args"])
+
+    assert {
+        path: path.read_bytes()
+        for path in case["brain_root"].rglob("*.json")
+    } == before
+
+
+def test_display_apply_uses_fresh_verified_plan(tmp_path):
+    case = _bound_display_case(tmp_path)
+    with (
+        mock.patch(
+            "project_brain.migration.verify_task18_binding",
+            return_value=case["binding"],
+        ),
+        mock.patch(
+            "project_brain.migration.verify_snapshot",
+            return_value=case["snapshot"],
+        ),
+    ):
+        result = apply_display_migration_artifact(**case["verify_args"])
+
+    assert result.action_count == 1
+    assert result.snapshot_id == case["snapshot"].snapshot_id
+    assert BrainStore.load(case["brain_root"]).get(
+        case["locator"]["id"]
+    )["title"] == "Namespace::Run"
+
+
+def test_generic_apply_rejects_display_artifacts_without_task18_binding(
+    tmp_path,
+):
+    case = _bound_display_case(tmp_path)
+    generic_args = {
+        "manifest_bytes": case["artifact"].manifest_bytes,
+        "expected_manifest_sha256": case["artifact"].manifest_sha256,
+        "brain_root": case["brain_root"],
+        "repo_root": case["repo_root"],
+        "engine_root": case["engine_root"],
+        "engine_sha": case["snapshot"].engine_head,
+        "snapshot_root": case["binding"].snapshot_root,
+        "expected_snapshot_manifest_sha256": case[
+            "snapshot"
+        ].manifest_sha256,
+    }
+    with pytest.raises(MigrationError, match="display artifact requires"):
+        apply_migration_artifact(**generic_args)
+
+    v2 = {
+        "migration_version": 2,
+        "migration_kind": "display_only",
+        "rows": [],
+        "intent": {},
+        "snapshot_id": case["snapshot"].snapshot_id,
+        "snapshot_manifest_sha256": case["snapshot"].manifest_sha256,
+    }
+    v2_bytes = (
+        json.dumps(v2, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    with pytest.raises(MigrationError, match="display artifact requires"):
+        apply_migration_artifact(
+            **{
+                **generic_args,
+                "manifest_bytes": v2_bytes,
+                "expected_manifest_sha256": hashlib.sha256(
+                    v2_bytes
+                ).hexdigest(),
+            }
+        )
 
 
 def test_apply_recomputes_manifest_and_rejects_canonical_hash_tampering(
