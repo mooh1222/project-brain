@@ -43,6 +43,7 @@ from project_brain.snapshot import (
     capture_git_dirt_receipt,
     decode_nul_paths,
     read_regular_no_follow,
+    require_commit_is_ancestor,
     run_git_bytes,
     verify_git_dirt_preserved,
     verify_snapshot,
@@ -209,6 +210,19 @@ class _PostInvariantStats:
     symbol_ids_sha256: str
     search_index: Mapping[str, object]
     stale_set_sha256: str
+
+
+@dataclass(frozen=True)
+class _FinalCorpusEvidence:
+    object_count: int
+    corpus_fingerprint: str
+    changed_paths: tuple[str, ...]
+    quote_count: int
+    quote_ids_sha256: str
+    symbol_count: int
+    symbol_ids_sha256: str
+    reference_edge_count: int
+    reference_graph_sha256: str
 
 
 def _fail(code: str, detail: str = "") -> None:
@@ -404,7 +418,7 @@ def _parse_binding_bytes(data: bytes) -> Mapping[str, object]:
     if (
         set(value) != _TOP_KEYS
         or type(value.get("version")) is not int
-        or value.get("version") != 1
+        or not _exact_int(value.get("version"), expected=1)
         or value.get("purpose") != "task18-display-labels-and-quote-debt-final-binding"
         or value.get("task18_allowed") is not True
         or not isinstance(value.get("created_at"), str)
@@ -819,6 +833,57 @@ def _reference_graph(store: BrainStore) -> tuple[int, str]:
     return len(rows), _json_sha(rows)
 
 
+def _exact_int(value: object, *, expected: int | None = None, minimum: int | None = None) -> bool:
+    if type(value) is not int:
+        return False
+    if expected is not None and value != expected:
+        return False
+    return minimum is None or value >= minimum
+
+
+def _final_corpus_evidence(
+    *,
+    brain_root: Path,
+    repo_root: Path,
+    binding: Mapping[str, object],
+) -> _FinalCorpusEvidence:
+    migration = binding.get("migration")
+    if not isinstance(migration, Mapping):
+        _fail("binding_schema_invalid", "migration missing")
+    targets = migration.get("targets")
+    if not isinstance(targets, Sequence) or isinstance(targets, (str, bytes, bytearray)):
+        _fail("binding_schema_invalid", "migration targets missing")
+    with corpus_lock(brain_root, exclusive=False):
+        assert_corpus_readable(brain_root)
+        sources = _live_object_sources_all(brain_root)
+        target_ids = [str(row["id"]) for row in targets if isinstance(row, Mapping)]
+        if len(target_ids) != len(targets) or not set(target_ids).issubset(sources):
+            _fail("final_corpus_target_set_mismatch")
+        store = _store_from_sources(sources)
+        quote_ids = sorted(
+            str(obj["id"])
+            for obj in store.by_kind("CodeLocator")
+            if "verified_quote" not in obj
+        )
+        symbol_ids = _noncanonical_symbol_ids(store)
+        edge_count, graph_sha = _reference_graph(store)
+        changed_paths = tuple(
+            (brain_root / sources[object_id][0]).relative_to(repo_root).as_posix()
+            for object_id in target_ids
+        )
+        return _FinalCorpusEvidence(
+            object_count=len(store.all()),
+            corpus_fingerprint=corpus_fingerprint(store),
+            changed_paths=changed_paths,
+            quote_count=len(quote_ids),
+            quote_ids_sha256=_json_sha(quote_ids),
+            symbol_count=len(symbol_ids),
+            symbol_ids_sha256=_json_sha(symbol_ids),
+            reference_edge_count=edge_count,
+            reference_graph_sha256=graph_sha,
+        )
+
+
 def _compare_snapshot_before_to_live(
     binding: ParsedTask18Binding,
 ) -> tuple[tuple[str, ...], BrainStore, BrainStore]:
@@ -1147,64 +1212,64 @@ def verify_task18_applied(
             or tail_dirt.content_manifest_bytes != dirt.content_manifest_bytes
         ):
             _fail("git_dirt_changed_during_post_verify")
-    report = {
-        "version": 1,
-        "purpose": "task18-post-apply-verification",
-        "generated_at": generated_at,
-        "binding": {"path": str(binding.path), "sha256": binding.sha256},
-        "display_manifest": {"path": str(manifest_path), "sha256": expected_manifest_sha256},
-        "quote_debt": {"path": str(quote_debt_path), "sha256": expected_quote_debt_sha256},
-        "target_ids_sha256": binding.target_ids_sha256,
-        "expected_after_corpus_fingerprint": binding.expected_after_corpus_fingerprint,
-        "actual_after_corpus_fingerprint": stats.actual_after_fingerprint,
-        "object_count": stats.object_count,
-        "changed_paths": list(changed_paths),
-        "update_count": len(changed_paths),
-        "create_count": 0,
-        "delete_count": 0,
-        "rename_count": 0,
-        "reference_graph": {
-            "edge_count": stats.reference_edge_count,
-            "sha256": stats.reference_graph_sha256,
-            "unchanged": True,
-        },
-        "lint_problem_count": 0,
-        "pairs": {"total": stats.pair_count, "mismatch_count": 0},
-        "quote_debt_state": {
-            "count": stats.quote_count,
-            "ids_sha256": stats.quote_ids_sha256,
-        },
-        "noncanonical_symbol_state": {
-            "count": stats.symbol_count,
-            "ids_sha256": stats.symbol_ids_sha256,
-        },
-        "search_index": dict(stats.search_index),
-        "stale_set_sha256": stats.stale_set_sha256,
-        "git": {
-            "baseline_status_sha256": hashlib.sha256(binding.baseline_status_bytes).hexdigest(),
-            "baseline_dirt_content_sha256": hashlib.sha256(binding.baseline_dirt_manifest_bytes).hexdigest(),
-            "current_status_sha256": dirt.status_sha256,
-            "current_dirt_content_sha256": dirt.content_manifest_sha256,
-        },
-        "quote_debt_unchanged": True,
-        "noncanonical_symbols_unchanged": True,
-        "index_db_unchanged": True,
-        "user_dirt_preserved": True,
-    }
-    try:
-        _atomic_create_pathspec(pathspec_output, changed_paths)
-        report_sha = atomic_create_receipt(report_path, report)
-    except Exception as exc:
-        raise _dependency(exc) from exc
-    return Task18PostVerification(
-        update_count=len(changed_paths),
-        quote_debt_unchanged=True,
-        noncanonical_symbols_unchanged=True,
-        index_db_unchanged=True,
-        user_dirt_preserved=True,
-        report_path=report_path,
-        report_sha256=report_sha,
-    )
+        report = {
+            "version": 1,
+            "purpose": "task18-post-apply-verification",
+            "generated_at": generated_at,
+            "binding": {"path": str(binding.path), "sha256": binding.sha256},
+            "display_manifest": {"path": str(manifest_path), "sha256": expected_manifest_sha256},
+            "quote_debt": {"path": str(quote_debt_path), "sha256": expected_quote_debt_sha256},
+            "target_ids_sha256": binding.target_ids_sha256,
+            "expected_after_corpus_fingerprint": binding.expected_after_corpus_fingerprint,
+            "actual_after_corpus_fingerprint": stats.actual_after_fingerprint,
+            "object_count": stats.object_count,
+            "changed_paths": list(changed_paths),
+            "update_count": len(changed_paths),
+            "create_count": 0,
+            "delete_count": 0,
+            "rename_count": 0,
+            "reference_graph": {
+                "edge_count": stats.reference_edge_count,
+                "sha256": stats.reference_graph_sha256,
+                "unchanged": True,
+            },
+            "lint_problem_count": 0,
+            "pairs": {"total": stats.pair_count, "mismatch_count": 0},
+            "quote_debt_state": {
+                "count": stats.quote_count,
+                "ids_sha256": stats.quote_ids_sha256,
+            },
+            "noncanonical_symbol_state": {
+                "count": stats.symbol_count,
+                "ids_sha256": stats.symbol_ids_sha256,
+            },
+            "search_index": dict(stats.search_index),
+            "stale_set_sha256": stats.stale_set_sha256,
+            "git": {
+                "baseline_status_sha256": hashlib.sha256(binding.baseline_status_bytes).hexdigest(),
+                "baseline_dirt_content_sha256": hashlib.sha256(binding.baseline_dirt_manifest_bytes).hexdigest(),
+                "current_status_sha256": dirt.status_sha256,
+                "current_dirt_content_sha256": dirt.content_manifest_sha256,
+            },
+            "quote_debt_unchanged": True,
+            "noncanonical_symbols_unchanged": True,
+            "index_db_unchanged": True,
+            "user_dirt_preserved": True,
+        }
+        try:
+            _atomic_create_pathspec(pathspec_output, changed_paths)
+            report_sha = atomic_create_receipt(report_path, report)
+        except Exception as exc:
+            raise _dependency(exc) from exc
+        return Task18PostVerification(
+            update_count=len(changed_paths),
+            quote_debt_unchanged=True,
+            noncanonical_symbols_unchanged=True,
+            index_db_unchanged=True,
+            user_dirt_preserved=True,
+            report_path=report_path,
+            report_sha256=report_sha,
+        )
 
 
 def _artifact_document(
@@ -1324,7 +1389,7 @@ def _assert_closure_post_report(
     )
     if (
         set(value) != _POST_REPORT_KEYS
-        or value.get("version") != 1
+        or not _exact_int(value.get("version"), expected=1)
         or value.get("purpose") != "task18-post-apply-verification"
         or not isinstance(value.get("generated_at"), str)
         or not value.get("generated_at")
@@ -1338,12 +1403,11 @@ def _assert_closure_post_report(
         != migration["expected_after_corpus_fingerprint"]
         or value.get("quote_debt")
         != {"path": quote_input["path"], "sha256": quote_input["sha256"]}
-        or type(value.get("object_count")) is not int
-        or int(value["object_count"]) < REQUIRED_TARGET_COUNT
-        or value.get("update_count") != REQUIRED_TARGET_COUNT
-        or value.get("create_count") != 0
-        or value.get("delete_count") != 0
-        or value.get("rename_count") != 0
+        or not _exact_int(value.get("object_count"), minimum=REQUIRED_TARGET_COUNT)
+        or not _exact_int(value.get("update_count"), expected=REQUIRED_TARGET_COUNT)
+        or not _exact_int(value.get("create_count"), expected=0)
+        or not _exact_int(value.get("delete_count"), expected=0)
+        or not _exact_int(value.get("rename_count"), expected=0)
         or not isinstance(value.get("changed_paths"), list)
         or len(value["changed_paths"]) != REQUIRED_TARGET_COUNT
         or len(set(value["changed_paths"])) != REQUIRED_TARGET_COUNT
@@ -1351,18 +1415,22 @@ def _assert_closure_post_report(
             isinstance(path, str) and path.startswith("brain/objects/")
             for path in value["changed_paths"]
         )
-        or value.get("lint_problem_count") != 0
+        or not _exact_int(value.get("lint_problem_count"), expected=0)
         or not isinstance(pairs, Mapping)
-        or pairs != {"total": REQUIRED_PAIR_COUNT, "mismatch_count": 0}
+        or set(pairs) != {"total", "mismatch_count"}
+        or not _exact_int(pairs.get("total"), expected=REQUIRED_PAIR_COUNT)
+        or not _exact_int(pairs.get("mismatch_count"), expected=0)
         or not isinstance(quote, Mapping)
         or set(quote) != {"count", "ids_sha256"}
-        or quote.get("count") != REQUIRED_QUOTE_DEBT_COUNT
+        or not _exact_int(quote.get("count"), expected=REQUIRED_QUOTE_DEBT_COUNT)
         or quote.get("ids_sha256") != _json_sha(bound_quote_ids)
         or not isinstance(quote.get("ids_sha256"), str)
         or _SHA256.fullmatch(str(quote["ids_sha256"])) is None
         or not isinstance(symbols, Mapping)
         or set(symbols) != {"count", "ids_sha256"}
-        or symbols.get("count") != REQUIRED_NONCANONICAL_SYMBOL_COUNT
+        or not _exact_int(
+            symbols.get("count"), expected=REQUIRED_NONCANONICAL_SYMBOL_COUNT,
+        )
         or not isinstance(symbols.get("ids_sha256"), str)
         or _SHA256.fullmatch(str(symbols["ids_sha256"])) is None
         or not isinstance(graph, Mapping)
@@ -1399,6 +1467,30 @@ def _assert_closure_post_report(
         _fail("post_report_binding_mismatch")
 
 
+def _assert_post_matches_final_corpus(
+    post: Mapping[str, object],
+    evidence: _FinalCorpusEvidence,
+) -> None:
+    graph = post.get("reference_graph")
+    quote = post.get("quote_debt_state")
+    symbols = post.get("noncanonical_symbol_state")
+    if (
+        post.get("object_count") != evidence.object_count
+        or post.get("actual_after_corpus_fingerprint") != evidence.corpus_fingerprint
+        or post.get("changed_paths") != list(evidence.changed_paths)
+        or not isinstance(quote, Mapping)
+        or quote.get("count") != evidence.quote_count
+        or quote.get("ids_sha256") != evidence.quote_ids_sha256
+        or not isinstance(symbols, Mapping)
+        or symbols.get("count") != evidence.symbol_count
+        or symbols.get("ids_sha256") != evidence.symbol_ids_sha256
+        or not isinstance(graph, Mapping)
+        or graph.get("edge_count") != evidence.reference_edge_count
+        or graph.get("sha256") != evidence.reference_graph_sha256
+    ):
+        _fail("post_report_final_corpus_mismatch")
+
+
 def _closure_artifacts(
     *,
     binding_path: Path,
@@ -1410,7 +1502,11 @@ def _closure_artifacts(
     engine_root: Path,
     repo_root: Path,
     brain_root: Path,
-) -> tuple[Mapping[str, object], dict[str, dict[str, object]]]:
+) -> tuple[
+    Mapping[str, object],
+    dict[str, dict[str, object]],
+    Mapping[str, object],
+]:
     binding, binding_receipt = _closure_binding(
         path=binding_path,
         expected_sha256=expected_binding_sha256,
@@ -1445,11 +1541,191 @@ def _closure_artifacts(
         manifest_sha256=expected_manifest_sha256,
         binding=binding,
     )
-    return binding, {
-        "binding": binding_receipt,
-        "display_manifest": manifest_receipt,
-        "post_report": post_receipt,
-    }
+    return (
+        binding,
+        {
+            "binding": binding_receipt,
+            "display_manifest": manifest_receipt,
+            "post_report": post_receipt,
+        },
+        post_doc.value,
+    )
+
+
+def _verify_closure_artifacts_independent(
+    *,
+    binding_receipt: Mapping[str, object],
+    manifest_receipt: Mapping[str, object],
+    post_receipt: Mapping[str, object],
+    engine_root: Path,
+    repo_root: Path,
+    brain_root: Path,
+) -> tuple[Mapping[str, object], dict[str, dict[str, object]], Mapping[str, object]]:
+    binding_path = Path(str(binding_receipt["path"]))
+    binding_doc, current_binding_receipt = _artifact_document(
+        binding_path, str(binding_receipt["sha256"]), "binding",
+    )
+    binding = _parse_binding_bytes(binding_doc.data)
+    if binding.get("roots") != {
+        "engine": str(engine_root),
+        "bb2": str(repo_root),
+        "brain": str(brain_root),
+    }:
+        _fail("binding_roots_mismatch")
+
+    manifest_path = Path(str(manifest_receipt["path"]))
+    manifest_doc, current_manifest_receipt = _artifact_document(
+        manifest_path, str(manifest_receipt["sha256"]), "display_manifest",
+    )
+    snapshot = binding.get("pre_mutation_snapshot")
+    if not isinstance(snapshot, Mapping) or (
+        set(manifest_doc.value) != _DISPLAY_MANIFEST_KEYS
+        or manifest_doc.value.get("migration_version") != 3
+        or manifest_doc.value.get("migration_kind") != "display_only"
+        or not isinstance(manifest_doc.value.get("intent"), Mapping)
+        or manifest_doc.value.get("task18_binding_path") != str(binding_path)
+        or manifest_doc.value.get("task18_binding_sha256") != binding_receipt["sha256"]
+        or manifest_doc.value.get("snapshot_id") != snapshot.get("snapshot_id")
+        or manifest_doc.value.get("snapshot_manifest_sha256")
+        != snapshot.get("manifest_sha256")
+    ):
+        _fail("display_manifest_binding_mismatch")
+
+    post_path = Path(str(post_receipt["path"]))
+    post_doc, current_post_receipt = _artifact_document(
+        post_path, str(post_receipt["sha256"]), "post_report",
+    )
+    post = post_doc.value
+    migration = binding.get("migration")
+    inputs = binding.get("inputs")
+    search_index = binding.get("search_index")
+    stale_set = binding.get("stale_set")
+    bb2 = binding.get("bb2")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (migration, inputs, search_index, stale_set, bb2)
+    ):
+        _fail("binding_schema_invalid")
+    assert isinstance(migration, Mapping)
+    assert isinstance(inputs, Mapping)
+    assert isinstance(search_index, Mapping)
+    assert isinstance(stale_set, Mapping)
+    assert isinstance(bb2, Mapping)
+    quote_input = inputs.get("quote_debt")
+    if not isinstance(quote_input, Mapping):
+        _fail("binding_schema_invalid")
+    _, quote_ids = _quote_inventory(
+        Path(str(quote_input["path"])), str(quote_input["sha256"]),
+    )
+    pairs = post.get("pairs")
+    quote = post.get("quote_debt_state")
+    symbols = post.get("noncanonical_symbol_state")
+    graph = post.get("reference_graph")
+    git = post.get("git")
+    changed = post.get("changed_paths")
+    if (
+        set(post) != _POST_REPORT_KEYS
+        or not _exact_int(post.get("version"), expected=1)
+        or post.get("purpose") != "task18-post-apply-verification"
+        or not isinstance(post.get("generated_at"), str)
+        or not post.get("generated_at")
+        or post.get("binding")
+        != {"path": str(binding_path), "sha256": binding_receipt["sha256"]}
+        or post.get("display_manifest")
+        != {"path": str(manifest_path), "sha256": manifest_receipt["sha256"]}
+        or post.get("quote_debt")
+        != {"path": quote_input["path"], "sha256": quote_input["sha256"]}
+        or post.get("target_ids_sha256") != migration.get("target_ids_sha256")
+        or post.get("expected_after_corpus_fingerprint")
+        != migration.get("expected_after_corpus_fingerprint")
+        or post.get("actual_after_corpus_fingerprint")
+        != migration.get("expected_after_corpus_fingerprint")
+        or not _exact_int(post.get("object_count"), minimum=REQUIRED_TARGET_COUNT)
+        or not _exact_int(post.get("update_count"), expected=REQUIRED_TARGET_COUNT)
+        or not _exact_int(post.get("create_count"), expected=0)
+        or not _exact_int(post.get("delete_count"), expected=0)
+        or not _exact_int(post.get("rename_count"), expected=0)
+        or not _exact_int(post.get("lint_problem_count"), expected=0)
+        or not isinstance(changed, list)
+        or len(changed) != REQUIRED_TARGET_COUNT
+        or len(set(changed)) != REQUIRED_TARGET_COUNT
+        or not all(isinstance(path, str) for path in changed)
+        or not isinstance(pairs, Mapping)
+        or set(pairs) != {"total", "mismatch_count"}
+        or not _exact_int(pairs.get("total"), expected=REQUIRED_PAIR_COUNT)
+        or not _exact_int(pairs.get("mismatch_count"), expected=0)
+        or not isinstance(quote, Mapping)
+        or set(quote) != {"count", "ids_sha256"}
+        or not _exact_int(quote.get("count"), expected=REQUIRED_QUOTE_DEBT_COUNT)
+        or quote.get("ids_sha256") != _json_sha(quote_ids)
+        or not isinstance(symbols, Mapping)
+        or set(symbols) != {"count", "ids_sha256"}
+        or not _exact_int(
+            symbols.get("count"), expected=REQUIRED_NONCANONICAL_SYMBOL_COUNT,
+        )
+        or not isinstance(symbols.get("ids_sha256"), str)
+        or _SHA256.fullmatch(str(symbols["ids_sha256"])) is None
+        or not isinstance(graph, Mapping)
+        or set(graph) != {"edge_count", "sha256", "unchanged"}
+        or not _exact_int(graph.get("edge_count"), minimum=0)
+        or not isinstance(graph.get("sha256"), str)
+        or _SHA256.fullmatch(str(graph["sha256"])) is None
+        or graph.get("unchanged") is not True
+        or post.get("search_index") != search_index
+        or post.get("stale_set_sha256") != stale_set.get("sha256")
+        or not isinstance(git, Mapping)
+        or set(git) != {
+            "baseline_status_sha256", "baseline_dirt_content_sha256",
+            "current_status_sha256", "current_dirt_content_sha256",
+        }
+        or git.get("baseline_status_sha256") != bb2.get("status_sha256")
+        or git.get("baseline_dirt_content_sha256") != bb2.get("dirt_content_sha256")
+        or not all(
+            isinstance(git.get(key), str)
+            and _SHA256.fullmatch(str(git[key])) is not None
+            for key in git
+        )
+        or any(
+            post.get(label) is not True
+            for label in (
+                "quote_debt_unchanged", "noncanonical_symbols_unchanged",
+                "index_db_unchanged", "user_dirt_preserved",
+            )
+        )
+    ):
+        _fail("post_report_binding_mismatch")
+    return (
+        binding,
+        {
+            "binding": current_binding_receipt,
+            "display_manifest": current_manifest_receipt,
+            "post_report": current_post_receipt,
+        },
+        post,
+    )
+
+
+def _verify_post_final_evidence_independent(
+    post: Mapping[str, object],
+    evidence: _FinalCorpusEvidence,
+) -> None:
+    quote = post.get("quote_debt_state")
+    symbols = post.get("noncanonical_symbol_state")
+    graph = post.get("reference_graph")
+    if not isinstance(quote, Mapping) or not isinstance(symbols, Mapping) or not isinstance(graph, Mapping):
+        _fail("post_report_final_corpus_mismatch")
+    if (
+        post.get("object_count") != evidence.object_count
+        or post.get("actual_after_corpus_fingerprint") != evidence.corpus_fingerprint
+        or post.get("changed_paths") != list(evidence.changed_paths)
+        or quote.get("count") != evidence.quote_count
+        or quote.get("ids_sha256") != evidence.quote_ids_sha256
+        or symbols.get("count") != evidence.symbol_count
+        or symbols.get("ids_sha256") != evidence.symbol_ids_sha256
+        or graph.get("edge_count") != evidence.reference_edge_count
+        or graph.get("sha256") != evidence.reference_graph_sha256
+    ):
+        _fail("post_report_final_corpus_mismatch")
 
 
 def _assert_baseline_git(
@@ -1511,7 +1787,7 @@ def create_task18_closure_receipt(
     except Exception as exc:
         raise _dependency(exc) from exc
     engine_git, repo_git = _current_git_closure(engine_root, repo_root)
-    binding, artifacts = _closure_artifacts(
+    binding, artifacts, post_value = _closure_artifacts(
         binding_path=_exact_absolute(binding_path, "binding"),
         expected_binding_sha256=expected_binding_sha256,
         manifest_path=_exact_absolute(manifest_path, "display_manifest"),
@@ -1522,11 +1798,28 @@ def create_task18_closure_receipt(
         repo_root=repo_root,
         brain_root=brain_root,
     )
+    final_evidence = _final_corpus_evidence(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        binding=binding,
+    )
+    _assert_post_matches_final_corpus(post_value, final_evidence)
     _assert_baseline_git(binding, engine_git, repo_git)
     binding_engine = binding["engine"]
+    binding_bb2 = binding["bb2"]
     migration = binding["migration"]
     assert isinstance(binding_engine, Mapping)
+    assert isinstance(binding_bb2, Mapping)
     assert isinstance(migration, Mapping)
+    try:
+        require_commit_is_ancestor(
+            engine_root, str(binding_engine["head"]), expected_engine_head,
+        )
+        require_commit_is_ancestor(
+            repo_root, str(binding_bb2["head"]), expected_repo_head,
+        )
+    except Exception as exc:
+        raise _dependency(exc) from exc
     if (
         engine_git.head != expected_engine_head
         or repo_git.head != expected_repo_head
@@ -1589,7 +1882,7 @@ def create_task18_closure_receipt(
         expected_snapshot_verify_receipt_sha256,
         "snapshot_verify_receipt",
     )
-    tail_binding, tail_artifacts = _closure_artifacts(
+    tail_binding, tail_artifacts, tail_post_value = _closure_artifacts(
         binding_path=Path(binding_path),
         expected_binding_sha256=expected_binding_sha256,
         manifest_path=Path(manifest_path),
@@ -1600,6 +1893,12 @@ def create_task18_closure_receipt(
         repo_root=repo_root,
         brain_root=brain_root,
     )
+    tail_evidence = _final_corpus_evidence(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        binding=tail_binding,
+    )
+    _assert_post_matches_final_corpus(tail_post_value, tail_evidence)
     _assert_baseline_git(tail_binding, tail_engine_git, tail_repo_git)
     if (
         tail_snapshot != snapshot
@@ -1608,6 +1907,7 @@ def create_task18_closure_receipt(
         or tail_verify_receipt != verify_receipt
         or tail_verify_doc.value != _expected_snapshot_verify(tail_snapshot)
         or tail_artifacts != artifacts
+        or tail_evidence != final_evidence
         or _committed_doc(
             engine_root, completion_report_path, expected_engine_head, "completion_report",
         ) != completion
@@ -1644,7 +1944,7 @@ def verify_task18_closure_receipt(
     value = _canonical_document(closure_path, expected_closure_sha256, "closure")
     if (
         set(value) != _CLOSURE_KEYS
-        or value.get("version") != 1
+        or not _exact_int(value.get("version"), expected=1)
         or value.get("purpose") != "task18-final-closure"
     ):
         _fail("closure_schema_invalid")
@@ -1728,24 +2028,38 @@ def verify_task18_closure_receipt(
     assert isinstance(binding_receipt, Mapping)
     assert isinstance(manifest_receipt, Mapping)
     assert isinstance(post_receipt, Mapping)
-    binding, current_artifacts = _closure_artifacts(
-        binding_path=Path(str(binding_receipt["path"])),
-        expected_binding_sha256=str(binding_receipt["sha256"]),
-        manifest_path=Path(str(manifest_receipt["path"])),
-        expected_manifest_sha256=str(manifest_receipt["sha256"]),
-        post_report_path=Path(str(post_receipt["path"])),
-        expected_post_report_sha256=str(post_receipt["sha256"]),
+    binding, current_artifacts, post_value = _verify_closure_artifacts_independent(
+        binding_receipt=binding_receipt,
+        manifest_receipt=manifest_receipt,
+        post_receipt=post_receipt,
         engine_root=engine_root,
         repo_root=repo_root,
         brain_root=brain_root,
     )
     if current_artifacts != artifacts:
         _fail("closure_artifact_drift")
+    final_evidence = _final_corpus_evidence(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        binding=binding,
+    )
+    _verify_post_final_evidence_independent(post_value, final_evidence)
     _assert_baseline_git(binding, engine_git, repo_git)
     binding_engine = binding["engine"]
+    binding_bb2 = binding["bb2"]
     migration = binding["migration"]
     assert isinstance(binding_engine, Mapping)
+    assert isinstance(binding_bb2, Mapping)
     assert isinstance(migration, Mapping)
+    try:
+        require_commit_is_ancestor(
+            engine_root, str(binding_engine["head"]), engine_git.head,
+        )
+        require_commit_is_ancestor(
+            repo_root, str(binding_bb2["head"]), repo_git.head,
+        )
+    except Exception as exc:
+        raise _dependency(exc) from exc
     if heads != {
         "implementation": snapshot.engine_head,
         "corpus": snapshot.repo_head,
@@ -1783,6 +2097,63 @@ def verify_task18_closure_receipt(
     tail_engine_git, tail_repo_git = _current_git_closure(engine_root, repo_root)
     if tail_engine_git != engine_git or tail_repo_git != repo_git:
         _fail("closure_state_changed_during_verify")
+    try:
+        tail_snapshot = verify_snapshot(
+            Path(str(snapshot_section["path"])),
+            expected_manifest_sha256=str(snapshot_section["manifest_sha256"]),
+        )
+    except Exception as exc:
+        raise _dependency(exc) from exc
+    if _expected_snapshot_verify(tail_snapshot) != _expected_snapshot_verify(snapshot):
+        _fail("corpus_final_snapshot_drift")
+    tail_verify_doc, tail_verify_receipt = _artifact_document(
+        Path(str(verify_receipt["path"])),
+        str(verify_receipt["sha256"]),
+        "snapshot_verify_receipt",
+    )
+    if (
+        tail_verify_receipt != verify_receipt
+        or not _valid_snapshot_verify_receipt(tail_verify_doc.value)
+        or tail_verify_doc.value != _expected_snapshot_verify(tail_snapshot)
+    ):
+        _fail("snapshot_verify_receipt_mismatch")
+    tail_binding, tail_artifacts, tail_post = _verify_closure_artifacts_independent(
+        binding_receipt=binding_receipt,
+        manifest_receipt=manifest_receipt,
+        post_receipt=post_receipt,
+        engine_root=engine_root,
+        repo_root=repo_root,
+        brain_root=brain_root,
+    )
+    if tail_artifacts != artifacts or tail_binding != binding or tail_post != post_value:
+        _fail("closure_artifact_drift")
+    tail_evidence = _final_corpus_evidence(
+        brain_root=brain_root,
+        repo_root=repo_root,
+        binding=tail_binding,
+    )
+    _verify_post_final_evidence_independent(tail_post, tail_evidence)
+    if tail_evidence != final_evidence:
+        _fail("closure_state_changed_during_verify")
+    try:
+        require_commit_is_ancestor(
+            engine_root, str(binding_engine["head"]), tail_engine_git.head,
+        )
+        require_commit_is_ancestor(
+            repo_root, str(binding_bb2["head"]), tail_repo_git.head,
+        )
+    except Exception as exc:
+        raise _dependency(exc) from exc
+    for label in ("completion_report", "roadmap"):
+        receipt = docs[label]
+        assert isinstance(receipt, Mapping)
+        if _committed_doc(
+            engine_root,
+            Path(str(receipt["path"])),
+            tail_engine_git.head,
+            label,
+        ) != receipt:
+            _fail("committed_docs_drift", label)
     report = {
         "version": 1,
         "purpose": "task18-final-closure-verification",

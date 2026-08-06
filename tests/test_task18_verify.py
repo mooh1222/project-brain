@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -345,18 +348,55 @@ def test_post_verify_creates_report_and_nul_pathspec_only_once(
         ),
     )
     output_order: list[str] = []
+    output_lock_held: list[bool] = []
     real_pathspec_create = module._atomic_create_pathspec
     real_report_create = module.atomic_create_receipt
 
     def create_pathspec(*args, **kwargs):
         output_order.append("pathspec")
+        from project_brain import corpus_io
+        output_lock_held.append(corpus_io._CORPUS_LOCK_SCOPE.get() is not None)
         return real_pathspec_create(*args, **kwargs)
 
     def create_report(*args, **kwargs):
         output_order.append("report")
+        from project_brain import corpus_io
+        output_lock_held.append(corpus_io._CORPUS_LOCK_SCOPE.get() is not None)
         return real_report_create(*args, **kwargs)
 
     monkeypatch.setattr(module, "_atomic_create_pathspec", create_pathspec)
+    failed_report = (binding.repo_root / "task18-post-failed.json").resolve()
+    retained_pathspec = (tmp_path / "retained-paths.nul").resolve()
+
+    def fail_report(*args, **kwargs):
+        output_order.append("report")
+        from project_brain import corpus_io
+        output_lock_held.append(corpus_io._CORPUS_LOCK_SCOPE.get() is not None)
+        raise RuntimeError("injected report create failure")
+
+    monkeypatch.setattr(module, "atomic_create_receipt", fail_report)
+    with pytest.raises(Task18VerificationError):
+        verify_task18_applied(
+            binding_path=binding.path,
+            expected_binding_sha256=binding.sha256,
+            manifest_path=manifest_path,
+            expected_manifest_sha256=_sha(manifest_bytes),
+            quote_debt_path=quote_path,
+            expected_quote_debt_sha256=_sha(quote_path.read_bytes()),
+            engine_root=binding.engine_root,
+            repo_root=binding.repo_root,
+            brain_root=binding.brain_root,
+            report_path=failed_report,
+            pathspec_output=retained_pathspec,
+            generated_at="2026-08-06T12:00:00+09:00",
+        )
+    assert output_order == ["pathspec", "report"]
+    assert output_lock_held == [True, True]
+    assert retained_pathspec.read_bytes() == changed.encode() + b"\0"
+    assert not failed_report.exists()
+
+    output_order.clear()
+    output_lock_held.clear()
     monkeypatch.setattr(module, "atomic_create_receipt", create_report)
 
     result = verify_task18_applied(
@@ -375,6 +415,7 @@ def test_post_verify_creates_report_and_nul_pathspec_only_once(
     )
     assert result.update_count == 1
     assert output_order == ["pathspec", "report"]
+    assert output_lock_held == [True, True]
     assert pathspec.read_bytes() == changed.encode() + b"\0"
     assert json.loads(report_path.read_bytes())["user_dirt_preserved"] is True
     with pytest.raises(Task18VerificationError, match="report_exists"):
@@ -394,13 +435,11 @@ def test_post_verify_creates_report_and_nul_pathspec_only_once(
         )
 
 
-def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+def _closure_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import project_brain.task18_binding as create_module
     import project_brain.task18_verify as module
     from project_brain.snapshot import GitDirtReceipt, SnapshotVerification
+    from project_brain.store import BrainStore
     from project_brain.task18_binding import create_task18_binding
     from tests.test_task18_binding import task18_fixture as fixture_definition
 
@@ -445,6 +484,15 @@ def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
     monkeypatch.setattr(module, "verify_snapshot", lambda *args, **kwargs: snapshot)
     current_git = {"value": (engine_git, repo_git)}
     monkeypatch.setattr(module, "_current_git_closure", lambda *args: current_git["value"])
+    ancestry = {"engine": True, "bb2": True, "calls": []}
+
+    def require_ancestor(root, ancestor, descendant):
+        label = "engine" if Path(root) == engine_root else "bb2"
+        ancestry["calls"].append((label, ancestor, descendant))
+        if not ancestry[label]:
+            raise Task18VerificationError(f"{label}_head_not_ancestor")
+
+    monkeypatch.setattr(module, "require_commit_is_ancestor", require_ancestor, raising=False)
 
     def committed_doc(root, path, head, label):
         receipt = dict(module.capture_bound_file(path))
@@ -477,6 +525,14 @@ def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
         "brain/objects/code/legacy-locator-name.json",
         "brain/objects/evidence_refs/legacy-ref-name.json",
     ]
+    for relative in changed_paths:
+        path = repo_root / relative
+        obj = json.loads(path.read_bytes())
+        obj["title"] = "Ns::run"
+        path.write_bytes(BrainStore.object_bytes(obj))
+    graph_rows = [
+        ("evref.ctx.run", "/locator/code_locator_id", "code.ctx.run"),
+    ]
     post_value = {
         "version": 1,
         "purpose": "task18-post-apply-verification",
@@ -493,7 +549,11 @@ def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
         "create_count": 0,
         "delete_count": 0,
         "rename_count": 0,
-        "reference_graph": {"edge_count": 1, "sha256": _json_sha([]), "unchanged": True},
+        "reference_graph": {
+            "edge_count": 1,
+            "sha256": _json_sha(graph_rows),
+            "unchanged": True,
+        },
         "lint_problem_count": 0,
         "pairs": {"total": 1, "mismatch_count": 0},
         "quote_debt_state": {"count": 1, "ids_sha256": _json_sha(["code.ctx.run"])},
@@ -517,35 +577,7 @@ def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
     completion.write_text("done\n", encoding="utf-8")
     roadmap.write_text("task 18 done\n", encoding="utf-8")
     closure = (tmp_path / "closure.json").resolve()
-
-    unrelated_path = (tmp_path / "unrelated-post.json").resolve()
-    unrelated = dict(post_value)
-    unrelated["binding"] = {"path": str(created.path), "sha256": "0" * 64}
-    unrelated_path.write_bytes(canonical_receipt_bytes(unrelated))
-    with pytest.raises(Task18VerificationError, match="post_report_binding_mismatch"):
-        create_task18_closure_receipt(
-            report_path=(tmp_path / "bad-closure.json").resolve(),
-            corpus_final_snapshot_root=snapshot_root,
-            expected_snapshot_manifest_sha256=snapshot.manifest_sha256,
-            snapshot_verify_receipt_path=verify_path,
-            expected_snapshot_verify_receipt_sha256=_sha(verify_path.read_bytes()),
-            binding_path=created.path,
-            expected_binding_sha256=created.sha256,
-            manifest_path=manifest_path,
-            expected_manifest_sha256=_sha(manifest_path.read_bytes()),
-            post_report_path=unrelated_path,
-            expected_post_report_sha256=_sha(unrelated_path.read_bytes()),
-            engine_root=engine_root,
-            repo_root=repo_root,
-            brain_root=brain_root,
-            completion_report_path=completion,
-            roadmap_path=roadmap,
-            expected_engine_head=engine_git.head,
-            expected_repo_head=repo_git.head,
-            generated_at="2026-08-06T12:00:00+09:00",
-        )
-
-    result = create_task18_closure_receipt(
+    create_args = dict(
         report_path=closure,
         corpus_final_snapshot_root=snapshot_root,
         expected_snapshot_manifest_sha256=snapshot.manifest_sha256,
@@ -566,40 +598,314 @@ def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
         expected_repo_head=repo_git.head,
         generated_at="2026-08-06T12:00:00+09:00",
     )
-    assert result.ok is True
-    verify_report = (tmp_path / "closure-verify-report.json").resolve()
-    verified = verify_task18_closure_receipt(
-        closure_path=closure,
-        expected_closure_sha256=result.closure_sha256,
+    return SimpleNamespace(
+        module=module,
+        created=created,
+        snapshot=snapshot,
         engine_root=engine_root,
         repo_root=repo_root,
         brain_root=brain_root,
+        engine_git=engine_git,
+        repo_git=repo_git,
+        current_git=current_git,
+        ancestry=ancestry,
+        verify_path=verify_path,
+        manifest_path=manifest_path,
+        post_path=post_path,
+        post_value=post_value,
+        completion=completion,
+        roadmap=roadmap,
+        closure=closure,
+        create_args=create_args,
+    )
+
+
+def _write_post_variant(fixture, tmp_path: Path, name: str, mutate) -> tuple[Path, dict]:
+    value = deepcopy(fixture.post_value)
+    mutate(value)
+    path = (tmp_path / f"{name}.json").resolve()
+    path.write_bytes(canonical_receipt_bytes(value))
+    return path, {**fixture.create_args, "post_report_path": path,
+                  "expected_post_report_sha256": _sha(path.read_bytes()),
+                  "report_path": (tmp_path / f"{name}-closure.json").resolve()}
+
+
+def _write_forged_closure(
+    fixture,
+    result,
+    tmp_path: Path,
+    *,
+    post_path: Path | None = None,
+    mutate=None,
+) -> tuple[Path, str]:
+    value = json.loads(fixture.closure.read_bytes())
+    if post_path is not None:
+        value["artifacts"]["post_report"] = dict(
+            fixture.module.capture_bound_file(post_path)
+        )
+    if mutate is not None:
+        mutate(value)
+    path = (tmp_path / f"forged-{len(list(tmp_path.glob('forged-*.json')))}.json").resolve()
+    payload = canonical_receipt_bytes(value)
+    path.write_bytes(payload)
+    return path, _sha(payload)
+
+
+def test_closure_receipt_binds_snapshot_heads_and_committed_docs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from project_brain.snapshot import GitDirtReceipt
+
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    unrelated_path, unrelated_args = _write_post_variant(
+        fixture,
+        tmp_path,
+        "unrelated-post",
+        lambda value: value.__setitem__(
+            "binding", {"path": str(fixture.created.path), "sha256": "0" * 64},
+        ),
+    )
+    assert unrelated_path.exists()
+    with pytest.raises(Task18VerificationError, match="post_report_binding_mismatch"):
+        create_task18_closure_receipt(**unrelated_args)
+
+    result = create_task18_closure_receipt(**fixture.create_args)
+    assert result.ok is True
+    verify_report = (tmp_path / "closure-verify-report.json").resolve()
+    verified = verify_task18_closure_receipt(
+        closure_path=fixture.closure,
+        expected_closure_sha256=result.closure_sha256,
+        engine_root=fixture.engine_root,
+        repo_root=fixture.repo_root,
+        brain_root=fixture.brain_root,
         report_path=verify_report,
     )
     assert verified.ok is True
 
     changed_dirt = GitDirtReceipt(
-        str(repo_root), repo_git.head, b"?? user.txt\0", _sha(b"?? user.txt\0"), 1,
+        str(fixture.repo_root), fixture.repo_git.head,
+        b"?? user.txt\0", _sha(b"?? user.txt\0"), 1,
         b"[]\n", _sha(b"[]\n"),
     )
-    current_git["value"] = (engine_git, changed_dirt)
+    fixture.current_git["value"] = (fixture.engine_git, changed_dirt)
     with pytest.raises(Task18VerificationError, match="closure_user_dirt_drift"):
         verify_task18_closure_receipt(
-            closure_path=closure,
+            closure_path=fixture.closure,
             expected_closure_sha256=result.closure_sha256,
-            engine_root=engine_root,
-            repo_root=repo_root,
-            brain_root=brain_root,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
             report_path=(tmp_path / "closure-dirt-report.json").resolve(),
         )
-    current_git["value"] = (engine_git, repo_git)
-    completion.write_text("drifted\n", encoding="utf-8")
+    fixture.current_git["value"] = (fixture.engine_git, fixture.repo_git)
+    fixture.completion.write_text("drifted\n", encoding="utf-8")
     with pytest.raises(Task18VerificationError, match="committed_docs_drift"):
         verify_task18_closure_receipt(
-            closure_path=closure,
+            closure_path=fixture.closure,
             expected_closure_sha256=result.closure_sha256,
-            engine_root=engine_root,
-            repo_root=repo_root,
-            brain_root=brain_root,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
             report_path=(tmp_path / "closure-doc-drift-report.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ("snapshot", "snapshot_verify", "binding", "manifest", "post", "completion", "roadmap"),
+)
+def test_closure_verifier_reverse_tail_revalidates_every_bound_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    result = create_task18_closure_receipt(**fixture.create_args)
+    paths = {
+        "snapshot_verify": fixture.verify_path,
+        "binding": fixture.created.path,
+        "manifest": fixture.manifest_path,
+        "post": fixture.post_path,
+        "completion": fixture.completion,
+        "roadmap": fixture.roadmap,
+    }
+    if artifact_name == "snapshot":
+        snapshot_state = {"value": fixture.snapshot}
+        monkeypatch.setattr(
+            fixture.module,
+            "verify_snapshot",
+            lambda *args, **kwargs: snapshot_state["value"],
+        )
+
+        def drift():
+            snapshot_state["value"] = replace(
+                fixture.snapshot,
+                corpus_fingerprint="0" * 64,
+            )
+    else:
+        target = paths[artifact_name]
+        original = target.read_bytes()
+
+        def drift():
+            target.write_bytes(original + b" ")
+
+    monkeypatch.setattr(fixture.module, "_closure_reverse_tail_hook", drift)
+    with pytest.raises(Task18VerificationError):
+        verify_task18_closure_receipt(
+            closure_path=fixture.closure,
+            expected_closure_sha256=result.closure_sha256,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / f"tail-{artifact_name}.json").resolve(),
+        )
+
+
+def _mutate_post_evidence(value: dict, case: str) -> None:
+    if case == "changed_paths":
+        value["changed_paths"] = [
+            "brain/objects/code/fake-a.json",
+            "brain/objects/code/fake-b.json",
+        ]
+    elif case == "symbol_hash":
+        value["noncanonical_symbol_state"]["ids_sha256"] = "0" * 64
+    elif case == "graph_evidence":
+        value["reference_graph"] = {
+            "edge_count": 0,
+            "sha256": "0" * 64,
+            "unchanged": True,
+        }
+    elif case == "integer_bool":
+        value["create_count"] = False
+    elif case == "integer_float":
+        value["delete_count"] = 0.0
+    elif case == "version_bool":
+        value["version"] = True
+    elif case == "version_float":
+        value["version"] = 1.0
+    else:  # pragma: no cover
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "changed_paths",
+        "symbol_hash",
+        "graph_evidence",
+        "integer_bool",
+        "integer_float",
+        "version_bool",
+        "version_float",
+    ),
+)
+def test_closure_create_rebinds_post_evidence_to_final_corpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    _, create_args = _write_post_variant(
+        fixture,
+        tmp_path,
+        f"bad-create-{case}",
+        lambda value: _mutate_post_evidence(value, case),
+    )
+    with pytest.raises(Task18VerificationError):
+        create_task18_closure_receipt(**create_args)
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "changed_paths",
+        "symbol_hash",
+        "graph_evidence",
+        "integer_bool",
+        "integer_float",
+        "version_bool",
+        "version_float",
+    ),
+)
+def test_closure_verify_independently_rebinds_post_evidence_to_final_corpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    result = create_task18_closure_receipt(**fixture.create_args)
+    post_path, _ = _write_post_variant(
+        fixture,
+        tmp_path,
+        f"bad-verify-{case}",
+        lambda value: _mutate_post_evidence(value, case),
+    )
+    closure_path, closure_sha = _write_forged_closure(
+        fixture,
+        result,
+        tmp_path,
+        post_path=post_path,
+    )
+    with pytest.raises(Task18VerificationError):
+        verify_task18_closure_receipt(
+            closure_path=closure_path,
+            expected_closure_sha256=closure_sha,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / f"bad-verify-{case}-report.json").resolve(),
+        )
+
+
+def test_closure_create_rejects_unrelated_binding_heads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    fixture.ancestry["bb2"] = False
+    with pytest.raises(Task18VerificationError, match="bb2_head_not_ancestor"):
+        create_task18_closure_receipt(**fixture.create_args)
+
+
+def test_closure_verify_rejects_unrelated_binding_heads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    result = create_task18_closure_receipt(**fixture.create_args)
+    fixture.ancestry["engine"] = False
+    with pytest.raises(Task18VerificationError, match="engine_head_not_ancestor"):
+        verify_task18_closure_receipt(
+            closure_path=fixture.closure,
+            expected_closure_sha256=result.closure_sha256,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "unrelated-head-verify.json").resolve(),
+        )
+
+
+@pytest.mark.parametrize("invalid_version", (True, 1.0))
+def test_closure_verify_rejects_non_integer_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_version: object,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+    result = create_task18_closure_receipt(**fixture.create_args)
+    closure_path, closure_sha = _write_forged_closure(
+        fixture,
+        result,
+        tmp_path,
+        mutate=lambda value: value.__setitem__("version", invalid_version),
+    )
+    with pytest.raises(Task18VerificationError, match="closure_schema_invalid"):
+        verify_task18_closure_receipt(
+            closure_path=closure_path,
+            expected_closure_sha256=closure_sha,
+            engine_root=fixture.engine_root,
+            repo_root=fixture.repo_root,
+            brain_root=fixture.brain_root,
+            report_path=(tmp_path / "bool-version-report.json").resolve(),
         )
