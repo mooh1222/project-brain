@@ -303,20 +303,26 @@ def test_task18_plan_pins_eval_scenarios_and_post_audit_cache_policy():
     task11 = task_section(11)
     task13 = task_section(13)
     eval_invocation = (
+        '(\n'
+        '  cd "$BB2"\n'
+        '  PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" '
         '-m project_brain.cli eval \\\n'
-        '  --brain-root "$BB2/brain" \\\n'
-        '  --scenarios "$BB2/brain/eval_scenarios.json"'
+        '    --brain-root "$BB2/brain" \\\n'
+        '    --scenarios "$BB2/brain/eval_scenarios.json"\n'
+        ')'
     )
     assert eval_invocation in task11
     assert eval_invocation in task13
-    assert (
-        '--brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch\n'
-    ) in task11
-    assert "--no-stale-cache-write" not in task11
-    assert (
+    audit_invocation = (
         '--brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch '
         "--no-stale-cache-write\n"
-    ) in task13
+    )
+    assert audit_invocation in task11
+    assert (
+        audit_invocation in task13
+    )
+    assert "--golden-set" not in task11
+    assert "--golden-set" not in task13
 
 
 @pytest.mark.parametrize("name", ("change-map.md", "runtime-map.md"))
