@@ -2415,6 +2415,60 @@ def test_display_migration_preserves_derived_files_byte_for_byte(tmp_path):
     assert not any(marker.startswith("derived:") for marker in journal["applied"])
 
 
+def test_display_migration_preserves_existing_object_modes(tmp_path):
+    brain_root, _request, planned, after_files = _display_transaction_inputs(
+        tmp_path
+    )
+    updated_paths = tuple(
+        brain_root / action["path"]
+        for action in planned.manifest.updates
+    )
+    for path in updated_paths:
+        path.chmod(0o644)
+
+    apply_transaction(
+        brain_root,
+        manifest=_journal_manifest(planned.manifest),
+        after_files=after_files,
+        derived_policy="preserve",
+    )
+
+    assert {
+        stat.S_IMODE(path.stat().st_mode)
+        for path in updated_paths
+    } == {0o644}
+
+
+def test_snapshot_fallback_recovery_restores_before_image_mode(tmp_path):
+    brain_root, _request, planned, after_files = _display_transaction_inputs(
+        tmp_path
+    )
+    first_update = planned.manifest.updates[0]
+    live_path = brain_root / first_update["path"]
+    live_path.chmod(0o640)
+
+    with pytest.raises(InjectedCrash, match="after_first_live_replace"):
+        apply_transaction(
+            brain_root,
+            manifest=_journal_manifest(planned.manifest),
+            after_files=after_files,
+            derived_policy="preserve",
+            failure_injector=_crash_at("after_first_live_replace"),
+        )
+
+    transaction_root = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / planned.manifest.transaction_id
+    )
+    (transaction_root / "before" / first_update["path"]).unlink()
+
+    recover_unfinished_transaction(brain_root)
+
+    assert stat.S_IMODE(live_path.stat().st_mode) == 0o640
+
+
 def test_display_migration_preserves_derived_with_noncanonical_source_bytes(
     tmp_path,
 ):

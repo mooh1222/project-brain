@@ -1289,6 +1289,66 @@ def _write_bytes_at(
     os.fsync(parent_fd)
 
 
+def _copy_regular_file_mode_at(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    source_fd = -1
+    destination_fd = -1
+    try:
+        source_fd = os.open(
+            source_name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=source_parent_fd,
+        )
+        destination_fd = os.open(
+            destination_name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=destination_parent_fd,
+        )
+        source_stat = os.fstat(source_fd)
+        destination_stat = os.fstat(destination_fd)
+        if not stat.S_ISREG(source_stat.st_mode) or not stat.S_ISREG(
+            destination_stat.st_mode
+        ):
+            raise CorpusIOError(
+                "file_type_invalid",
+                "file mode copy requires regular source and destination files",
+            )
+        if source_stat.st_dev != destination_stat.st_dev:
+            raise CorpusIOError(
+                "filesystem_mismatch",
+                "file mode copy crosses a filesystem boundary",
+            )
+        source_mode = stat.S_IMODE(source_stat.st_mode)
+        os.fchmod(destination_fd, source_mode)
+        copied_stat = os.fstat(destination_fd)
+        if (
+            not stat.S_ISREG(copied_stat.st_mode)
+            or stat.S_IMODE(copied_stat.st_mode) != source_mode
+        ):
+            raise CorpusIOError(
+                "file_mode_copy_failed",
+                f"{destination_name}: file mode was not copied exactly",
+            )
+        os.fsync(destination_fd)
+        os.fsync(destination_parent_fd)
+    except CorpusIOError:
+        raise
+    except OSError as exc:
+        raise CorpusIOError(
+            "file_mode_copy_failed",
+            f"{destination_name}: cannot copy regular-file mode: {exc}",
+        ) from exc
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        if source_fd >= 0:
+            os.close(source_fd)
+
+
 def _unlink_at_if_exists(parent_fd: int, name: str) -> None:
     try:
         os.unlink(name, dir_fd=parent_fd)
@@ -2865,6 +2925,14 @@ def apply_transaction(
                     after_files[entry["path"]],
                     replace_existing=False,
                 )
+                if entry["had_before"]:
+                    live_parent, live_name = live_parents[entry["path"]]
+                    _copy_regular_file_mode_at(
+                        live_parent.fd,
+                        live_name,
+                        parent_fd,
+                        name,
+                    )
             _inject(failure_injector, "after_temp_fsync")
             scope.verify_lexical_bindings()
             _verify_live_bindings(anchored, live_parents)
@@ -2891,6 +2959,12 @@ def apply_transaction(
                     snapshot_name,
                     data,
                     replace_existing=False,
+                )
+                _copy_regular_file_mode_at(
+                    live_parent.fd,
+                    live_name,
+                    snapshot_parent_fd,
+                    snapshot_name,
                 )
             journal["state"] = JournalState.PREPARED.value
             _write_journal_at(private_fd, journal)
@@ -3769,6 +3843,12 @@ def _rollback_transaction_anchored(
                 temporary_name,
                 payload,
                 replace_existing=False,
+            )
+            _copy_regular_file_mode_at(
+                source_parent_fd,
+                source_name,
+                restore_parent_fd,
+                temporary_name,
             )
             os.replace(
                 temporary_name,

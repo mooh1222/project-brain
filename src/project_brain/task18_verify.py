@@ -770,6 +770,7 @@ def load_task18_post_authorization(
         repo_root=repo_root,
         brain_root=brain_root,
     )
+    _compare_snapshot_before_to_live(binding)
     titles = {
         str(row["id"]): str(row["expected_title"])
         for row in binding.migration_targets
@@ -804,16 +805,25 @@ def _read_display_manifest(path: Path, expected_sha256: str, binding: ParsedTask
 
 def _snapshot_object_sources_all(
     binding: ParsedTask18Binding,
-) -> dict[str, tuple[str, bytes, Mapping[str, object]]]:
+) -> tuple[
+    dict[str, tuple[str, bytes, Mapping[str, object]]],
+    dict[str, int],
+]:
     try:
         manifest_data, _ = read_regular_no_follow(binding.snapshot_root / "manifest.json")
     except SnapshotError as exc:
         raise _dependency(exc) from exc
     manifest = _strict_json(manifest_data, "snapshot_manifest_invalid")
     files = manifest.get("files") if isinstance(manifest, Mapping) else None
-    if not isinstance(files, Sequence) or isinstance(files, (str, bytes, bytearray)):
+    if (
+        not isinstance(manifest, Mapping)
+        or not _exact_int(manifest.get("version"), expected=2)
+        or not isinstance(files, Sequence)
+        or isinstance(files, (str, bytes, bytearray))
+    ):
         _fail("snapshot_manifest_invalid")
     result: dict[str, tuple[str, bytes, Mapping[str, object]]] = {}
+    modes: dict[str, int] = {}
     for entry in files:
         if not isinstance(entry, Mapping) or entry.get("scope") != "brain":
             continue
@@ -829,15 +839,23 @@ def _snapshot_object_sources_all(
         ):
             continue
         try:
-            payload, _ = read_regular_no_follow(binding.snapshot_root / snapshot_relative)
+            payload, snapshot_mode = read_regular_no_follow(
+                binding.snapshot_root / snapshot_relative
+            )
         except SnapshotError as exc:
             raise _dependency(exc) from exc
+        mode = entry.get("mode")
+        if type(mode) is not int or not 0 <= mode <= 0o777:
+            _fail("snapshot_object_mode_invalid", relative)
+        if snapshot_mode != mode:
+            _fail("snapshot_object_mode_mismatch", relative)
         value = _strict_json(payload, "snapshot_object_invalid")
         object_id = value.get("id") if isinstance(value, Mapping) else None
         if not isinstance(object_id, str) or not object_id or object_id in result:
             _fail("snapshot_object_set_invalid", str(object_id))
         result[object_id] = (relative, payload, value)
-    return result
+        modes[object_id] = mode
+    return result, modes
 
 
 def _live_object_sources_all(
@@ -1418,7 +1436,7 @@ def _verify_closure_semantics_independent(
 def _compare_snapshot_before_to_live(
     binding: ParsedTask18Binding,
 ) -> tuple[tuple[str, ...], BrainStore, BrainStore]:
-    before = _snapshot_object_sources_all(binding)
+    before, before_modes = _snapshot_object_sources_all(binding)
     live = _live_object_sources_all(binding.brain_root)
     before_ids = set(before)
     live_ids = set(live)
@@ -1432,6 +1450,21 @@ def _compare_snapshot_before_to_live(
     )
     if renamed:
         _fail("object_paths_changed", repr(renamed))
+    for object_id in sorted(before_ids):
+        live_path, live_bytes, _ = live[object_id]
+        try:
+            reread_bytes, live_mode = read_regular_no_follow(
+                binding.brain_root / live_path
+            )
+        except SnapshotError as exc:
+            raise _dependency(exc) from exc
+        if reread_bytes != live_bytes:
+            _fail("live_object_changed_during_mode_check", object_id)
+        if live_mode != before_modes[object_id]:
+            _fail(
+                "object_mode_drift",
+                f"{object_id}: {live_mode:04o} != {before_modes[object_id]:04o}",
+            )
     target_by_id = {str(row["id"]): row for row in binding.migration_targets}
     changed_ids = {
         object_id

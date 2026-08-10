@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import stat
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -66,14 +67,20 @@ def _parsed_binding(tmp_path: Path) -> ParsedTask18Binding:
     before_bytes = canonical_receipt_bytes(before)
     after_bytes = canonical_receipt_bytes(after)
     relative = "objects/code/run.json"
-    (snapshot_root / "payload/brain" / relative).write_bytes(before_bytes)
-    (brain_root / relative).write_bytes(after_bytes)
+    snapshot_object_path = snapshot_root / "payload/brain" / relative
+    live_object_path = brain_root / relative
+    snapshot_object_path.write_bytes(before_bytes)
+    live_object_path.write_bytes(after_bytes)
+    snapshot_object_path.chmod(0o644)
+    live_object_path.chmod(0o644)
     manifest = {
+        "version": 2,
         "files": [{
             "scope": "brain",
             "path": relative,
             "sha256": _sha(before_bytes),
             "size": len(before_bytes),
+            "mode": 0o644,
             "copied": True,
             "snapshot_path": f"payload/brain/{relative}",
         }]
@@ -240,6 +247,68 @@ def test_post_authorization_requires_exact_binding_sha_and_returns_only_bound_ti
     assert value.target_ids_sha256 == binding.target_ids_sha256
 
 
+def test_post_authorization_rejects_live_non_target_object_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import project_brain.task18_verify as module
+
+    binding = _parsed_binding(tmp_path)
+    stable = {
+        "id": "code.ctx.stable",
+        "kind": "CodeLocator",
+        "title": "Ns::stable",
+        "repo": "demo",
+        "path": "src/Stable.cpp",
+        "symbol": "Ns::stable",
+        "locator_source": "symbol",
+        "verified_at": "2026-08-06T00:00:00+09:00",
+    }
+    stable_bytes = canonical_receipt_bytes(stable)
+    relative = "objects/code/stable.json"
+    snapshot_relative = f"payload/brain/{relative}"
+    snapshot_path = binding.snapshot_root / snapshot_relative
+    live_path = binding.brain_root / relative
+    snapshot_path.write_bytes(stable_bytes)
+    live_path.write_bytes(stable_bytes)
+    snapshot_path.chmod(0o644)
+    live_path.chmod(0o644)
+    manifest_path = binding.snapshot_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["files"].append({
+        "scope": "brain",
+        "path": relative,
+        "sha256": _sha(stable_bytes),
+        "size": len(stable_bytes),
+        "mode": 0o644,
+        "copied": True,
+        "snapshot_path": snapshot_relative,
+    })
+    manifest_path.write_bytes(canonical_receipt_bytes(manifest))
+    live_path.write_bytes(canonical_receipt_bytes({
+        **stable,
+        "title": "unexpected drift",
+    }))
+    live_path.chmod(0o644)
+    monkeypatch.setattr(
+        module,
+        "parse_task18_binding_for_post_verify",
+        lambda **kwargs: binding,
+    )
+
+    with pytest.raises(
+        Task18VerificationError,
+        match="changed_target_set_mismatch",
+    ):
+        load_task18_post_authorization(
+            binding_path=binding.path,
+            expected_binding_sha256=binding.sha256,
+            engine_root=binding.engine_root,
+            repo_root=binding.repo_root,
+            brain_root=binding.brain_root,
+        )
+
+
 def test_snapshot_compare_accepts_evidence_ref_only_target_with_canonical_locator(
     tmp_path: Path,
 ):
@@ -266,9 +335,11 @@ def test_snapshot_compare_accepts_evidence_ref_only_target_with_canonical_locato
     snapshot_ref = binding.snapshot_root / snapshot_ref_relative
     snapshot_ref.parent.mkdir(parents=True, exist_ok=True)
     snapshot_ref.write_bytes(before_ref_bytes)
+    snapshot_ref.chmod(0o644)
     live_ref_path = binding.brain_root / ref_relative
     live_ref_path.parent.mkdir(parents=True, exist_ok=True)
     live_ref_path.write_bytes(live_ref_bytes)
+    live_ref_path.chmod(0o644)
 
     manifest_path = binding.snapshot_root / "manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
@@ -281,6 +352,7 @@ def test_snapshot_compare_accepts_evidence_ref_only_target_with_canonical_locato
         "path": ref_relative,
         "sha256": _sha(before_ref_bytes),
         "size": len(before_ref_bytes),
+        "mode": 0o644,
         "copied": True,
         "snapshot_path": snapshot_ref_relative,
     })
@@ -305,6 +377,19 @@ def test_snapshot_compare_accepts_evidence_ref_only_target_with_canonical_locato
     changed_paths, _, _ = module._compare_snapshot_before_to_live(binding)
 
     assert changed_paths == ("brain/objects/evidence_refs/run.json",)
+
+
+def test_snapshot_compare_rejects_live_object_mode_drift(tmp_path: Path):
+    import project_brain.task18_verify as module
+
+    binding = _parsed_binding(tmp_path)
+    live_path = binding.brain_root / "objects/code/run.json"
+    live_path.chmod(0o600)
+
+    with pytest.raises(Task18VerificationError, match="object_mode_drift"):
+        module._compare_snapshot_before_to_live(binding)
+
+    assert stat.S_IMODE(live_path.stat().st_mode) == 0o600
 
 
 def test_post_verify_rejects_non_title_object_change(
