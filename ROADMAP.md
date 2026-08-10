@@ -36,34 +36,34 @@
 
 ## 진행 중
 
-### Task 18 표시 제목·인용문 부채 — 구현 계획 검토 대기
-
-P0 ingest integrity foundation은 완료됐다. 기존
-`2026-08-04-task18-display-labels-and-quote-backlog` 설계·계획·binding은 당시 상태의 역사
-자료이며 실행하지 않는다.
-
-2026-08-06 현재 engine·BB2 HEAD와 `origin/develop`, 표시 제목 대상, quote backlog를 읽기 전용으로
-다시 측정해 canonical receipt를 남겼다. corpus·raw·index는 P0 handoff와 같고, 현재 대상은
-CodeLocator 제목 3,305개, quote 부채 3,307개, paired EvidenceRef 제목 3,186개다. receipt와
-현재 판단은 [Task 18 재설계](docs/superpowers/specs/2026-08-06-task18-display-labels-and-quote-debt-redesign.md)에
-기록했다.
-
-새 설계는 2026-08-06 사용자 승인을 받았다. 현재 gate는
-`blocked_pending_plan_approval_and_binding`이며, 새
-[구현 계획](docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md)을 사용자에게
-검토받은 뒤에만 구현을 시작한다. 구현 완료 뒤 engine·BB2 최종 HEAD를 결속한 새 pre-mutation
-snapshot과 final binding을 독립 검증하기 전에는 migration plan/apply나 실코퍼스 변경을 시작하지
-않는다.
-
-기존 legacy 객체는 ingest 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는 항목으로
-기록한다. 이를 “검증된 적 없음”으로 확대 해석하지 않는다.
-
-그 밖의 후보는 아래 "미뤄둔 작업"에 착수 트리거와 함께 있다. 특히 7번(Task 17 복구 번들
-소속과 엔진 흡수)과 8번(옛 앵커 수정을 막는 읽기/쓰기 비대칭)은 별도 후속이다.
+현재 확정되어 진행 중인 작업은 없다. 착수 조건이 있는 후보는 아래 "미뤄둔 작업"에서 관리한다.
 
 ---
 
 ## 완료 단계
+
+### Task 18 표시 제목·인용문 부채 — 적용·검증 완료 (2026-08-11)
+
+표시 제목 규칙과 독립 검증·복구 경계를 엔진에 구현하고, BB2 실코퍼스에서 CodeLocator
+3,305개와 짝 EvidenceRef 3,186개, 합계 6,491개의 `title`만 갱신했다. create/delete/rename과
+보조 파일 변경은 0건이고 짝 불일치도 0/3,202였다.
+
+- 엔진 implementation HEAD `5e08dc09514dd4961c7b211ab1a494884390b6aa`, BB2 corpus HEAD
+  `0e2a19e6ffad2f759890112d0efdb10e5fe2e051`
+- 인용문 부채 3,307건과 비정본 symbol 289건은 목록화한 상태 그대로 보존했으며 backfill하지
+  않았다. legacy 인용문은 적재 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는
+  항목이다. 이를 "검증된 적 없음"으로 보지 않는다.
+- 엔진 pytest 2,076개(+ subtest 136개), 설치 runtime 120개, BB2 checks 12개, audit lint 0,
+  eval 15/15, graph export를 통과했다. index DB SHA와 기존 사용자 변경은 그대로 보존했고
+  index rebuild와 finalizer는 실행하지 않았다.
+- engine과 BB2 독립 최종 리뷰는 설계 준수·품질 모두 통과했고 Critical·Important·Minor가
+  각각 0건이었다.
+- 설계: [Task 18 재설계](docs/superpowers/specs/2026-08-06-task18-display-labels-and-quote-debt-redesign.md) ·
+  계획: [Task 18 구현 계획](docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md) ·
+  결과: [완료 보고서](docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md)
+
+완료 문서 commit 뒤에는 create-only closure 두 개로 최종 engine·BB2 HEAD와 증빙을 다시
+결속·검증한다. 이 ROADMAP 작성 시점에는 아직 실행하지 않았다.
 
 ### P0 ingest integrity foundation — 완료 (2026-08-05)
 
