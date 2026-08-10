@@ -1195,6 +1195,123 @@ def test_version_1_snapshot_verifies_but_restore_refuses_before_mutation(tmp_pat
     assert _mode(paths["object"]) == live_mode
 
 
+def test_version_1_restore_recovers_existing_journal_before_fresh_refusal(
+    tmp_path,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"live-before-version-1-crash\n")
+    paths["object"].chmod(0o604)
+    script = f"""
+import os
+from pathlib import Path
+import project_brain.snapshot as snapshot
+
+brain = Path({str(request.brain_root)!r})
+original_rename = snapshot._rename_entry
+def crash_after_live_rename(source_fd, source_name, destination_fd, destination_name):
+    original_rename(source_fd, source_name, destination_fd, destination_name)
+    if source_name == brain.name and destination_name == "backup":
+        os._exit(91)
+snapshot._rename_entry = crash_after_live_rename
+snapshot.restore_snapshot(
+    Path({str(result.snapshot_root)!r}),
+    brain,
+    expected_manifest_sha256={result.manifest_sha256!r},
+)
+"""
+    crashed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": "src"},
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    state_root = snapshot._restore_state_root(request.brain_root)
+    journal_path = state_root / "journal.json"
+
+    assert crashed.returncode == 91
+    assert not request.brain_root.exists()
+    assert journal_path.is_file()
+
+    version_1_sha256 = _rewrite_snapshot_as_version_1(result)
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["expected_manifest_sha256"] = version_1_sha256
+    _write_snapshot_manifest(journal_path, journal)
+
+    assert verify_snapshot(
+        result.snapshot_root,
+        expected_manifest_sha256=version_1_sha256,
+    ).ok is True
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=version_1_sha256,
+        )
+
+    assert caught.value.code == "snapshot_mode_unavailable"
+    assert paths["object"].read_bytes() == b"live-before-version-1-crash\n"
+    assert _mode(paths["object"]) == 0o604
+    assert not state_root.exists()
+
+
+def test_version_1_restore_recovers_activated_journal_by_bytes_and_size(
+    tmp_path,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    original_object = paths["object"].read_bytes()
+    result = create_snapshot(request)
+    script = f"""
+import os
+from pathlib import Path
+import project_brain.snapshot as snapshot
+
+brain = Path({str(request.brain_root)!r})
+original_rename = snapshot._rename_entry
+def crash_after_activation(source_fd, source_name, destination_fd, destination_name):
+    original_rename(source_fd, source_name, destination_fd, destination_name)
+    if source_name == "staged" and destination_name == brain.name:
+        os._exit(92)
+snapshot._rename_entry = crash_after_activation
+snapshot.restore_snapshot(
+    Path({str(result.snapshot_root)!r}),
+    brain,
+    expected_manifest_sha256={result.manifest_sha256!r},
+)
+"""
+    crashed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": "src"},
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    state_root = snapshot._restore_state_root(request.brain_root)
+    journal_path = state_root / "journal.json"
+
+    assert crashed.returncode == 92
+    assert paths["object"].read_bytes() == original_object
+    assert journal_path.is_file()
+
+    version_1_sha256 = _rewrite_snapshot_as_version_1(result)
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["expected_manifest_sha256"] = version_1_sha256
+    _write_snapshot_manifest(journal_path, journal)
+    paths["object"].chmod(0o600)
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=version_1_sha256,
+        )
+
+    assert caught.value.code == "snapshot_mode_unavailable"
+    assert paths["object"].read_bytes() == original_object
+    assert _mode(paths["object"]) == 0o600
+    assert not state_root.exists()
+
+
 def test_restore_activation_failure_rolls_live_tree_back(tmp_path):
     request, paths = _snapshot_fixture(tmp_path)
     result = create_snapshot(request)

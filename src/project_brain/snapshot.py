@@ -2872,7 +2872,7 @@ def _remove_restore_state_at(
 def _brain_snapshot_inventory(
     brain_root: Path,
     manifest: dict,
-) -> dict[str, tuple[str, int, int]]:
+) -> dict[str, tuple[str, int] | tuple[str, int, int]]:
     targets = manifest["brain_targets"]
     paths = {
         path
@@ -2887,13 +2887,26 @@ def _brain_snapshot_inventory(
                 raise
         else:
             paths.add(relative)
+    if manifest["version"] == 1:
+        return {
+            relative: _hash_regular(brain_root, relative)
+            for relative in sorted(paths)
+        }
     return {
         relative: _fingerprint_regular(brain_root / relative)
         for relative in sorted(paths)
     }
 
 
-def _expected_brain_inventory(manifest: dict) -> dict[str, tuple[str, int, int]]:
+def _expected_brain_inventory(
+    manifest: dict,
+) -> dict[str, tuple[str, int] | tuple[str, int, int]]:
+    if manifest["version"] == 1:
+        return {
+            entry["path"]: (entry["sha256"], entry["size"])
+            for entry in manifest["files"]
+            if entry["scope"] == "brain"
+        }
     return {
         entry["path"]: (entry["sha256"], entry["size"], entry["mode"])
         for entry in manifest["files"]
@@ -3238,12 +3251,6 @@ def restore_snapshot(
         snapshot_root,
         expected_manifest_sha256=expected_manifest_sha256,
     )
-    if manifest["version"] == 1:
-        _fail(
-            "snapshot_mode_unavailable",
-            "version-1 snapshots do not record regular-file modes",
-        )
-    state_root = _restore_state_root(brain_root)
     try:
         with stable_corpus_lock(brain_root, exclusive=True):
             parent_fd = _open_absolute_directory(brain_root.parent, create=False)
@@ -3255,6 +3262,11 @@ def restore_snapshot(
                     expected_manifest_sha256=expected_manifest_sha256,
                     manifest=manifest,
                 )
+                if manifest["version"] == 1:
+                    _fail(
+                        "snapshot_mode_unavailable",
+                        "version-1 snapshots do not record regular-file modes",
+                    )
                 with corpus_lock(brain_root, exclusive=True):
                     recover_unfinished_transaction_unlocked(brain_root)
                 return _restore_snapshot_locked(
