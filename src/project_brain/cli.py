@@ -1484,6 +1484,11 @@ def _run_audit(argv) -> int:
     parser.add_argument("--no-stale", action="store_true",
                         help="stale-check 생략(git 없는 환경) — lint·isolated만 돈다")
     parser.add_argument(
+        "--no-stale-cache-write",
+        action="store_true",
+        help="전체 audit을 실행하되 stale-set cache는 쓰지 않는다",
+    )
+    parser.add_argument(
         "--timestamp-details-file",
         help="객체 ID를 포함한 timestamp 진단 JSON의 absolute 출력 경로",
     )
@@ -1501,6 +1506,7 @@ def _run_audit(argv) -> int:
         default_branch=default_branch,
         fetch=not args.no_fetch,
         no_stale=args.no_stale,
+        write_stale_cache=not args.no_stale_cache_write,
         principal=None,
         acl_evaluator=None,
         now=now_kst(),

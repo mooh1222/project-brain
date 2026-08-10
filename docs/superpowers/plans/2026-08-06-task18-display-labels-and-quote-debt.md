@@ -1386,7 +1386,8 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m unittest \
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli audit \
   --brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli eval \
-  --brain-root "$BB2/brain"
+  --brain-root "$BB2/brain" \
+  --scenarios "$BB2/brain/eval_scenarios.json"
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli graph export \
   "$BB2/.snapshots/2026-08-06/task18-execution/attempt-001/pre-mutation-graph.html" \
   --brain-root "$BB2/brain"
@@ -1612,9 +1613,10 @@ PROJECT_BRAIN_TASK18_BINDING_SHA256="$BINDING_SHA" \
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m unittest \
   discover -s "$BB2/brain/checks" -p 'test_*.py'
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli audit \
-  --brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch
+  --brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch --no-stale-cache-write
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli eval \
-  --brain-root "$BB2/brain"
+  --brain-root "$BB2/brain" \
+  --scenarios "$BB2/brain/eval_scenarios.json"
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli graph export \
   "$ROOT/final-graph.html" --brain-root "$BB2/brain"
 ```

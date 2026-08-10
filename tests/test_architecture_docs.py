@@ -285,6 +285,40 @@ def test_task18_migration_boundaries_are_explicit():
         assert token in contracts
 
 
+def test_task18_plan_pins_eval_scenarios_and_post_audit_cache_policy():
+    plan = (
+        ROOT
+        / "docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md"
+    ).read_text(encoding="utf-8")
+
+    def task_section(number: int) -> str:
+        match = re.search(
+            rf"^### Task {number}:.*?(?=^### Task \d+:|\Z)",
+            plan,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None
+        return match.group(0)
+
+    task11 = task_section(11)
+    task13 = task_section(13)
+    eval_invocation = (
+        '-m project_brain.cli eval \\\n'
+        '  --brain-root "$BB2/brain" \\\n'
+        '  --scenarios "$BB2/brain/eval_scenarios.json"'
+    )
+    assert eval_invocation in task11
+    assert eval_invocation in task13
+    assert (
+        '--brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch\n'
+    ) in task11
+    assert "--no-stale-cache-write" not in task11
+    assert (
+        '--brain-root "$BB2/brain" --repo-root "$BB2" --no-fetch '
+        "--no-stale-cache-write\n"
+    ) in task13
+
+
 @pytest.mark.parametrize("name", ("change-map.md", "runtime-map.md"))
 def test_display_migration_preserve_exception_forbids_rebuild(name: str):
     text = _read_architecture_doc(name)

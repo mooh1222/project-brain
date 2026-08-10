@@ -152,6 +152,7 @@ def run_audit(
     default_branch: str = "develop",
     fetch: bool = True,
     no_stale: bool = False,
+    write_stale_cache: bool = True,
     git_runner=None,
     blob_reader: BlobReader | None = None,
     target_head: str | None = None,
@@ -216,12 +217,13 @@ def run_audit(
                 default_branch=default_branch,
                 fetch=fetch,
             )
-            cache_written = str(
-                write_stale_set(
-                    brain_root,
-                    build_stale_set(stale, now=now or now_kst()),
+            if write_stale_cache:
+                cache_written = str(
+                    write_stale_set(
+                        brain_root,
+                        build_stale_set(stale, now=now or now_kst()),
+                    )
                 )
-            )
         except GitError as exc:
             stale = {"error": str(exc)}
             stale_status = {"ok": False, "skipped": False}

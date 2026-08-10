@@ -300,6 +300,8 @@ redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을
 | `doctor --download` | 모델 cache | 없음 |
 
 `audit은 stale-set cache를 쓴다`. 그래서 “점검 명령은 모두 읽기 전용”이라고 묶지 않는다.
+`audit --no-stale-cache-write`는 stale·code quote·symbol 검사를 포함한 전체 판정을 실행하되
+cache만 게시하지 않는다. Git 의존 검사까지 생략하는 `--no-stale`과는 다른 검증 모드다.
 기본 `stale-check`·`lint`·`graph isolated`는 객체 코퍼스를 바꾸지 않지만,
 `stale-check --write-cache`, `graph export`, `doctor --download`처럼 옵션이나 하위 명령에 따라
 코퍼스 밖 파일을 쓸 수 있다.

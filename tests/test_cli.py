@@ -2450,6 +2450,65 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(payload["code_quotes"],
                          {"ok": True, "checked": 1, "skipped": 0, "failures": []})
 
+    def test_audit_without_stale_cache_write_runs_full_git_checks(self):
+        from tests.test_stale_check import code_locator
+
+        repo_root = self.brain.parent
+        source = repo_root / "a" / "X.cpp"
+        source.parent.mkdir()
+        source.write_text("void sym() {}\n", encoding="utf-8")
+        commit = _commit_git_fixture(repo_root)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "update-ref",
+                "refs/remotes/origin/develop",
+                commit,
+            ],
+            check=True,
+        )
+        loc = code_locator("code.quoted", path="a/X.cpp", commit_sha=commit)
+        loc["verified_quote"] = "void sym() {}"
+        BrainStore.save_object(self.brain, loc)
+
+        stale_set = self.brain / ".brain-local" / "stale-set.json"
+        stale_set.parent.mkdir(parents=True)
+        bound_bytes = b'{"computed_at":"bound-task18-cache"}\n'
+        stale_set.write_bytes(bound_bytes)
+
+        out = io.StringIO()
+        with mock.patch(
+            "sys.argv",
+            [
+                "cli",
+                "audit",
+                "--brain-root",
+                str(self.brain),
+                "--repo-root",
+                str(repo_root),
+                "--no-fetch",
+                "--no-stale-cache-write",
+            ],
+        ), redirect_stdout(out):
+            rc = cli.main()
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(payload["stale"])
+        self.assertEqual(
+            payload["stale_status"],
+            {"ok": True, "skipped": False},
+        )
+        self.assertEqual(
+            payload["code_quotes"],
+            {"ok": True, "checked": 1, "skipped": 0, "failures": []},
+        )
+        self.assertEqual(payload["locators"][0]["code_quote"], "verified")
+        self.assertIsNone(payload["cache_written"])
+        self.assertEqual(stale_set.read_bytes(), bound_bytes)
+
     def test_audit_fails_closed_on_global_git_error(self):
         from project_brain.stale_check import GitError
         out = io.StringIO()
