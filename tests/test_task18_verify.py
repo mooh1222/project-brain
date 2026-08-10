@@ -240,6 +240,73 @@ def test_post_authorization_requires_exact_binding_sha_and_returns_only_bound_ti
     assert value.target_ids_sha256 == binding.target_ids_sha256
 
 
+def test_snapshot_compare_accepts_evidence_ref_only_target_with_canonical_locator(
+    tmp_path: Path,
+):
+    import project_brain.task18_verify as module
+
+    binding = _parsed_binding(tmp_path)
+    locator_relative = "objects/code/run.json"
+    locator_bytes = (binding.brain_root / locator_relative).read_bytes()
+    snapshot_locator = binding.snapshot_root / "payload/brain" / locator_relative
+    snapshot_locator.write_bytes(locator_bytes)
+
+    before_ref = {
+        "id": "evref.ctx.run",
+        "kind": "EvidenceRef",
+        "title": "old ref title",
+        "ref_type": "code_locator",
+        "locator": {"code_locator_id": "code.ctx.run"},
+    }
+    live_ref = {**before_ref, "title": "Ns::run"}
+    ref_relative = "objects/evidence_refs/run.json"
+    snapshot_ref_relative = f"payload/brain/{ref_relative}"
+    before_ref_bytes = canonical_receipt_bytes(before_ref)
+    live_ref_bytes = canonical_receipt_bytes(live_ref)
+    snapshot_ref = binding.snapshot_root / snapshot_ref_relative
+    snapshot_ref.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_ref.write_bytes(before_ref_bytes)
+    live_ref_path = binding.brain_root / ref_relative
+    live_ref_path.parent.mkdir(parents=True, exist_ok=True)
+    live_ref_path.write_bytes(live_ref_bytes)
+
+    manifest_path = binding.snapshot_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["files"][0].update({
+        "sha256": _sha(locator_bytes),
+        "size": len(locator_bytes),
+    })
+    manifest["files"].append({
+        "scope": "brain",
+        "path": ref_relative,
+        "sha256": _sha(before_ref_bytes),
+        "size": len(before_ref_bytes),
+        "copied": True,
+        "snapshot_path": snapshot_ref_relative,
+    })
+    manifest_path.write_bytes(canonical_receipt_bytes(manifest))
+
+    target = {
+        "id": before_ref["id"],
+        "kind": before_ref["kind"],
+        "paired_locator_id": "code.ctx.run",
+        "before_object_sha256": _sha(before_ref_bytes),
+        "before_non_title_sha256": _json_sha({
+            key: value for key, value in before_ref.items() if key != "title"
+        }),
+        "expected_title": "Ns::run",
+    }
+    binding = replace(
+        binding,
+        migration_targets=(target,),
+        target_ids_sha256=_json_sha([before_ref["id"]]),
+    )
+
+    changed_paths, _, _ = module._compare_snapshot_before_to_live(binding)
+
+    assert changed_paths == ("brain/objects/evidence_refs/run.json",)
+
+
 def test_post_verify_rejects_non_title_object_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

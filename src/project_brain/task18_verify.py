@@ -1445,9 +1445,9 @@ def _compare_snapshot_before_to_live(
         )
     changed_paths: list[str] = []
     expected_locator_titles = {
-        object_id: str(row["expected_title"])
-        for object_id, row in target_by_id.items()
-        if row["kind"] == "CodeLocator"
+        object_id: canonical_locator_title(item[2])
+        for object_id, item in live.items()
+        if item[2].get("kind") == "CodeLocator"
     }
     for object_id in sorted(target_by_id):
         before_path, before_bytes, before_obj = before[object_id]
