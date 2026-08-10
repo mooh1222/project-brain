@@ -51,7 +51,8 @@
 | `.snapshots/2026-08-06/task18-execution/attempt-002/` | engine cwd에서 eval 0/15로 실패한 snapshot, binding, manifest, verify receipt, pathspec 등 역사 증빙. 삭제·덮어쓰기 금지 |
 | `.snapshots/2026-08-06/task18-execution/attempt-003/` | binding·독립 검증·plan·apply는 성공했지만 production post-verify에서 EvidenceRef 단독 target 검증 버그가 드러난 역사 증빙. v2 restore 성공. 삭제·덮어쓰기·재사용 금지 |
 | `.snapshots/2026-08-06/task18-execution/attempt-004/` | apply·post-verify·corpus commit·corpus-final snapshot은 성공했지만 최종 리뷰에서 object mode 손실과 약한 post authorization이 드러난 역사 증빙. exact revert commit과 v2 restore 성공. 삭제·덮어쓰기·재사용 금지 |
-| `.snapshots/2026-08-06/task18-execution/attempt-005/` | 현재 실행의 snapshot, binding, manifest, verify receipt, pathspec 등 ignored control artifact |
+| `.snapshots/2026-08-06/task18-execution/attempt-005/` | gate·apply·post-verify·corpus commit·독립 최종 리뷰·완료 문서 commit까지 성공했지만 closure-create가 descendant ref 계약 버그로 실패한 역사 증빙. closure-verify는 실행하지 않았다. exact revert와 canonical v2 restore 뒤에도 삭제·덮어쓰기·재사용 금지 |
+| `.snapshots/2026-08-06/task18-execution/attempt-006/` | ref 계약 수정 뒤 다시 실행할 snapshot, binding, manifest, verify receipt, pathspec, closure 등 ignored control artifact |
 
 ### Task 0: 실행 기준선과 SDD 복구 기록을 고정한다
 
@@ -1368,22 +1369,35 @@ git -C "$BB2" commit -m "docs(brain): 현재 인용문 부채 기준 갱신"
 ### Task 11: 실코퍼스 gate와 pre-mutation snapshot을 만든다
 
 **Files:**
-- Create: `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-execution/attempt-005/pre-mutation/` (ignored)
-- Create: `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-execution/attempt-005/pre-mutation-verify.json` (ignored)
+- Create: `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-execution/attempt-006/pre-mutation/` (ignored)
+- Create: `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-execution/attempt-006/pre-mutation-verify.json` (ignored)
 
 **Interfaces:**
 - Produces: 모든 engine/BB2 code·docs·inventory commit 뒤의 검증된 pre-mutation snapshot
+
+Task 11에 들어가기 전에 attempt-005를 정확히 복구한다. 고정 BB2 HEAD
+`0e2a19e6ffad2f759890112d0efdb10e5fe2e051`와 staged 0을 확인한 뒤 그 corpus
+commit을 `git revert --no-commit`으로 정확히 한 번 되돌린다. staged 집합은 그 commit의
+6,491개 object와 result report 한 개, 모두 6,492 path와 정확히 같아야 하며 사용자 dirt가
+섞이지 않고 `git diff --cached --check`가 통과할 때만 별도 revert commit을 만든다. 그다음
+attempt-005의 검증된 v2 `pre-mutation` manifest에서 SHA를 다시 계산해 canonical
+`snapshot restore`를 attempt-005 `pre-mutation` 경로·BB2 brain root·그 manifest SHA로
+`brain_only`에서 정확히 한 번 실행한다. reset, amend, 수동
+파일·mode 교정, restore 재시도는 금지한다. object Git diff 0, staged 0/0, corpus
+fingerprint·index·stale·사용자 dirt가 attempt-005 이전 값과 정확히 같고 attempt-005
+artifact가 byte-preserved임을 한 번의 제한된 확인으로 증명한 뒤에만 아래 attempt-006을
+시작한다.
 
 - [ ] **Step 0: 새 attempt root가 비어 있음을 확인한다**
 
 ```bash
 BB2=/Users/al03040455/Desktop/bb2_client
-ATTEMPT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ATTEMPT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 test ! -e "$ATTEMPT"
 mkdir -p "$ATTEMPT"
 ```
 
-attempt-002는 engine cwd에서 실행한 eval이 색인 DB를 찾지 못해 0/15로 실패한 역사 증빙이다. attempt-003은 binding·독립 검증·plan·apply까지 성공했지만 production post-verify가 이미 정본 제목인 비대상 CodeLocator와 짝인 EvidenceRef 단독 target을 잘못 거부했고, v2 restore가 성공한 역사 증빙이다. attempt-004는 apply·post-verify·corpus commit·corpus-final snapshot까지 성공했지만 최종 리뷰에서 object mode 손실과 약한 post authorization이 드러났고, exact revert commit과 canonical v2 restore로 복구한 역사 증빙이다. 셋 다 지우거나 재사용하지 않는다. 이후 실패해 재시도할 때도 기존 디렉터리를 지우거나 재사용하지 않고 다음 번호의 새 attempt root를 쓴다. 선택한 번호를 SDD ledger에 기록하고 Task 11~13의 모든 `ROOT`를 같은 번호로 바꾼다.
+attempt-002는 engine cwd에서 실행한 eval이 색인 DB를 찾지 못해 0/15로 실패한 역사 증빙이다. attempt-003은 binding·독립 검증·plan·apply까지 성공했지만 production post-verify가 이미 정본 제목인 비대상 CodeLocator와 짝인 EvidenceRef 단독 target을 잘못 거부했고, v2 restore가 성공한 역사 증빙이다. attempt-004는 apply·post-verify·corpus commit·corpus-final snapshot까지 성공했지만 최종 리뷰에서 object mode 손실과 약한 post authorization이 드러났고, exact revert commit과 canonical v2 restore로 복구한 역사 증빙이다. attempt-005는 모든 gate·apply·post-verify·corpus commit·독립 최종 리뷰·완료 문서 commit까지 성공했지만 closure-create에서 `require_commit_is_ancestor`의 descendant에 40-hex SHA를 넘겨 ref 계약 위반이 드러났으며 closure-verify는 0회다. 네 attempt 모두 지우거나 재사용하지 않는다. 이후 실패해 재시도할 때도 기존 디렉터리를 지우거나 재사용하지 않고 다음 번호의 새 attempt root를 쓴다. 선택한 번호를 SDD ledger에 기록하고 Task 11~13의 모든 `ROOT`를 같은 번호로 바꾼다.
 
 - [ ] **Step 1: BB2 gate를 명시적 checkout으로 실행한다**
 
@@ -1402,7 +1416,7 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli audit \
     --scenarios "$BB2/brain/eval_scenarios.json"
 )
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli graph export \
-  "$BB2/.snapshots/2026-08-06/task18-execution/attempt-005/pre-mutation-graph.html" \
+  "$BB2/.snapshots/2026-08-06/task18-execution/attempt-006/pre-mutation-graph.html" \
   --brain-root "$BB2/brain"
 ```
 
@@ -1417,7 +1431,7 @@ audit의 code quote 결과는 quote가 저장된 502개와 현재 blob을 대상
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-SNAP_PARENT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+SNAP_PARENT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 SNAP="$SNAP_PARENT/pre-mutation"
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli snapshot create \
   --output-root "$SNAP_PARENT" --snapshot-id pre-mutation \
@@ -1429,7 +1443,7 @@ create 출력과 별개로 생성된 canonical manifest bytes에서 SHA를 다�
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-SNAP="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005/pre-mutation"
+SNAP="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006/pre-mutation"
 VERIFY_RECEIPT="$(dirname "$SNAP")/pre-mutation-verify.json"
 SNAP_SHA=$(shasum -a 256 "$SNAP/manifest.json" | awk '{print $1}')
 PYTHONPATH="$ENGINE/src" SNAP="$SNAP" SNAP_SHA="$SNAP_SHA" \
@@ -1465,7 +1479,7 @@ git -C /Users/al03040455/Desktop/bb2_client diff --cached --name-only
 ### Task 12: final binding → plan → 독립 verify-plan → apply를 끊김 없이 실행한다
 
 **Files:**
-- Create: `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-execution/attempt-005/task18-binding.json` (ignored)
+- Create: `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-execution/attempt-006/task18-binding.json` (ignored)
 - Create: 같은 root의 `binding-verify.json`, `display-migration.manifest.json`, `plan-report.json`, `verify-plan-report.json`, `apply-report.json` (ignored)
 - Modify: exact 6,491 corpus object JSON (아직 커밋하지 않음)
 
@@ -1478,7 +1492,7 @@ git -C /Users/al03040455/Desktop/bb2_client diff --cached --name-only
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 PLAN_REL=docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md
 DESIGN_REL=docs/superpowers/specs/2026-08-06-task18-display-labels-and-quote-debt-redesign.md
 PLAN="$ENGINE/$PLAN_REL"
@@ -1534,7 +1548,7 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli \
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 BINDING_SHA=$(shasum -a 256 "$ROOT/task18-binding.json" | awk '{print $1}')
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli \
   migration display binding-verify \
@@ -1551,7 +1565,7 @@ Expected: `task18_allowed=true`, locator 3,305, EvidenceRef 3,186, total 6,491.
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 BINDING_SHA=$(shasum -a 256 "$ROOT/task18-binding.json" | awk '{print $1}')
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migration display plan \
   --brain-root "$BB2/brain" --repo-root "$BB2" --engine-root "$ENGINE" \
@@ -1566,7 +1580,7 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migrati
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 BINDING_SHA=$(shasum -a 256 "$ROOT/task18-binding.json" | awk '{print $1}')
 MANIFEST_SHA=$(shasum -a 256 "$ROOT/display-migration.manifest.json" | awk '{print $1}')
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migration display verify-plan \
@@ -1583,7 +1597,7 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migrati
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 BINDING_SHA=$(shasum -a 256 "$ROOT/task18-binding.json" | awk '{print $1}')
 MANIFEST_SHA=$(shasum -a 256 "$ROOT/display-migration.manifest.json" | awk '{print $1}')
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migration display apply \
@@ -1603,7 +1617,7 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migrati
 - Create: `/Users/al03040455/Desktop/bb2_client/brain/recovery/2026-08-06/task18-display-and-quote-debt/display-migration-result.json`
 - Create: ignored `changed-object-paths.zlist`, final graph, `corpus-final/` snapshot, snapshot verify receipt, closure·closure verify receipt
 - Modify: exact 6,491 BB2 object JSON
-- Create: `docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md`
+- Modify: `docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md`
 - Modify: `ROADMAP.md`
 
 **Interfaces:**
@@ -1614,7 +1628,7 @@ PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli migrati
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 BINDING_SHA=$(shasum -a 256 "$ROOT/task18-binding.json" | awk '{print $1}')
 cd "$ENGINE"
 .venv/bin/python -m pytest -q
@@ -1644,7 +1658,7 @@ Expected: 모든 test 실패 0, audit 성공, eval 15/15, graph export 성공. r
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 BINDING_SHA=$(shasum -a 256 "$ROOT/task18-binding.json" | awk '{print $1}')
 MANIFEST_SHA=$(shasum -a 256 "$ROOT/display-migration.manifest.json" | awk '{print $1}')
 QUOTE="$BB2/brain/recovery/2026-08-06/task18-display-and-quote-debt/legacy-quote-debt-current-develop.json"
@@ -1670,7 +1684,7 @@ Expected: updates 6,491, paired mismatch 0/3,202, title 외 변경 0, v2 pre-mut
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-PATHS="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005/changed-object-paths.zlist"
+PATHS="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006/changed-object-paths.zlist"
 git -C "$BB2" add -f --pathspec-from-file="$PATHS" --pathspec-file-nul
 git -C "$BB2" add -f -- \
   brain/recovery/2026-08-06/task18-display-and-quote-debt/display-migration-result.json
@@ -1678,7 +1692,7 @@ git -C "$BB2" add -f -- \
 import subprocess
 from pathlib import Path
 root = Path("/Users/al03040455/Desktop/bb2_client")
-paths = root / ".snapshots/2026-08-06/task18-execution/attempt-005/changed-object-paths.zlist"
+paths = root / ".snapshots/2026-08-06/task18-execution/attempt-006/changed-object-paths.zlist"
 expected = {part.decode("utf-8") for part in paths.read_bytes().split(b"\0") if part}
 expected.add("brain/recovery/2026-08-06/task18-display-and-quote-debt/display-migration-result.json")
 payload = subprocess.run(
@@ -1701,7 +1715,7 @@ staged 목록은 object 6,491개 + result report 1개뿐이어야 한다. 사용
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-FINAL_PARENT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+FINAL_PARENT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 FINAL="$FINAL_PARENT/corpus-final"
 FINAL_VERIFY="$FINAL_PARENT/corpus-final-verify.json"
 PYTHONPATH="$ENGINE/src" "$ENGINE/.venv/bin/python" -m project_brain.cli snapshot create \
@@ -1736,14 +1750,15 @@ snapshot verify receipt는 `ok=true`여야 하고, `repo_head`는 방금 만든 
 
 engine reviewer는 Task 0 시작 SHA부터 corpus-final snapshot의 `engine_head`까지 whole branch를 보고, BB2 reviewer는 quote inventory commit부터 snapshot의 exact `repo_head`까지와 binding·manifest·post report·snapshot verify receipt를 함께 본다. exact 6,491 object diff가 title-only이고 v2 pre-mutation snapshot과 live object의 file mode가 모두 같은지, quote/symbol/index/dirt가 불변인지, paired closure·복구·우회 차단이 설계를 충족하는지 확인한다. load-bearing finding이 남으면 완료 문서를 쓰지 않는다. 수정이 필요하면 현재 attempt artifact를 재사용하지 않고 새 attempt 번호로 Task 11부터 다시 시작한다.
 
-- [ ] **Step 6: 리뷰가 깨끗한 뒤에만 engine 완료 보고서와 ROADMAP을 커밋한다**
+- [ ] **Step 6: 리뷰가 깨끗한 뒤에만 engine 완료 보고서와 ROADMAP을 attempt-006 결과로 갱신해 커밋한다**
 
-두 path를 수정하기 직전에 모두 HEAD와 같음을 확인한다. 완료 보고서는 설계/계획, engine implementation SHA, BB2 corpus SHA, binding/manifest/post report SHA, corpus-final snapshot manifest·verify receipt SHA, 실제 counts, 검증 명령 결과, 독립 리뷰 verdict, index DB SHA 불변, 사용자 dirt 보존, 마지막 closure path를 기록한다. 별도 reviewer가 이 두 문서의 주장과 증빙을 대조해 승인한 뒤에만 커밋한다.
+두 path는 attempt-005 완료 문서 commit에 이미 존재하므로 새로 만들지 않는다. 수정 직전에 둘 다 HEAD와 같음을 확인하고, 기존 attempt-005 성공·closure 실패 기록은 지우지 않은 채 attempt-006의 설계/계획, engine implementation SHA, BB2 corpus SHA, binding/manifest/post report SHA, corpus-final snapshot manifest·verify receipt SHA, 실제 counts, 검증 명령 결과, 독립 리뷰 verdict, index DB SHA 불변, 사용자 dirt 보존, 마지막 closure path로 갱신한다. 별도 reviewer가 이 두 문서의 주장과 증빙을 대조해 승인한 뒤에만 커밋한다.
 
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
-git -C "$ENGINE" diff --quiet HEAD -- ROADMAP.md
-test ! -e "$ENGINE/docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md"
+git -C "$ENGINE" diff --quiet HEAD -- \
+  docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md \
+  ROADMAP.md
 # 위 검증 결과로 두 문서를 작성하고 독립 docs review를 통과한 뒤 실행한다.
 git -C "$ENGINE" add -- \
   docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md \
@@ -1773,7 +1788,7 @@ test -z "$(git -C "$ENGINE" diff --cached --name-only)"
 ```bash
 ENGINE=/Users/al03040455/Downloads/codes/project-brain
 BB2=/Users/al03040455/Desktop/bb2_client
-ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-005"
+ROOT="$BB2/.snapshots/2026-08-06/task18-execution/attempt-006"
 FINAL="$ROOT/corpus-final"
 FINAL_SHA=$(shasum -a 256 "$FINAL/manifest.json" | awk '{print $1}')
 FINAL_VERIFY_SHA=$(shasum -a 256 "$ROOT/corpus-final-verify.json" | awk '{print $1}')

@@ -1162,6 +1162,32 @@ def _write_ignored_raw_drift(fixture, name: str = "drift.md") -> Path:
     return path
 
 
+def test_closure_ancestry_uses_head_and_preserves_bound_ancestor_shas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixture = _closure_fixture(tmp_path, monkeypatch)
+
+    result = create_task18_closure_receipt(**fixture.create_args)
+    verify_task18_closure_receipt(
+        closure_path=fixture.closure,
+        expected_closure_sha256=result.closure_sha256,
+        engine_root=fixture.engine_root,
+        repo_root=fixture.repo_root,
+        brain_root=fixture.brain_root,
+        report_path=(tmp_path / "closure-ancestry-verify.json").resolve(),
+    )
+
+    assert fixture.ancestry["calls"] == [
+        ("engine", "a" * 40, "HEAD"),
+        ("bb2", "b" * 40, "HEAD"),
+        ("engine", "a" * 40, "HEAD"),
+        ("bb2", "b" * 40, "HEAD"),
+        ("engine", "a" * 40, "HEAD"),
+        ("bb2", "b" * 40, "HEAD"),
+    ]
+
+
 def test_closure_create_accepts_post_report_with_exact_bound_raw_tree_sha256(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -2418,10 +2418,10 @@ def create_task18_closure_receipt(
     assert isinstance(migration, Mapping)
     try:
         require_commit_is_ancestor(
-            engine_root, str(binding_engine["head"]), expected_engine_head,
+            engine_root, str(binding_engine["head"]), "HEAD",
         )
         require_commit_is_ancestor(
-            repo_root, str(binding_bb2["head"]), expected_repo_head,
+            repo_root, str(binding_bb2["head"]), "HEAD",
         )
     except Exception as exc:
         raise _dependency(exc) from exc
@@ -2659,10 +2659,10 @@ def verify_task18_closure_receipt(
     assert isinstance(migration, Mapping)
     try:
         require_commit_is_ancestor(
-            engine_root, str(binding_engine["head"]), engine_git.head,
+            engine_root, str(binding_engine["head"]), "HEAD",
         )
         require_commit_is_ancestor(
-            repo_root, str(binding_bb2["head"]), repo_git.head,
+            repo_root, str(binding_bb2["head"]), "HEAD",
         )
     except Exception as exc:
         raise _dependency(exc) from exc
@@ -2743,10 +2743,10 @@ def verify_task18_closure_receipt(
         _fail("closure_state_changed_during_verify")
     try:
         require_commit_is_ancestor(
-            engine_root, str(binding_engine["head"]), tail_engine_git.head,
+            engine_root, str(binding_engine["head"]), "HEAD",
         )
         require_commit_is_ancestor(
-            repo_root, str(binding_bb2["head"]), tail_repo_git.head,
+            repo_root, str(binding_bb2["head"]), "HEAD",
         )
     except Exception as exc:
         raise _dependency(exc) from exc
