@@ -311,7 +311,13 @@ snapshot 범위도 분리해 본다.
 - `snapshot create`는 모든 `BrainStore._KIND_DIR`, `raw/sources`, index DB sidecar,
   stale-set, `eval_scenarios.json`을 brain payload로 캡처한다.
 - repo payload에는 `.project-brain.json`, 설치 manifest, manifest가 관리하는 설치 파일을 담는다.
+- 새로 만드는 version 2 snapshot은 각 정규 파일의 `0o000..0o777` 권한을 manifest에
+  기록하고 payload·`brain_only` 복원 결과까지 같은 권한으로 검증한다. 특수 권한 비트나
+  payload 권한 변경은 검증에서 거부한다.
+- 기존 version 1 snapshot은 원래 6-key 파일 행으로 계속 검증할 수 있지만 파일 권한을
+  기록하지 않았으므로 `snapshot restore`는 `snapshot_mode_unavailable`로 상태 변경 전에 거부한다.
 - `snapshot restore`의 범위는 `brain_only`다. repo payload는 복원하지 않는다.
+- 복원 범위 밖에 남는 live brain 정규 파일은 staging 복사에서 기존 파일 권한을 보존한다.
 - session marker와 corpus transaction journal은 snapshot 캡처·복원 범위가 아니다.
 
 no-op manifest, 적격 대상이 없는 `promote-auto`, 바뀔 hash가 없는 `projection refresh`는 실제

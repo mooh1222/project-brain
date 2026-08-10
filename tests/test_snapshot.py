@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -29,6 +30,46 @@ from project_brain.store import BrainStore
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _write_snapshot_manifest(path: Path, manifest: dict) -> str:
+    payload = (
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    path.write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _rewrite_snapshot_as_version_1(result) -> str:
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = 1
+    for entry in manifest["files"]:
+        del entry["mode"]
+    fingerprint_payload = {
+        "files": manifest["files"],
+        "managed_files": manifest["managed_files"],
+        "repo_head": manifest["repo_head"],
+        "engine_head": manifest["engine_head"],
+    }
+    manifest["source_fingerprint"] = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return _write_snapshot_manifest(result.manifest_path, manifest)
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -878,6 +919,33 @@ def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
     }]
 
 
+def test_create_snapshot_records_and_applies_exact_regular_file_mode(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    paths["source_a"].chmod(0o640)
+
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in manifest["files"]
+        if item["scope"] == "brain" and item["path"] == "raw/sources/a.md"
+    )
+
+    assert manifest["version"] == 2
+    assert entry["mode"] == 0o640
+    assert _mode(result.snapshot_root / entry["snapshot_path"]) == 0o640
+
+
+def test_create_snapshot_rejects_special_regular_file_mode(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    paths["source_a"].chmod(0o1644)
+
+    with pytest.raises(SnapshotError) as caught:
+        create_snapshot(request)
+
+    assert caught.value.code == "source_mode_invalid"
+    assert not (request.output_root / request.snapshot_id).exists()
+
+
 def test_verify_requires_trusted_receipt_before_manifest_parse(tmp_path):
     request, _ = _snapshot_fixture(tmp_path)
     result = create_snapshot(request)
@@ -950,9 +1018,14 @@ def test_create_snapshot_fails_closed_if_source_changes_during_copy(tmp_path):
     original_copy = snapshot._copy_file
     changed = False
 
-    def mutate_after_copy(source: Path, destination: Path) -> None:
+    def mutate_after_copy(
+        source: Path,
+        destination: Path,
+        *,
+        mode: int | None,
+    ) -> None:
         nonlocal changed
-        original_copy(source, destination)
+        original_copy(source, destination, mode=mode)
         if source == paths["source_a"] and not changed:
             changed = True
             source.write_bytes(b"changed-during-snapshot\n")
@@ -981,6 +1054,70 @@ def test_verify_snapshot_rejects_tampered_payload(tmp_path):
     assert caught.value.code == "snapshot_payload_hash_mismatch"
 
 
+def test_verify_snapshot_rejects_payload_mode_drift(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    paths["source_a"].chmod(0o640)
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in manifest["files"]
+        if item["scope"] == "brain" and item["path"] == "raw/sources/a.md"
+    )
+    (result.snapshot_root / entry["snapshot_path"]).chmod(0o600)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=result.manifest_sha256,
+        )
+
+    assert caught.value.code == "snapshot_payload_mode_mismatch"
+
+
+def test_verify_snapshot_rejects_coordinated_manifest_and_payload_mode_change(
+    tmp_path,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    paths["source_a"].chmod(0o640)
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in manifest["files"]
+        if item["scope"] == "brain" and item["path"] == "raw/sources/a.md"
+    )
+    entry["mode"] = 0o600
+    (result.snapshot_root / entry["snapshot_path"]).chmod(0o600)
+    tampered_sha256 = _write_snapshot_manifest(result.manifest_path, manifest)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=tampered_sha256,
+        )
+
+    assert caught.value.code == "snapshot_metadata_mismatch"
+
+
+@pytest.mark.parametrize("invalid_mode", [True, -1, 0o1000])
+def test_verify_snapshot_rejects_invalid_version_2_mode_metadata(
+    tmp_path,
+    invalid_mode,
+):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][0]["mode"] = invalid_mode
+    tampered_sha256 = _write_snapshot_manifest(result.manifest_path, manifest)
+
+    with pytest.raises(SnapshotError) as caught:
+        verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=tampered_sha256,
+        )
+
+    assert caught.value.code == "snapshot_manifest_invalid"
+
+
 def test_restore_snapshot_replaces_captured_scope_and_removes_new_entries(tmp_path):
     request, paths = _snapshot_fixture(tmp_path)
     original_object = paths["object"].read_bytes()
@@ -1002,6 +1139,60 @@ def test_restore_snapshot_replaces_captured_scope_and_removes_new_entries(tmp_pa
         result.snapshot_root,
         expected_manifest_sha256=result.manifest_sha256,
     ).ok is True
+
+
+def test_restore_snapshot_reproduces_captured_mode_and_preserves_live_mode(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    original_object = paths["object"].read_bytes()
+    paths["object"].chmod(0o640)
+    result = create_snapshot(request)
+    paths["object"].write_bytes(b"changed\n")
+    paths["object"].chmod(0o600)
+    live_file = request.brain_root / "install.sh"
+    live_file.write_bytes(b"#!/bin/sh\n")
+    live_file.chmod(0o751)
+
+    restore_snapshot(
+        result.snapshot_root,
+        request.brain_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
+
+    assert paths["object"].read_bytes() == original_object
+    assert _mode(paths["object"]) == 0o640
+    assert live_file.read_bytes() == b"#!/bin/sh\n"
+    assert _mode(live_file) == 0o751
+
+
+def test_version_1_snapshot_verifies_but_restore_refuses_before_mutation(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    version_1_sha256 = _rewrite_snapshot_as_version_1(result)
+    paths["object"].write_bytes(b"live-version-1\n")
+    paths["object"].chmod(0o600)
+    live_bytes = paths["object"].read_bytes()
+    live_mode = _mode(paths["object"])
+    live_root_inode = request.brain_root.stat().st_ino
+    state_root = snapshot._restore_state_root(request.brain_root)
+
+    assert verify_snapshot(
+        result.snapshot_root,
+        expected_manifest_sha256=version_1_sha256,
+    ).ok is True
+    assert not state_root.exists()
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=version_1_sha256,
+        )
+
+    assert caught.value.code == "snapshot_mode_unavailable"
+    assert not state_root.exists()
+    assert request.brain_root.stat().st_ino == live_root_inode
+    assert paths["object"].read_bytes() == live_bytes
+    assert _mode(paths["object"]) == live_mode
 
 
 def test_restore_activation_failure_rolls_live_tree_back(tmp_path):

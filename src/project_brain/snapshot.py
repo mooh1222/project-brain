@@ -363,6 +363,17 @@ def read_regular_no_follow(path: Path) -> tuple[bytes, int]:
         os.close(parent_fd)
 
 
+def _fingerprint_regular(path: Path) -> tuple[str, int, int]:
+    data, mode = read_regular_no_follow(path)
+    if type(mode) is not int or not 0 <= mode <= 0o777:
+        _fail(
+            "source_mode_invalid",
+            f"regular file has special or invalid permission bits: {path}",
+            paths=(path,),
+        )
+    return hashlib.sha256(data).hexdigest(), len(data), mode
+
+
 def _hash_regular(root: Path, relative: str) -> tuple[str, int]:
     descriptor = _open_relative_regular(root, relative)
     try:
@@ -1830,12 +1841,13 @@ def _inventory(request: SnapshotRequest) -> tuple[list[dict], list[dict]]:
         else:
             brain_paths.add(relative)
     for relative in sorted(brain_paths):
-        digest, size = _hash_regular(request.brain_root, relative)
+        digest, size, mode = _fingerprint_regular(request.brain_root / relative)
         files.append({
             "scope": "brain",
             "path": relative,
             "sha256": digest,
             "size": size,
+            "mode": mode,
             "copied": True,
             "snapshot_path": f"payload/brain/{relative}",
         })
@@ -1851,12 +1863,13 @@ def _inventory(request: SnapshotRequest) -> tuple[list[dict], list[dict]]:
         else:
             repo_paths.add(relative)
     for relative in sorted(repo_paths):
-        digest, size = _hash_regular(request.repo_root, relative)
+        digest, size, mode = _fingerprint_regular(request.repo_root / relative)
         files.append({
             "scope": "repo",
             "path": relative,
             "sha256": digest,
             "size": size,
+            "mode": mode,
             "copied": True,
             "snapshot_path": f"payload/repo/{relative}",
         })
@@ -1956,9 +1969,18 @@ def _derive_snapshot_metadata(files: list[dict], payload_root: Path) -> tuple[di
     return corpus, derived
 
 
-def _copy_file(source: Path, destination: Path) -> None:
+def _copy_file(source: Path, destination: Path, *, mode: int | None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    data = _read_regular(source.parent, source.name)
+    data, source_mode = read_regular_no_follow(source)
+    if type(source_mode) is not int or not 0 <= source_mode <= 0o777:
+        _fail(
+            "source_mode_invalid",
+            f"regular file has special or invalid permission bits: {source}",
+            paths=(source,),
+        )
+    destination_mode = source_mode if mode is None else mode
+    if type(destination_mode) is not int or not 0 <= destination_mode <= 0o777:
+        _fail("snapshot_manifest_invalid", "regular file mode is invalid")
     descriptor = os.open(
         destination,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -1969,6 +1991,7 @@ def _copy_file(source: Path, destination: Path) -> None:
         while view:
             written = os.write(descriptor, view)
             view = view[written:]
+        os.fchmod(descriptor, destination_mode)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -2055,12 +2078,16 @@ def _create_snapshot_locked(request: SnapshotRequest) -> SnapshotResult:
             _copy_file(
                 roots[entry["scope"]] / entry["path"],
                 temporary_root / entry["snapshot_path"],
+                mode=entry["mode"],
             )
-            copied_sha, copied_size = _hash_regular(
-                temporary_root,
-                entry["snapshot_path"],
+            copied_sha, copied_size, copied_mode = _fingerprint_regular(
+                temporary_root / entry["snapshot_path"]
             )
-            if (copied_sha, copied_size) != (entry["sha256"], entry["size"]):
+            if (copied_sha, copied_size, copied_mode) != (
+                entry["sha256"],
+                entry["size"],
+                entry["mode"],
+            ):
                 _fail(
                     "source_fingerprint_changed",
                     f"source changed while copying: {entry['scope']}:{entry['path']}",
@@ -2085,7 +2112,7 @@ def _create_snapshot_locked(request: SnapshotRequest) -> SnapshotResult:
             )
         corpus, derived = _derive_snapshot_metadata(files_before, temporary_root)
         manifest = {
-            "version": 1,
+            "version": 2,
             "snapshot_id": request.snapshot_id,
             "created_at": now_kst(),
             "source_fingerprint": fingerprint_before,
@@ -2188,9 +2215,14 @@ def _load_manifest(
     }
     if not isinstance(manifest, dict) or set(manifest) != required:
         _fail("snapshot_manifest_invalid", "manifest keys do not match contract")
-    if manifest["version"] != 1 or _SNAPSHOT_ID.fullmatch(
-        manifest.get("snapshot_id", "")
-    ) is None:
+    version = manifest.get("version")
+    snapshot_id = manifest.get("snapshot_id")
+    if (
+        type(version) is not int
+        or version not in {1, 2}
+        or not isinstance(snapshot_id, str)
+        or _SNAPSHOT_ID.fullmatch(snapshot_id) is None
+    ):
         _fail("snapshot_manifest_invalid", "snapshot version or ID is invalid")
     if (
         not isinstance(manifest["created_at"], str)
@@ -2237,9 +2269,12 @@ def _validate_file_entries(snapshot_root: Path, manifest: dict) -> set[str]:
     seen_keys: set[tuple[str, str]] = set()
     previous_key: tuple[str, str] | None = None
     for entry in manifest["files"]:
-        if not isinstance(entry, dict) or set(entry) != {
+        required_keys = {
             "scope", "path", "sha256", "size", "copied", "snapshot_path",
-        }:
+        }
+        if manifest["version"] == 2:
+            required_keys.add("mode")
+        if not isinstance(entry, dict) or set(entry) != required_keys:
             _fail("snapshot_manifest_invalid", "file entry keys are invalid")
         if entry["scope"] not in {"brain", "repo"}:
             _fail("snapshot_manifest_invalid", "file scope is invalid")
@@ -2255,6 +2290,10 @@ def _validate_file_entries(snapshot_root: Path, manifest: dict) -> set[str]:
             or entry["copied"] is not True
         ):
             _fail("snapshot_manifest_invalid", "file hash/size/copy flag is invalid")
+        if manifest["version"] == 2 and (
+            type(entry["mode"]) is not int or not 0 <= entry["mode"] <= 0o777
+        ):
+            _fail("snapshot_manifest_invalid", "regular file mode is invalid")
         key = (entry["scope"], relative)
         if key in seen_keys or snapshot_path in expected_payload_paths:
             _fail("snapshot_manifest_invalid", "duplicate file entry")
@@ -2264,16 +2303,28 @@ def _validate_file_entries(snapshot_root: Path, manifest: dict) -> set[str]:
         seen_keys.add(key)
         expected_payload_paths.add(snapshot_path)
         try:
-            actual = _hash_regular(snapshot_root, snapshot_path)
+            actual_sha256, actual_size, actual_mode = _fingerprint_regular(
+                snapshot_root / snapshot_path
+            )
         except SnapshotError as exc:
+            if exc.code == "source_mode_invalid":
+                _fail(
+                    "snapshot_payload_mode_mismatch",
+                    f"snapshot payload mode is invalid: {snapshot_path}",
+                )
             _fail(
                 "snapshot_payload_hash_mismatch",
                 f"snapshot payload unavailable: {snapshot_path}: {exc.detail}",
             )
-        if actual != (entry["sha256"], entry["size"]):
+        if (actual_sha256, actual_size) != (entry["sha256"], entry["size"]):
             _fail(
                 "snapshot_payload_hash_mismatch",
                 f"snapshot payload changed: {snapshot_path}",
+            )
+        if manifest["version"] == 2 and actual_mode != entry["mode"]:
+            _fail(
+                "snapshot_payload_mode_mismatch",
+                f"snapshot payload mode changed: {snapshot_path}",
             )
     return expected_payload_paths
 
@@ -2467,7 +2518,7 @@ def _copy_tree_no_symlinks(
     for relative in sorted(directories, key=lambda value: (value.count("/"), value)):
         (destination / relative).mkdir()
     for relative in sorted(files):
-        _copy_file(source / relative, destination / relative)
+        _copy_file(source / relative, destination / relative, mode=None)
 
 
 def _remove_stage_target(path: Path) -> None:
@@ -2818,7 +2869,10 @@ def _remove_restore_state_at(
     os.fsync(parent_fd)
 
 
-def _brain_snapshot_inventory(brain_root: Path, manifest: dict) -> dict[str, tuple[str, int]]:
+def _brain_snapshot_inventory(
+    brain_root: Path,
+    manifest: dict,
+) -> dict[str, tuple[str, int, int]]:
     targets = manifest["brain_targets"]
     paths = {
         path
@@ -2833,12 +2887,15 @@ def _brain_snapshot_inventory(brain_root: Path, manifest: dict) -> dict[str, tup
                 raise
         else:
             paths.add(relative)
-    return {relative: _hash_regular(brain_root, relative) for relative in sorted(paths)}
-
-
-def _expected_brain_inventory(manifest: dict) -> dict[str, tuple[str, int]]:
     return {
-        entry["path"]: (entry["sha256"], entry["size"])
+        relative: _fingerprint_regular(brain_root / relative)
+        for relative in sorted(paths)
+    }
+
+
+def _expected_brain_inventory(manifest: dict) -> dict[str, tuple[str, int, int]]:
+    return {
+        entry["path"]: (entry["sha256"], entry["size"], entry["mode"])
         for entry in manifest["files"]
         if entry["scope"] == "brain"
     }
@@ -3181,6 +3238,11 @@ def restore_snapshot(
         snapshot_root,
         expected_manifest_sha256=expected_manifest_sha256,
     )
+    if manifest["version"] == 1:
+        _fail(
+            "snapshot_mode_unavailable",
+            "version-1 snapshots do not record regular-file modes",
+        )
     state_root = _restore_state_root(brain_root)
     try:
         with stable_corpus_lock(brain_root, exclusive=True):
@@ -3316,6 +3378,7 @@ def _restore_snapshot_locked(
             _copy_file(
                 snapshot_root / entry["snapshot_path"],
                 staged / entry["path"],
+                mode=entry["mode"],
             )
         expected_inventory = _expected_brain_inventory(manifest)
         if _brain_snapshot_inventory(staged, manifest) != expected_inventory:
