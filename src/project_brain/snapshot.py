@@ -3251,6 +3251,18 @@ def restore_snapshot(
         snapshot_root,
         expected_manifest_sha256=expected_manifest_sha256,
     )
+    if manifest["version"] == 1:
+        state_root = _restore_state_root(brain_root)
+        parent_fd = _open_absolute_directory(brain_root.parent, create=False)
+        try:
+            state_exists = _stat_entry(parent_fd, state_root.name) is not None
+        finally:
+            os.close(parent_fd)
+        if not state_exists:
+            _fail(
+                "snapshot_mode_unavailable",
+                "version-1 snapshots do not record regular-file modes",
+            )
     try:
         with stable_corpus_lock(brain_root, exclusive=True):
             parent_fd = _open_absolute_directory(brain_root.parent, create=False)

@@ -315,9 +315,10 @@ snapshot 범위도 분리해 본다.
   기록하고 payload·`brain_only` 복원 결과까지 같은 권한으로 검증한다. 특수 권한 비트나
   payload 권한 변경은 검증에서 거부한다.
 - 기존 version 1 snapshot은 원래 6-key 파일 행으로 계속 검증할 수 있지만 파일 권한을
-  기록하지 않았으므로 fresh `snapshot restore`는 `snapshot_mode_unavailable`로 새 상태를 만들기
-  전에 거부한다. 다만 이전 restore journal이 남아 있으면 bytes·size 계약으로 안전하게
-  rollback/cleanup한 뒤 같은 오류로 fresh 복원을 거부한다.
+  기록하지 않았으므로 restore state가 없는 fresh `snapshot restore`는 stable lock이나 새 상태를
+  만들기 전에 `snapshot_mode_unavailable`로 거부한다. 다만 이전 restore journal이 남아 있으면
+  stable lock 아래에서 bytes·size 계약으로 안전하게 rollback/cleanup한 뒤 같은 오류로 fresh
+  복원을 거부한다.
 - `snapshot restore`의 범위는 `brain_only`다. repo payload는 복원하지 않는다.
 - 복원 범위 밖에 남는 live brain 정규 파일은 staging 복사에서 기존 파일 권한을 보존한다.
 - session marker와 corpus transaction journal은 snapshot 캡처·복원 범위가 아니다.

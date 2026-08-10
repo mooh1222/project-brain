@@ -36,6 +36,10 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def _stable_lock_path(brain_root: Path) -> Path:
+    return brain_root.parent / f".{brain_root.name}.project-brain-corpus.lock"
+
+
 def _write_snapshot_manifest(path: Path, manifest: dict) -> str:
     payload = (
         json.dumps(
@@ -1174,12 +1178,15 @@ def test_version_1_snapshot_verifies_but_restore_refuses_before_mutation(tmp_pat
     live_mode = _mode(paths["object"])
     live_root_inode = request.brain_root.stat().st_ino
     state_root = snapshot._restore_state_root(request.brain_root)
+    stable_lock_path = _stable_lock_path(request.brain_root)
+    stable_lock_path.unlink()
 
     assert verify_snapshot(
         result.snapshot_root,
         expected_manifest_sha256=version_1_sha256,
     ).ok is True
     assert not state_root.exists()
+    assert not stable_lock_path.exists()
 
     with pytest.raises(SnapshotError) as caught:
         restore_snapshot(
@@ -1190,9 +1197,35 @@ def test_version_1_snapshot_verifies_but_restore_refuses_before_mutation(tmp_pat
 
     assert caught.value.code == "snapshot_mode_unavailable"
     assert not state_root.exists()
+    assert not stable_lock_path.exists()
     assert request.brain_root.stat().st_ino == live_root_inode
     assert paths["object"].read_bytes() == live_bytes
     assert _mode(paths["object"]) == live_mode
+
+
+def test_version_1_fresh_restore_refuses_before_invalid_stable_lock(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    version_1_sha256 = _rewrite_snapshot_as_version_1(result)
+    live_bytes = paths["object"].read_bytes()
+    live_root_inode = request.brain_root.stat().st_ino
+    state_root = snapshot._restore_state_root(request.brain_root)
+    stable_lock_path = _stable_lock_path(request.brain_root)
+    stable_lock_path.unlink()
+    stable_lock_path.mkdir()
+
+    with pytest.raises(SnapshotError) as caught:
+        restore_snapshot(
+            result.snapshot_root,
+            request.brain_root,
+            expected_manifest_sha256=version_1_sha256,
+        )
+
+    assert caught.value.code == "snapshot_mode_unavailable"
+    assert stable_lock_path.is_dir()
+    assert not state_root.exists()
+    assert request.brain_root.stat().st_ino == live_root_inode
+    assert paths["object"].read_bytes() == live_bytes
 
 
 def test_version_1_restore_recovers_existing_journal_before_fresh_refusal(
