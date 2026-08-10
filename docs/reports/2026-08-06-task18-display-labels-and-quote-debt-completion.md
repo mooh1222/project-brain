@@ -6,43 +6,59 @@
 
 ## 판정과 문서 경계
 
-Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final snapshot 검증, engine·BB2 독립 최종
-리뷰까지 통과했다. 이 보고서와 ROADMAP은 계획의 Task 13 Step 6에 해당한다.
+attempt-006에서 Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final
+snapshot 검증, engine·BB2 독립 최종 리뷰까지 통과했다. 이 보고서와
+ROADMAP은 계획의 Task 13 Step 6에 해당한다.
 
 마지막 closure는 이 두 문서를 독립 리뷰하고 commit한 뒤에만 create-only로 생성·검증한다.
 따라서 아래 closure 파일은 이 보고서 작성 시점에 아직 생성하거나 검증하지 않았으며, 이
 문서는 closure 완료를 주장하지 않는다.
 
-- `attempt-005/task18-closure.json`
-- `attempt-005/task18-closure-verify.json`
+- `attempt-006/task18-closure.json`
+- `attempt-006/task18-closure-verify.json`
+
+## attempt-005 실패와 복구 이력
+
+attempt-005는 모든 gate·apply·post-verify·corpus commit·corpus-final snapshot·
+독립 최종 리뷰·완료 문서 commit까지 성공했다. 그러나 그 다음 create-only
+closure-create가 descendant ref 계약 위반을 드러내며
+`git_ref_invalid: local_ref must be one full refs/ name`으로 한 번 실패했다.
+closure-verify는 실행하지 않았다.
+
+엔진 수정 commit `bc2b8de82b0cf31a9b1cea6550cae5981ed4c7b6`이 이 계약을
+바로잡았다. BB2는 exact revert 복구 commit
+`c924843e1bc80ae1cff9a3efe7fbb16bd793647a`과 canonical v2 restore로 attempt-005
+적용 전 corpus 상태에 돌아갔고, attempt-005 주요 산출물 13개는 바이트
+단위로 보존됐다. 그 다음 attempt-006이 전체 gate·apply·리뷰 순서를 다시
+실행해 아래 결과를 남겼다.
 
 ## 고정된 결과와 증빙
 
 | 항목 | 값 |
 |---|---|
-| engine implementation HEAD | `5e08dc09514dd4961c7b211ab1a494884390b6aa` |
-| BB2 corpus HEAD | `0e2a19e6ffad2f759890112d0efdb10e5fe2e051` |
-| Task 18 binding SHA-256 | `a4cad18061dd29854db81d4adaca708114d65bf723ddfa881fc905f37f057229` |
-| binding verify receipt SHA-256 | `680cc802b58a43f35d7e171cc5f0c0f8b66a0cfaeb3dbe97f7fba8eb2211fda8` |
-| display migration manifest SHA-256 | `2c8c1f66a86ebe37ddffbd8bbf46d7a05e917de632a112cb4e64d09fb74a069a` |
-| post report SHA-256 | `cd5efaf5eec6a61bf6e98cb888bef6d4e16c396d2c5ce0f95f57c24e863900ad` |
-| corpus-final manifest SHA-256 | `dc8290bdc38fedb2a486370ee6109982728225f0ce26fb198cf0e30db88cc009` |
-| corpus-final verify receipt SHA-256 | `6ce94ad4bd43196ea8b5f37d818af537518b30d74db9134f16a51330fe4ef2dc` |
+| engine implementation HEAD | `bc2b8de82b0cf31a9b1cea6550cae5981ed4c7b6` |
+| BB2 corpus HEAD | `7ed3cc687fb3ba09fc0f3ebe274cbfc1cd1bd2d5` |
+| Task 18 binding SHA-256 | `e839a1ad720eaabcdc80ab726546f792f4ab013ac7cea1811691598751c11e03` |
+| binding verify receipt SHA-256 | `5192f358b80f4d81cc60e1e8e45d1a7e8ac99b6ee99d7b74bac5b2da8987ba67` |
+| display migration manifest SHA-256 | `f1c74b5b9812703c8c1ca927dd9740bd671349bb015878298422cb6d19e02ff0` |
+| post report SHA-256 | `4b68caee2923f1465bb05a18bba4b9c79708e87e589dea6db3c6871ef7855751` |
+| corpus-final manifest SHA-256 | `b31dcff4e0be388939578865f08c75adfe09c064ffa08a3eeadaef4f25d7a9e6` |
+| corpus-final verify receipt SHA-256 | `6fbbbc664cd25ac9f61b65984c276ee7a1750976fdda4d2b6a4614cf525d3837` |
 | quote inventory SHA-256 | `9a815911b0d019d72132e0a1fd4b225a6f66cc99284e36819bea628a4abb140b` |
 
 증빙 경로는 다음과 같다. `<BB2>`는 BB2 저장소 루트다.
 
-- binding: `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/task18-binding.json`
+- binding: `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/task18-binding.json`
 - binding verify receipt:
-  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/binding-verify.json`
+  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/binding-verify.json`
 - display manifest:
-  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/display-migration.manifest.json`
+  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/display-migration.manifest.json`
 - post report:
   `<BB2>/brain/recovery/2026-08-06/task18-display-and-quote-debt/display-migration-result.json`
 - corpus-final manifest:
-  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/corpus-final/manifest.json`
+  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/corpus-final/manifest.json`
 - corpus-final verify receipt:
-  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/corpus-final-verify.json`
+  `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/corpus-final-verify.json`
 - quote inventory:
   `<BB2>/brain/recovery/2026-08-06/task18-display-and-quote-debt/legacy-quote-debt-current-develop.json`
 
@@ -63,7 +79,7 @@ Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final snapshot 검증
 - v2 pre-mutation snapshot과 적용 뒤 live object의 path·file mode: 전부 일치
 
 인용문 부채 3,307건과 비정본 symbol 289건은 재현 가능한 목록으로 고정하고 그대로 보존했다.
-이번 작업에서 backfill하거나 의미를 바꾸지 않았다. legacy 인용문은 적재 당시 검토됐지만
+이번 작업에서 backfill하거나 고치지 않았다. legacy 인용문은 적재 당시 검토됐지만
 현재 저장 정보만으로 기계 재검증할 수 없는 항목이다. 이를 "검증된 적 없음", 신규 schema
 실패, 또는 전체 code quote 검증 완료로 확대 해석하지 않는다.
 
@@ -71,7 +87,7 @@ Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final snapshot 검증
 
 - `binding-create -> binding-verify -> plan -> verify-plan -> apply`: 각 한 번 실행해 PASS —
   binding verification `ok=true`, `task18_allowed=true`; plan·verify-plan·apply `ok=true`
-- `.venv/bin/python -m pytest -q`: PASS — 2,076 passed, subtests 136 passed
+- `.venv/bin/python -m pytest -q`: PASS — 2,077 passed, subtests 136 passed
 - 설치 ingest runtime unittest: PASS — 120 tests, `OK`
 - `PROJECT_BRAIN_TASK18_PHASE=post_migration` BB2 checks: PASS — 12 tests, `OK`
 - `project_brain.cli audit --no-fetch --no-stale-cache-write`: PASS — `ok=true`, lint 0,
@@ -80,9 +96,6 @@ Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final snapshot 검증
 - `project_brain.cli graph export`: PASS — 노드 10,941개, 간선 23,666개
 - canonical post-verify: PASS — exact target·title-only·mode·부채·색인·사용자 변경 보존 확인
 - corpus-final snapshot create와 `verify_snapshot`: 각각 한 번 실행해 PASS
-
-최종 graph SHA-256은
-`7108fea4e67ea7818a64f75caa8ecdcf78e5208600de06a4d254947f609bffac`이다.
 
 ## 불변 경계와 독립 리뷰
 
@@ -94,8 +107,9 @@ Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final snapshot 검증
 - 고정 baseline의 기존 사용자 변경은 engine 15건, BB2 12건이며 내용까지 그대로
   보존됐다. BB2 corpus commit에는 승인된 object 6,491개와 post result receipt 1개만
   들어갔고, commit 직후 staged path는 0개였다.
-- engine 독립 최종 리뷰: 설계·spec PASS, 코드 품질 PASS, Critical/Important/Minor 0/0/0
-- BB2·Task 13 독립 최종 리뷰: 설계·spec PASS, 증빙 품질 PASS,
+- engine 독립 최종 리뷰: 전체 branch spec·코드 품질 APPROVED,
+  Critical/Important/Minor 0/0/0
+- BB2·Task 13 독립 최종 리뷰: 이력·최종 diff·증빙 품질 APPROVED,
   Critical/Important/Minor 0/0/0
 
 이번 최종 적용·문서화 범위에서는 index rebuild, finalizer, install, push, PR을 실행하지
@@ -108,7 +122,7 @@ Task 18의 엔진 구현, BB2 표시 제목 적용, corpus-final snapshot 검증
 그 commit의 engine HEAD와 위 BB2 corpus HEAD를 포함해 다음 create-only receipt를 순서대로
 만들고 독립 검증한다.
 
-1. `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/task18-closure.json`
-2. `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-005/task18-closure-verify.json`
+1. `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/task18-closure.json`
+2. `<BB2>/.snapshots/2026-08-06/task18-execution/attempt-006/task18-closure-verify.json`
 
 두 파일의 생성·검증은 이 문서 commit 이후 단계다.

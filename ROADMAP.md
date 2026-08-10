@@ -48,12 +48,16 @@
 3,305개와 짝 EvidenceRef 3,186개, 합계 6,491개의 `title`만 갱신했다. create/delete/rename과
 보조 파일 변경은 0건이고 짝 불일치도 0/3,202였다.
 
-- 엔진 implementation HEAD `5e08dc09514dd4961c7b211ab1a494884390b6aa`, BB2 corpus HEAD
-  `0e2a19e6ffad2f759890112d0efdb10e5fe2e051`
-- 인용문 부채 3,307건과 비정본 symbol 289건은 목록화한 상태 그대로 보존했으며 backfill하지
-  않았다. legacy 인용문은 적재 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는
+- attempt-005는 gate·apply·리뷰·완료 문서 commit까지 성공한 뒤 closure-create에서
+  descendant ref 계약 결함을 드러냈다. closure-verify는 실행하지 않았고,
+  engine `bc2b8de8` 수정·BB2 `c924843e` exact revert commit·canonical v2 restore로
+  계약과 corpus를 복구한 뒤 attempt-006 전체 순서를 다시 실행했다.
+- 엔진 implementation HEAD `bc2b8de82b0cf31a9b1cea6550cae5981ed4c7b6`, BB2 corpus HEAD
+  `7ed3cc687fb3ba09fc0f3ebe274cbfc1cd1bd2d5`
+- 인용문 부채 3,307건과 비정본 symbol 289건은 목록화한 상태 그대로 보존했으며 backfill하거나
+  고치지 않았다. legacy 인용문은 적재 당시 검토됐지만 현재 저장 정보만으로 기계 재검증할 수 없는
   항목이다. 이를 "검증된 적 없음"으로 보지 않는다.
-- 엔진 pytest 2,076개(+ subtest 136개), 설치 runtime 120개, BB2 checks 12개, audit lint 0,
+- 엔진 pytest 2,077개(+ subtest 136개), 설치 runtime 120개, BB2 checks 12개, audit lint 0,
   eval 15/15, graph export를 통과했다. index DB SHA와 기존 사용자 변경은 그대로 보존했고
   index rebuild와 finalizer는 실행하지 않았다.
 - engine과 BB2 독립 최종 리뷰는 설계 준수·품질 모두 통과했고 Critical·Important·Minor가
@@ -62,8 +66,10 @@
   계획: [Task 18 구현 계획](docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md) ·
   결과: [완료 보고서](docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md)
 
-완료 문서 commit 뒤에는 create-only closure 두 개로 최종 engine·BB2 HEAD와 증빙을 다시
-결속·검증한다. 이 ROADMAP 작성 시점에는 아직 실행하지 않았다.
+이 attempt-006 완료 문서 commit 뒤에는 create-only closure 두 개로 최종
+engine·BB2 HEAD와 증빙을 다시 결속·검증한다. 이 ROADMAP 작성 시점에는
+`attempt-006/task18-closure.json`과 `attempt-006/task18-closure-verify.json`을 아직
+생성하거나 검증하지 않았다.
 
 ### P0 ingest integrity foundation — 완료 (2026-08-05)
 
