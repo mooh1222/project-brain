@@ -28,14 +28,14 @@ binding을 전제로 썼다. 그 뒤 신규 적재를 coverage·단일 mutation�
 
 | 항목 | 현재 값 |
 |---|---|
-| 재측정 receipt | `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-remeasurement/measurement.json` |
-| receipt SHA-256 | `6de6a1d55e135974a0443e67bce323bae0d2183e0f9307cebdfaebc5faf7e589` |
-| 측정 시각 | `2026-08-06T11:22:14+09:00` |
+| 재측정 receipt | `/Users/al03040455/Desktop/bb2_client/.snapshots/2026-08-06/task18-remeasurement-current-develop/attempt-001/measurement.json` |
+| receipt SHA-256 | `f3f95505fd93a1e78c3ce225bbf2db984c090adebfc51c5598d0736d20a25834` |
+| 측정 시각 | `2026-08-10T15:04:09+09:00` |
 | 측정 방식 | `read_only_no_fetch` |
-| 측정 당시 engine HEAD | `f054ba9c35039fb936c1ce849df1ddefa293abf6` |
-| 측정 당시 BB2 HEAD | `fbcbc861f9a9b43c3ac483e43b8d706c9c4d2b01` |
-| `refs/remotes/origin/develop` | `6607c458a635ab96ac31acf04c3474fa4ea7eeff` |
-| 원격 `refs/heads/develop` 확인값 | `6607c458a635ab96ac31acf04c3474fa4ea7eeff` |
+| 측정 당시 engine HEAD | `d4b746ad2a4b2f28f1935a9f3969f9b67ef2755d` |
+| 측정 당시 BB2 HEAD | `979cc01bca7a76c96addcd7bc4dfe6f800be3c78` |
+| `refs/remotes/origin/develop` | `47fd83e3b10a21e1294ed00f9259bf356f9259da` |
+| 원격 `refs/heads/develop` 확인값 | `47fd83e3b10a21e1294ed00f9259bf356f9259da` |
 | P0 handoff SHA-256 | `55df01d2ed40aa8bee93ded3df378c3733bb00be30fbc8a8a9da21138590761b` |
 | 옛 Task 18 binding | SHA-256 `a27aa26e238c5e0a1bf76fb48080b9b019873e0f08b93519cc86029cc6e56e5f`, `usable_for_current_migration=false` |
 
@@ -73,10 +73,14 @@ engine·BB2 Git 상태와 corpus/index 지문도 같았고 `corpus_mutated=false
 코퍼스 자체는 P0 handoff 뒤 바뀌지 않았다.
 
 - mutation fingerprint: `0e9a2d52c387a8c51b73635bf60de690e20110f59a70135d3865a1e2a5926f7c`
-- objects tree: `762117e941ba427333d7929cb06aa87a08d81f49bdeb8a049f5272b306e09372`
-- raw tree: `1c5b0cdd2088a0b40d129c6974bf2477e42e7e9a7d3806e9bad25923ec208060`
+- objects tree: `c07ea29bd5e2a035e0d2f736aeb14a2e65491fcf4e87e481366e685f282b1ab8`
+- raw tree: `07c3ae9c0225b44d2837978528dce48c1f1476ec1b37ae00a421cd66442b7e34`
 - live/meta search fingerprint: `b6b3708f963dec1b382ef6cd7d03b8e7a4dfdb7b48b8510d3051e0daffa1734f`
 - index DB SHA-256: `b5aa3b3d846752107f651a2393b4169fdf07a0db82c5f1d47ab1b0e535d381a4`
+
+objects/raw tree SHA는 실패한 attempt-001 복구 뒤 파일 모드를 정규화하면서 바뀌었다. 객체
+bytes와 mutation·검색·index 지문은 그대로이며, 표시 대상·quote 부채·비정본 symbol·짝 ID
+집합의 count와 ID SHA도 이전 측정과 같다.
 
 ## 3. 목표와 범위
 
