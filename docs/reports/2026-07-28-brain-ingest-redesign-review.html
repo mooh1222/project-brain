@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>브레인 적재 문제 — 실제 상태와 재설계 판단</title>
+<style>
+:root{
+  color-scheme:light;
+  --plane:#f7f7f4; --surface:#ffffff; --surface2:#f1f1ed;
+  --ink:#11110f; --ink2:#565650; --muted:#8c8b84;
+  --grid:#dfdfd8; --axis:#c5c4ba; --ring:rgba(17,17,15,.10);
+  --blue:#2878d3; --orange:#e86832; --green:#16883a; --red:#cf4141;
+  --blue-soft:#e8f2ff; --orange-soft:#fff0e8; --green-soft:#eaf7ee; --red-soft:#fdecec;
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --plane:#111110; --surface:#1a1a18; --surface2:#242421;
+  --ink:#f7f7f4; --ink2:#c7c6be; --muted:#8f8e87;
+  --grid:#30302c; --axis:#41413b; --ring:rgba(255,255,255,.10);
+  --blue:#55a2f3; --orange:#f0834f; --green:#51be70; --red:#ef7373;
+  --blue-soft:#162a40; --orange-soft:#382319; --green-soft:#18301f; --red-soft:#391d1d;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--plane);color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI","Noto Sans KR",sans-serif;
+  font-size:15px;line-height:1.65;letter-spacing:-.006em;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:44px 28px 96px}
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-wrap:wrap}
+h1{font-size:30px;line-height:1.2;margin:0 0 8px;letter-spacing:-.025em;font-weight:720}
+.sub{color:var(--ink2);font-size:13.5px;margin:0}
+.themebtn{
+  border:1px solid var(--ring);background:var(--surface);color:var(--ink2);
+  border-radius:8px;padding:7px 13px;font:inherit;font-size:13px;cursor:pointer;white-space:nowrap;
+}
+.themebtn:hover{color:var(--ink)}
+h2{font-size:20px;margin:46px 0 6px;letter-spacing:-.018em;font-weight:690}
+h2 .n{color:var(--muted);font-size:14px;font-weight:560;margin-right:9px}
+h3{font-size:15px;margin:0 0 5px;font-weight:680}
+p{margin:8px 0}
+.lede{font-size:16.5px;line-height:1.75;margin:20px 0 6px;max-width:1060px}
+.note{color:var(--ink2);font-size:13.5px}
+.small{color:var(--muted);font-size:12.5px}
+code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em;
+  background:var(--surface2);border:1px solid var(--ring);border-radius:5px;padding:1px 5px;
+}
+.tiles{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:26px 0 8px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:15px 16px;min-width:0}
+.tile .k{font-size:12px;color:var(--muted);margin-bottom:5px}
+.tile .v{font-size:25px;font-weight:720;line-height:1.15;letter-spacing:-.025em;white-space:nowrap}
+.tile .u{font-size:12.5px;color:var(--ink2);font-weight:560;margin-left:3px}
+.tile .f{font-size:12px;color:var(--ink2);margin-top:5px;line-height:1.45}
+.tile.good .v{color:var(--green)}
+.tile.warn .v{color:var(--orange)}
+.tile.bad .v{color:var(--red)}
+.panel{background:var(--surface);border:1px solid var(--ring);border-radius:14px;overflow:hidden;margin:14px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+thead th{
+  text-align:left;font-weight:650;color:var(--ink2);font-size:12px;
+  padding:11px 14px;border-bottom:1px solid var(--grid);background:var(--surface2);white-space:nowrap;
+}
+tbody td{padding:13px 14px;border-bottom:1px solid var(--grid);vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.what{display:block;font-weight:680;margin-bottom:3px}
+.why{display:block;color:var(--ink2);font-size:12.5px;line-height:1.55}
+.pill{
+  display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;
+  font-size:11.5px;font-weight:680;white-space:nowrap;border:1px solid transparent;
+}
+.pill.good{color:var(--green);background:var(--green-soft);border-color:color-mix(in srgb,var(--green) 28%,transparent)}
+.pill.warn{color:var(--orange);background:var(--orange-soft);border-color:color-mix(in srgb,var(--orange) 28%,transparent)}
+.pill.bad{color:var(--red);background:var(--red-soft);border-color:color-mix(in srgb,var(--red) 28%,transparent)}
+.pill.info{color:var(--blue);background:var(--blue-soft);border-color:color-mix(in srgb,var(--blue) 28%,transparent)}
+.flow{
+  display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:28px;
+  margin:16px 0 8px;
+}
+.flow-node{
+  position:relative;background:var(--surface);border:1px solid var(--ring);
+  border-radius:12px;padding:15px 16px;min-height:146px;
+}
+.flow-node::after{
+  content:"→";position:absolute;right:-22px;top:52px;color:var(--muted);font-size:19px;font-weight:700;
+}
+.flow-node:last-child::after{content:""}
+.flow-node.source{border-top:3px solid var(--blue)}
+.flow-node.problem{border-top:3px solid var(--orange)}
+.flow-node .step{font-size:11.5px;color:var(--muted);margin-bottom:5px}
+.flow-node p{font-size:12.5px;color:var(--ink2);line-height:1.55;margin-top:8px}
+.compare th:first-child,.compare td:first-child{min-width:154px}
+.compare td:nth-child(n+2):nth-child(-n+7){font-variant-numeric:tabular-nums}
+.compare .action{min-width:245px}
+.bars{background:var(--surface);border:1px solid var(--ring);border-radius:14px;padding:20px 22px;margin-top:14px}
+.bar-row{display:grid;grid-template-columns:270px 1fr 150px;gap:18px;align-items:center;margin:13px 0}
+.bar-label{font-size:13px;color:var(--ink2);text-align:right}
+.track{height:18px;background:var(--surface2);border-radius:4px;overflow:hidden}
+.fill{height:100%;border-radius:4px;background:var(--blue)}
+.fill.orange{background:var(--orange)}
+.fill.red{background:var(--red)}
+.bar-value{font-size:13px;font-weight:680;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cap{font-size:12px;color:var(--muted);margin-top:12px}
+.two-col{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;margin-top:14px}
+.callout{background:var(--surface);border:1px solid var(--ring);border-left:4px solid var(--blue);border-radius:10px;padding:14px 16px}
+.callout.warn{border-left-color:var(--orange)}
+.callout.bad{border-left-color:var(--red)}
+.callout p{font-size:13px;color:var(--ink2);margin:4px 0}
+.steps{counter-reset:step;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px}
+.plan-step{
+  background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:15px 16px;min-height:128px;
+}
+.plan-step::before{
+  counter-increment:step;content:counter(step);display:inline-flex;align-items:center;justify-content:center;
+  width:24px;height:24px;border-radius:50%;background:var(--blue-soft);color:var(--blue);
+  font-size:12px;font-weight:720;margin-bottom:9px;
+}
+.plan-step.urgent::before{background:var(--red-soft);color:var(--red)}
+.plan-step.review::before{background:var(--orange-soft);color:var(--orange)}
+.plan-step p{font-size:12.5px;color:var(--ink2);line-height:1.55;margin:5px 0 0}
+.decision-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}
+.decision-item{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:13px 15px}
+.decision-item b{display:block;margin-bottom:4px}
+.decision-item span{display:block;color:var(--ink2);font-size:12.5px}
+.source-list{font-size:12.5px;color:var(--ink2);columns:2;column-gap:36px}
+.source-list li{break-inside:avoid;margin:5px 0}
+hr{border:none;border-top:1px solid var(--grid);margin:42px 0 0}
+@media(max-width:1050px){
+  .tiles{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .flow{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .flow-node:nth-child(3)::after{content:""}
+  .flow-node:nth-child(4){grid-column:1}
+}
+@media(max-width:760px){
+  .wrap{padding:28px 16px 72px}
+  h1{font-size:25px}
+  .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .flow,.steps,.decision-list,.two-col{grid-template-columns:1fr}
+  .flow-node{min-height:auto}
+  .flow-node::after{content:"↓";right:auto;left:20px;top:auto;bottom:-26px}
+  .flow-node:nth-child(3)::after{content:"↓"}
+  .flow-node:nth-child(4){grid-column:auto}
+  .flow-node:last-child::after{content:""}
+  .bar-row{grid-template-columns:1fr;gap:5px}
+  .bar-label{text-align:left}
+  .panel{overflow:auto}
+  table{min-width:780px}
+  .source-list{columns:1}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div>
+    <h1>브레인 적재 문제 — 실제 상태와 재설계 판단</h1>
+    <p class="sub">2026-07-28 · 엔진 구현, BB2 설치 스킬, 인게임 아이템·광선발사 적재, 기존 코퍼스를 읽기 전용으로 대조</p>
+  </div>
+  <button class="themebtn" id="theme-button" type="button">밝은 모드</button>
+</header>
+
+<p class="lede">
+결론은 두 갈래다. <b>수정 방향은 이미 보인다.</b> 설치본이 낡은 문제가 아니라 엔진·스킬 계약의 빈틈이
+두 적재의 품질 문제로 이어졌다. 다만 <b>구현안과 데이터 교체 방식은 아직 확정하면 안 된다.</b>
+광선발사는 수정이 확정됐고, 인게임 아이템은 같은 기준으로 재심사해야 하며, 기존 코퍼스는 전량 재적재보다
+신규 문제 차단과 필요한 컨텍스트의 점진 수정이 안전하다.
+</p>
+
+<div class="tiles">
+  <div class="tile good">
+    <div class="k">BB2 설치본</div>
+    <div class="v">23 / 23<span class="u">일치</span></div>
+    <div class="f">설치 드리프트 0건</div>
+  </div>
+  <div class="tile good">
+    <div class="k">엔진 검증</div>
+    <div class="v">684 + 75</div>
+    <div class="f">pytest 684 · 템플릿 75</div>
+  </div>
+  <div class="tile bad">
+    <div class="k">광선발사 사후 심사</div>
+    <div class="v">77 + 1</div>
+    <div class="f">DROP 77 · MOVE 1, 전부 미반영</div>
+  </div>
+  <div class="tile warn">
+    <div class="k">인게임 아이템 앵커</div>
+    <div class="v">393</div>
+    <div class="f">매핑 66 · 매핑당 최대 19</div>
+  </div>
+  <div class="tile good">
+    <div class="k">기존 평가·구조</div>
+    <div class="v">15 / 15</div>
+    <div class="f">lint 0 · audit 통과</div>
+  </div>
+  <div class="tile warn">
+    <div class="k">코드 인용 실검증</div>
+    <div class="v">14.9%</div>
+    <div class="f">579 / 3,886 · 3,307개 건너뜀</div>
+  </div>
+</div>
+
+<h2><span class="n">A</span>지금 확정할 수 있는 판정</h2>
+<p class="note">“정상/비정상” 한 줄로 뭉개지 않고, 실제로 확인된 범위와 아직 판단이 필요한 범위를 나눴다.</p>
+
+<div class="panel">
+<table>
+<thead>
+<tr>
+  <th>범위</th>
+  <th>확인된 사실</th>
+  <th>현재 판정</th>
+  <th>다음 처리</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><span class="what">엔진·설치 스킬</span><span class="why">소스 → 설치본 경계</span></td>
+  <td>
+    <span class="what">BB2 설치 파일 23개가 현재 엔진 템플릿과 모두 일치</span>
+    <span class="why">설치 누락이나 구버전 혼용이 원인이 아니다. 현재 계약의 빈틈이 그대로 설치됐다.</span>
+  </td>
+  <td><span class="pill warn">설계 보강 필요</span></td>
+  <td><span class="why">표면형 배관, finalizer 진단, 실제 검증 시각, 안전한 교체·퇴역 경로를 먼저 설계</span></td>
+</tr>
+<tr>
+  <td><span class="what">광선발사</span><span class="why">456 적재 단위</span></td>
+  <td>
+    <span class="what">대표 질의 2개가 현재도 게이트에서 차단</span>
+    <span class="why">검색 점수는 충분하지만 명부 일치가 없고 anchor_df가 47·37이다. 사후 DROP 77·MOVE 1도 전부 라이브에 남아 있다.</span>
+  </td>
+  <td><span class="pill bad">수정 확정</span></td>
+  <td><span class="why">엔진의 안전한 수정 경로를 만든 뒤 용어 명부와 앵커 관계를 함께 바로잡는다.</span></td>
+</tr>
+<tr>
+  <td><span class="what">인게임 아이템</span><span class="why">945 적재 단위</span></td>
+  <td>
+    <span class="what">표본 질의 2개는 정상 회수</span>
+    <span class="why">다만 용어 표면형 0개, 앵커 393개, 5개 초과 매핑 33개, 최대 19개라 품질 심사가 필요하다.</span>
+  </td>
+  <td><span class="pill warn">재심사 필요</span></td>
+  <td><span class="why">광선발사와 같은 앵커 자격 기준으로 검토한 뒤 선택 수정과 전체 재조립 중 결정한다.</span></td>
+</tr>
+<tr>
+  <td><span class="what">기존 코퍼스</span><span class="why">누적 데이터</span></td>
+  <td>
+    <span class="what">구조는 살아 있지만 검증·회상 품질 부채가 있음</span>
+    <span class="why">lint 0, audit·eval 통과. 반면 quote 없는 앵커 3,307개, 표면형 보유 용어 40/1,181개다.</span>
+  </td>
+  <td><span class="pill info">전량 수정 금지</span></td>
+  <td><span class="why">신규 유입 차단과 측정 가드를 먼저 넣고, 문제가 드러난 컨텍스트만 점진적으로 수정한다.</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h2><span class="n">B</span>문제가 생긴 실제 흐름</h2>
+<p class="note">엔진에서 에이전트 답변까지 이어지는 다섯 경계 중 설치 자체는 정상이고, 계약과 데이터 품질에서 문제가 생겼다.</p>
+
+<div class="flow">
+  <div class="flow-node source">
+    <div class="step">1 · 실행 엔진</div>
+    <h3>dirty 소스가 글로벌 CLI에 즉시 반영</h3>
+    <span class="pill info">편집 설치</span>
+    <p>현재 미커밋 코어 변경이 다른 세션의 build·ingest·audit에도 바로 닿는다.</p>
+  </div>
+  <div class="flow-node problem">
+    <div class="step">2 · 설치 스킬</div>
+    <h3>설치는 일치하지만 계약이 부족</h3>
+    <span class="pill warn">23 / 23 동일</span>
+    <p><code>synonyms</code>·<code>aliases</code>, <code>verified_at</code>, query <code>--db</code> 안내가 불완전하다.</p>
+  </div>
+  <div class="flow-node problem">
+    <div class="step">3 · 적재 데이터</div>
+    <h3>표면형·시각·앵커 품질 저하</h3>
+    <span class="pill warn">945 + 456</span>
+    <p>코드식 용어, 자정 검증 시각, 과다·중복 앵커가 저장됐다.</p>
+  </div>
+  <div class="flow-node problem">
+    <div class="step">4 · 검색 게이트</div>
+    <h3>광선발사 표면형을 명부가 모름</h3>
+    <span class="pill bad">anchor_df 47 · 37</span>
+    <p>의미 검색 점수가 높아도 명부 일치가 없어서 확정 답변 채널이 닫힌다.</p>
+  </div>
+  <div class="flow-node source">
+    <div class="step">5 · 소비 지점</div>
+    <h3>주 소비자는 에이전트</h3>
+    <span class="pill info">graph는 보조 보기</span>
+    <p>예쁜 객체 화면보다 에이전트가 근거를 구별하고 안전하게 답하는 payload가 우선이다.</p>
+  </div>
+</div>
+
+<h2><span class="n">C</span>두 적재와 기존 데이터 비교</h2>
+
+<div class="panel">
+<table class="compare">
+<thead>
+<tr>
+  <th>범위</th>
+  <th class="num">적재 단위</th>
+  <th class="num">CodeLocator</th>
+  <th class="num">Mapping</th>
+  <th class="num">Glossary</th>
+  <th class="num">표면형 보유</th>
+  <th>실제 회상</th>
+  <th class="action">처리 판단</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><span class="what">인게임 아이템</span><span class="why">ingame-item-usage</span></td>
+  <td class="num">945</td>
+  <td class="num">393</td>
+  <td class="num">66</td>
+  <td class="num">91</td>
+  <td class="num">0</td>
+  <td><span class="pill good">표본 2 / 2</span></td>
+  <td><span class="why">전체 재적재는 미확정. 앵커 자격 재심사 뒤 결정.</span></td>
+</tr>
+<tr>
+  <td><span class="what">광선발사</span><span class="why">petskill-kamehameha</span></td>
+  <td class="num">456</td>
+  <td class="num">180</td>
+  <td class="num">25</td>
+  <td class="num">36</td>
+  <td class="num">0</td>
+  <td><span class="pill bad">대표 표본 0 / 2</span></td>
+  <td><span class="why">수정 확정. DROP 77·MOVE 1과 명부를 함께 처리.</span></td>
+</tr>
+<tr>
+  <td><span class="what">기존 코퍼스</span><span class="why">전체 누적</span></td>
+  <td class="num">—</td>
+  <td class="num">3,886</td>
+  <td class="num">1,030</td>
+  <td class="num">1,181</td>
+  <td class="num">40</td>
+  <td><span class="pill good">평가 15 / 15</span></td>
+  <td><span class="why">구조 통과. 전량 수정 대신 측정·차단 후 점진 수정.</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h2><span class="n">D</span>기존 코퍼스가 “문제없다”고 할 수 없는 이유</h2>
+
+<div class="bars">
+  <div class="bar-row">
+    <div class="bar-label">원문 인용을 실제 대조한 CodeLocator</div>
+    <div class="track"><div class="fill" style="width:14.9%"></div></div>
+    <div class="bar-value">579 / 3,886 · 14.9%</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">synonyms 또는 aliases를 가진 GlossaryTerm</div>
+    <div class="track"><div class="fill orange" style="width:3.4%"></div></div>
+    <div class="bar-value">40 / 1,181 · 3.4%</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">광선발사 앵커 중 사후 DROP 판정</div>
+    <div class="track"><div class="fill red" style="width:42.8%"></div></div>
+    <div class="bar-value">77 / 180 · 42.8%</div>
+  </div>
+  <p class="cap">구조 검사 통과는 연결이 끊기지 않았다는 뜻이다. 검색 게이트가 실제 사용자 표현을 아는지, 코드 인용이 검증됐는지, 앵커가 주장에 꼭 필요한지는 별도 문제다.</p>
+</div>
+
+<h2><span class="n">E</span>엔진·스킬에서 먼저 바로잡을 계약</h2>
+
+<div class="two-col">
+  <div class="panel">
+    <table>
+    <thead><tr><th>계약</th><th>현재 빈틈</th><th>재설계 기준</th></tr></thead>
+    <tbody>
+    <tr>
+      <td><span class="what">용어 표면형</span></td>
+      <td><span class="why">추출 스키마와 조립기가 synonyms·aliases를 끝까지 전달하지 않음</span></td>
+      <td><span class="why">사용자가 실제로 부르는 표현을 추출→검증→조립→색인까지 보존</span></td>
+    </tr>
+    <tr>
+      <td><span class="what">회상 실패 진단</span></td>
+      <td><span class="why">finalizer가 needs_clarification을 버려 게이트 차단과 순위 미달을 구분 못 함</span></td>
+      <td><span class="why">명부 일치, anchor_df, 기대 ID 순위, 최종 차단 이유를 따로 보고</span></td>
+    </tr>
+    <tr>
+      <td><span class="what">검증 시각</span></td>
+      <td><span class="why">문서의 자동 입력 설명과 실제 필수 입력이 충돌하고 자정값이 대량 생성됨</span></td>
+      <td><span class="why">실제로 원문을 확인한 시각만 verified_at으로 기록</span></td>
+    </tr>
+    <tr>
+      <td><span class="what">안전한 데이터 수정</span></td>
+      <td><span class="why">목록 일부 제거·객체 퇴역·같은 ID 교체에 일관된 잠금과 변경 보고가 없음</span></td>
+      <td><span class="why">정확한 이전 상태 확인, 전체 사전검사, 원복 가능한 한 묶음 교체</span></td>
+    </tr>
+    </tbody>
+    </table>
+  </div>
+  <div>
+    <div class="callout">
+      <h3>에이전트 소비 계약</h3>
+      <p>Brain 객체의 주 소비자는 사람 화면이 아니라 에이전트다. <code>title</code>을 보기 좋게 만드는 것보다 답변 payload에서 근거를 구별할 수 있어야 한다.</p>
+    </div>
+    <div class="callout warn">
+      <h3>아직 결정하지 않은 것</h3>
+      <p><code>path</code>·<code>symbol</code>·<code>verified_quote</code> 중 어디까지 응답에 싣는지와 제한 자료 접근제어 위치가 미확정이다.</p>
+    </div>
+    <div class="callout bad">
+      <h3>현재 운영 경고</h3>
+      <p>글로벌 <code>project-brain</code>이 이 dirty 체크아웃을 직접 읽는다. 설계가 끝날 때까지 BB2 build·ingest·audit·mark-checked 쓰기 흐름을 돌리면 안 된다.</p>
+    </div>
+  </div>
+</div>
+
+<h2><span class="n">F</span>권장 재설계 순서</h2>
+<p class="note">기존 전체 마이그레이션을 이번 작업에 넣지 않고, 재발 차단과 두 적재 복구를 먼저 끝내는 범위다.</p>
+
+<div class="steps">
+  <div class="plan-step">
+    <h3>현재 변경 분리</h3>
+    <p>T1·T5는 유지 후보, T3는 묶음 중복까지 보완, T2·T4 title 변경은 소비 계약 확정 전까지 격리한다.</p>
+  </div>
+  <div class="plan-step">
+    <h3>에이전트 답변 계약 확정</h3>
+    <p>근거 구별 필드, quote 노출, 접근제어, quote 없는 기존 앵커 처리 규칙을 먼저 결정한다.</p>
+  </div>
+  <div class="plan-step">
+    <h3>엔진·스킬 재발 차단</h3>
+    <p>표면형 배관, 회상 실패 진단, 검증 시각, 안전한 교체·퇴역 기능과 테스트를 만든다.</p>
+  </div>
+  <div class="plan-step urgent">
+    <h3>광선발사 복구</h3>
+    <p>DROP 77·MOVE 1을 반영하고 사용자 표현을 명부에 추가한 뒤 대표 질의와 전체 평가를 다시 확인한다.</p>
+  </div>
+  <div class="plan-step review">
+    <h3>인게임 아이템 재심사</h3>
+    <p>광선발사와 같은 앵커 자격 기준으로 393개를 검토하고, 증거에 따라 선택 수정 또는 재조립을 결정한다.</p>
+  </div>
+  <div class="plan-step">
+    <h3>기존 데이터 점진 관리</h3>
+    <p>신규 유입 차단과 품질 지표를 먼저 추가한 뒤, 실제 검색 실패가 확인된 컨텍스트만 순차 수정한다.</p>
+  </div>
+</div>
+
+<h2><span class="n">G</span>설계 전에 결정할 네 가지</h2>
+
+<div class="decision-list">
+  <div class="decision-item">
+    <b>1. 에이전트가 받을 코드 근거</b>
+    <span>응답에 symbol·path·quote를 어떤 조합으로 싣고, quote가 없는 유산 데이터는 어떻게 표시할지</span>
+  </div>
+  <div class="decision-item">
+    <b>2. 제한 자료의 quote 접근제어</b>
+    <span>검색 층에서 제거할지, 라우터가 권한을 확인한 뒤 포함할지</span>
+  </div>
+  <div class="decision-item">
+    <b>3. 데이터 퇴역 방식</b>
+    <span>물리 삭제, archived/rejected 전환, 컨텍스트 전체 원자 교체 중 어떤 방식을 정식 계약으로 삼을지</span>
+  </div>
+  <div class="decision-item">
+    <b>4. 인게임 처리 범위</b>
+    <span>앵커 재심사 결과에 따라 선택 수정으로 끝낼지, 전체 컨텍스트를 다시 조립할지</span>
+  </div>
+</div>
+
+<h2><span class="n">H</span>검증 근거</h2>
+<div class="panel">
+<table>
+<thead><tr><th>검증</th><th>결과</th><th>해석</th></tr></thead>
+<tbody>
+<tr><td><code>.venv/bin/python -m pytest -q</code></td><td><b>684 passed · 43 subtests</b></td><td class="why">현재 엔진 회귀 테스트는 통과. 원래 적재 문제가 해결됐다는 뜻은 아님.</td></tr>
+<tr><td>템플릿 런타임 테스트</td><td><b>75 tests · OK</b></td><td class="why">현재 설치 템플릿의 내부 테스트 통과.</td></tr>
+<tr><td>BB2 실코퍼스 검사</td><td><b>5 tests · OK</b></td><td class="why">객체 수·raw 청크·기대 ID 기본 가드 통과.</td></tr>
+<tr><td><code>project-brain eval</code></td><td><b>15 / 15</b></td><td class="why">기존 골든셋은 유지. 이번 두 적재의 모든 실제 질문을 덮지는 않음.</td></tr>
+<tr><td><code>project-brain audit --no-fetch</code></td><td><b>lint 0 · quote 579 성공</b></td><td class="why">quote 없는 3,307개는 검사 대상에서 제외.</td></tr>
+</tbody>
+</table>
+</div>
+
+<hr>
+<p class="small">이 문서는 2026-07-28 현재 로컬 엔진과 BB2 코퍼스를 읽기 전용으로 재검증한 결과다. 파일 수정·설치·적재·색인 재생성은 수행하지 않았다.</p>
+
+</div>
+<script>
+const root=document.documentElement;
+const button=document.getElementById("theme-button");
+function applyTheme(theme){
+  root.dataset.theme=theme;
+  button.textContent=theme==="dark"?"밝은 모드":"어두운 모드";
+}
+button.addEventListener("click",()=>{
+  applyTheme(root.dataset.theme==="dark"?"light":"dark");
+});
+applyTheme(root.dataset.theme||"dark");
+</script>
+</body>
+</html>
