@@ -5,43 +5,36 @@ Source JSONL: /Users/al03040455/.codex/sessions/2026/08/06/rollout-2026-08-06T15
 Session ID: 019fd5d6-80dd-7af0-a4fc-8803ebda7b34
 Snapshot SHA-256: 3d2aa8b93b217fa0348c6514689705aac795a0797876cf2f5f167967dc94d883
 
-## 다음 목표
+## 인계 목적과 첫 행동
 
-**이 인계의 마감 조건**
+> 이 문서는 이번 세션에서 완료한 작업과 현재 저장소 상태를 전달하는 브리핑이다.
+> **새 구현 계획이 아니며, 현재 승인된 다음 작업은 없다.**
 
-- 이 갱신본은 `docs/reports/2026-08-11-task18-session-handoff.md` 한 경로만 검토해
-  별도 docs commit으로 남긴다. 현재 HEAD가 그 commit이면 이미 마감된 것이므로 다음
-  에이전트는 다시 만들지 않는다.
-
-**다음 에이전트가 당장 할 일**
+**다음 에이전트의 첫 행동**
 
 1. `AGENTS.md` → `ROADMAP.md` → 이 handoff 순서로 읽고 engine·BB2 HEAD와
-   `git status`를 읽기 전용으로 다시 확인한다.
-2. Task 18은 재실행하지 않는다. 필수 후속이 없으므로 사용자가 원하는 **별도 작업**을
-   확인하고 현행 ROADMAP의 착수 조건에서 새 범위를 잡는다.
-3. 아래 미추적 두 묶음은 열린 질문이 풀리기 전까지 수정·stage·commit하지 않는다.
+   `git status`를 읽기 전용으로 확인한다.
+2. 확인한 현재 상태를 사용자에게 짧게 브리핑하고, 다음 목표와 작업 범위를 사용자와
+   먼저 합의한다.
+3. 합의 전에는 추가 조사·설계·수정·테스트·stage·commit을 시작하지 않는다.
+   Task 18도 완료 상태이므로 재실행하지 않는다.
 
-**하면 좋은 항목**
+**참고 후보 — 실행 지시가 아님**
 
-- 사용자가 우선순위를 정하면 quote 부채 3,307건, 비정본 symbol 289건, legacy 앵커
-  재검증 부채를 각각 새 작업으로 설계한다.
-- 원격 공유가 필요할 때만 최신 remote를 확인하고 별도 승인 아래 push/PR 여부를 정한다.
-- `decks/project-brain-new/`는 대본의 “8개 동작”과 실제 10개 명령 불일치를 고치고
-  PPTX 12장을 시각 검수한 뒤 보존 여부를 정한다.
-- `docs/superpowers/plans/2026-07-27-handoff-consumer.md`는 현행
-  `corpus_io.py`·`MutationService` 계약에 맞게 다시 설계하거나 역사 초안임을 표시한다.
+quote 부채 3,307건, 비정본 symbol 289건, legacy 앵커 재검증 부채, 두 미추적 묶음,
+옛 Task 19와 ROADMAP의 미뤄둔 항목은 모두 배경 정보다. 사용자가 새 목표로 선택하고
+범위를 승인하기 전에는 우선순위를 추정하거나 작업에 착수하지 않는다.
 
 ## 지금 상태
 
-- 이 handoff 전용 docs commit의 부모 HEAD는
-  `0336c649b4de38101bacfc33bd59927077e6fded`
-  (`docs(brain): 에이전트 지침과 로드맵 현행화`)다. 최종 checkout은 그 위에 이 파일
-  한 경로만 바꾼 commit이 하나 더 있으며, SHA는 이 파일의 Git history에서 확인한다.
+- `0336c649b4de38101bacfc33bd59927077e6fded`는 `AGENTS.md`·`ROADMAP.md`
+  현행화 commit이고, `9f3c15da6737078a87e2ffde3c939733a55f4a1c`는 그 상태를
+  처음 반영한 handoff commit이다. 이후 이 파일만 고친 docs commit은 제품 상태 변경이
+  아니다. 실제 current HEAD는 `git rev-parse HEAD`로 확인한다.
 - BB2 HEAD는 `684ab42b49e9c4941c406357dd385376737559b2`이고 working tree가 clean하다.
-- 이 handoff를 고치기 직전 양쪽 staged는 0이고, engine에는
+- 인계 완료 시점에 양쪽 staged는 0이고, engine에는
   `decks/project-brain-new/`와
   `docs/superpowers/plans/2026-07-27-handoff-consumer.md`만 미추적으로 남아 있었다.
-  이 갱신본을 한 경로로 commit하면 다시 그 상태가 된다.
 - Task 18은 attempt-006에서 완료됐다. 총 6,491개(CodeLocator 3,305 +
   EvidenceRef 3,186)의 `title`만 바뀌었고 다른 변경 0, 짝 불일치 0/3,202였다.
   상세 실행·복구 이력은 완료 보고서와 attempt-006 receipt를 본다.
