@@ -5,8 +5,10 @@
 
 - 전체 구조·현재 코드 길찾기: [docs/architecture/README.md](docs/architecture/README.md)
 - 설계 근거(정체성·철학·아키텍처·미결): [docs/design-canonical.md](docs/design-canonical.md)
-- 설치·사용: [README.md](README.md) · 개발 루프: [CLAUDE.md](CLAUDE.md)
-- 단계별 설계/계획 문서: `docs/specs/`(19) · `docs/plans/`(46) · `docs/skill-drafts/`(3)
+- 설치·사용: [README.md](README.md) · 개발 루프 정본: [AGENTS.md](AGENTS.md)
+  (`CLAUDE.md`는 `@AGENTS.md` wrapper)
+- 단계별 설계/계획 문서: `docs/specs/` · `docs/plans/` · `docs/superpowers/specs/` ·
+  `docs/superpowers/plans/` · `docs/skill-drafts/`
 - 비교·검증 보고서: [docs/reports/](docs/reports/)
 - 데이터·적재 이력은 각 프로젝트 레포(`brain/`)에 있다. 이 로드맵은 **엔진 기능**만 다룬다.
   BB2(첫 데이터) 적재 작업 추적은 vault task `bb2-project-brain-build`에 남아 있다.
@@ -21,7 +23,7 @@
 
 | 층 | 상태 | 비고 |
 |---|---|---|
-| L1 저장 엔진 | ✅ 완료 수준 | 18 kind + Insight·원자성 적재·promote·lint |
+| L1 저장 엔진 | ✅ 완료 수준 | 19 kind(Insight 포함)·원자성 적재·promote·lint |
 | L1 인사이트 그릇 | ✅ `Insight` kind (2026-06-15) | advisories 별도 통로·candidate 적재 거부(1차) |
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대·보수적 토큰 근사와 과대 유닛 분할 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
@@ -66,10 +68,14 @@
   계획: [Task 18 구현 계획](docs/superpowers/plans/2026-08-06-task18-display-labels-and-quote-debt.md) ·
   결과: [완료 보고서](docs/reports/2026-08-06-task18-display-labels-and-quote-debt-completion.md)
 
-이 attempt-006 완료 문서 commit 뒤에는 create-only closure 두 개로 최종
-engine·BB2 HEAD와 증빙을 다시 결속·검증한다. 이 ROADMAP 작성 시점에는
-`attempt-006/task18-closure.json`과 `attempt-006/task18-closure-verify.json`을 아직
-생성하거나 검증하지 않았다.
+attempt-006 완료 문서 commit 뒤 create-only closure와 독립 verify까지 완료했다. closure
+SHA-256 `1a6a17c3f0f5ca13e15c08bb26dbf151dc959971dbccd399ff6f43515ae53495`는 engine
+implementation `bc2b8de82b0cf31a9b1cea6550cae5981ed4c7b6`, engine docs
+`da044273af6fae011d4ee43ab17a4c79eb434fc5`, BB2 corpus
+`7ed3cc687fb3ba09fc0f3ebe274cbfc1cd1bd2d5`를 결속한다. 독립 verify SHA-256은
+`32ce0f2d1b07b04173c89157143ccd5397ebbf4dd44e0d4d3cf1dcf3d8a7107c`이고 `ok=true`다.
+이후 문서 이력은 이 고정 결속을 넓히거나 무효화하지 않으며 closure를 다시 실행할 이유가
+아니다. 현재 인계는 [Task 18 세션 인계](docs/reports/2026-08-11-task18-session-handoff.md)를 본다.
 
 ### P0 ingest integrity foundation — 완료 (2026-08-05)
 
@@ -567,14 +573,19 @@ decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶�
      `run_migration.py`를 복사하지 말고 위 안전장치 네 가지를 엔진 기능으로 흡수한다.
      그 전엔 착수하지 않는다.
 
-8. **옛 앵커를 고치려 하면 쓰기 층이 막는다 — 읽기/쓰기 비대칭** (2026-08-04 실측)
+8. **재검증이 필요한 옛 앵커 수정의 읽기/쓰기 비대칭** (2026-08-04 실측)
 
-   `--3` 하나를 고치려다 드러난 사실이다. **읽기 쪽은 옛 데이터를 받아주는데 쓰기
-   쪽은 안 받아준다.** 그래서 "잘못된 걸 발견했는데 고칠 수가 없는" 상태가 생긴다.
+   `--3` 하나를 고치려다 드러난 사실이다. 읽기 쪽은 옛 데이터를 받아주지만,
+   `repo`·`path`·`commit_sha` 좌표나 `symbol`·`verified_quote`를 바꾸거나 `mark-checked`를
+   실행하면 쓰기 쪽의 현재 검증 계약을 통과해야 한다. **모든 옛 객체 수정이 막히는 것은
+   아니다.** 이 필드가 그대로인 변경은 legacy 축약 SHA·quote를 보존할 수 있다. Task 18은
+   이 경계를 우회한 일반 수정이 아니라, 다른 필드를 그대로 보존하는 title-only 전용
+   `DISPLAY_MIGRATION` 경로였다.
 
-   - **벽 1 — 축약 commit_sha**: 쓰기 층은 40자(또는 64자) 전체 SHA를 요구한다
-     (`mutation.py` 좌표 검증). 그런데 BB2 앵커 3,809개 중 **3,294개(86%)가 10자
-     축약형**이다. 40자는 515개뿐. 즉 옛 앵커를 수정하려 하면 대부분
+   - **벽 1 — 축약 commit_sha**: 재검증 경로의 쓰기 층은 40자(또는 64자) 전체 SHA를 요구한다
+     (`mutation.py` 좌표 검증). 2026-08-04 최초 측정에서 BB2 앵커 3,809개 중
+     **3,294개(86%)가 10자 축약형**, 40자는 515개였다. 2026-08-11 현재는 10자 3,293개,
+     40자 516개이며 현재 일괄 정규화 대상은 3,293개다. 즉 이 옛 앵커가 재검증 대상이 되면
      `commit_missing: locator commit_sha is not an exact hexadecimal SHA`로 거부된다.
      읽기 쪽(audit·stale-check)은 축약형을 그대로 해석해 잘 돈다.
 
@@ -591,14 +602,15 @@ decision ledger·classification·snapshot·engine·corpus receipt를 서로 묶�
      사람이 "이 앵커가 어느 브랜치 것인지" 미리 알아야 쓸 수 있다 — 카드에는 그
      정보가 없고 `git branch --contains`로 직접 찾아야 한다.
 
-   - **왜 지금 안 고치는가**: 벽 1을 없애려면 3,294개를 일괄 변환해야 하는데, 같은
+   - **왜 지금 안 고치는가**: 벽 1을 없애려면 현재 3,293개를 일괄 변환해야 하는데, 같은
      커밋의 다른 표기로 바꾸는 것이라 의미 변화는 없지만 코퍼스 대부분을 건드린다.
      벽 2는 "미머지 앵커를 쓰기에서 어떻게 다룰지"라는 정책 결정이 먼저다 —
      읽기처럼 표시만 하고 통과시킬지, 브랜치를 카드에 적게 할지, 지금처럼 호출자가
      ref를 대게 할지. 실익 대비 범위가 커서 미룬다.
 
-   - **착수 방아쇠**: 옛 앵커 수정이 한 번에 그치지 않고 반복될 때. 특히 미머지
-     브랜치 앵커를 정기적으로 손봐야 하면 벽 2부터 정한다. 그 전엔 위 우회로 개별
-     처리하고, 처리할 때마다 어느 브랜치를 기준으로 썼는지 기록에 남긴다.
+   - **착수 방아쇠**: 좌표·symbol·quote 재검증이나 `mark-checked`가 반복해서 이 벽에
+     걸릴 때. 특히 미머지 브랜치 앵커를 정기적으로 손봐야 하면 벽 2부터 정한다. 그 전엔
+     좌표가 그대로인 변경은 legacy 값을 보존하고, 재검증이 필요한 건 위 우회로 개별 처리해
+     어느 브랜치를 기준으로 썼는지 기록에 남긴다.
 
 미결 사항 상세는 [docs/design-canonical.md §4](docs/design-canonical.md)를 본다.

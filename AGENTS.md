@@ -22,7 +22,8 @@ brain 객체의 주 소비자는 사람이 아니라 에이전트다. 사용자�
   골든셋(`brain/eval_scenarios.json`)과 실측 가드(`brain/checks/`)는 그쪽 소유다.
 - 엔진 설계·로드맵·발전 히스토리는 이 레포에 있다: 히스토리 허브 [ROADMAP.md](ROADMAP.md)
   (완료 단계·현황·미뤄둔 작업) + [docs/design-canonical.md](docs/design-canonical.md) +
-  `docs/specs/`·`docs/plans/`. 데이터·적재 이력만 데이터 레포(`brain/`)·vault task에 있다.
+  `docs/specs/`·`docs/plans/` + `docs/superpowers/specs/`·`docs/superpowers/plans/`.
+  데이터·적재 이력만 데이터 레포(`brain/`)·vault task에 있다.
 
 ## 작업 길찾기 — 먼저 전체 지도로
 
@@ -57,10 +58,13 @@ uv sync --extra mecab
 - TDD: red 테스트 먼저, 그다음 구현. 결정론 유지 — 테스트에서 실모델 금지
   (StubEmbedder / `PROJECT_BRAIN_EMBEDDER=stub`), 토큰화는 정규식 폴백 강제 패턴 참고.
 
-## 엔진 수정 후 실코퍼스 회귀 (필수)
+## 엔진 수정 후 실코퍼스 회귀 (변경별)
 
-엔진 테스트는 합성뿐이라, 검색 품질·색인·라우터를 건드렸으면 데이터 레포에서 회귀를
-돌려야 완료다:
+엔진 테스트는 합성 데이터 중심이다. schema·ingest·mutation·migration·projection·검색처럼
+실제 데이터에 따라 결과가 달라지는 변경은 [change-map](docs/architecture/change-map.md)의
+해당 행을 기준으로 데이터 레포에서 확인한다. `brain/checks`, `lint`·`audit`, `eval`, `graph`,
+`index rebuild`를 일괄 실행하지 말고 변경 축과 실제 corpus·index 영향에 맞는 것만 실행한다.
+아래는 자주 쓰는 명령 예시다:
 
 ```bash
 cd <소비 프로젝트 루트>
@@ -74,14 +78,19 @@ PYTHONPATH=<engine-root>/src <engine-root>/.venv/bin/python \
 
 여러 checkout이 있으면 bare `project-brain`이나 시스템 `python3`가 다른 엔진을 import할 수
 있다. 검증할 checkout의 `PYTHONPATH`와 `.venv/bin/python`을 함께 명시한다. 실모델 rebuild는
-비용이 크므로 색인 입력·임베딩 계약이 바뀐 경우에만 한 번 실행하고, 문서·installer-only
-변경에서는 기존 DB로 lint/eval/graph를 확인한다.
+비용이 크므로 change map의 조건에 해당할 때만 한 번 실행한다. 설치 대상이 아닌 문서만
+바뀌면 해당 문서의 표적 검사만 돌리고 소비 데이터 회귀는 하지 않는다. 설치되는 template·
+reference와 installer 변경은 installer 회귀, 설치 runtime unittest, 두 번째 설치의 무변경
+확인이 기본이다. 설치 결과가 데이터·검색 계약까지 바꿀 때만 change map이 지정한 BB2 검증을
+추가한다.
 
 ## 주의
 
 - `Date`·경로 하드코딩 금지 — 경로는 config(.project-brain.json) 해석
   (`src/project_brain/config.py`, 명시 인자 > config > ConfigError).
-- `context_projection.py`는 context_md 빌더와 `build_reuse_projection`(재사용 projection 빌더)를 모두 담는 정본이다. projection 재사용층(별도 검색 레인)이 소비하며, cli `projection` 서브커맨드·`rebuild`·`lint`도 이 파일을 참조한다. "동결·소비자 없음"이 아님.
+- `context_projection.py`는 context_md와 reuse projection 빌더의 정본이다. source 의미 해시의
+  단일 공식은 `hash_utils.py`가 맡고, `lint.py`의 `projection_is_fresh()`가 현재 store 기준
+  freshness를 판정한다. `search_index.py`는 이 판정을 fingerprint와 색인 입력에 함께 사용한다.
 - 스킬 템플릿이나 installer를 바꾸면 `tests/test_installer.py`로 사용자 수정 파일 skip,
   프로젝트 overlay 비관리, 실행 비트 채택, 퇴역 파일 제거·rollback을 확인한다. 임시
   대상에 두 번 설치해 두 번째 report의 `created/updated/removed/adopted/skipped`가 전부
