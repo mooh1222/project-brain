@@ -27,6 +27,8 @@ flowchart LR
 
 세부 실행 순서와 저장 경계는 [런타임 지도](runtime-map.md), 객체 필드와 관계는
 [데이터 계약](data-contracts.md), 변경할 파일과 검증 범위는 [변경 지도](change-map.md)를 본다.
+Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
+[설계 정본의 JSON 객체 선택 근거](../design-canonical.md#왜-json-객체를-정본으로-두는가)를 본다.
 
 ## 엔진 레포와 데이터 레포
 
@@ -65,6 +67,7 @@ flowchart LR
 | 하려는 일 | 먼저 읽을 곳 | 이어서 확인할 코드·테스트 |
 |---|---|---|
 | “이 기능이 지금 어떻게 동작해?” | [런타임 지도의 query와 search](runtime-map.md#query와-search는-다르다) | `intent.py`, `router.py`, `search.py`, `tests/test_router.py`, `tests/test_search.py` |
+| 왜 Markdown 지식 문서가 아니라 JSON 객체를 쓰는지 확인 | [설계 정본의 JSON 객체 선택 근거](../design-canonical.md#왜-json-객체를-정본으로-두는가) | [초기 storage layout](../specs/2026-05-28-bb2-brain-storage-layout-design.md), [객체별 JSON 결정](../plans/2026-05-28-bb2-brain-p0-router.md#object-file-encoding-decision), [현재 데이터 계약](data-contracts.md) |
 | 객체를 새로 적재하거나 기존 객체를 고치기 | [데이터 계약](data-contracts.md) | JSON 예시, `assembly.py`, `mutation.py`, `tests/test_assembly.py`, `tests/test_mutation.py` |
 | CodeLocator를 쓰거나 갱신하기 | 데이터 계약의 CodeLocator 행과 정상·실패 예시 | `code_verify.py`, `mutation.py`, `tests/test_code_verify.py`, `tests/test_mutation.py` |
 | 검색·색인·라우터를 바꾸기 | [변경 지도](change-map.md), [검색 내부 구조](../search-internals.md) | 해당 표적 테스트 뒤 소비 데이터 `brain/checks`와 `eval` |
@@ -96,4 +99,6 @@ flowchart LR
 | 설계 반영 | Karpathy LLM Wiki | 누적되는 구조화 산물과 raw-first 출발점. [설계 정본의 철학](../design-canonical.md#2-철학--왜-이-형태인가-1차-자료-검증-2026-06-10)에 큰 틀과 세부 구현의 차이를 명시했다. |
 | 설계 반영 | Matt Pocock식 `CONTEXT.md` | 공유 도메인 어휘 아이디어가 `DomainContext`·`GlossaryTerm`으로 진화했고, generated `CONTEXT.md`는 버릴 수 있는 projection으로 분리했다. 근거는 [Domain Context v2 설계](../specs/2026-06-02-bb2-brain-domain-context-v2-design.md)다. |
 | 초기 참고·부분 반영 | GBrain | Markdown/DB 분리 참고에서 DB·index를 다시 만들 수 있는 projection으로 두는 원칙을 채택했다. GBrain 코드 기반을 직접 적용했다고 주장하지 않는다. 근거는 [초기 storage layout의 source mapping](../specs/2026-05-28-bb2-brain-storage-layout-design.md#2-basis--source-mapping)이다. |
+| 설계 반영 | Mnemosyne | `subject`·`predicate`·`value`와 `valid_from`·`valid_until`을 갖는 시간축 트리플이 `TemporalFact`의 직접 원형이 됐다. 근거는 [초기 storage layout의 source mapping](../specs/2026-05-28-bb2-brain-storage-layout-design.md#2-basis--source-mapping)이다. |
+| 설계 반영 | Sentra | 사건 이력과 의미 사실을 분리하고, 값이 바뀌면 과거 사실을 지우지 않고 유효 시간을 닫는 방식에 반영됐다. 근거는 [초기 storage layout의 source mapping](../specs/2026-05-28-bb2-brain-storage-layout-design.md#2-basis--source-mapping)이다. |
 | 내부 진화 | BB2 | BB2 내부 도구로 출발해 범용 엔진과 소비 데이터 레포를 분리했다. 현재 상태와 이력은 [ROADMAP](../../ROADMAP.md)에 있다. |
