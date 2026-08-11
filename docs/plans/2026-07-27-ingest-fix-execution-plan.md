@@ -238,7 +238,7 @@
 **검증**: `.venv/bin/python -m unittest discover -s src/project_brain/templates/ingest/scripts -p 'test_*.py'` OK
 
 > **심사 반영 — 최상위 `warnings`에 올리는 것은 '이번 적재가 새로 만든 위반'만.** store에 이미 있던 id는 제외한다. 안 그러면 매 적재 리포트에 498줄이 붙어 아무도 안 읽고, 신규 위반이 499번째 줄로 섞인다. 그래야 보통 0줄이 되고 0이 아닐 때만 눈에 들어온다.
->
+> 
 > **추가 — 회상 질문 바꿔치기 흔적을 기계로 남긴다.** `finalize_ingest.py:286`의 config에 질문 잠금이 없어 이번 사고의 원인 중 하나가 재발 가능하다. 완전한 잠금은 범위 밖이지만 **'리포트에 이전 질문을 함께 남긴다'**는 여기서 넣을 수 있다.
 
 ---
@@ -295,7 +295,7 @@
 > **심사 반영 — 엔진 편집 구간은 병렬 세션에 대한 무통보 배포다.** 글로벌 `project-brain`은 이 클론의 편집 설치이고 `_editable_impl_project_brain.pth`가 클론 `src`를 그대로 가리킨다. 그래서 **파일을 저장하는 순간** 다른 세션의 `build`/`ingest`/`audit`, finalize 스크립트, bb2 corpus 가드까지 전부 새 코드로 돈다. 커밋도 install도 필요 없다. 원안은 T1~T14를 '엔진 레포 안의 격리된 작업'처럼 배치했다.
 > 구체적 사고 경로: T7 저장 직후 다른 세션이 새 도메인을 적재하면 `context.<새키>` 때문에 실패한다. T2 저장 뒤에는 그 세션 앵커 title이 조용히 symbol로 바뀐다(그 세션은 규약이 바뀐 걸 모른다). T8 저장 뒤에는 갑자기 git blob 대조를 타서 repo-root 해석이 다르면 거부된다. 오늘 실제로 두 세션이 병렬로 돌았고 `mark-checked`가 객체 21개를 건드렸다.
 > → 엔진 편집을 **별도 워크트리**에서 하고 검증은 `PYTHONPATH=<워크트리>/src <워크트리>/.venv/bin/python`으로만 한다. 부담이면 최소한 **T1 앞에 '엔진 편집 구간 동안 bb2 적재 금지' 합의 단계를 task로 세우고**, verify에 '그 구간에 bb2에서 돈 ingest가 없음(`brain` git status·파일 mtime)'을 넣는다.
->
+> 
 > **추가 — 엔진 해석 경로를 하나로 통일하는 결정을 여기서 못 박는다.** 데이터 단계는 `PYTHONPATH=<engine>/src`를 쓰는데 finalize는 bare `project-brain`·bare `python3`를 부른다(`finalize_ingest.py:189-201`). 지금은 둘이 같은 클론을 가리키지만 다른 checkout이 글로벌 도구를 가로채면 게이트가 조용히 달라진다.
 
 ---
@@ -399,7 +399,7 @@
 **검증**: ingest ok + `project-brain lint` problems [] + rebuild 완료 후 위 red 측정 3개 질의가 reviewed 5건으로 열리는지 재실행(실모델 실측으로 0→5 확인됨). 회귀 확인: s5·s13·s14·s15가 여전히 0건(부재 엔티티 가드 온전), s1·s3·s6·s16·s17이 여전히 5건. 그리고 `project-brain eval` 15/15 유지
 
 > **심사 반영 — 대상에서 `ingame-item-usage`가 빠진다(D1 재결정).** 재조립 때 `synonyms`를 직접 심으므로 여기서는 `g.stage-clear-token.clear-pass-ticket-item`·`g.petskill-hammer-motion.create-hammer-skill` 2개 + 경계선 `g.ad-skip-product.no-ad-item` 1개만 남는다.
->
+> 
 > **추가 — verify에 실코퍼스 가드를 넣는다**: `PYTHONPATH=<engine>/src <engine>/.venv/bin/python -m unittest discover -s brain/checks -p "test_*.py"`. stub 임베더로 임시 DB에 재구축하니 실모델 비용이 없다(`test_real_corpus.py:70-76`). 색인 행 수 대조가 여기서 안 돌면 T23까지 미뤄진다.
 
 ---
