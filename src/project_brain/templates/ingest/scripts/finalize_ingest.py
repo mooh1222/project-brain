@@ -486,7 +486,11 @@ def _audit_git_state(result: dict) -> tuple[dict[str, Any] | None, str]:
 
 def capture_isolation_baseline(runner: CommandRunner = _default_runner) -> dict:
     result = _run_command(runner, ["project-brain", "graph", "isolated"], json_output=True)
-    audit = _run_command(runner, ["project-brain", "audit", "--no-fetch"], json_output=True)
+    audit = _run_command(
+        runner,
+        ["project-brain", "audit", "--no-fetch", "--write-stale-cache"],
+        json_output=True,
+    )
     payload = result.get("payload")
     isolated = payload.get("isolated") if isinstance(payload, dict) else None
     if (not result["ok"] or not isinstance(isolated, list)
@@ -534,7 +538,11 @@ def run_finalization(
         "eval": _run_command(runner, ["project-brain", "eval"], json_output=True),
         "graph_isolated": _run_command(
             runner, ["project-brain", "graph", "isolated"], json_output=True),
-        "audit": _run_command(runner, ["project-brain", "audit", "--no-fetch"], json_output=True),
+        "audit": _run_command(
+            runner,
+            ["project-brain", "audit", "--no-fetch", "--write-stale-cache"],
+            json_output=True,
+        ),
         "corpus_tests": _run_command(
             runner,
             ["python3", "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",

@@ -1,17 +1,18 @@
 ---
 name: {{PROJECT}}-brain-query
 description: |
-  Use when BB2(LineBubble2) 기능·도메인 질문에 답하기 시작할 때 — "~가 뭐야", "어디에
+  Use when {{PROJECT}} 기능·도메인 질문에 답하기 시작할 때 — "~가 뭐야", "어디에
   구현돼 있어", "왜 이렇게 동작해/바뀌었어", "이 값 기준이 뭐야" 같은 기능 의미·기획·코드
   위치·변경 이유 질문, QA 이슈 분석 착수, 기능 개발 착수, 사전 지식 확인,
   "brain에서 찾아/물어봐". 직접 코드를 뒤지기 전에 Brain을 먼저 조회하는 상황.
   적재(brain에 넣기)는 {{PROJECT}}-brain-ingest·{{PROJECT}}-brain-session-ingest 몫이고, 이 스킬은 읽기 쪽이다.
 ---
 
-# BB2 Brain 조회 — 검색 먼저, 결과만으로, 없으면 없다
+# {{PROJECT}} Brain 조회 — 검색 먼저, 결과만으로, 없으면 없다
 
-Brain은 BB2 프로젝트 지식의 단일 저장소다(검수 상태·근거가 붙은 객체 그래프). 이 절차서는
-어시스턴트가 brain을 **쓰는** 쪽 계약이다 — 절차는 얇게, 판단·답변은 검색 결과 위에서만.
+Brain은 {{PROJECT}} 프로젝트 지식의 단일 저장소다(검수 상태·근거가 붙은 객체 그래프).
+**기본 조회는 읽기 전용**이며, 질문이나 "맞아" 같은 단순 확인만으로 객체·색인·stale cache를
+바꾸거나 Git 상태를 변경하지 않는다. 판단·답변은 검색 결과 위에서만 수행한다.
 
 ## 1. 검색 먼저
 
@@ -25,18 +26,13 @@ project-brain search "<질문>"
 `project-brain query "<시간·이력 질문>"`, 특정 객체 본문과 이웃은
 `project-brain show <object_id>`로 구분한다.
 
-- 엔진은 글로벌 도구 `project-brain`(2-레포 분리, 2026-06-11). 미설치면(`which project-brain`이
-  비면) 레포 루트에서 `./{{BRAIN_ROOT}}/install.sh` 한 번 실행 — uv 전제로 엔진 클론·편집 설치·색인을
-  자동화한다. 설치되면 레포 안 어느 디렉토리에서든 실행 가능 — 루트 `.project-brain.json`
-  config가 경로를 해석한다: brain=`{{BRAIN_ROOT}}/`, 색인=`{{BRAIN_ROOT}}/.brain-local/index.db`.
-- "색인 DB가 없다" 에러면 먼저 재생성 후 재시도(실모델 배치 임베딩이라 수십 초 걸리는 게 정상):
-  ```bash
-  project-brain index rebuild
-  ```
+- 엔진과 색인은 루트 `.project-brain.json`이 가리키는 경로를 사용한다. 도구나 색인이 없으면
+  조회 불가 상태와 필요한 복구 대상을 먼저 보고한다. 조회 흐름에서 설치나 색인 재생성을
+  자동 실행하지 않는다. 설치 config의 코퍼스 경로는 `{{BRAIN_ROOT}}/`다.
 - **출력 읽기**: `project-brain`은 JSON을 stdout으로 내보내고 진행 로그·HF 경고는 stderr로 보낸다 →
   `project-brain search "<질문>" 2>/dev/null | jq` 로 읽는다(`2>&1`로 합쳐 손파싱하면 키 혼동·잔여줄로 깨짐).
   search 적중 배열 키는 `.results`(candidates·raw_excerpts·advisories·projection_reuse는 별도 채널), eval 요약은 `.summary`.
-  각 적중 원소의 객체 식별자 키는 `object_id`다(`id` 아님) — promote 등 후속 명령엔 이 값을 넘긴다.
+  각 적중 원소의 객체 식별자 키는 `object_id`다(`id` 아님) — 출처와 후속 판단에 이 값을 쓴다.
 
 ## 2. 결과만으로 답한다
 
@@ -73,19 +69,15 @@ EventLedgerRecord에서 파생된 새 fact의 supersedes 사슬과, `valid_until
   답한 것처럼 포장하지 않는다.
 - 질문이 모호해서 못 찾은 것 같으면 사용자에게 좁히기 질문을 먼저 한다.
 
-## 5. 사용 시점 승격 (C 루프)
+## 5. 확인과 쓰기 요청을 분리한다
 
-candidate를 근거로 답했는데 사용자가 "맞다"고 확인하면, 그 자리에서 승격한다:
+candidate를 근거로 답한 뒤 사용자가 "맞아"처럼 단순 확인만 하면 확인 내용만 답하고 멈춘다.
+그 확인을 승격·저장 승인으로 확대 해석하지 않는다.
 
-```bash
-project-brain promote --ids <candidate id> \
-  --reviewer user-confirmed --reviewed-at <ISO8601>
-```
-
-- 조회와 한 흐름이라 이 스킬에 둔다. **일괄 승격(`promote-auto`)은 적재 스킬
-  ({{PROJECT}}-brain-ingest) 몫** — 여기서 돌리지 않는다.
-- 승격 후 색인 재생성(`project-brain index rebuild`)까지 해야 다음 검색에 status
-  변화가 반영된다.
+사용자가 "Brain에 반영해", "승격해", "저장해"처럼 **명시적인 쓰기 요청**을 한 경우에만
+현재 자료 적재·승격은 `{{PROJECT}}-brain-ingest`, 세션 자료의 추출·적재는
+`{{PROJECT}}-brain-session-ingest`로 넘긴다. 이 조회 스킬은 candidate 승격, projection
+저장·교체, 색인 재생성을 직접 실행하지 않는다.
 
 ## 6. 이력 질문 가드
 
@@ -132,51 +124,18 @@ project-brain promote --ids <candidate id> \
 한 매핑에 모아둔 경우 등)은 분해 질의가 불필요할 수 있다 — 기준은 5요소가 차는지이지 질의 횟수가
 아니다.
 
-6. **재사용 저장(조건 충족 시에만)** — 조립이 (가) 한 기능(context)으로 수렴 (나) 5요소를 다 채움
-   (다) 구성 객체 id가 확정된 경우에만, candidate projection으로 저장한다.
-   **수작업 JSON 작성 금지** — 반드시 아래 CLI를 사용한다(hash·source_content_hash·projection_hash는
-   엔진이 계산하므로 직접 기입하면 틀린다):
-
-   ```bash
-   # payload를 파일로 먼저 저장한 뒤 CLI에 넘긴다
-   project-brain projection build-reuse \
-     --context-id <context_id> \
-     --requirement-key <requirement_key> \
-     --source-object-ids <id1> <id2> ... \
-     --title "<브리핑 제목>" \
-     --payload-file <payload.json 경로> \
-     --generated-by query-skill \
-     --write
-   ```
-
-   - `--write` 없이 실행하면 저장 없이 미리보기만 출력된다(조건 점검 용도).
-   - 같은 `context_id + requirement_key`로 이미 저장된 projection이 있으면 `--replace`를 추가해야
-     교체된다(없으면 CLI가 거부하고 종료).
-   - 단 기존 projection이 **reviewed면 `--replace`로도 교체되지 않는다**(정책: 재검증 강제). reviewed
-     브리핑이 낡았으면 같은 id 재생성이 아니라 1~5단계로 **새로 조립**한다(새 candidate). 갱신 메커니즘은
-     후속 과제(스펙 2026-06-17 projection-reuse §7).
-   - 저장 성공 후 반드시 색인을 재생성한다:
-     ```bash
-     project-brain index rebuild
-     ```
-   - 구성 객체(`source_object_ids`)가 바뀌면 rebuild가 자동으로 그 projection을 색인에서 뺀다(낡음).
-   - 부분 조립·needs_clarification 단계에선 저장하지 않는다.
-
-7. **사용 시점 승격** — 0단계에서 회수한 재사용 후보가 이번 요구에 실제로 맞았으면 reviewed로
-   promote한다(`project-brain promote` — 범용 승격기라 ContextProjection도 그대로 승격되며,
-   낡은 candidate는 lint 단계에서 거부된다). reviewed가 돼도 projection은 정본 results가 아니라
-   projection_reuse 채널로만 노출되고(채널 이동 없음), 라벨만 "재사용 후보(미검증)"→"재사용
-   브리핑(검증됨)"으로 바뀐다. 어긋났으면 promote하지 않는다.
+6. **조립 결과는 답변으로만 사용** — 한 기능으로 수렴하고 5요소가 모두 채워져도 조회 요청만으로
+   projection을 저장·교체하거나 candidate를 승격하지 않는다. 재사용 저장이 필요하다는 명시적인
+   쓰기 요청이 들어오면 근거 객체 ID와 조립 결과를 `{{PROJECT}}-brain-ingest`로 넘긴다.
 
 ## Common Mistakes
 
 | 실수 | 바로잡기 |
 |---|---|
 | 도메인 질문에 바로 코드 탐색부터 | `project-brain search` 먼저. 폴백은 "brain에 없음" 명시 후 |
-| candidate 적중을 확신처럼 답함 | "확인 필요" 라벨 필수. 사용자 확인 시 promote |
+| candidate 적중을 확신처럼 답함 | "확인 필요" 라벨 필수. 단순 확인은 승격 요청으로 확대하지 않음 |
 | 검색 결과에 없는 사실을 brain 답에 섞음 | brain 출처와 일반 지식을 구분해 말한다 |
 | reviewed니까 "왜 바뀌었는지"도 답함 | `history_coverage=complete` 없으면 이력 질문 차단 |
-| promote 후 바로 재검색 | 색인 재생성(`project-brain index rebuild`) 후에야 status 반영 |
 | 개발 요구사항에 단발 검색 하나로 답함 | 8번 조립 모드 — 분해 질의 3축·원문 열람·5요소. 단 단발이 5요소 채우면 멈춤(과잉 금지) |
-| 조립 끝났는데 재사용 저장 안 함 | 한 기능 수렴+5요소+source 확정이면 candidate projection 저장. 부분/clarifying은 금지 |
-| 재사용 후보를 확신처럼 답함 | "재사용 후보(미검증)" 라벨 필수. 정본 results 적중으로 확인 후 promote |
+| 조회 중 candidate·projection·색인을 바꿈 | 결과와 필요한 변경을 먼저 보고하고 명시적인 쓰기 요청만 ingest 흐름으로 넘김 |
+| 재사용 후보를 확신처럼 답함 | "재사용 후보(미검증)" 라벨 필수. 정본 results 적중으로 확인 |

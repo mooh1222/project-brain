@@ -139,7 +139,7 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `BrainStore.object_path()`가 정하는 모든 kind 디렉터리 | 정상 편집은 `MutationService`의 plan과 `corpus_io` transaction | 검수 상태가 붙은 구조화 지식 정본. `objects/**`뿐 아니라 `raw/manifests/**`, `indexes/context_projections/**`, `indexes/records/**`, `views/**`도 포함 | 원본·근거로 다시 적재할 수는 있지만 파생물로 취급하지 않음 |
 | `brain/raw/sources/**` | 소비 데이터 작업의 사람·설치된 적재 스킬. 엔진 CLI에는 직접 writer가 없음 | 검수 전 원문 정본. `raw/manifests/**`의 EvidenceManifest 객체와 다른 경계 | 원출처에서 다시 확보해야 하므로 index처럼 지우지 않음 |
 | `.brain-local/index.db*` | `index rebuild`, `bootstrap`, 적재 finalizer | 객체와 raw로부터 만든 로컬 파생 색인 | `project-brain index rebuild` |
-| `.brain-local/stale-set.json` | `stale-check --write-cache`, 기본 `audit` | query/show가 읽는 계산 결과 cache | stale-check 또는 audit 재실행 |
+| `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | query/show가 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
 | `.brain-local/sessions/*.json` | `session mark-processed` | transcript 추출 처리 marker. 지식 객체가 아님 | 같은 UUID를 다시 mark하면 덮어씀 |
 | `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
@@ -288,7 +288,7 @@ redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을
 | `build` | 지정한 objects JSON | 없음 |
 | `index rebuild` | 검증 후 원자 교체하는 index DB, `<db>.lock`, 같은 디렉터리의 임시 DB | 없음. 객체·raw를 읽음 |
 | `stale-check --write-cache` | `.brain-local/stale-set.json` | 없음 |
-| `audit` | 기본 실행에서 stale-set cache | 없음. `--no-stale`이면 cache 쓰기와 stale·quote 검사를 생략 |
+| `audit` | 기본 실행은 쓰지 않음. `--write-stale-cache`일 때 stale-set cache | 없음. `--no-stale`이면 stale·quote 검사를 생략 |
 | `session mark-processed` | `.brain-local/sessions/<uuid>.json` | 없음 |
 | `graph export` | 지정한 HTML | 없음 |
 | `context-replace plan` | 지정한 manifest | 없음 |
@@ -299,9 +299,9 @@ redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을
 | `bootstrap` | install 산출물과, 정확히 `<brain_root>/objects` 디렉터리가 있으면 index DB | 객체는 바꾸지 않음. 다른 kind 디렉터리만 존재하는 경우를 “코퍼스 있음”으로 일반화하지 않음 |
 | `doctor --download` | 모델 cache | 없음 |
 
-`audit은 stale-set cache를 쓴다`. 그래서 “점검 명령은 모두 읽기 전용”이라고 묶지 않는다.
-`audit --no-stale-cache-write`는 stale·code quote·symbol 검사를 포함한 전체 판정을 실행하되
-cache만 게시하지 않는다. Git 의존 검사까지 생략하는 `--no-stale`과는 다른 검증 모드다.
+기본 `audit`은 현재 로컬 Git 기준으로 stale·code quote·symbol 검사를 포함한 전체 판정을
+실행하되 fetch나 cache 게시를 하지 않는다. `--fetch`와 `--write-stale-cache`는 각각 원격·cache
+갱신을 명시적으로 켠다. Git 의존 검사까지 생략하는 `--no-stale`과는 다른 검증 모드다.
 기본 `stale-check`·`lint`·`graph isolated`는 객체 코퍼스를 바꾸지 않지만,
 `stale-check --write-cache`, `graph export`, `doctor --download`처럼 옵션이나 하위 명령에 따라
 코퍼스 밖 파일을 쓸 수 있다.
@@ -361,7 +361,8 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 - `lint`는 schema·ID·reference·projection 등 저장소 전체 무결성을 검사한다.
 - `graph isolated`는 registry 기준 인바운드가 없는 기본 잎 kind를 보고하고,
   `graph export`는 같은 edge 정의로 HTML을 만든다.
-- `audit`은 lint, isolated, stale/코드 quote·symbol 상태를 묶고 기본 stale cache를 갱신한다.
+- `audit`은 lint, isolated, stale/코드 quote·symbol 상태를 묶고 기본 실행은 읽기 전용이다.
+  원격·stale cache 갱신은 `--fetch`, `--write-stale-cache`로 각각 명시한다.
 - `eval --check-ids`는 모델 없이 기대 ID 실존을 확인한다. 일반 `eval`은 소비 데이터의 골든셋과
   검색 구현을 사용한다.
 - 설치기는 query, ingest, session-ingest, audit 스킬을 소비 프로젝트에 심는다. ingest 스킬의

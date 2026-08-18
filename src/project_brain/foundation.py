@@ -283,6 +283,7 @@ def foundation_command_specs(
                 "--repo-root",
                 str(repo_root),
                 "--no-fetch",
+                "--write-stale-cache",
             ),
             cwd=str(repo_root),
             env=common_env,
