@@ -41,6 +41,23 @@ brain 객체의 주 소비자는 사람이 아니라 에이전트다. 사용자�
 전체 지도는 코드보다 높은 새 정본이 아니다. 현재 동작은 현재 checkout의 코드·테스트·CLI가
 기준이며, 지도와 다르면 문서 드리프트와 엔진 설계 이탈을 먼저 구분한다.
 
+## Agent skills
+
+### Issue tracker
+
+이 저장소의 spec과 작업 issue는 `mooh1222/project-brain` GitHub Issues에서 관리한다.
+자세한 규칙은 [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)를 본다.
+
+### Triage labels
+
+issue 분류·상태 전이는 Matt triage 기본 라벨을 사용한다.
+역할별 실제 라벨은 [docs/agents/triage-labels.md](docs/agents/triage-labels.md)를 본다.
+
+### Domain docs
+
+이 저장소는 루트 `CONTEXT.md`와 `docs/adr/`를 사용하는 single-context 구조다.
+사용 규칙은 [docs/agents/domain.md](docs/agents/domain.md)를 본다.
+
 ## 개발 루프
 
 ```bash
