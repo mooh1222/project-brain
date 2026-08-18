@@ -527,9 +527,28 @@ def run_finalization(
     else:
         transactions = validate_transaction_results(transaction_results)
     baseline = normalize_baseline(baseline_ids, config["expected_unmerged_locator_ids"])
+    only_no_changes = all(
+        transaction["outcome"] == "no_changes"
+        for transaction in transactions
+    )
+    index_rebuild = (
+        {
+            "ok": True,
+            "exit_code": 0,
+            "payload": {
+                "ok": True,
+                "skipped": True,
+                "reason": "all ingest receipts are no_changes",
+            },
+            "stderr": "",
+        }
+        if only_no_changes
+        else _run_command(
+            runner, ["project-brain", "index", "rebuild"], json_output=True
+        )
+    )
     commands = {
-        "index_rebuild": _run_command(
-            runner, ["project-brain", "index", "rebuild"], json_output=True),
+        "index_rebuild": index_rebuild,
         "lint": _run_command(runner, ["project-brain", "lint"], json_output=True),
         "eval": _run_command(runner, ["project-brain", "eval"], json_output=True),
         "graph_isolated": _run_command(

@@ -1,182 +1,185 @@
 ---
 name: {{PROJECT}}-brain-query
 description: |
-  Use when BB2(LineBubble2) 기능·도메인 질문에 답하기 시작할 때 — "~가 뭐야", "어디에
-  구현돼 있어", "왜 이렇게 동작해/바뀌었어", "이 값 기준이 뭐야" 같은 기능 의미·기획·코드
-  위치·변경 이유 질문, QA 이슈 분석 착수, 기능 개발 착수, 사전 지식 확인,
-  "brain에서 찾아/물어봐". 직접 코드를 뒤지기 전에 Brain을 먼저 조회하는 상황.
-  적재(brain에 넣기)는 {{PROJECT}}-brain-ingest·{{PROJECT}}-brain-session-ingest 몫이고, 이 스킬은 읽기 쪽이다.
+  Use when {{PROJECT}} 기능·도메인 질문에 답하거나 개발·QA 분석을 시작할 때. 기능 의미,
+  구현 위치, 값의 기준, 변경 이유, 사전 지식, "brain에서 찾아" 요청에서는 현재 코드를
+  뒤지기 전에 Brain을 먼저 조회한다. "우리 뭐 하기로 했지", "남은 일", "백로그",
+  "나중에 고치기로 한 것"처럼 합의·대기 작업을 회상하는 질문도 담당한다. Brain 적재와
+  상태 변경은 sibling ingest 스킬로 넘긴다.
 ---
 
-# BB2 Brain 조회 — 검색 먼저, 결과만으로, 없으면 없다
+# {{PROJECT}} Brain 조회 — Brain 먼저, 현재 코드 대조
 
-Brain은 BB2 프로젝트 지식의 단일 저장소다(검수 상태·근거가 붙은 객체 그래프). 이 절차서는
-어시스턴트가 brain을 **쓰는** 쪽 계약이다 — 절차는 얇게, 판단·답변은 검색 결과 위에서만.
+Brain은 검수 상태와 근거가 붙은 프로젝트 지식 저장소다. 사용자는 객체 파일을 직접 읽는 대신
+질문하고, 에이전트가 검색 결과와 현재 소스를 구분해 해석한다. **기본 조회는 읽기 전용**이다.
 
-## 1. 검색 먼저
+## 실행 순서
 
-도메인 질문을 받으면 직접 코드를 뒤지기 전에 먼저:
+### 0. 일반 지식과 백로그 회상을 먼저 나눈다
+
+- 일반 기능·도메인 질문은 1단계부터 기존 Brain 색인만 조회한다.
+- **백로그 회상 질문에서만** 기존 Brain 조회와 함께 다음 비색인 파일을 직접 읽는다.
+  - `{{BRAIN_ROOT}}/pending/insights.md`: 검증 대기 중인 합성 인사이트
+  - `{{BRAIN_ROOT}}/backlog/development.md`: 개발 개선 제안과 나중 할 일
+
+두 파일은 정식 Brain 객체나 raw 원문이 아니며 현재 엔진의 일반 `search`·`query` 결과와
+Project Brain snapshot에 들어가지 않는다. Git 추적 상태를 확인해 보존한다.
+따라서 일반 기능 답변의 근거로 쓰지 않는다. 백로그 회상에서는 정식 DecisionRecord 등도 함께
+조회해, 저장된 결정과 대기 파일을 한쪽만 보고 빠뜨리지 않는다.
+
+`{{BRAIN_ROOT}}` 경로가 상대 경로라면 `.project-brain.json`이 있는 프로젝트 루트를 기준으로 연다.
+임의의 현재 작업 디렉터리 기준으로 해석하지 않는다.
+
+관련 항목마다 다음 네 상태를 원문에 적힌 그대로 보고한다.
+
+- `확정 여부`: 합의된 일인지 제안인지
+- `진행 상태`: 미착수·진행 중·완료 등 기록된 상태
+- `검증 상태`: 확인 완료인지 추가 확인이 필요한지
+- `출처`: 날짜·세션·코드 위치 등 기록된 근거
+
+제안을 확정된 약속으로 바꾸거나, 기록되지 않은 완료 상태를 추측하지 않는다. 파일이 없으면
+`백로그 파일 없음 — 조회 불가`라고 경고하고 설치·추적 상태를 확인한다. 파일은 있지만 항목이
+비어 있을 때만 `등록된 항목 없음`이라고 답한다.
+
+완료 기준: 두 비색인 파일의 존재 여부를 모두 확인하고, 관련 항목마다 확정 여부·진행 상태·
+검증 상태·출처를 빠짐없이 표시한다.
+
+### 1. Brain에서 먼저 찾는다
+
+일반 현재 사실은 다음 명령으로 찾는다.
 
 ```bash
-project-brain search "<질문>"
+project-brain search "<질문>" 2>/dev/null | jq
 ```
 
-일반 현재 회수는 `search`, 시간·왜·언제·이전 값 질문은 라우터의 이력 경로를 쓰는
-`project-brain query "<시간·이력 질문>"`, 특정 객체 본문과 이웃은
-`project-brain show <object_id>`로 구분한다.
+시간·이전 값·변경 이유 질문은 `project-brain query "<시간·이력 질문>"`, 특정 객체의 전체 본문과 이웃은
+`project-brain show <object_id>`를 쓴다. 검색 적중의 식별자 키는 `id`가 아니라 `object_id`다.
 
-- 엔진은 글로벌 도구 `project-brain`(2-레포 분리, 2026-06-11). 미설치면(`which project-brain`이
-  비면) 레포 루트에서 `./{{BRAIN_ROOT}}/install.sh` 한 번 실행 — uv 전제로 엔진 클론·편집 설치·색인을
-  자동화한다. 설치되면 레포 안 어느 디렉토리에서든 실행 가능 — 루트 `.project-brain.json`
-  config가 경로를 해석한다: brain=`{{BRAIN_ROOT}}/`, 색인=`{{BRAIN_ROOT}}/.brain-local/index.db`.
-- "색인 DB가 없다" 에러면 먼저 재생성 후 재시도(실모델 배치 임베딩이라 수십 초 걸리는 게 정상):
-  ```bash
-  project-brain index rebuild
-  ```
-- **출력 읽기**: `project-brain`은 JSON을 stdout으로 내보내고 진행 로그·HF 경고는 stderr로 보낸다 →
-  `project-brain search "<질문>" 2>/dev/null | jq` 로 읽는다(`2>&1`로 합쳐 손파싱하면 키 혼동·잔여줄로 깨짐).
-  search 적중 배열 키는 `.results`(candidates·raw_excerpts·advisories·projection_reuse는 별도 채널), eval 요약은 `.summary`.
-  각 적중 원소의 객체 식별자 키는 `object_id`다(`id` 아님) — promote 등 후속 명령엔 이 값을 넘긴다.
+명령이 없거나 색인이 없거나 오래됐다는 오류가 나오면 환경 문제와 필요한 정비를 먼저 보고한다.
+설치·색인 정비는 파생 파일을 바꾸므로 명시적인 환경 정비 요청에서 처리한다.
+프로젝트 config가 가리키는 Brain 데이터 루트는 `{{BRAIN_ROOT}}/`이며, 경로를 임의로 추측하지 않는다.
 
-## 2. 결과만으로 답한다
+`project-brain`은 JSON을 stdout, 진행 로그와 경고를 stderr로 내보낸다. 둘을 합쳐 손으로
+해석하지 않는다.
 
-- 답의 모든 사실에 근거를 표시한다. 매핑 적중은 동반된 `linked.code_locators`
-  (path:symbol)로 코드 위치까지 핀포인트한다. CodeLocator의 `title`은 display_only이고,
-  `verified_quote`와 함께 의미 근거로 쓰지 않는다. 의미 주장은 적중한 DomainMapping과 접근 가능한
-  EvidenceRef에서 가져온다.
-- CodeLocator quote는 `quote_access=allow`일 때만 표시할 수 있다. `deny` 또는 `indeterminate`면
-  숨기며, allow여도 코드 위치를 보여 주는 보조 표시일 뿐 의미를 새로 증명하지 않는다.
-- **검색 결과에 없는 내용을 brain의 답인 것처럼 섞지 않는다.** 내 일반 지식·이전 세션
-  기억으로 보강한 부분은 brain 출처가 아니라고 구분해 말한다.
+완료 기준: 실행한 질문, 성공·환경 오류, 회수한 객체 ID·채널별 건수를 조회 기록에 남긴다.
 
-## 3. 채널 해석
+### 2. 채널과 검수 상태를 구분한다
 
-| 응답 필드 | 의미 | 답변 처리 |
+| 응답 필드 | 저장 상태 | 답변 처리 |
 |---|---|---|
-| `results` | reviewed(검수됨) 적중 | 확신 답. 근거·코드 위치 동반 |
-| `candidates` | candidate(미검수) 적중 | **"확인 필요" 라벨 필수** — 확신처럼 말하지 않는다 |
-| `raw_excerpts` | 원문 발췌(미검수, 기획서 청크) | 단정 답이 아니라 **발췌 자료**로 취급 — "기획서 원문에 이런 서술이 있다"로 인용. 객체화 안 된 기획 배경·의도 질문은 이 채널이 답 |
-| `advisories` | 가로지르는 위험·교훈(검증됨, reviewed Insight) | 단정 답 아님 — 질의와 가로지르는 위험·교훈을 답에 **참고로 곁들임**(results 확신 답을 대체하지 않음). 답이 그 위험과 맞닿으면 함께 일러준다 |
-| `projection_reuse` | 재사용 후보(미검증, 이전 착수 브리핑) | 단정 답 아님 — **"재사용 후보(미검증)" 라벨 필수**. 확신은 정본 객체(results) 적중으로 확인 |
-| `needs_clarification: true` | 게이트 통과 reviewed 0건 | 아래 4번 — "없다"가 답이거나 질문을 좁힌다 (raw 발췌만 있으면 발췌 인용+"검수된 답 없음" 명시) |
+| `results` | reviewed 객체 | 검수된 저장 내용. 현재 코드 주장이라면 4단계 대조 뒤 사용 |
+| `candidates` | candidate 객체 | `확인 필요`로 표시 |
+| `raw_excerpts` | 원문 발췌, 미검수 | 원문에 그런 서술이 있다고만 설명 |
+| `advisories` | reviewed Insight | 가로지르는 위험·교훈으로 곁들임 |
+| `projection_reuse` | 이전 착수 브리핑 | status에 따라 검증됨/미검증을 표시하되 정본 객체를 대신하지 않음 |
+| `needs_clarification: true` | 게이트 통과 reviewed 0건 | 재검색 후 Brain 부재 또는 질문 모호성으로 분류 |
 
-search는 superseded 객체나 supersedes 사슬을 확장하지 않는다. DomainMapping 변경 이유는 query가
-질의와 연결된 reviewed DecisionRecord를 회수할 때 답할 수 있다. TemporalFact의 이전 값은 reviewed
-EventLedgerRecord에서 파생된 새 fact의 supersedes 사슬과, `valid_until`로 닫힌 옛 reviewed fact가
-함께 있을 때 query의 이력 결과에 나타난다.
+검색 게이트 통과는 관련성이 낮은 후보를 줄였다는 뜻이다. 현재 코드와의 일치, 답변의 완전성,
+사용자에게 실제로 유용한지는 별도로 확인한다.
 
-## 4. 없으면 "brain에 없다"를 명시한 뒤 폴백
+완료 기준: 답변에 쓸 각 적중의 채널과 reviewed·candidate·raw 상태를 빠짐없이 표시한다.
 
-- 적중이 없거나 빈약하면 **"brain에 없음 — 코드에서 직접 확인"** 한 줄을 박고 직접
-  코드 탐색으로 넘어간다.
-- 금지는 폴백이 아니라 **"brain에 있는 척"**이다. brain이 답하지 못한 질문을 brain이
-  답한 것처럼 포장하지 않는다.
-- 질문이 모호해서 못 찾은 것 같으면 사용자에게 좁히기 질문을 먼저 한다.
+### 3. 핵심 객체의 본문과 근거를 연다
 
-## 5. 사용 시점 승격 (C 루프)
+검색 surface는 본문이 잘릴 수 있다. 핵심 `DomainMapping`은 `show`로 열어 `meaning`, `boundary`,
+`caveats`, 연결된 용어·결정·근거를 확인한다.
 
-candidate를 근거로 답했는데 사용자가 "맞다"고 확인하면, 그 자리에서 승격한다:
+- 의미 주장은 DomainMapping과 접근 가능한 EvidenceRef에서 가져온다.
+- CodeLocator의 `title`은 `display_only`(표시 전용)이며 의미 근거로 쓰지 않는다.
+- `linked.code_locators`의 path·symbol은 현재 코드 확인을 시작할 위치다.
+- `verified_quote`는 코드 위치를 보조할 뿐 의미 근거로 쓰지 않으며 매핑 의미를 새로 증명하지 않는다.
+- quote는 `quote_access=allow`일 때만 보여 준다. `deny`와 `indeterminate`에서는 숨긴다.
 
-```bash
-project-brain promote --ids <candidate id> \
-  --reviewer user-confirmed --reviewed-at <ISO8601>
-```
+완료 기준: 핵심 객체 ID와 사용한 EvidenceRef·CodeLocator 목록, 근거가 비어 있는 항목을 기록한다.
 
-- 조회와 한 흐름이라 이 스킬에 둔다. **일괄 승격(`promote-auto`)은 적재 스킬
-  ({{PROJECT}}-brain-ingest) 몫** — 여기서 돌리지 않는다.
-- 승격 후 색인 재생성(`project-brain index rebuild`)까지 해야 다음 검색에 status
-  변화가 반영된다.
+### 4. 현재 checkout과 대조한다
 
-## 6. 이력 질문 가드
+코드로 확인 가능한 현재 동작·위치·시그니처는 현재 checkout에서 다시 확인한다. 프로젝트
+`AGENTS.md`가 정한 코드 탐색·호출처 검증 절차를 사용하고, 저장된 path·symbol을 시작점으로 삼는다.
 
-"왜 바뀌었어/그때는 어땠어" 질문인데 적중 매핑의 `caveats`에 `history_coverage=complete`가
-없으면 "변경 이력 미적재"로 답한다 — 현재 사실(meaning/value/boundary)과 변경 이력은
-다른 축이다(적재 스킬과 같은 규칙을 회상 쪽에서도 지킨다).
+`search` 결과에는 stale cache가 붙지 않는다. `query`와 매핑 대상 `show`에
+`stale_advisory`가 있을 수 있지만, 경고가 없다는 사실만으로 현재 코드와 같다고 판정하지 않는다.
 
-## 7. scope 자동 추론이 배선돼 있다 (P2 3번, 2026-06-10)
+다음 세 축은 독립적으로 읽는다.
 
-질의가 기능명을 단일하게 특정하면(컨텍스트 표면의 내용 토큰이 전부
-질의에 포함 — 예: "샐리의 카누 보상") 그 컨텍스트로 하드 필터가
-자동으로 걸린다. 기능 언급이 없거나 여러 기능을 같이 언급하면 필터
-없이 전체 검색(연관도 가중만). 다른 기능 객체가 섞여 보이면 질의에
-기능명을 정확히 넣어 재검색하고, 그래도 섞이면 결과의 context_id로
-수동 필터해서 답한다.
+- `stale`: 저장된 앵커 뒤 코드가 바뀌었는가
+- `code_quote=missing`: 옛 객체에 자동 재검증할 인용문이 없는가
+- `quote_access`: 저장된 인용문을 현재 답변에 보여도 되는가
 
-## 8. 개발 착수 요구사항 — 조립 모드
+옛 인용문 누락은 `적재 당시 검토됐지만 현재 저장 정보만으로 기계 재검증하기 어려움`을 뜻한다.
+처음부터 검토되지 않았다는 뜻으로 바꾸지 않는다.
 
-단일 질문("X가 뭐야")이 아니라 **개발 요구사항**(기능 추가/수정 착수)을 받으면, 단발 검색으로
-끝내지 말고 착수 컨텍스트를 조립한다. 목표 = 코드 뒤지기 전에 "어디를 만지고 무엇을 알아야
-하는지"를 brain만으로 묶어내기.
+완료 기준: 코드로 확인 가능한 주장마다 확인한 path·symbol과 일치 결과를 남기고,
+불일치·미확인 목록에는 이유를 붙인다.
 
-0. **재사용 후보 먼저 확인** — `project-brain search`로 요구를 질의하면 출력의
-   `projection_reuse` 채널("재사용 후보(미검증)")에 이전 착수 브리핑이 잡힐 수 있다.
-   후보가 이번 요구와 맞으면(범위·5요소) 그 payload를 토대로 빈 곳만 보강하고 2~4단계
-   전체 조립은 생략한다. 없거나 낡았거나 범위가 어긋나면 1~5단계로 새로 조립한다.
-   후보는 항상 "확인 필요"로 다루고, 확신은 정본 객체(results) 적중으로 확인한다.
+### 5. 한 번 재검색하고 실패 원인을 분류한다
 
-1. **도메인 특정** — 요구에서 기능·개념 단위 컨텍스트 후보를 집는다.
-2. **분해 질의 (최소 3축)** — 한 번에 안 나온다. 구조·표시("X 팝업·화면 구조"), 데이터
-   ("X 데이터 모델·출처"), 흐름·결정("X 흐름·분기·이력")을 각각 질의한다. 각 질의는 **도메인
-   용어로 바꿔 1회 재시도**(자연어 단어가 도메인 용어와 어긋나면 미스 — 예: "경주"→"레이스").
-   식별자를 알면 클래스명 직격(가장 정확). 1차가 미스/`needs_clarification`이어도, 같은
-   컨텍스트의 인접 객체는 대개 회수되니 그 표면에서 도메인 용어를 얻어 재질의한다 — **변형
-   재시도는 의무**(없다 단정은 재시도 후).
-3. **적중 객체 원문 열람** — 검색 surface는 잘린다. 핵심 매핑은 `project-brain show <object_id>`로
-   객체 본문(meaning·boundary·caveats)과 연결된 이웃(코드 위치·용어·결정·근거)을 종류·제목과 함께 펼쳐 읽는다(JSON 파일 직접 열기 대체).
-4. **5요소로 조립** — (1) 데이터 출처(어느 모델/테이블이 무엇을) (2) 구조·표시 패턴
-   (재사용 후보 포함) (3) 확장 지점(신규/수정 시 만지는 곳) (4) 기존 규칙·함정(보정·타이밍·
-   컨벤션) (5) 과거 결정(왜 이 구조). 각 사실에 근거(객체 id) 표기.
-5. **없는 것 명시** — "brain에 없음" 목록(신규 UI 배치·미적재 시그니처 등. 기존 4번 계약 그대로).
+첫 검색이 비거나 빈약하면 현재 코드에서 확인한 실제 도메인 용어·클래스명으로 한 번만 다시
+검색한다. 재검색 뒤 다음 중 하나로 분류한다.
 
-**과잉 금지**: 단발/소수 질의가 5요소를 이미 채우면 거기서 멈춘다. 잘 적재된 도메인(확장 지점을
-한 매핑에 모아둔 경우 등)은 분해 질의가 불필요할 수 있다 — 기준은 5요소가 차는지이지 질의 횟수가
-아니다.
+- `일치`: Brain 내용과 현재 코드가 맞음
+- `코드와 불일치`: stale 또는 잘못된 지식 후보
+- `검색 표현 문제`: 다른 도메인 용어·식별자로는 회수됨
+- `적재 누락`: 현재 코드에는 있는데 관련 Brain 객체가 회수되지 않음
+- `실제 입력 검증 전`: DB·맵·운영 입력이 없어 동적 동작을 확인하지 못함
 
-6. **재사용 저장(조건 충족 시에만)** — 조립이 (가) 한 기능(context)으로 수렴 (나) 5요소를 다 채움
-   (다) 구성 객체 id가 확정된 경우에만, candidate projection으로 저장한다.
-   **수작업 JSON 작성 금지** — 반드시 아래 CLI를 사용한다(hash·source_content_hash·projection_hash는
-   엔진이 계산하므로 직접 기입하면 틀린다):
+첫 검색이 빗나갔다는 이유만으로 곧바로 `Brain에 없다`고 단정하지 않는다. 재검색 뒤에도 없으면
+`Brain에 없음 — 현재 코드에서 직접 확인`이라고 출처 경계를 명시한다.
+Brain과 현재 코드 어느 쪽에서도 근거를 찾지 못하면 다섯 판정을 억지로 고르지 말고, 확인 범위를
+`Brain에서 못 찾은 내용`에 적은 뒤 질문을 좁힌다.
 
-   ```bash
-   # payload를 파일로 먼저 저장한 뒤 CLI에 넘긴다
-   project-brain projection build-reuse \
-     --context-id <context_id> \
-     --requirement-key <requirement_key> \
-     --source-object-ids <id1> <id2> ... \
-     --title "<브리핑 제목>" \
-     --payload-file <payload.json 경로> \
-     --generated-by query-skill \
-     --write
-   ```
+완료 기준: 재검색 여부와 사용한 질의를 기록하고, 근거가 있으면 위 다섯 판정 중 하나를 확정한다.
 
-   - `--write` 없이 실행하면 저장 없이 미리보기만 출력된다(조건 점검 용도).
-   - 같은 `context_id + requirement_key`로 이미 저장된 projection이 있으면 `--replace`를 추가해야
-     교체된다(없으면 CLI가 거부하고 종료).
-   - 단 기존 projection이 **reviewed면 `--replace`로도 교체되지 않는다**(정책: 재검증 강제). reviewed
-     브리핑이 낡았으면 같은 id 재생성이 아니라 1~5단계로 **새로 조립**한다(새 candidate). 갱신 메커니즘은
-     후속 과제(스펙 2026-06-17 projection-reuse §7).
-   - 저장 성공 후 반드시 색인을 재생성한다:
-     ```bash
-     project-brain index rebuild
-     ```
-   - 구성 객체(`source_object_ids`)가 바뀌면 rebuild가 자동으로 그 projection을 색인에서 뺀다(낡음).
-   - 부분 조립·needs_clarification 단계에선 저장하지 않는다.
+### 6. 같은 형식으로 답한다
 
-7. **사용 시점 승격** — 0단계에서 회수한 재사용 후보가 이번 요구에 실제로 맞았으면 reviewed로
-   promote한다(`project-brain promote` — 범용 승격기라 ContextProjection도 그대로 승격되며,
-   낡은 candidate는 lint 단계에서 거부된다). reviewed가 돼도 projection은 정본 results가 아니라
-   projection_reuse 채널로만 노출되고(채널 이동 없음), 라벨만 "재사용 후보(미검증)"→"재사용
-   브리핑(검증됨)"으로 바뀐다. 어긋났으면 promote하지 않는다.
+필요한 항목만 골라 다음 순서를 유지한다.
 
-## Common Mistakes
+- **Brain에서 찾은 내용** — 객체 ID, 검수 상태, 근거
+- **현재 코드에서 확인한 내용** — 현재 checkout의 path·symbol과 실제 동작
+- **Brain에서 못 찾은 내용** — 적재 누락 또는 확인 불가 범위
+- **판정** — 근거가 있으면 일치, 코드와 불일치, 검색 표현 문제, 적재 누락, 실제 입력 검증 전 중
+  하나. 어느 쪽에도 근거가 없으면 확인 범위와 다음에 좁힐 질문
+
+Brain에 없는 일반 지식이나 이전 세션 기억을 보강하면 Brain 출처가 아니라고 분리한다.
+
+## 이력 질문
+
+현재 사실과 변경 이력은 별도 축이다. 적중 매핑의 `caveats`에
+`history_coverage=complete`가 없으면 변경 이유를 완결된 답으로 말하지 않고 `변경 이력 미적재`로
+표시한다. superseded 객체는 일반 search가 자동 확장하지 않으므로 이력 질문은 query 결과의
+DecisionRecord·EventLedgerRecord·TemporalFact 사슬을 따른다.
+
+## 개발 착수 조립
+
+기능 추가·수정 착수라면 Brain을 구조·표시, 데이터, 흐름·결정 세 축으로 나눠 조회하고 핵심 객체를
+`show`로 연다. 그 뒤 현재 코드와 대조해 다음 다섯 요소를 조립한다.
+
+1. 데이터 출처
+2. 구조·표시 패턴
+3. 확장 지점
+4. 기존 규칙·함정
+5. 과거 결정과 확인된 이력 범위
+
+단발 조회로 다섯 요소가 채워지면 추가 검색을 늘리지 않는다. 없는 요소는 Brain 부재와 코드 확인
+결과를 구분해 적는다.
+
+## 쓰기 경계
+
+candidate 승격, 재사용 브리핑 저장·교체, 색인 정비는 **명시적인 쓰기 요청**에서만 수행한다.
+사용자가 저장이나 갱신을 요청하면 candidate·projection 변경은 `{{PROJECT}}-brain-ingest` 또는
+`{{PROJECT}}-brain-session-ingest`로 넘겨 근거·coverage·완료 게이트를 적용한다. 단순한 확인 응답은
+쓰기 승인으로 확대하지 않는다.
+
+## Common mistakes
 
 | 실수 | 바로잡기 |
 |---|---|
-| 도메인 질문에 바로 코드 탐색부터 | `project-brain search` 먼저. 폴백은 "brain에 없음" 명시 후 |
-| candidate 적중을 확신처럼 답함 | "확인 필요" 라벨 필수. 사용자 확인 시 promote |
-| 검색 결과에 없는 사실을 brain 답에 섞음 | brain 출처와 일반 지식을 구분해 말한다 |
-| reviewed니까 "왜 바뀌었는지"도 답함 | `history_coverage=complete` 없으면 이력 질문 차단 |
-| promote 후 바로 재검색 | 색인 재생성(`project-brain index rebuild`) 후에야 status 반영 |
-| 개발 요구사항에 단발 검색 하나로 답함 | 8번 조립 모드 — 분해 질의 3축·원문 열람·5요소. 단 단발이 5요소 채우면 멈춤(과잉 금지) |
-| 조립 끝났는데 재사용 저장 안 함 | 한 기능 수렴+5요소+source 확정이면 candidate projection 저장. 부분/clarifying은 금지 |
-| 재사용 후보를 확신처럼 답함 | "재사용 후보(미검증)" 라벨 필수. 정본 results 적중으로 확인 후 promote |
+| Brain을 건너뛰고 코드부터 탐색 | Brain 먼저 조회한 뒤 현재 코드 대조 |
+| reviewed 적중을 현재 사실로 바로 단정 | 저장 검수와 현재 checkout 일치를 분리 |
+| 첫 검색 실패를 적재 부재로 단정 | 실제 용어·식별자로 한 번 재검색 후 실패 유형 분류 |
+| stale 경고가 없으니 최신이라고 단정 | 현재 checkout에서 별도 확인 |
+| quote 누락을 미검수로 표현 | 옛 자동 재검증 부채로 설명 |
+| 조회 중 candidate나 projection을 자동 변경 | 명시적인 쓰기 요청을 sibling ingest 스킬로 라우팅 |
+| 일반 기능 질문에서 대기 파일까지 읽음 | 백로그 회상 질문에서만 두 비색인 파일을 직접 확인 |
+| 개선 제안을 확정된 할 일로 답함 | 확정 여부·진행 상태·검증 상태·출처를 분리해 원문대로 보고 |

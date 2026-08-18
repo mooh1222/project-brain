@@ -135,7 +135,8 @@ Insight는 단일 객체의 재진술이 아니라 여러 객체·구현·결정
 - `scope`는 적용 범위이며, `code_locator_ids`는 선택 코드 앵커다.
 - `source_object_ids`는 내용을 뒷받침하는 기존 객체이고 `evidence_refs`는 진술 출처다. 둘을 바꾸어 쓰지 않는다.
 - 사용자 진술이 출처면 approved session EvidenceManifest와 session_turn EvidenceRef를 연결한다.
-- source 또는 code locator dangling은 lint가 막는다. 먼저 근거 객체를 적재하지 못하면 backlog에 둔다.
+- source 또는 code locator dangling은 lint가 막는다. 먼저 근거 객체를 적재하지 못하면
+  `{{BRAIN_ROOT}}/pending/insights.md`에 검증 대기로 둔다.
 - 저장 뒤 Insight는 일반 results가 아니라 `advisories` 회상 통로에 나온다.
 
 ## 논리 key
@@ -168,6 +169,11 @@ code anchor 입력은 `key`, `path`, `symbol`, `quote`만 전달한다. `title`�
 repo/commit/blob/symbol/quote를 확인한 뒤 최종 CodeLocator에 기록한다. 숨은 fallback이나
 일반 quote 우회 flag는 두지 않는다. 기준 코드의 심볼과 {{DEFAULT_BRANCH}} 이력에서 도달 가능한
 commit SHA는 별도 코드 앵커 정보로 남긴다.
+
+좌표가 그대로인 옛 CodeLocator에 `verified_quote`가 없거나 축약 commit SHA가 남아 있을 수 있다.
+이는 적재 당시 검토됐지만 현재 저장 정보만으로 기계적으로 다시 대조하기 어려운 legacy 부채다.
+처음부터 검토되지 않았다는 뜻이 아니다. 과거 객체를 읽고 좌표 불변 상태로 보존하는 경계일 뿐,
+새 locator·좌표 변경·`mark-checked`에는 full commit SHA와 실제 symbol·quote 검증을 그대로 요구한다.
 
 ## 완성 ID와의 차이
 

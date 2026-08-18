@@ -41,6 +41,8 @@
    통과했다. post-gate에서 정상 index/audit derived 출력만 허용됐고 action object 변경이나
    알 수 없는 object 추가는 없었다. config/실행 상태 오류는 traceback이 아니라
    `ok=false` 또는 `finalized=false` JSON으로 남았다.
+   모든 receipt가 `outcome=no_changes`면 `commands.index_rebuild.payload.skipped=true`와 명시적인
+   reason이 있고 실제 rebuild는 호출되지 않았다. 그 경우에도 나머지 semantic gate는 모두 통과했다.
    post head == baseline head이고, post unmerged는 baseline union expected와 일치한다. legacy
    baseline은 그 제한을 그대로 적용하며, 사용할 수 없는 감사 상태를 만들어 내지 않는다.
    직접 단건은 config 선행검사와 적재 전 baseline을 확인한다.

@@ -10,6 +10,31 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-08-13 — 미검증 합성 내용과 개발 백로그를 일반 검색에서 분리
+
+session-ingest는 실제 원문만 raw에 두고, 에이전트가 만든 미검증 합성 분석은
+`brain/pending/insights.md`, 개발 개선 제안은 `brain/backlog/development.md`에 기록한다. 두 경로는
+색인 밖이므로 변경해도 rebuild하지 않는다. query는 일반 기능 질문에서 이 파일들을 읽지 않고,
+"우리 뭐 하기로 했지" 같은 백로그 회상 질문에서만 직접 읽어 확정·진행·검증·출처 상태를 나눠
+답한다. 과거 `raw/sources/insights/backlog.md` 운영은 퇴역했다.
+
+## 2026-08-12 — 현재 엔진 기준 조회·감사·적재 안전 계약 정리
+
+query는 Brain을 먼저 조회한 뒤 현재 checkout과 대조하고, 재검색 후 `일치`·`코드와 불일치`·
+`검색 표현 문제`·`적재 누락`·`실제 입력 검증 전`을 구분한다. 단순 조회는 읽기 전용이며 candidate
+승격, projection 저장, 색인 정비를 자동 실행하지 않는다. audit도 fetch와 stale cache 쓰기를 끈
+진단을 기본으로 삼고 checked·skipped·failures와 실사용 품질 관문을 분리해 먼저 보고한다.
+
+ingest assembler는 검증 결과에 명시적인 `pass|fixed` verdict와 verified atoms를 요구한다.
+누락·`needs_user`·실패를 extract 결과로 대체하던 폴백은 제거했고, `pass`는 추출 원자와 정확히
+같아야 한다. 새 코드 앵커는 full SHA를 쓰며, 옛 quote 누락은 당시 검토 이력과 현재 기계 재검증
+가능성을 구분한다. 모든 receipt가 no-op이면 finalizer는 색인 재생성만 건너뛰고 나머지 완료
+관문은 그대로 실행한다. 과거 Task 18 착수 금지 문구는 현재 코드·ROADMAP 우선 규칙으로 교체했다.
+
+모든 쓰기 절차는 승인 경로만 stage하고, broad add/commit과 기존 사용자 변경의 자동 commit·stash를
+금지한다. session-ingest는 코드로 확인 가능한 사실을 사용자 진술만으로 reviewed 처리하지 않으며,
+처리 완료 표시는 exact receipt, zero failures, `finalization.ok=true` 뒤에만 한다.
+
 ## 2026-07-23 — 코드 앵커 SHA 머지 규칙 정정
 
 커밋 SHA는 머지로 바뀌지 않으며, fast-forward와 일반 merge에서는 작업 브랜치 커밋이

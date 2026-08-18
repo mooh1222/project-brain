@@ -37,7 +37,7 @@
   논리 key만, 실제 id 아님) / `uncertainty`(코드로 안 잡히는 의도 — 예외 큐로) / `overlap_with_existing`.
 - **메인(부모) = 결정론적 조립 = `project-brain build`.** 추출 노트를 build 노트(JSON: context/
   sources/glossary/code_anchors/mappings/refs/updates/extra_objects)로 정리해 `project-brain build
-  --notes notes.json --objects-file out.json`을 돌리면 id 파생·객체 간 연결(노트의 논리 key → 실제
+  --notes notes.json --coverage-file coverage.json --objects-file out.json`을 돌리면 id 파생·객체 간 연결(노트의 논리 key → 실제
   id)·기존 용어 재사용(refs/updates)·EvidenceManifest 부여·끊긴 참조 검사·diff를 **엔진이** 한다
   (2026-06-16, `ingest-tools.md` "build" 절). **더는 적재마다 손으로 조립 스크립트를 짜지 않는다.**
   build로 표현 못 하는 것(1차 기준: DecisionRecord 조립, session 등 비-code EvidenceRef)만

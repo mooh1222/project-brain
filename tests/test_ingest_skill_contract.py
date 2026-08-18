@@ -321,9 +321,10 @@ class IngestSkillContractTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
 
         for text in (canonical, installed):
-            intro = text[:text.index("## 언제")]
+            intro = text[:text.index("## 기본 실행")]
             self.assertIn("세 건강 신호", intro)
             self.assertIn("별도의 정확한 코드 인용 검증", intro)
+            self.assertNotIn("## 언제", text)
             start = text.index("project-brain audit --no-stale")
             end = text.index("## 세 신호 읽기", start)
             gitless = text[start:end]

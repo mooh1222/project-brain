@@ -127,6 +127,18 @@ class IterRawSourcesTest(unittest.TestCase):
             chunks = iter_raw_sources(brain)
         self.assertEqual([c["chunk_id"] for c in chunks], ["raw.foo-ctx.spec#000"])
 
+    def test_pending_insights_and_development_backlog_are_not_raw_sources(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            pending = brain / "pending" / "insights.md"
+            backlog = brain / "backlog" / "development.md"
+            pending.parent.mkdir(parents=True)
+            backlog.parent.mkdir(parents=True)
+            pending.write_text("# 검증 대기 인사이트\n후보 내용\n", encoding="utf-8")
+            backlog.write_text("# 개발 개선 백로그\n개선 제안\n", encoding="utf-8")
+
+            self.assertEqual(iter_raw_sources(brain), [])
+
 
 if __name__ == "__main__":
     unittest.main()

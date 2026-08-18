@@ -129,7 +129,7 @@ from pathlib import Path
 promoted, reviews = promote(
     objects, ids=[...승격할 mapping id들...], scope="mapping_bundle",
     bundle_key="bundle.<도메인>.domain-mapping",
-    reviewer="user-confirmed", reviewed_at="2026-06-04T00:00:00Z",
+    reviewer="user-confirmed", reviewed_at="<실제 검토 시각 ISO8601>",
 )
 objects = promoted + reviews
 coverage = normalize_coverage({
@@ -240,8 +240,10 @@ reviewed 매핑이 참조하는 candidate **용어**는, 배치 커버리지 검
 project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8601>]
 ```
 
-★돌리기 전 **커밋 먼저** — 많은 객체를 한 번에 바꾸는 파괴적 작업이므로 되돌릴 기준
-커밋을 만든 뒤 실행한다(2026-06-09 부분 쓰기 사고 교훈, {{BRAIN_ROOT}}/README.md 규약)★.
+실행 전 `git status --short`를 기록한다. 복구 기준 커밋이 필요하면 승인된 경로만 명시적으로
+stage·commit하고 `git add -A`, `git add .`, `git commit -a`는 쓰지 않는다. 기존 사용자 변경과
+대상 경로가 겹치면 자동 commit·stash하지 않고 중단해 겹친 범위를 보고한다. 현재의 깨끗한 HEAD를
+복구 기준으로 쓸 수 있으면 불필요한 커밋을 만들지 않는다(2026-06-09 부분 쓰기 사고 교훈).
 
 ## 조립·적재 스크립트 (scripts/)
 
@@ -356,7 +358,10 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    `new_ids`, `resolved_ids`, `missing_expected_ids`, `unexpected_new_ids`, `current_target_head`는 `null`이다.
    이때 `errors`의 audit/stale 오류를 확인해 Git 문제를 고친 뒤 같은 baseline으로 다시 실행한다.
 
-5. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
+5. verify는 그룹마다 `verdict=pass|fixed`와 `corrected_atoms` 배열을 명시한다. `pass`는
+   `extract.atoms`와 정확히 같아야 하고, `fixed`는 검증자가 확정한 배열이다. verdict·배열 누락이나
+   `needs_user`는 조립 실패다. 이미 확인된 의미 보정은 domain_spec.CORRECTIONS(선언적)로,
+   진짜 novel만 HOOK으로 처리한다. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록한다.
 
 채운 예(형태): 14결정·{groups} 래핑형 / 0결정·list형(CORRECTIONS 사용). 변칙 누적은 `references/ingest-case-log.md` 참고.
 
@@ -386,6 +391,9 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
    index rebuild는 잠금으로 동시 실행을 막고, 임시 파일에 완성본을 만든 뒤 유효성을 검사하고
    원자적으로 교체한다. 교체 뒤 내구성 확인까지 끝나야 완료다. 교체 뒤 내구성 실패는 새 색인이
    보이더라도 성공으로 숨기지 말고 `committed` 상태와 함께 보고한다.
+   모든 authoritative receipt가 `outcome=no_changes`면 finalizer는 실제 rebuild를 호출하지 않고
+   `commands.index_rebuild.payload.skipped=true`, reason=`all ingest receipts are no_changes`를 남긴다.
+   lint·eval·실코퍼스 가드·audit·회상·고립 관문은 그대로 실행한다.
 3. **골든셋 회귀 + 실코퍼스 가드** — 새 적재가 기존 회상을 깨뜨리지 않았는지(기능마다
    골든셋 시나리오를 늘려가는 게 P2 방침). 객체 색인 행은 가드가 디스크의 색인 대상 kind
    `.json` 수를 세서 `indexed - raw_chunks`와 자동 대조하니 손으로 갱신하지 않는다
@@ -425,32 +433,6 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
 | ContextProjection | `format=prompt_payload`이고 fresh일 때만 색인(아니면 제외) |
 
 조회 쪽 계약(결과 해석·채널 라벨·사용 시점 promote)은 `{{PROJECT}}-brain-query` 스킬이 정본이다.
-
-## P0 foundation gate — 일반 적재 finalizer와 별개
-
-설치되는 `scripts/validate_foundation.py`는 P0 완료를 판정하기 위한 명시적 운영 경계다. 평소
-ingest 뒤 자동으로 실행되는 finalizer가 아니며, semantic finalizer나 `index rebuild`를 호출하지
-않는다. Task 15에서 clean BB2 checkout과 고정 artifact 디렉터리를 준비한 뒤 다음 순서로만 쓴다.
-
-1. `baseline`이 engine·BB2 HEAD와 dirt, objects/raw, index DB·meta, stale cache, 설치 manifest,
-   artifact 상태를 고정하고 자기 SHA에 결속된 receipt를 만든다.
-2. 같은 target에 installer를 두 번 실행한다. 첫 report는 설치된 관리 파일과 control file을
-   target-relative POSIX 경로로 기록하고, 두 번째 report의 `created/updated/removed/adopted/skipped`
-   다섯 배열은 모두 비어 있어야 한다.
-3. `verify`가 installed runtime unittest → BB2 checks → lint → `audit --no-fetch` → eval → 임시
-   디렉터리 coverage build dry smoke의 고정 6개 command를 순서대로 실행한다. 각 command 전후
-   상태는 baseline과 같아야 하며 audit이 만든 stale cache 변화만 허용한다. coverage smoke 출력은
-   임시 디렉터리에만 쓴다.
-4. 성공한 gate receipt는 제공받은 baseline receipt의 SHA와 시작·종료 상태를 결속한다. 입력
-   receipt가 바뀌었으면 현재 파일을 다시 해시해 새 기준처럼 받아들이지 않고 실패한다.
-5. `handoff`는 기존 snapshot create/verify receipt의 CLI schema와 snapshot manifest를 대조하고,
-   독립 `snapshot verify`를 정확히 한 번 다시 실행한다. snapshot과 전체 artifact를 게시 전과 게시
-   후 두 번 더 확인한 뒤 canonical handoff receipt를 배타적으로 만든다. 경쟁자가 같은 경로를
-   선점하거나 바꾼 파일은 삭제하지 않는다.
-
-이 snapshot은 P0 foundation 상태의 복구·인계 증거일 뿐 Task 18 migration binding이 아니다.
-실제 BB2 객체나 raw corpus 수정, Task 18 label/quote debt migration은 P0 기준이 모두 통과하고 새
-binding으로 부채를 다시 측정하기 전에는 시작하지 않는다.
 
 ## 설치 범위
 
