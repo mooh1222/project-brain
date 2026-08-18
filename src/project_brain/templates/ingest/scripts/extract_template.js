@@ -1,6 +1,7 @@
 // 적재 추출 템플릿(채워넣기 골격). 고정 코드 아님 — 적재마다 GROUPS/프롬프트 슬롯을 채운다.
-// 출력: [{group, title, extract:{atoms}, verify:{corrected_atoms}}] (assemble_notes가 읽는 형태).
-// CASE: verify가 corrected_atoms를 비워 반환할 수 있음 → 빈배열 폴백 방어(assemble_notes가 extract.atoms로 폴백). (근거: main-map 2026-06-25)
+// 출력: [{group, title, extract:{atoms}, verify:{verdict, corrected_atoms}}] (assemble_notes가 읽는 형태).
+// verify 예시: { verdict: "pass", corrected_atoms: [] }. pass는 extract와 exact 같고,
+// fixed는 검증자가 보정한 배열이다. 누락·needs_user·실패는 assemble 단계에서 거부한다.
 
 // 스키마 4종(추출 atom이 따라야 할 형태) — 프롬프트에 그대로 넣는다.
 const SCHEMAS = {
@@ -23,10 +24,10 @@ async function runGroup(group) {
   const extract = await llmExtract(extractPrompt);          // TODO: 추출 호출 슬롯
   const verifyPrompt = `/* TODO: 위 atoms를 코드 대조로 반박·보정 */`;
   const verify = await llmVerify(verifyPrompt, extract);    // TODO: 검증 호출 슬롯
-  // CASE 폴백 방어: verify가 비면 corrected_atoms를 비워 두고 assemble_notes가 extract.atoms로 폴백.
   return { group: group.name, title: group.focus,
            extract: { atoms: (extract && extract.atoms) || [] },
-           verify: { corrected_atoms: (verify && verify.corrected_atoms) || [] } };
+           verify: { verdict: verify && verify.verdict,
+                     corrected_atoms: verify && verify.corrected_atoms } };
 }
 
 async function main() {
