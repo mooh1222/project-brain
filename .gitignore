@@ -8,3 +8,5 @@ __pycache__/
 # 세션 대화 스냅샷 (session-snapshot 스킬 산출물, 로컬 전용)
 .snapshots/
 .worktrees/
+# 영상·문서 분석 도구가 만드는 로컬 출력
+/va-out/
