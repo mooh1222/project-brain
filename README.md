@@ -84,13 +84,16 @@ project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 �
 project-brain graph export out.html      # 코퍼스 불변, 지정한 HTML 파일은 씀
 project-brain lint                       # 끊긴 참조 등 무결성 점검 (코퍼스 불변)
 project-brain stale-check                # 코드 변경 후보. --write-cache는 stale-set cache를 씀
-project-brain audit                      # lint+isolated+stale·quote 감사. 기본 stale-set cache 갱신
+project-brain audit                      # lint+isolated+stale·quote 읽기 전용 감사
+project-brain audit --fetch --write-stale-cache  # 명시적으로 원격·stale cache 갱신
 project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매핑의 commit_sha 갱신
 ```
 
 **점검·진단의 쓰기 경계:** `lint`, `graph isolated`, 기본 `stale-check`는 코퍼스 객체를
 바꾸지 않는다. `stale-check --write-cache`는 `.brain-local/stale-set.json`을 쓰고,
-`audit`은 기본 stale 검사 결과를 같은 cache에 쓰며 `--no-stale`이면 그 단계를 생략한다.
+`audit`은 기본적으로 현재 로컬 Git 기준 검사만 하고 cache를 쓰지 않는다. 원격과 stale cache를
+갱신하려면 `--fetch --write-stale-cache`를 명시한다. `--no-stale`은 Git 기반 stale·quote 검사를
+함께 생략한다.
 `graph export`는 코퍼스는 안 바꾸지만 지정한 HTML을 쓰고, `doctor --download`는 모델 cache를
 채운다. `mark-checked`는 stale 해소를 위해 CodeLocator를 실제로 갱신하는 mutation이다.
 `stale-check`은 미머지 앵커를 변경과 별개로 `unmerged_anchors`에 라벨하며, cache는
