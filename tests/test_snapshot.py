@@ -872,6 +872,8 @@ def test_verify_snapshot_rejects_non_exact_git_head(tmp_path, field):
 
 def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
     request, paths = _snapshot_fixture(tmp_path)
+    _write(request.brain_root / "pending" / "insights.md", b"pending synthesis\n")
+    _write(request.brain_root / "backlog" / "development.md", b"development backlog\n")
 
     result = create_snapshot(request)
     verification = verify_snapshot(
@@ -905,6 +907,8 @@ def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
         ".brain-local/stale-set.json",
         "eval_scenarios.json",
     } <= brain_paths
+    assert "pending/insights.md" not in brain_paths
+    assert "backlog/development.md" not in brain_paths
     source_inventory = {
         entry["path"]: entry["sha256"]
         for entry in manifest["raw_sources"]

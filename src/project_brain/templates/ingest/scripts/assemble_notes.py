@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """적재 조립기: verify 출력 + domain_spec → project-brain build 노트 dict.
 
-세 층: (1) 입력 정규화(verify 형태 흡수·폴백·CORRECTIONS·HOOK),
+세 층: (1) 입력 정규화(verify 형태 흡수·명시적 verdict 검증·CORRECTIONS·HOOK),
 (2) 공통 조립 루프(atom→code_anchors/glossary/mappings),
 (3) decisions[] 패스스루(엔진 build_decisions가 조립 — 여기선 해석 안 함).
 조립 로직은 적재마다 재작성하지 않는다. 적재별 데이터는 domain_spec.py가 담는다.
@@ -65,8 +65,36 @@ def normalize(verify_data, spec):
         )
     by_group = {}
     for g in groups:
-        # CASE: verify가 corrected_atoms를 비워 반환하면 extract.atoms로 폴백 (근거: main-map map-stage-episode 2026-06-25). 새 폴백은 여기 추가.
-        atoms = (g.get("verify") or {}).get("corrected_atoms") or (g.get("extract") or {}).get("atoms") or []
+        verify = g.get("verify")
+        verdict = verify.get("verdict") if isinstance(verify, dict) else None
+        if verdict not in {"pass", "fixed"}:
+            raise CoverageError(
+                "verify_result_invalid",
+                "verify verdict must be pass or fixed",
+                section="verify_groups",
+                field=g["group"],
+                coverage_sha256=binding.sha256,
+            )
+        atoms = verify.get("corrected_atoms")
+        if not isinstance(atoms, list):
+            raise CoverageError(
+                "verify_result_invalid",
+                "verify corrected_atoms must be an array",
+                section="verify_groups",
+                field=g["group"],
+                coverage_sha256=binding.sha256,
+            )
+        if verdict == "pass":
+            extract = g.get("extract")
+            extracted_atoms = extract.get("atoms") if isinstance(extract, dict) else None
+            if not isinstance(extracted_atoms, list) or atoms != extracted_atoms:
+                raise CoverageError(
+                    "verify_result_invalid",
+                    "pass verdict requires corrected_atoms to equal extract atoms",
+                    section="verify_groups",
+                    field=g["group"],
+                    coverage_sha256=binding.sha256,
+                )
         by_group[g["group"]] = atoms
     ordered = []
     for name in expected_groups:

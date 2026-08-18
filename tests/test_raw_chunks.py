@@ -103,6 +103,16 @@ class IterRawSourcesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(iter_raw_sources(Path(td)), [])
 
+    def test_pending_and_development_backlog_are_not_raw_sources(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "pending").mkdir()
+            (brain / "backlog").mkdir()
+            (brain / "pending" / "insights.md").write_text("합성 분석\n", encoding="utf-8")
+            (brain / "backlog" / "development.md").write_text("개발 제안\n", encoding="utf-8")
+
+            self.assertEqual(iter_raw_sources(brain), [])
+
     def test_sorted_traversal_is_deterministic(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td)
