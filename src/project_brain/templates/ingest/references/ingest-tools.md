@@ -231,6 +231,38 @@ keyword-only 필수다.
 새 엔진 필드는 만들지 않는다. 텍스트만 Git으로 추적하고 바이너리(PPT·이미지)는 계속 미추적으로 로컬 보관한다. 규약 정본은
 `{{BRAIN_ROOT}}/README.md`이며 서버 위키·세션은 링크만(`EvidenceManifest.locator`) 남긴다.
 
+## 재사용 projection 수신 절차
+
+이 절차는 query 또는 session-ingest가 넘긴 **명시적인 재사용 저장 요청**만 받는다. 단순 확인이나
+조회 결과만으로 시작하지 않는다. 수신값은 한 기능의 `context_id`, 안정적인 `requirement_key`,
+5요소가 모두 채워진 조립 결과 파일, 그 결과를 실제로 뒷받침한 정확한 `source_object_ids`다.
+대상 context와 source 객체를 `project-brain show`로 다시 읽어 모두 존재하고 같은 기능 범위이며,
+payload의 각 요소에 실제 근거가 있는지 확인한다. 부분 조립, 되묻기 중인 결과, 빈 source 목록은 보류한다.
+
+먼저 `--write` 없이 미리보기한다. hash나 projection ID를 손으로 만들지 않는다.
+
+```bash
+project-brain projection build-reuse \
+  --context-id <context-id> \
+  --requirement-key <requirement-key> \
+  --source-object-ids <object-id> [<object-id> ...] \
+  --title <title> \
+  --payload-file <five-elements.md> \
+  --generated-by <receiver-name>
+```
+
+미리보기 영수증은 종료 상태 0, `ok=true`, `preview=true`이고 `projection.id`, `context_id`,
+`source_object_ids`, `status=candidate`, `format=prompt_payload`가 수신값과 정확히 맞아야 한다.
+하나라도 다르면 쓰지 않는다. 검증이 끝난 같은 인자로 `--engine-sha <현재 엔진 SHA> --write`를
+추가해 저장한다. 기존 candidate를 의도적으로 교체하는 별도 요청과 비교 근거가 있을 때만
+`--replace`를 쓴다. reviewed projection은 같은 ID로 교체하지 않고 새 검수 경계를 따른다.
+
+쓰기 영수증은 종료 상태 0, `ok=true`, `id=<미리보기 projection.id>`가 정확히 맞을 때만 받는다.
+그 뒤 `project-brain show <id>`로 저장된 객체를 다시 읽어 candidate 상태, source 목록, payload와
+도구가 계산한 hash가 미리보기와 같은지 확인한다. 실패 JSON, 다른 ID, 읽기 불가, 불일치는 성공으로
+바꾸지 않으며 미저장 상태와 재개 입력을 남긴다. 쓰기가 확인되면 일반 적재 완료 게이트에 따라
+lint와 필요한 색인·회상 확인을 실행한다. 이 쓰기 영수증은 그 후속 게이트의 성공을 대신하지 않는다.
+
 ## promote-auto — 매핑 보증 용어 일괄 승격
 
 reviewed 매핑이 참조하는 candidate **용어**는, 배치 커버리지 검증(정의가 매핑 검증 의미

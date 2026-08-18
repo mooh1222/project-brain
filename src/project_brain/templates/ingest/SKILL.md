@@ -14,6 +14,9 @@ description: |
 
 이 스킬은 완료된 사양이나 확정된 도메인을 소급 적재할 때만 쓴다.
 진행 중 개발의 후보 선점과 끝난 세션 로그 마이닝은 다른 적재 흐름으로 넘긴다.
+query에서 명시적인 재사용 저장 요청과 조립 결과를 넘겨받은 경우에는
+`references/ingest-tools.md`의 `재사용 projection 수신 절차`가 실제 쓰기 경로다.
+일반 객체 조립 절차로 수작업 `ContextProjection` JSON을 만들지 않는다.
 
 사용자가 기능 이름만 주면 이름은 대상일 뿐 근거가 아니다.
 기본 source packet은 현재 {{DEFAULT_BRANCH}} 코드, 현행 기능 문서, 현재 운영·서비스 규칙이다.
@@ -149,6 +152,8 @@ workflow 최상위 상태만으로 완료를 선언하지 않는다.
 - `references/judgment.md`: 변경이 기존 사실을 대체·보완·충돌시키는지 판정할 때 읽는다.
 - `references/update-rules.md`(설치 후 `{{PROJECT}}-brain-ingest/references/update-rules.md`): 기존 객체를 kind별로 갱신·대체할 실제 묶음과 엔진 빈틈을 확인할 때 읽는다.
 - `references/ingest-tools.md`: build, ingest, raw 보관, 단건·대량 실행과 마무리 명령이 필요할 때 읽는다.
+- `references/ingest-tools.md`의 `재사용 projection 수신 절차`: query 또는 session-ingest가 넘긴
+  명시적 `projection build-reuse` 요청의 대상 검증, 미리보기, 쓰기, 영수증 확인이 필요할 때 읽는다.
 - `references/system-domain-playbook.md`: 큰 도메인 분할, 동적 workflow, 재개 운영이 필요할 때 읽는다.
 - `references/completeness-checklist.md`: 적재 직전과 직후의 통과 조건을 점검할 때 읽는다.
 - `references/worked-example.md`: 한 기능을 source에서 verify까지 연결한 작은 흐름이 필요할 때 읽는다.

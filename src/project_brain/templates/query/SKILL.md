@@ -79,6 +79,12 @@ candidate를 근거로 답한 뒤 사용자가 "맞아"처럼 단순 확인만 �
 `{{PROJECT}}-brain-session-ingest`로 넘긴다. 이 조회 스킬은 candidate 승격, projection
 저장·교체, 색인 재생성을 직접 실행하지 않는다.
 
+명시적인 재사용 저장 요청이면 `context_id`, 요구를 식별하는 `requirement_key`, 5요소 조립 결과,
+그 결과를 뒷받침한 정확한 `source_object_ids`를 `{{PROJECT}}-brain-ingest`의
+`재사용 projection 수신 절차`로 넘긴다. query가 해당 쓰기 명령을 대신 실행하거나
+쓰기 성공을 판단하지 않는다. 진행 중 개발 세션에서 나온 요청은
+`{{PROJECT}}-brain-session-ingest`가 같은 수신 절차로 연결한다.
+
 ## 6. 이력 질문 가드
 
 "왜 바뀌었어/그때는 어땠어" 질문인데 적중 매핑의 `caveats`에 `history_coverage=complete`가
@@ -126,7 +132,8 @@ candidate를 근거로 답한 뒤 사용자가 "맞아"처럼 단순 확인만 �
 
 6. **조립 결과는 답변으로만 사용** — 한 기능으로 수렴하고 5요소가 모두 채워져도 조회 요청만으로
    projection을 저장·교체하거나 candidate를 승격하지 않는다. 재사용 저장이 필요하다는 명시적인
-   쓰기 요청이 들어오면 근거 객체 ID와 조립 결과를 `{{PROJECT}}-brain-ingest`로 넘긴다.
+   쓰기 요청이 들어오면 context ID, 요구 key, 근거 객체 ID와 조립 결과를
+   `{{PROJECT}}-brain-ingest`의 `재사용 projection 수신 절차`로 넘긴다.
 
 ## Common Mistakes
 

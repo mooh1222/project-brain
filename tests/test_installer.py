@@ -222,6 +222,31 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(report["config"], "created")
         self.assertEqual(len(report["created"]), self._expected_count())
 
+    def test_projection_build_reuse_write_handoff_has_an_explicit_receiver(self):
+        install(self.target, project="demo")
+
+        query = self._skill("demo-brain-query").read_text(encoding="utf-8")
+        ingest = self._skill("demo-brain-ingest").read_text(encoding="utf-8")
+        ingest_tools = (
+            self._skill_dir("demo-brain-ingest") / "references" / "ingest-tools.md"
+        ).read_text(encoding="utf-8")
+        session_dev = (
+            self._skill_dir("demo-brain-session-ingest") / "references" / "dev-ingest.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("저장·교체, 색인 재생성을 직접 실행하지 않는다", query)
+        self.assertIn("쓰기 성공을 판단하지 않는다", query)
+        self.assertIn("명시적인 재사용 저장 요청", query)
+        self.assertIn("projection build-reuse", ingest)
+        self.assertIn("재사용 projection 수신 절차", ingest_tools)
+        self.assertIn("--source-object-ids", ingest_tools)
+        self.assertIn("--payload-file", ingest_tools)
+        self.assertIn("--write", ingest_tools)
+        self.assertIn('`preview=true`', ingest_tools)
+        self.assertIn('`ok=true`', ingest_tools)
+        self.assertIn("저장된 객체를 다시 읽어", ingest_tools)
+        self.assertIn("재사용 projection 수신 절차", session_dev)
+
     def test_report_paths_are_target_relative_and_control_paths_track_writes(self):
         first = install(
             self.target,

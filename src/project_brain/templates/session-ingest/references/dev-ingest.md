@@ -17,6 +17,12 @@
 3. **갱신**: 바뀐 범위의 단어로 기존 객체를 search하고, 있으면 `{{PROJECT}}-brain-ingest/references/update-rules.md`의 kind별 흐름을 따른다. 없으면 신설한다.
 4. **완료 마무리**: reviewed 승격과 history를 보강한 뒤 `{{PROJECT}}-brain-ingest/references/completeness-checklist.md`로 닫는다.
 
+개발 중 조립한 5요소를 재사용 projection으로 저장해 달라는 명시적 요청은 일반 candidate 선점으로
+대신하지 않는다. `context_id`, 안정적인 `requirement_key`, 조립 결과 파일, 정확한
+`source_object_ids`를 `{{PROJECT}}-brain-ingest/references/ingest-tools.md`의
+`재사용 projection 수신 절차`로 넘겨 미리보기·대상 검증·쓰기 영수증·재확인을 그대로 수행한다.
+단순 확인이나 저장 요청 없는 개발 대화에서는 이 경로를 시작하지 않는다.
+
 coverage 없는 single/batch는 쓰기 전에 실패해야 한다. terminal 결과는 canonical receipt의
 `expected_objects == verified_objects`와 `committed|no_changes`를 확인한 뒤에만 finalize한다.
 
