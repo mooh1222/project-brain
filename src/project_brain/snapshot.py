@@ -16,6 +16,7 @@ from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 from project_brain.installer import MANIFEST_FILENAME
 from project_brain.objbase import now_kst
@@ -25,10 +26,28 @@ from project_brain.store import BrainStore
 _SNAPSHOT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
-_BRAIN_DIRECTORIES = tuple(sorted({
-    *BrainStore._KIND_DIR.values(),
-    "raw/sources",
-}))
+_SNAPSHOT_V1_OBJECT_KINDS = MappingProxyType({
+    "CodeLocator": "objects/code",
+    "ContextProjection": "indexes/context_projections",
+    "CurrentView": "views/current",
+    "DecisionRecord": "objects/decisions",
+    "DomainContext": "objects/domain",
+    "DomainMapping": "objects/mappings",
+    "EventLedgerRecord": "objects/ledger",
+    "EvidenceManifest": "raw/manifests",
+    "EvidenceRef": "objects/evidence_refs",
+    "GlossaryTerm": "objects/domain",
+    "IndexRecord": "indexes/records",
+    "Insight": "objects/insights",
+    "KnowledgePage": "views/knowledge",
+    "ReviewRecord": "objects/reviews",
+    "SlackThread": "objects/comms",
+    "SlideRef": "objects/specs",
+    "SpecDocument": "objects/specs",
+    "SpecRevision": "objects/specs",
+    "TemporalFact": "objects/facts",
+})
+_SNAPSHOT_V2_OBJECT_KINDS = MappingProxyType(dict(_SNAPSHOT_V1_OBJECT_KINDS))
 _BRAIN_FILES = (
     ".brain-local/index.db",
     ".brain-local/index.db-wal",
@@ -40,6 +59,21 @@ _INDEX_FILES = ("index.db", "index.db-wal", "index.db-shm")
 _PHASE_RECORDS = (b"preparing", b"prepared", b"moved_live", b"activated")
 _PHASE_LOG_MAX_BYTES = sum(len(record) + 1 for record in _PHASE_RECORDS)
 _PHASE_READ_EINTR_RETRY_LIMIT = 8
+
+
+def _snapshot_object_kinds(version: int) -> MappingProxyType:
+    if version == 1:
+        return _SNAPSHOT_V1_OBJECT_KINDS
+    if version == 2:
+        return _SNAPSHOT_V2_OBJECT_KINDS
+    raise ValueError(f"unsupported snapshot version: {version}")
+
+
+def _snapshot_brain_directories(version: int) -> tuple[str, ...]:
+    return tuple(sorted({
+        *_snapshot_object_kinds(version).values(),
+        "raw/sources",
+    }))
 
 
 class SnapshotError(RuntimeError):
@@ -1829,7 +1863,7 @@ def _inventory(request: SnapshotRequest) -> tuple[list[dict], list[dict]]:
     files: list[dict] = []
     brain_paths = {
         path
-        for directory in _BRAIN_DIRECTORIES
+        for directory in _snapshot_brain_directories(2)
         for path in _walk_regular_files(request.brain_root, directory)
     }
     for relative in _BRAIN_FILES:
@@ -1909,9 +1943,15 @@ def _corpus_fingerprint(objects: dict[str, dict]) -> str:
     return digest.hexdigest()
 
 
-def _derive_snapshot_metadata(files: list[dict], payload_root: Path) -> tuple[dict, dict]:
-    object_directories = tuple(sorted(set(BrainStore._KIND_DIR.values())))
-    counts = {kind: 0 for kind in BrainStore._KIND_DIR}
+def _derive_snapshot_metadata(
+    files: list[dict],
+    payload_root: Path,
+    *,
+    version: int,
+) -> tuple[dict, dict]:
+    object_kinds = _snapshot_object_kinds(version)
+    object_directories = tuple(sorted(set(object_kinds.values())))
+    counts = {kind: 0 for kind in object_kinds}
     objects: dict[str, dict] = {}
     by_path = {
         entry["path"]: entry
@@ -1938,8 +1978,8 @@ def _derive_snapshot_metadata(files: list[dict], payload_root: Path) -> tuple[di
         actual_kind = value.get("kind") if isinstance(value, dict) else None
         if (
             not isinstance(value, dict)
-            or actual_kind not in BrainStore._KIND_DIR
-            or BrainStore._KIND_DIR[actual_kind] != object_directory
+            or actual_kind not in object_kinds
+            or object_kinds[actual_kind] != object_directory
             or not isinstance(value.get("id"), str)
             or not value["id"]
             or value["id"] in objects
@@ -2110,7 +2150,11 @@ def _create_snapshot_locked(request: SnapshotRequest) -> SnapshotResult:
                 "source_fingerprint_changed",
                 "snapshot inputs changed between initial and final inventory",
             )
-        corpus, derived = _derive_snapshot_metadata(files_before, temporary_root)
+        corpus, derived = _derive_snapshot_metadata(
+            files_before,
+            temporary_root,
+            version=2,
+        )
         manifest = {
             "version": 2,
             "snapshot_id": request.snapshot_id,
@@ -2124,8 +2168,8 @@ def _create_snapshot_locked(request: SnapshotRequest) -> SnapshotResult:
             "repo_head": repo_head_before,
             "engine_head": engine_head_before,
             "brain_targets": {
-                "object_kinds": dict(sorted(BrainStore._KIND_DIR.items())),
-                "directories": list(_BRAIN_DIRECTORIES),
+                "object_kinds": dict(sorted(_SNAPSHOT_V2_OBJECT_KINDS.items())),
+                "directories": list(_snapshot_brain_directories(2)),
                 "files": list(_BRAIN_FILES),
             },
             "files": files_before,
@@ -2241,11 +2285,12 @@ def _load_manifest(
     ):
         _fail("snapshot_manifest_invalid", "manifest metadata types are invalid")
     targets = manifest["brain_targets"]
+    object_kinds = _snapshot_object_kinds(version)
     if (
         not isinstance(targets, dict)
         or set(targets) != {"object_kinds", "directories", "files"}
-        or targets["object_kinds"] != dict(sorted(BrainStore._KIND_DIR.items()))
-        or targets["directories"] != list(_BRAIN_DIRECTORIES)
+        or targets["object_kinds"] != dict(sorted(object_kinds.items()))
+        or targets["directories"] != list(_snapshot_brain_directories(version))
         or targets["files"] != list(_BRAIN_FILES)
     ):
         _fail("snapshot_manifest_invalid", "brain target coverage is invalid")
@@ -2331,11 +2376,12 @@ def _validate_file_entries(snapshot_root: Path, manifest: dict) -> set[str]:
 
 def _validate_completeness_types(manifest: dict) -> None:
     corpus = manifest["corpus"]
+    object_kinds = _snapshot_object_kinds(manifest["version"])
     if (
         not isinstance(corpus, dict)
         or set(corpus) != {"kind_counts", "object_ids", "fingerprint"}
         or not isinstance(corpus["kind_counts"], dict)
-        or set(corpus["kind_counts"]) != set(BrainStore._KIND_DIR)
+        or set(corpus["kind_counts"]) != set(object_kinds)
         or any(
             type(value) is not int or value < 0
             for value in corpus["kind_counts"].values()
@@ -2430,7 +2476,11 @@ def _validate_manifest_derivations(snapshot_root: Path, manifest: dict) -> None:
     )
     if manifest["source_fingerprint"] != expected_fingerprint:
         _fail("snapshot_metadata_mismatch", "source fingerprint is inconsistent")
-    corpus, derived = _derive_snapshot_metadata(manifest["files"], snapshot_root)
+    corpus, derived = _derive_snapshot_metadata(
+        manifest["files"],
+        snapshot_root,
+        version=manifest["version"],
+    )
     if manifest["corpus"] != corpus or manifest["derived"] != derived:
         _fail("snapshot_metadata_mismatch", "corpus or derived metadata is inconsistent")
 
@@ -2914,6 +2964,55 @@ def _expected_brain_inventory(
     }
 
 
+def _preflight_restore_target_kinds(brain_root: Path, manifest: dict) -> None:
+    frozen_kinds = _snapshot_object_kinds(manifest["version"])
+    frozen_directories = set(frozen_kinds.values())
+    current_kinds = BrainStore._KIND_DIR
+    changed_directories = {
+        directory
+        for kind, directory in current_kinds.items()
+        if frozen_kinds.get(kind) != directory
+    }
+    for directory in sorted(changed_directories):
+        paths = _walk_regular_files(brain_root, directory)
+        if not paths:
+            continue
+        if directory not in frozen_directories:
+            unsupported = sorted(
+                kind
+                for kind, current_directory in current_kinds.items()
+                if current_directory == directory
+                and frozen_kinds.get(kind) != current_directory
+            )
+            _fail(
+                "restore_target_kind_unsupported",
+                (
+                    "restore target contains files for kinds outside snapshot "
+                    f"version {manifest['version']}: {unsupported!r}"
+                ),
+                paths=tuple(brain_root / path for path in paths),
+            )
+
+        for relative in paths:
+            try:
+                value = json.loads(_read_regular(brain_root, relative))
+            except (UnicodeError, json.JSONDecodeError, SnapshotError):
+                continue
+            actual_kind = value.get("kind") if isinstance(value, dict) else None
+            if (
+                actual_kind in current_kinds
+                and frozen_kinds.get(actual_kind) != directory
+            ):
+                _fail(
+                    "restore_target_kind_unsupported",
+                    (
+                        "restore target contains a kind outside snapshot "
+                        f"version {manifest['version']}: {actual_kind}"
+                    ),
+                    paths=(brain_root / relative,),
+                )
+
+
 def _recover_restore(
     *,
     parent_fd: int,
@@ -3279,6 +3378,7 @@ def restore_snapshot(
                         "snapshot_mode_unavailable",
                         "version-1 snapshots do not record regular-file modes",
                     )
+                _preflight_restore_target_kinds(brain_root, manifest)
                 with corpus_lock(brain_root, exclusive=True):
                     recover_unfinished_transaction_unlocked(brain_root)
                 return _restore_snapshot_locked(

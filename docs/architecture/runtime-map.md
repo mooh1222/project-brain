@@ -308,8 +308,9 @@ redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을
 
 snapshot 범위도 분리해 본다.
 
-- `snapshot create`는 모든 `BrainStore._KIND_DIR`, `raw/sources`, index DB sidecar,
-  stale-set, `eval_scenarios.json`을 brain payload로 캡처한다.
+- snapshot version 1과 2는 현재 registry를 다시 해석하지 않고 각 버전에 동결된 19종 kind와
+  storage directory 계약을 사용한다. `snapshot create`는 version 2의 동결 범위와
+  `raw/sources`, index DB sidecar, stale-set, `eval_scenarios.json`을 brain payload로 캡처한다.
 - repo payload에는 `.project-brain.json`, 설치 manifest, manifest가 관리하는 설치 파일을 담는다.
 - 새로 만드는 version 2 snapshot은 각 정규 파일의 `0o000..0o777` 권한을 manifest에
   기록하고 payload·`brain_only` 복원 결과까지 같은 권한으로 검증한다. 특수 권한 비트나
@@ -320,6 +321,8 @@ snapshot 범위도 분리해 본다.
   stable lock 아래에서 bytes·size 계약으로 안전하게 rollback/cleanup한 뒤 같은 오류로 fresh
   복원을 거부한다.
 - `snapshot restore`의 범위는 `brain_only`다. repo payload는 복원하지 않는다.
+- version 2 복원 대상에 동결 범위 밖의 현재 kind 파일이 남아 있으면 restore journal 회복 뒤,
+  새 복원 state나 corpus 변경 전에 거부한다.
 - 복원 범위 밖에 남는 live brain 정규 파일은 staging 복사에서 기존 파일 권한을 보존한다.
 - session marker와 corpus transaction journal은 snapshot 캡처·복원 범위가 아니다.
 
