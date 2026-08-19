@@ -11,6 +11,7 @@ merge한다 — 자동 승격의 vouched_by_mapping_ids(§4.5), 수동 conflict 
 
 from project_brain.id_grammar import format_id
 from project_brain.objbase import review_record
+from project_brain.verification import promotion_review_fields
 
 
 def vouching_mappings(term_id, store):
@@ -71,7 +72,7 @@ def select_vouched_candidates(store):
 
 def promote(objects, ids, scope, *, bundle_key=None, reviewer,
             reviewed_at: str | None,
-            review_extra_by_id=None):
+            review_extra_by_id=None, store=None):
     """ids에 해당하는 객체를 reviewed로 승격하고 (promoted_objects, review_records)를 반환.
 
     scope == "single_object": 각 id를 독립 승격. candidate 키 통째 pop + 객체별
@@ -89,6 +90,11 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer,
         review_records = []
         for tid in ids:
             obj = index[tid]  # 없는 id면 KeyError
+            verification_fields = (
+                promotion_review_fields(obj, store)
+                if obj.get("kind") == "EvidenceRef"
+                else {}
+            )
             reviewed = dict(obj)
             reviewed["status"] = "reviewed"
             reviewed.pop("updated_at", None)
@@ -105,6 +111,7 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer,
                 created_at=None,
                 updated_at=None,
                 evidence_refs=reviewed.get("evidence_refs", []),
+                **verification_fields,
                 **extra_by_id.get(tid, {}),
             )
             promoted_objects.append(reviewed)

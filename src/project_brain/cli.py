@@ -1111,6 +1111,7 @@ def _run_promote(argv) -> int:
             bundle_key=args.bundle_key, reviewer=args.reviewer,
             reviewed_at=args.reviewed_at,
             review_extra_by_id=review_extra_by_id,
+            store=store,
         )
     except (ValueError, KeyError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
@@ -1201,6 +1202,7 @@ def _run_promote_auto(argv) -> int:
                 reviewer="auto:mapping-vouched",
                 reviewed_at=args.reviewed_at,
                 review_extra_by_id=review_extra,
+                store=store,
             )
         except (ValueError, KeyError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))

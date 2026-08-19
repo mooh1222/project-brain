@@ -241,6 +241,17 @@ def _validate_object_schema(
     status = obj.get("status")
     if status is not None and status not in OBJECT_STATUS_VALUES:
         errors.append(f"{obj['id']}: invalid status {status!r}")
+    candidate_metadata = obj.get("candidate")
+    if (
+        isinstance(candidate_metadata, dict)
+        and "verification" in candidate_metadata
+    ):
+        from project_brain.verification import verification_envelope_problems
+
+        errors.extend(
+            f"{obj['id']}: {problem}"
+            for problem in verification_envelope_problems(obj)
+        )
     priority = obj.get("poc_priority")
     if priority is not None and priority not in POC_PRIORITY_VALUES:
         errors.append(f"{obj['id']}: invalid poc_priority {priority!r}")
@@ -388,6 +399,12 @@ def _validate_object_schema(
                 errors.append(f"{obj['id']}: mapping_bundle ReviewRecord requires confirmation_key")
         elif "target_object_id" not in obj:
             errors.append(f"{obj['id']}: ReviewRecord missing field 'target_object_id'")
+        from project_brain.verification import review_record_verification_problems
+
+        errors.extend(
+            f"{obj['id']}: {problem}"
+            for problem in review_record_verification_problems(obj)
+        )
     return errors
 
 

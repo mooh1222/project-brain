@@ -6,6 +6,7 @@ context_projection.py 와 lint.py 에서 동일한 해시 계산 로직을 사�
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 
 
 def sha256_text(text: str) -> str:
@@ -43,3 +44,38 @@ def source_content_hash(objects) -> str:
         stable_json({k: v for k, v in obj.items() if k not in HASH_EXCLUDE_KEYS})
         for obj in objects
     ))
+
+
+VERIFICATION_CONTENT_EXCLUDE_KEYS = HASH_EXCLUDE_KEYS | frozenset({
+    "status",
+    "review_record_id",
+    "candidate",
+})
+
+
+def verification_content_projection(
+    obj: Mapping[str, object],
+    *,
+    direct_evidence_fields: Iterable[str],
+) -> dict[str, object]:
+    """`verification-content-v1`의 의미·검색 필드 projection을 반환한다."""
+    excluded = VERIFICATION_CONTENT_EXCLUDE_KEYS | frozenset(
+        direct_evidence_fields
+    )
+    return {
+        key: value
+        for key, value in obj.items()
+        if key not in excluded
+    }
+
+
+def verification_content_hash(
+    obj: Mapping[str, object],
+    *,
+    direct_evidence_fields: Iterable[str],
+) -> str:
+    """공통 verification 내용 결속의 단일 SHA-256 공식을 적용한다."""
+    return sha256_text(stable_json(verification_content_projection(
+        obj,
+        direct_evidence_fields=direct_evidence_fields,
+    )))

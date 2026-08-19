@@ -57,6 +57,10 @@ from project_brain.schema import (
     validate_object_id,
 )
 from project_brain.store import BrainStore, StoreLoadError
+from project_brain.verification import (
+    candidate_promotion_problems,
+    evaluate_candidate_verification,
+)
 from project_brain.transaction_receipt import (
     BatchBinding,
     MutationOutcome,
@@ -682,6 +686,39 @@ class MutationService:
             merged.pop(object_id)
         merged.update(planned_by_id)
         merged_store = BrainStore(merged)
+
+        for obj in planned_inputs:
+            candidate = obj.get("candidate")
+            if (
+                obj.get("kind") != "EvidenceRef"
+                or obj.get("status") != "candidate"
+                or not isinstance(candidate, Mapping)
+                or "verification" not in candidate
+            ):
+                continue
+            evaluation = evaluate_candidate_verification(obj, merged_store)
+            invalidated_reasons = tuple(
+                reason
+                for reason in evaluation.reason_codes
+                if reason in {
+                    "unsupported_version",
+                    "profile_mismatch",
+                    "content_changed",
+                    "evidence_changed",
+                    "rules_changed",
+                    "execution_invalid",
+                    "review_shape_invalid",
+                }
+            )
+            if invalidated_reasons:
+                return _failure(
+                    "verification_not_ready",
+                    (
+                        f"{obj['id']}: candidate update must carry a fresh "
+                        "verification envelope or remove the old envelope: "
+                        + ", ".join(invalidated_reasons)
+                    ),
+                )
 
         for obj in merged_store.all():
             for ref in iter_object_refs(obj):
@@ -1992,6 +2029,12 @@ def _validate_promotion_request(
             "promotion_corpus_fingerprint_required",
             "promotion requires the exact selection corpus fingerprint",
         )
+    live_store = BrainStore(dict(existing_by_id))
+    single_record_by_target = {
+        record["target_object_id"]: record
+        for record in review_records
+        if isinstance(record.get("target_object_id"), str)
+    }
     for target_id in sorted(target_ids):
         previous = existing_by_id.get(target_id)
         if previous is None:
@@ -2012,6 +2055,26 @@ def _validate_promotion_request(
                 "promotion_result_not_reviewed",
                 f"{target_id}: promotion replacement must be reviewed",
             )
+        if previous.get("kind") == "EvidenceRef":
+            record = single_record_by_target.get(target_id)
+            if record is None:
+                return _failure(
+                    "verification_review_record_missing",
+                    f"{target_id}: verified promotion requires a single ReviewRecord",
+                )
+            problems = candidate_promotion_problems(
+                previous,
+                input_by_id[target_id],
+                record,
+                live_store,
+            )
+            if problems:
+                code = (
+                    "verification_not_ready"
+                    if problems[0].startswith("verification_not_ready:")
+                    else "verification_promotion_invalid"
+                )
+                return _failure(code, f"{target_id}: {problems[0]}")
     for record in review_records:
         if record["id"] in existing_by_id:
             return _failure(
