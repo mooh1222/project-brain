@@ -102,10 +102,52 @@ _EVIDENCE_REF_PROFILE = _profile(
         "evidence_manifest_id", "locator", "evidence_refs",
     }),
 )
+_DOMAIN_CONTEXT_PROFILE = _profile(
+    "verification.domain-context",
+    "DomainContext",
+    dedicated_checks={
+        "domain.boundary-explicit": frozenset({"agent", "human"}),
+        "domain.owner-distinct": frozenset({"agent", "human"}),
+        "domain.glossary-coherent": frozenset({"agent"}),
+    },
+    engine_check_ids=frozenset(),
+    direct_evidence_fields=frozenset({"evidence_refs"}),
+)
+_DECISION_RECORD_PROFILE = _profile(
+    "verification.decision-record",
+    "DecisionRecord",
+    dedicated_checks={
+        "decision.statement-supported": frozenset({"agent", "human"}),
+        "decision.scope-explicit": frozenset({"agent", "human"}),
+        "decision.supersession-valid": frozenset({"engine", "agent"}),
+        "decision.impacts-linked": frozenset({"engine"}),
+    },
+    engine_check_ids=frozenset({"decision.impacts-linked"}),
+    direct_evidence_fields=frozenset({"source_object_ids", "evidence_refs"}),
+)
+_CONTEXT_PROJECTION_PROFILE = _profile(
+    "verification.context-projection",
+    "ContextProjection",
+    dedicated_checks={
+        "projection.sources-fresh": frozenset({"engine"}),
+        "projection.prompt-payload-valid": frozenset({"engine"}),
+        "projection.scope-bounded": frozenset({"agent"}),
+    },
+    engine_check_ids=frozenset({
+        "projection.sources-fresh", "projection.prompt-payload-valid",
+    }),
+    direct_evidence_fields=frozenset({
+        "source_object_ids", "source_content_hash",
+    }),
+    required_format="prompt_payload",
+)
 _PROFILES_BY_KIND = {
     profile.subject_kind: profile
     for profile in (
         _EVIDENCE_REF_PROFILE,
+        _DOMAIN_CONTEXT_PROFILE,
+        _DECISION_RECORD_PROFILE,
+        _CONTEXT_PROJECTION_PROFILE,
     )
 }
 _PROFILES_BY_ID = {
@@ -484,6 +526,53 @@ def _engine_checks(
             "evidence.quote-bound": (
                 quote_bound,
                 "비어 있지 않은 인용 요약이 locator에 결속된다.",
+            ),
+        })
+    elif selected is _DECISION_RECORD_PROFILE:
+        impact_fields = {
+            "affected_context_ids": "DomainContext",
+            "affected_mapping_ids": "DomainMapping",
+            "affected_glossary_term_ids": "GlossaryTerm",
+        }
+        impact_ids = [
+            (object_id, expected_kind)
+            for field, expected_kind in impact_fields.items()
+            for object_id in (
+                subject.get(field)
+                if isinstance(subject.get(field), list)
+                else []
+            )
+        ]
+        impacts_linked = bool(impact_ids) and all(
+            isinstance(object_id, str)
+            and store.has(object_id)
+            and store.get(object_id).get("kind") == expected_kind
+            for object_id, expected_kind in impact_ids
+        )
+        checks.update({
+            "decision.impacts-linked": (
+                impacts_linked,
+                "영향 대상이 현재 store의 해당 객체 종류로 연결된다.",
+            ),
+        })
+    elif selected is _CONTEXT_PROJECTION_PROFILE:
+        from project_brain.lint import projection_is_fresh
+
+        reuse_payload = subject.get("reuse_payload")
+        prompt_payload_valid = bool(
+            subject.get("format") == "prompt_payload"
+            and isinstance(reuse_payload, str)
+            and reuse_payload.strip()
+            and subject.get("projection_hash") == sha256_text(reuse_payload)
+        )
+        checks.update({
+            "projection.sources-fresh": (
+                projection_is_fresh(store, dict(subject)),
+                "공식 source_content_hash와 현재 source가 일치한다.",
+            ),
+            "projection.prompt-payload-valid": (
+                prompt_payload_valid,
+                "prompt_payload와 공식 projection_hash가 일치한다.",
             ),
         })
     return [
