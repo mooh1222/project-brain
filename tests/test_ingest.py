@@ -488,8 +488,12 @@ class TestIngest(unittest.TestCase):
 
     def test_ingest_insight_reviewed_idempotent(self):
         from tests.test_ingest import insight
-        ingest(self.root, self._insight_bundle() + [insight()])
-        # 같은 reviewed Insight 재적재(멱등) — 기존 ingest 로직 그대로 성공.
+        ingest(self.root, self._insight_bundle())
+        legacy = insight()
+        path = BrainStore.object_path(self.root, legacy)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(BrainStore.object_bytes(legacy))
+        # 기존 reviewed Insight는 읽히고 같은 내용을 다시 넣는 무변경 경로도 유지된다.
         ingest(self.root, [insight()])
         self.assertEqual(
             BrainStore.load(self.root).get("insight.neutral.risk")["status"],
