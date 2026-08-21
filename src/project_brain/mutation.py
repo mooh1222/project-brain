@@ -698,7 +698,11 @@ class MutationService:
                 or "verification" not in candidate
             ):
                 continue
-            evaluation = evaluate_candidate_verification(obj, merged_store)
+            evaluation = evaluate_candidate_verification(
+                obj,
+                merged_store,
+                repo_context=request.repo_context,
+            )
             invalidated_reasons = tuple(
                 reason
                 for reason in evaluation.reason_codes
@@ -2075,6 +2079,7 @@ def _validate_promotion_request(
                 input_by_id[target_id],
                 record,
                 live_store,
+                repo_context=request.repo_context,
             )
             if problems:
                 code = (
