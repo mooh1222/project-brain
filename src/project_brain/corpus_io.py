@@ -157,15 +157,23 @@ _MUTATION_MANIFEST_FIELDS = frozenset({
     "canonical_repair_binding",
     "dedicated_proofs",
 })
-_RECEIPT_MANIFEST_FIELDS = frozenset({
-    "coverage_sha256",
-    "expected_objects",
-    "verified_objects",
-    "changed_objects",
+_LEGACY_V1_MUTATION_MANIFEST_FIELDS = frozenset({
+    "transaction_id",
+    "operation",
+    "engine_sha",
+    "creates",
+    "updates",
+    "deletes",
+    "renames",
+    "reference_rewrites",
+    "auxiliary_updates",
+    "before_fingerprint",
+    "expected_after_fingerprint",
+    "grandfathered_problems_before",
+    "grandfathered_problems_after",
+    "batch_binding",
+    "canonical_repair_binding",
 })
-_LEGACY_V1_MUTATION_MANIFEST_FIELDS = (
-    _MUTATION_MANIFEST_FIELDS - _RECEIPT_MANIFEST_FIELDS
-)
 
 
 @dataclass(frozen=True)
@@ -1448,7 +1456,7 @@ def _with_historical_terminal_manifest_compatibility(
     transaction_id: str,
 ) -> dict[str, Any]:
     if (
-        payload.get("version") != 1
+        payload.get("version") not in (1, 2)
         or _SHA256.fullmatch(transaction_id) is None
         or payload.get("transaction_id") != transaction_id
         or payload.get("state") not in _TERMINAL_STATES
@@ -1461,11 +1469,21 @@ def _with_historical_terminal_manifest_compatibility(
     compatible = dict(payload)
     compatible["manifest"] = dict(manifest)
     changed = False
-    if "dedicated_proofs" not in manifest:
+    legacy_v1_manifest_fields = (
+        payload.get("version") == 1
+        and set(manifest)
+        in (
+            _LEGACY_V1_MUTATION_MANIFEST_FIELDS,
+            _LEGACY_V1_MUTATION_MANIFEST_FIELDS
+            - {"canonical_repair_binding"},
+        )
+    )
+    if "dedicated_proofs" not in manifest and not legacy_v1_manifest_fields:
         compatible["manifest"]["dedicated_proofs"] = []
         changed = True
     if (
-        "canonical_repair_binding" not in manifest
+        payload.get("version") == 1
+        and "canonical_repair_binding" not in manifest
         and manifest.get("operation")
         in (_MUTATION_OPERATIONS - {"canonical_repair"})
     ):
@@ -4203,6 +4221,8 @@ def _validate_manifest_contents(
             "manifest canonical_repair_binding requires canonical_repair operation"
         )
     dedicated_proofs = manifest.get("dedicated_proofs")
+    if dedicated_proofs is None and not validate_receipt_fields:
+        dedicated_proofs = ()
     if not isinstance(dedicated_proofs, (list, tuple)):
         raise ValueError("manifest dedicated_proofs must be a sequence")
     proof_target_ids: list[str] = []

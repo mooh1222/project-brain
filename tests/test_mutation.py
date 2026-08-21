@@ -3694,7 +3694,8 @@ def test_live_create_uses_one_injected_clock_for_all_engine_timestamps(tmp_path)
     request = _request(tmp_path / "brain", inputs)
 
     result = MutationService(
-        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME
+        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME,
+        dedicated_proof_profiles=(),
     ).apply(inputs, request=request)
 
     assert result.ok
@@ -4286,7 +4287,8 @@ def test_valid_caller_event_time_change_is_substantive_and_bumps_updated(
     calls: list[str] = []
 
     result = MutationService(
-        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME
+        clock=lambda: calls.append(FIXED_TIME) or FIXED_TIME,
+        dedicated_proof_profiles=(),
     ).apply(request.objects, request=request)
 
     stored = object_by_id(result.after_objects, old["id"])

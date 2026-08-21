@@ -478,7 +478,8 @@ class TestCli(unittest.TestCase):
         ) as apply, mock.patch(
             "project_brain.ingest._new_mutation_service",
             return_value=MutationService(
-                clock=lambda: "2026-08-05T12:34:56+09:00"
+                clock=lambda: "2026-08-05T12:34:56+09:00",
+                dedicated_proof_profiles=(),
             ),
         ), mock.patch(
             "sys.argv",
