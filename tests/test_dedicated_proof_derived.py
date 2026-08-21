@@ -408,6 +408,65 @@ def test_context_md_uses_official_freshness_and_builder_identity(tmp_path):
     )
 
 
+def test_existing_context_md_updates_with_current_dedicated_proof(tmp_path):
+    brain_root = (tmp_path / "brain").resolve()
+    source = _context("context.neutral")
+    _write(brain_root, source)
+    initial_store = BrainStore.load(brain_root)
+    existing, _ = build_context_projection(
+        initial_store,
+        source["id"],
+        output_locator="docs/contexts/generated/neutral/CONTEXT.md",
+        generated_by=BUILDER["id"],
+    )
+    initial_proof = _proof(existing, initial_store, brain_root, receipt="a")
+    created = MutationService().apply(
+        (existing,),
+        request=_request(
+            brain_root,
+            (existing,),
+            (initial_proof,),
+            operation=MutationOperation.PROJECTION,
+        ),
+    )
+    assert created.ok is True
+    existing = BrainStore.load(brain_root).get(existing["id"])
+
+    current_store = BrainStore.load(brain_root)
+    replacement, _ = build_context_projection(
+        current_store,
+        source["id"],
+        output_locator="docs/contexts/generated/neutral/CURRENT_CONTEXT.md",
+        generated_by=BUILDER["id"],
+    )
+    proof = _proof(
+        replacement,
+        current_store,
+        brain_root,
+        before=existing,
+        action=ObjectActionKind.UPDATE,
+        receipt="b",
+    )
+
+    result = MutationService().apply(
+        (replacement,),
+        request=_request(
+            brain_root,
+            (replacement,),
+            (proof,),
+            operation=MutationOperation.PROJECTION,
+        ),
+    )
+
+    assert result.ok is True
+    assert result.manifest is not None
+    assert result.manifest.dedicated_proofs[0]["action"] == "update"
+    assert (
+        BrainStore.load(brain_root).get(existing["id"])["output_locator"]
+        == replacement["output_locator"]
+    )
+
+
 def test_source_timestamp_only_does_not_stale_builtin_profile(tmp_path):
     brain_root = (tmp_path / "brain").resolve()
     source = _context("context.neutral")
