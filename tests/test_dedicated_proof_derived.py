@@ -11,6 +11,7 @@ from project_brain.dedicated_proof import (
 from project_brain.dedicated_proof_derived import (
     CONTEXT_MD_PROFILE_ID,
     CURRENT_VIEW_PROFILE_ID,
+    DERIVED_PROFILES,
     INSIGHT_PROFILE_ID,
     KNOWLEDGE_PAGE_PROFILE_ID,
     prepare_derived_dedicated_proof,
@@ -203,14 +204,16 @@ def _proof(
     )
 
 
-def test_builtin_profiles_cover_only_four_derived_variants():
+def test_builtin_profiles_include_exactly_four_derived_variants():
     profiles = builtin_dedicated_proof_profiles()
-    assert {profile.id for profile in profiles} == {
+    expected_ids = {
         CURRENT_VIEW_PROFILE_ID,
         KNOWLEDGE_PAGE_PROFILE_ID,
         INSIGHT_PROFILE_ID,
         CONTEXT_MD_PROFILE_ID,
     }
+    assert {profile.id for profile in DERIVED_PROFILES} == expected_ids
+    assert expected_ids <= {profile.id for profile in profiles}
     prompt_payload = {
         "kind": "ContextProjection",
         "format": "prompt_payload",
