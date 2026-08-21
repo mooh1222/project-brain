@@ -143,7 +143,10 @@ def _proof_identity(proof: DedicatedProof) -> str:
 
 
 def _subject_sha256(subject: Mapping[str, object]) -> str:
-    return verification_content_hash(subject, direct_evidence_fields=())
+    return verification_content_hash(
+        subject,
+        direct_evidence_fields=("generated_at",),
+    )
 
 
 def semantic_source_bindings(
