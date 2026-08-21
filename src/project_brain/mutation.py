@@ -20,6 +20,11 @@ from project_brain.code_verify import (
     CodeVerificationError,
     verify_locator_for_write,
 )
+from project_brain.capabilities import (
+    CAPABILITY_REGISTRY,
+    CandidatePolicy,
+    ManualPromotionPolicy,
+)
 from project_brain.corpus_io import (
     CorpusIOError,
     DerivedFilePolicy,
@@ -44,6 +49,14 @@ from project_brain.display_contract import (
     canonical_locator_title,
     non_title_sha256,
     paired_code_locator_id,
+)
+from project_brain.dedicated_proof import (
+    DedicatedProof,
+    DedicatedProofProfile,
+    builtin_dedicated_proof_profiles,
+    dedicated_proof_dict,
+    dedicated_proof_profile,
+    evaluate_dedicated_proof,
 )
 from project_brain.hash_utils import stable_json
 from project_brain.id_grammar import IdGrammarError, parse_id
@@ -188,6 +201,7 @@ class MutationRequest:
     external_reference_rewrite_bindings: tuple[
         VerifiedReferenceRewrite, ...
     ] = ()
+    dedicated_proofs: tuple[DedicatedProof, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -211,6 +225,7 @@ class MutationManifest:
     grandfathered_problems_after: tuple[dict, ...]
     batch_binding: dict[str, object] | None
     canonical_repair_binding: dict[str, object] | None
+    dedicated_proofs: tuple[dict[str, object], ...]
 
 
 @dataclass(frozen=True)
@@ -301,6 +316,10 @@ def canonical_unstamped_intent(
                 if request.canonical_repair_binding is not None
                 else None
             ),
+            "dedicated_proofs": [
+                dedicated_proof_dict(proof)
+                for proof in request.dedicated_proofs
+            ],
         },
         "preview": {
             "after_objects": [dict(obj) for obj in preview.after_objects],
@@ -368,8 +387,18 @@ class _BoundMutationState:
 
 
 class MutationService:
-    def __init__(self, *, clock: Callable[[], str] = now_kst) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], str] = now_kst,
+        dedicated_proof_profiles: Sequence[DedicatedProofProfile] | None = None,
+    ) -> None:
         self._clock = clock
+        self._dedicated_proof_profiles = (
+            tuple(dedicated_proof_profiles)
+            if dedicated_proof_profiles is not None
+            else builtin_dedicated_proof_profiles()
+        )
 
     def preview(
         self,
@@ -688,6 +717,73 @@ class MutationService:
             merged.pop(object_id)
         merged.update(planned_by_id)
         merged_store = BrainStore(merged)
+
+        proof_by_target = {
+            proof.target_id: proof
+            for proof in request.dedicated_proofs
+        }
+        matched_proof_targets: set[str] = set()
+        for action in object_actions:
+            if action.action not in {
+                ObjectActionKind.CREATE,
+                ObjectActionKind.UPDATE,
+                ObjectActionKind.NO_CHANGE,
+            }:
+                continue
+            obj = planned_by_id.get(action.object_id)
+            if obj is None:
+                continue
+            profile = dedicated_proof_profile(
+                obj,
+                profiles=self._dedicated_proof_profiles,
+            )
+            if profile is None:
+                continue
+            proof = proof_by_target.get(action.object_id)
+            if (
+                proof is None
+                and action.action
+                in {ObjectActionKind.CREATE, ObjectActionKind.UPDATE}
+            ):
+                return _failure(
+                    "dedicated_proof_missing",
+                    f"{obj['id']}: reviewed create/update requires dedicated proof",
+                )
+            if proof is None:
+                continue
+            matched_proof_targets.add(action.object_id)
+            if obj.get("status") != "reviewed":
+                return _failure(
+                    "dedicated_proof_status_invalid",
+                    f"{obj['id']}: dedicated proof requires reviewed status",
+                )
+            evaluation = evaluate_dedicated_proof(
+                proof,
+                brain_root=request.brain_root,
+                store=merged_store,
+                before=existing_by_id.get(action.source_id or action.object_id),
+                after=obj,
+                action=action.action,
+                profile=profile,
+            )
+            if evaluation.proof_status != "ready":
+                return _failure(
+                    "dedicated_proof_not_ready",
+                    (
+                        f"{obj['id']}: dedicated proof is "
+                        f"{evaluation.proof_status}: "
+                        + ", ".join(evaluation.reason_codes)
+                    ),
+                )
+        unused_proof_targets = sorted(
+            set(proof_by_target) - matched_proof_targets
+        )
+        if unused_proof_targets:
+            return _failure(
+                "dedicated_proof_target_invalid",
+                "dedicated proof targets do not match dedicated actions: "
+                + ", ".join(unused_proof_targets),
+            )
 
         for obj in planned_inputs:
             candidate = obj.get("candidate")
@@ -1017,6 +1113,52 @@ class MutationService:
             )
             if canonical_validation.error is not None:
                 return canonical_validation.error
+
+        for obj in inputs:
+            profile = dedicated_proof_profile(
+                obj,
+                profiles=self._dedicated_proof_profiles,
+            )
+            capability = CAPABILITY_REGISTRY.get(str(obj.get("kind", "")))
+            if (
+                profile is not None
+                and capability is not None
+                and obj.get("status") == "candidate"
+                and capability.candidate_policy is CandidatePolicy.FORBIDDEN
+            ):
+                return _failure(
+                    "dedicated_candidate_forbidden",
+                    f"{obj.get('id', '?')}: dedicated proof kind forbids candidates",
+                )
+
+        if request.operation in {
+            MutationOperation.PROMOTE,
+            MutationOperation.PROMOTE_AUTO,
+        }:
+            for object_id, obj in input_by_id.items():
+                previous = existing_by_id.get(object_id)
+                if previous is None or previous.get("status") != "candidate":
+                    continue
+                profile = dedicated_proof_profile(
+                    previous,
+                    profiles=self._dedicated_proof_profiles,
+                ) or dedicated_proof_profile(
+                    obj,
+                    profiles=self._dedicated_proof_profiles,
+                )
+                capability = CAPABILITY_REGISTRY.get(
+                    str(previous.get("kind", ""))
+                )
+                if (
+                    profile is not None
+                    and capability is not None
+                    and capability.manual_promotion
+                    is ManualPromotionPolicy.FORBIDDEN
+                ):
+                    return _failure(
+                        "dedicated_promotion_forbidden",
+                        f"{object_id}: dedicated proof kind forbids promotion",
+                    )
 
         # 3) schema와 enum.
         for obj in inputs:
@@ -2146,6 +2288,26 @@ def _validate_request_shape(
         if raw_inputs != request.objects:
             raise ValueError(
                 "objects must exactly match request.objects in sequence order"
+            )
+        if (
+            not isinstance(request.dedicated_proofs, tuple)
+            or not all(
+                isinstance(proof, DedicatedProof)
+                for proof in request.dedicated_proofs
+            )
+        ):
+            raise ValueError(
+                "dedicated_proofs must be tuple[DedicatedProof, ...]"
+            )
+        proof_target_ids = tuple(
+            proof.target_id for proof in request.dedicated_proofs
+        )
+        if (
+            proof_target_ids != tuple(sorted(proof_target_ids))
+            or len(proof_target_ids) != len(set(proof_target_ids))
+        ):
+            raise ValueError(
+                "dedicated_proofs must be sorted by unique target_id"
             )
         if not isinstance(request.delete_ids, tuple) or not all(
             isinstance(object_id, str)
@@ -3375,6 +3537,10 @@ def _build_manifest(
         if request.canonical_repair_binding is not None
         else None
     )
+    dedicated_proofs = tuple(
+        dedicated_proof_dict(proof)
+        for proof in request.dedicated_proofs
+    )
     expected_objects = (
         tuple(
             {"id": identity.id, "kind": identity.kind}
@@ -3434,6 +3600,7 @@ def _build_manifest(
         "grandfathered_problems_after": after_grandfathered,
         "batch_binding": batch_binding,
         "canonical_repair_binding": canonical_repair_binding,
+        "dedicated_proofs": dedicated_proofs,
     }
     transaction_id = hashlib.sha256(
         json.dumps(
@@ -3459,6 +3626,7 @@ def _build_manifest(
         grandfathered_problems_after=after_grandfathered,
         batch_binding=batch_binding,
         canonical_repair_binding=canonical_repair_binding,
+        dedicated_proofs=dedicated_proofs,
     )
     manifest = MutationManifest(
         **manifest_kwargs,

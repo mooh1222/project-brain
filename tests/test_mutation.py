@@ -1053,6 +1053,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "context_id",
         "external_reference_rewrites",
         "external_reference_rewrite_bindings",
+        "dedicated_proofs",
     ]
     assert [field.name for field in fields(MutationManifest)] == [
         "transaction_id",
@@ -1074,6 +1075,7 @@ def test_request_and_manifest_models_match_the_plan_contract():
         "grandfathered_problems_after",
         "batch_binding",
         "canonical_repair_binding",
+        "dedicated_proofs",
     ]
     assert {operation.value for operation in MutationOperation} == {
         "ingest",

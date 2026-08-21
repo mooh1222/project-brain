@@ -155,6 +155,7 @@ _MUTATION_MANIFEST_FIELDS = frozenset({
     "grandfathered_problems_after",
     "batch_binding",
     "canonical_repair_binding",
+    "dedicated_proofs",
 })
 _RECEIPT_MANIFEST_FIELDS = frozenset({
     "coverage_sha256",
@@ -1457,21 +1458,20 @@ def _with_historical_terminal_manifest_compatibility(
     manifest = payload.get("manifest")
     if not isinstance(manifest, dict):
         return payload
-    if manifest.get("operation") not in (
-        _MUTATION_OPERATIONS - {"canonical_repair"}
-    ):
-        return payload
-    historical_field_sets = {
-        _MUTATION_MANIFEST_FIELDS - {"canonical_repair_binding"},
-        _LEGACY_V1_MUTATION_MANIFEST_FIELDS
-        - {"canonical_repair_binding"},
-    }
-    if set(manifest) not in historical_field_sets:
-        return payload
     compatible = dict(payload)
     compatible["manifest"] = dict(manifest)
-    compatible["manifest"]["canonical_repair_binding"] = None
-    return compatible
+    changed = False
+    if "dedicated_proofs" not in manifest:
+        compatible["manifest"]["dedicated_proofs"] = []
+        changed = True
+    if (
+        "canonical_repair_binding" not in manifest
+        and manifest.get("operation")
+        in (_MUTATION_OPERATIONS - {"canonical_repair"})
+    ):
+        compatible["manifest"]["canonical_repair_binding"] = None
+        changed = True
+    return compatible if changed else payload
 
 
 def _is_legacy_v1_terminal_journal(
@@ -4201,6 +4201,38 @@ def _validate_manifest_contents(
     elif canonical_repair_binding is not None:
         raise ValueError(
             "manifest canonical_repair_binding requires canonical_repair operation"
+        )
+    dedicated_proofs = manifest.get("dedicated_proofs")
+    if not isinstance(dedicated_proofs, (list, tuple)):
+        raise ValueError("manifest dedicated_proofs must be a sequence")
+    proof_target_ids: list[str] = []
+    for proof in dedicated_proofs:
+        if not isinstance(proof, Mapping) or set(proof) != {
+            "version",
+            "target_id",
+            "profile",
+            "action",
+            "subject_sha256",
+            "sources",
+            "inputs",
+            "execution",
+            "proof_sha256",
+        }:
+            raise ValueError("manifest dedicated proof keys are invalid")
+        target_id = proof.get("target_id")
+        if not isinstance(target_id, str) or not target_id:
+            raise ValueError("manifest dedicated proof target_id is invalid")
+        if not _is_sha256(proof.get("subject_sha256")) or not _is_sha256(
+            proof.get("proof_sha256")
+        ):
+            raise ValueError("manifest dedicated proof hash is invalid")
+        proof_target_ids.append(target_id)
+    if (
+        proof_target_ids != sorted(proof_target_ids)
+        or len(proof_target_ids) != len(set(proof_target_ids))
+    ):
+        raise ValueError(
+            "manifest dedicated proofs must use sorted unique targets"
         )
     for field_name in (
         "grandfathered_problems_before",
