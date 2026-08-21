@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from project_brain import ingest as ingest_module
 from project_brain.ingest import IngestError, ingest as _product_ingest
 from project_brain.mutation import MutationService
 from project_brain.objbase import base
@@ -26,14 +27,26 @@ FIXED_TIME = "2026-08-05T12:34:56+09:00"
 def ingest(brain_root, objects, preconditions=None, **kwargs):
     """합성 테스트 writer도 exact engine SHA를 명시한다."""
     coverage = kwargs.pop("coverage", direct_coverage(*objects))
-    return _product_ingest(
-        brain_root,
-        objects,
-        preconditions=preconditions,
-        engine_sha=kwargs.pop("engine_sha", ENGINE_SHA),
-        coverage=coverage,
-        **kwargs,
-    )
+    engine_sha = kwargs.pop("engine_sha", ENGINE_SHA)
+
+    def call():
+        return _product_ingest(
+            brain_root,
+            objects,
+            preconditions=preconditions,
+            engine_sha=engine_sha,
+            coverage=coverage,
+            **kwargs,
+        )
+
+    if isinstance(ingest_module._new_mutation_service, mock.Mock):
+        return call()
+    with mock.patch.object(
+        ingest_module,
+        "_new_mutation_service",
+        return_value=MutationService(dedicated_proof_profiles=()),
+    ):
+        return call()
 
 
 def manifest(mid="manifest.neutral.source"):
@@ -310,7 +323,10 @@ class TestIngest(unittest.TestCase):
         draft = manifest()
         draft.pop("created_at")
         draft.pop("updated_at")
-        service = MutationService(clock=lambda: FIXED_TIME)
+        service = MutationService(
+            clock=lambda: FIXED_TIME,
+            dedicated_proof_profiles=(),
+        )
 
         with mock.patch(
             "project_brain.ingest._new_mutation_service",

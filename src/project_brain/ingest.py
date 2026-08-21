@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from project_brain.dedicated_proof import DedicatedProof
 from project_brain.mutation import (
     MutationOperation,
     MutationRequest,
@@ -55,6 +56,7 @@ def ingest(
     operation: MutationOperation = MutationOperation.INGEST,
     expected_corpus_fingerprint: str | None = None,
     batch_binding: BatchBinding | None = None,
+    dedicated_proofs: Sequence[DedicatedProof] = (),
 ):
     """한 bundle을 공통 mutation service로 원자 적용한다."""
     inputs = tuple(objects)
@@ -69,6 +71,12 @@ def ingest(
         batch_binding=batch_binding,
         coverage=coverage,
         build_binding=build_binding,
+        dedicated_proofs=tuple(
+            sorted(
+                dedicated_proofs,
+                key=lambda proof: proof.target_id,
+            )
+        ),
     )
     result = _new_mutation_service().apply(inputs, request=request)
     if not result.ok:

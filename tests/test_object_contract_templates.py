@@ -103,7 +103,10 @@ def _mutation_plan(
             else None
         ),
     )
-    return MutationService().plan(inputs, request=request)
+    return MutationService(dedicated_proof_profiles=()).plan(
+        inputs,
+        request=request,
+    )
 
 
 def _object_hash(obj: dict) -> str:

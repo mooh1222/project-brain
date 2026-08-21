@@ -1448,7 +1448,7 @@ def _with_historical_terminal_manifest_compatibility(
     transaction_id: str,
 ) -> dict[str, Any]:
     if (
-        payload.get("version") != 1
+        payload.get("version") not in (1, 2)
         or _SHA256.fullmatch(transaction_id) is None
         or payload.get("transaction_id") != transaction_id
         or payload.get("state") not in _TERMINAL_STATES
@@ -1465,7 +1465,8 @@ def _with_historical_terminal_manifest_compatibility(
         compatible["manifest"]["dedicated_proofs"] = []
         changed = True
     if (
-        "canonical_repair_binding" not in manifest
+        payload.get("version") == 1
+        and "canonical_repair_binding" not in manifest
         and manifest.get("operation")
         in (_MUTATION_OPERATIONS - {"canonical_repair"})
     ):

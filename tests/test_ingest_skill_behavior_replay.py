@@ -154,7 +154,10 @@ class CoverageWriteBoundaryReplayTest(unittest.TestCase):
                 coverage=direct_coverage(obj),
             )
 
-            result = MutationService().plan((obj,), request=request)
+            result = MutationService(dedicated_proof_profiles=()).plan(
+                (obj,),
+                request=request,
+            )
 
             self.assertTrue(result.ok, (result.error_code, result.detail))
             self.assertEqual(_write_surface_inventory(root), before)

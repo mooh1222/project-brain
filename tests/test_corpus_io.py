@@ -1314,6 +1314,74 @@ def test_historical_terminal_manifest_without_canonical_binding_is_read_only_com
     assert journal_path.read_bytes() == before_bytes
 
 
+def test_historical_v2_terminal_manifest_without_dedicated_proofs_is_read_only_compatible(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    result = _service().apply(
+        (after,),
+        request=_request(
+            brain_root,
+            (after,),
+            operation=MutationOperation.CONTEXT_REPLACE,
+        ),
+    )
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["version"] == 2
+    assert journal["state"] == JournalState.COMMITTED.value
+    assert journal["manifest"].pop("dedicated_proofs") == []
+    journal_path.write_bytes(_canonical_test_json_bytes(journal))
+    before_bytes = journal_path.read_bytes()
+
+    assert_corpus_readable(brain_root)
+    assert BrainStore.load(brain_root).get(after["id"]) == after
+    recovered = recover_unfinished_transaction(brain_root)
+
+    assert recovered.recovered_transaction_ids == ()
+    assert journal_path.read_bytes() == before_bytes
+
+
+def test_v2_terminal_manifest_missing_canonical_binding_remains_rejected(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    result = _service().apply(
+        (after,),
+        request=_request(
+            brain_root,
+            (after,),
+            operation=MutationOperation.CONTEXT_REPLACE,
+        ),
+    )
+    assert result.ok and result.manifest is not None
+    journal_path = (
+        brain_root
+        / ".brain-local"
+        / "transactions"
+        / result.manifest.transaction_id
+        / "journal.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["version"] == 2
+    assert journal["manifest"].pop("canonical_repair_binding") is None
+    journal_path.write_bytes(_canonical_test_json_bytes(journal))
+
+    with pytest.raises(RecoveryRequiredError, match="journal structure is invalid"):
+        assert_corpus_readable(brain_root)
+
+
 @pytest.mark.parametrize(
     "state",
     (JournalState.PREPARED.value, JournalState.COMMITTING.value),

@@ -478,7 +478,8 @@ class TestCli(unittest.TestCase):
         ) as apply, mock.patch(
             "project_brain.ingest._new_mutation_service",
             return_value=MutationService(
-                clock=lambda: "2026-08-05T12:34:56+09:00"
+                clock=lambda: "2026-08-05T12:34:56+09:00",
+                dedicated_proof_profiles=(),
             ),
         ), mock.patch(
             "sys.argv",
@@ -490,13 +491,13 @@ class TestCli(unittest.TestCase):
         payload = json.loads(out.getvalue())
         expected = {
             "version": 1,
-            "receipt_id": "2fe42bc987bc38e0e05be551dcaf83b9395601e3d070a2834d2b335a57e5fa20",
+            "receipt_id": "bd523f4dfd100d32b4b73f1b461b830956f085b4f8865bfe62157ee38ed170f2",
             "ok": True,
             "outcome": "committed",
             "operation": "ingest",
             "committed": True,
-            "transaction_id": "f145095bc82fa708e13872dda9795a4314575129900e85f29af7e2f06e78d302",
-            "manifest_sha256": "ccba14bfe72888682d7f37b5d76e47c05b40e7c9bc2f63ec74e87fe32c37b623",
+            "transaction_id": "e0ac1677133c625a757ff7ba3870a7c09fb6335b740b75a490dd147c07b0524a",
+            "manifest_sha256": "65c73a78c4efc993155c0e9d918b9b2963de485d3c6fee1bfc407704effcc0c7",
             "coverage_sha256": "7a05b32eed05a81200013ec59f03a058dcc3038552d121c296fb1f37b6ee5fe9",
             "expected_objects": [
                 {"id": "context.neutral", "kind": "DomainContext"},
