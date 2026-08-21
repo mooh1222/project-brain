@@ -102,56 +102,10 @@ _EVIDENCE_REF_PROFILE = _profile(
         "evidence_manifest_id", "locator", "evidence_refs",
     }),
 )
-_EVENT_LEDGER_RECORD_PROFILE = _profile(
-    "verification.event-ledger-record",
-    "EventLedgerRecord",
-    dedicated_checks={
-        "event.occurred-at-valid": frozenset({"engine"}),
-        "event.source-support": frozenset({"agent", "human"}),
-        "event.correction-policy": frozenset({"agent"}),
-    },
-    engine_check_ids=frozenset({"event.occurred-at-valid"}),
-    direct_evidence_fields=frozenset({"evidence_refs"}),
-)
-_TEMPORAL_FACT_PROFILE = _profile(
-    "verification.temporal-fact",
-    "TemporalFact",
-    dedicated_checks={
-        "fact.event-linked": frozenset({"engine"}),
-        "fact.time-scope-valid": frozenset({"agent"}),
-        "fact.supersession-valid": frozenset({"engine", "agent"}),
-    },
-    engine_check_ids=frozenset({
-        "fact.event-linked",
-        "fact.supersession-valid",
-    }),
-    direct_evidence_fields=frozenset({
-        "derived_from_event_id",
-        "evidence_refs",
-    }),
-)
-_CODE_LOCATOR_PROFILE = _profile(
-    "verification.code-locator",
-    "CodeLocator",
-    dedicated_checks={
-        "code.locator-resolves": frozenset({"engine"}),
-        "code.quote-matches": frozenset({"engine"}),
-        "code.revision-bound": frozenset({"engine"}),
-    },
-    engine_check_ids=frozenset({
-        "code.locator-resolves",
-        "code.quote-matches",
-        "code.revision-bound",
-    }),
-    direct_evidence_fields=frozenset({"evidence_refs"}),
-)
 _PROFILES_BY_KIND = {
     profile.subject_kind: profile
     for profile in (
         _EVIDENCE_REF_PROFILE,
-        _EVENT_LEDGER_RECORD_PROFILE,
-        _TEMPORAL_FACT_PROFILE,
-        _CODE_LOCATOR_PROFILE,
     )
 }
 _PROFILES_BY_ID = {
@@ -328,8 +282,6 @@ def _direct_evidence_rows(
     subject: Mapping[str, object],
     store: BrainStore,
     profile: VerificationProfile | None = None,
-    *,
-    repo_context: RepoContext | None = None,
 ) -> list[dict[str, object]]:
     selected = profile or candidate_verification_profile(subject)
     if selected is None:
@@ -380,8 +332,6 @@ def _direct_evidence_rows(
             "object_id": None,
             "content_sha256": current_source_hash,
         })
-    if selected is _CODE_LOCATOR_PROFILE:
-        rows.append(code_checkout_evidence_row(subject, repo_context))
     return sorted(rows, key=lambda row: (str(row["pointer"]), str(row["object_id"])))
 
 
@@ -402,20 +352,13 @@ def _evidence_sha256(
     subject: Mapping[str, object],
     store: BrainStore,
     profile: VerificationProfile | None = None,
-    *,
-    repo_context: RepoContext | None = None,
 ) -> str:
     selected = profile or candidate_verification_profile(subject)
     if selected is None:
         raise ValueError("subject has no supported verification profile")
     return sha256_text(stable_json({
         "projection": "verification-evidence-v1",
-        "rows": _direct_evidence_rows(
-            subject,
-            store,
-            selected,
-            repo_context=repo_context,
-        ),
+        "rows": _direct_evidence_rows(subject, store, selected),
     }))
 
 
@@ -473,18 +416,11 @@ def _engine_checks(
     subject: Mapping[str, object],
     store: BrainStore,
     profile: VerificationProfile | None = None,
-    *,
-    repo_context: RepoContext | None = None,
 ) -> list[dict[str, str]]:
     selected = profile or candidate_verification_profile(subject)
     if selected is None:
         return []
-    rows = _direct_evidence_rows(
-        subject,
-        store,
-        selected,
-        repo_context=repo_context,
-    )
+    rows = _direct_evidence_rows(subject, store, selected)
     references_resolve = all(row["content_sha256"] is not None for row in rows)
     checks = {
         "common.evidence-resolved": (
@@ -550,18 +486,6 @@ def _engine_checks(
                 "비어 있지 않은 인용 요약이 locator에 결속된다.",
             ),
         })
-    elif selected in (
-        _EVENT_LEDGER_RECORD_PROFILE,
-        _TEMPORAL_FACT_PROFILE,
-        _CODE_LOCATOR_PROFILE,
-    ):
-        checks.update(
-            dedicated_engine_checks(
-                subject,
-                store,
-                repo_context=repo_context,
-            )
-        )
     return [
         {
             "id": check_id,
@@ -739,12 +663,7 @@ def prepare_candidate_verification(
     if any(not isinstance(verifier, Mapping) for verifier in verifiers):
         raise ValueError("verifiers must contain objects")
     normalized_checks = sorted(
-        supplied_checks + _engine_checks(
-            subject,
-            store,
-            selected,
-            repo_context=repo_context,
-        ),
+        supplied_checks + _engine_checks(subject, store, selected),
         key=lambda check: str(check.get("id")),
     )
     normalized_verifiers = sorted(
@@ -757,12 +676,7 @@ def prepare_candidate_verification(
     )
     bindings = {
         "content_sha256": _content_sha256(subject, selected),
-        "evidence_sha256": _evidence_sha256(
-            subject,
-            store,
-            selected,
-            repo_context=repo_context,
-        ),
+        "evidence_sha256": _evidence_sha256(subject, store, selected),
         "rules_sha256": _rules_binding(selected),
     }
     execution = {
@@ -804,11 +718,7 @@ def promotion_review_fields(
     """fresh candidate가 ReviewRecord로 옮길 초기 verification 필드를 반환한다."""
     if not isinstance(store, BrainStore):
         raise ValueError("verified candidate promotion requires the current BrainStore")
-    evaluation = evaluate_candidate_verification(
-        dict(subject),
-        store,
-        repo_context=repo_context,
-    )
+    evaluation = evaluate_candidate_verification(dict(subject), store)
     if evaluation.verification_status != "ready":
         reasons = ", ".join(evaluation.reason_codes) or "unknown"
         raise ValueError(f"verification_not_ready: {reasons}")
@@ -899,7 +809,6 @@ def candidate_promotion_problems(
             promoted,
             store,
             selected,
-            repo_context=repo_context,
         ):
             problems.append("promotion target evidence binding differs from candidate")
     if record.get("verification") != envelope:
@@ -1063,12 +972,7 @@ def evaluate_candidate_verification(
             )
             evidence_matches = (
                 bindings.get("evidence_sha256")
-                == _evidence_sha256(
-                    subject,
-                    store,
-                    selected,
-                    repo_context=repo_context,
-                )
+                == _evidence_sha256(subject, store, selected)
             )
             rules_match = bindings.get("rules_sha256") == _rules_binding(selected)
             if not content_matches:
@@ -1090,12 +994,7 @@ def evaluate_candidate_verification(
                         for check in checks
                         if isinstance(check, Mapping) and "id" in check
                     }
-                    for engine_check in _engine_checks(
-                        subject,
-                        store,
-                        selected,
-                        repo_context=repo_context,
-                    ):
+                    for engine_check in _engine_checks(subject, store, selected):
                         if check_by_id.get(engine_check["id"]) != engine_check:
                             reasons.add("execution_invalid")
         if (

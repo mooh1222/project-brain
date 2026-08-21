@@ -105,11 +105,7 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer,
                     f"{obj.get('kind')} candidate requires {required_format} verification"
                 )
             verification_fields = (
-                promotion_review_fields(
-                    obj,
-                    store,
-                    repo_context=repo_context,
-                )
+                promotion_review_fields(obj, store)
                 if profile is not None
                 else {}
             )
