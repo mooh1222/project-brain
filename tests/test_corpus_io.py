@@ -76,6 +76,23 @@ PREPARATION_FAILURE_POINTS = (
     "before_active_publish",
 )
 TRANSACTION_TIME = "2026-06-04T00:00:00Z"
+LEGACY_V1_MANIFEST_FIELDS = (
+    "transaction_id",
+    "operation",
+    "engine_sha",
+    "creates",
+    "updates",
+    "deletes",
+    "renames",
+    "reference_rewrites",
+    "auxiliary_updates",
+    "before_fingerprint",
+    "expected_after_fingerprint",
+    "grandfathered_problems_before",
+    "grandfathered_problems_after",
+    "batch_binding",
+    "canonical_repair_binding",
+)
 
 
 class InjectedCrash(RuntimeError):
@@ -272,15 +289,17 @@ def _downgrade_committed_batch_to_legacy_v1(
     )
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
     _journal_payload_as_v1(journal)
-    manifest = journal["manifest"]
-    for field_name in (
-        "coverage_sha256",
-        "expected_objects",
-        "verified_objects",
-        "changed_objects",
-    ):
-        assert field_name in manifest
-        manifest.pop(field_name)
+    current_manifest = journal["manifest"]
+    assert all(
+        field_name in current_manifest
+        for field_name in LEGACY_V1_MANIFEST_FIELDS
+    )
+    manifest = {
+        field_name: current_manifest[field_name]
+        for field_name in LEGACY_V1_MANIFEST_FIELDS
+    }
+    assert "dedicated_proofs" not in manifest
+    journal["manifest"] = manifest
     manifest["batch_binding"] = legacy_binding_payload
     journal["batch_binding"] = legacy_binding_payload
     manifest_sha256 = hashlib.sha256(
@@ -1962,6 +1981,9 @@ def test_legacy_v1_receipt_recovery_preserves_shape_bytes_and_chain(tmp_path):
     )
     first_bytes = (first_journal.read_bytes(), first_intent.read_bytes())
 
+    assert_corpus_readable(brain_root)
+    assert BrainStore.load(brain_root).get(first_after["id"]) == first_after
+    assert (first_journal.read_bytes(), first_intent.read_bytes()) == first_bytes
     assert recover_committed_receipt(
         brain_root,
         first_legacy_binding,
