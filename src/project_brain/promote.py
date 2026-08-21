@@ -11,7 +11,11 @@ merge한다 — 자동 승격의 vouched_by_mapping_ids(§4.5), 수동 conflict 
 
 from project_brain.id_grammar import format_id
 from project_brain.objbase import review_record
-from project_brain.verification import promotion_review_fields
+from project_brain.verification import (
+    candidate_verification_profile,
+    promotion_review_fields,
+    registered_candidate_verification_kind,
+)
 
 
 def vouching_mappings(term_id, store):
@@ -72,7 +76,7 @@ def select_vouched_candidates(store):
 
 def promote(objects, ids, scope, *, bundle_key=None, reviewer,
             reviewed_at: str | None,
-            review_extra_by_id=None, store=None):
+            review_extra_by_id=None, store=None, repo_context=None):
     """ids에 해당하는 객체를 reviewed로 승격하고 (promoted_objects, review_records)를 반환.
 
     scope == "single_object": 각 id를 독립 승격. candidate 키 통째 pop + 객체별
@@ -90,9 +94,23 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer,
         review_records = []
         for tid in ids:
             obj = index[tid]  # 없는 id면 KeyError
+            profile = candidate_verification_profile(obj)
+            if profile is None and registered_candidate_verification_kind(obj):
+                required_format = (
+                    "prompt_payload"
+                    if obj.get("kind") == "ContextProjection"
+                    else "supported"
+                )
+                raise ValueError(
+                    f"{obj.get('kind')} candidate requires {required_format} verification"
+                )
             verification_fields = (
-                promotion_review_fields(obj, store)
-                if obj.get("kind") == "EvidenceRef"
+                promotion_review_fields(
+                    obj,
+                    store,
+                    repo_context=repo_context,
+                )
+                if profile is not None
                 else {}
             )
             reviewed = dict(obj)
