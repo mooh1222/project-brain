@@ -58,8 +58,10 @@ from project_brain.schema import (
 )
 from project_brain.store import BrainStore, StoreLoadError
 from project_brain.verification import (
+    candidate_verification_profile,
     candidate_promotion_problems,
     evaluate_candidate_verification,
+    registered_candidate_verification_kind,
 )
 from project_brain.transaction_receipt import (
     BatchBinding,
@@ -690,7 +692,7 @@ class MutationService:
         for obj in planned_inputs:
             candidate = obj.get("candidate")
             if (
-                obj.get("kind") != "EvidenceRef"
+                candidate_verification_profile(obj) is None
                 or obj.get("status") != "candidate"
                 or not isinstance(candidate, Mapping)
                 or "verification" not in candidate
@@ -2055,7 +2057,13 @@ def _validate_promotion_request(
                 "promotion_result_not_reviewed",
                 f"{target_id}: promotion replacement must be reviewed",
             )
-        if previous.get("kind") == "EvidenceRef":
+        profile = candidate_verification_profile(previous)
+        if profile is None and registered_candidate_verification_kind(previous):
+            return _failure(
+                "verification_not_ready",
+                f"{target_id}: candidate variant has no supported verification profile",
+            )
+        if profile is not None:
             record = single_record_by_target.get(target_id)
             if record is None:
                 return _failure(

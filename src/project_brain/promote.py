@@ -11,7 +11,11 @@ merge한다 — 자동 승격의 vouched_by_mapping_ids(§4.5), 수동 conflict 
 
 from project_brain.id_grammar import format_id
 from project_brain.objbase import review_record
-from project_brain.verification import promotion_review_fields
+from project_brain.verification import (
+    candidate_verification_profile,
+    promotion_review_fields,
+    registered_candidate_verification_kind,
+)
 
 
 def vouching_mappings(term_id, store):
@@ -90,9 +94,19 @@ def promote(objects, ids, scope, *, bundle_key=None, reviewer,
         review_records = []
         for tid in ids:
             obj = index[tid]  # 없는 id면 KeyError
+            profile = candidate_verification_profile(obj)
+            if profile is None and registered_candidate_verification_kind(obj):
+                required_format = (
+                    "prompt_payload"
+                    if obj.get("kind") == "ContextProjection"
+                    else "supported"
+                )
+                raise ValueError(
+                    f"{obj.get('kind')} candidate requires {required_format} verification"
+                )
             verification_fields = (
                 promotion_review_fields(obj, store)
-                if obj.get("kind") == "EvidenceRef"
+                if profile is not None
                 else {}
             )
             reviewed = dict(obj)

@@ -35,30 +35,84 @@ class VerificationEvaluation:
     reason_codes: tuple[str, ...]
 
 
-_PROFILE_ID = "verification.evidence-ref"
 _PROFILE_VERSION = 1
-_DIRECT_EVIDENCE_FIELDS = frozenset({
-    "evidence_manifest_id",
-    "locator",
-    "evidence_refs",
-})
-_CHECK_AUTHORITIES = {
+_COMMON_CHECK_AUTHORITIES = {
     "common.content-supported": frozenset({"agent", "human"}),
     "common.evidence-resolved": frozenset({"engine"}),
     "common.current": frozenset({"engine", "agent"}),
     "common.kind-fit": frozenset({"agent"}),
     "common.questions-resolved": frozenset({"agent", "human"}),
-    "evidence.locator-resolves": frozenset({"engine"}),
-    "evidence.manifest-compatible": frozenset({"engine"}),
-    "evidence.quote-bound": frozenset({"engine"}),
 }
-_ENGINE_CHECK_IDS = frozenset({
+_COMMON_ENGINE_CHECK_IDS = frozenset({
     "common.evidence-resolved",
     "common.current",
-    "evidence.locator-resolves",
-    "evidence.manifest-compatible",
-    "evidence.quote-bound",
 })
+
+
+@dataclass(frozen=True)
+class VerificationProfile:
+    id: str
+    version: int
+    subject_kind: str
+    check_authorities: Mapping[str, frozenset[str]]
+    engine_check_ids: frozenset[str]
+    direct_evidence_fields: frozenset[str]
+    required_format: str | None = None
+
+
+def _profile(
+    profile_id: str,
+    subject_kind: str,
+    *,
+    dedicated_checks: Mapping[str, frozenset[str]],
+    engine_check_ids: frozenset[str],
+    direct_evidence_fields: frozenset[str],
+    required_format: str | None = None,
+) -> VerificationProfile:
+    return VerificationProfile(
+        id=profile_id,
+        version=_PROFILE_VERSION,
+        subject_kind=subject_kind,
+        check_authorities={**_COMMON_CHECK_AUTHORITIES, **dedicated_checks},
+        engine_check_ids=_COMMON_ENGINE_CHECK_IDS | engine_check_ids,
+        direct_evidence_fields=direct_evidence_fields,
+        required_format=required_format,
+    )
+
+
+_EVIDENCE_REF_PROFILE = _profile(
+    "verification.evidence-ref",
+    "EvidenceRef",
+    dedicated_checks={
+        "evidence.locator-resolves": frozenset({"engine"}),
+        "evidence.manifest-compatible": frozenset({"engine"}),
+        "evidence.quote-bound": frozenset({"engine"}),
+    },
+    engine_check_ids=frozenset({
+        "evidence.locator-resolves",
+        "evidence.manifest-compatible",
+        "evidence.quote-bound",
+    }),
+    direct_evidence_fields=frozenset({
+        "evidence_manifest_id", "locator", "evidence_refs",
+    }),
+)
+_PROFILES_BY_KIND = {
+    profile.subject_kind: profile
+    for profile in (
+        _EVIDENCE_REF_PROFILE,
+    )
+}
+_PROFILES_BY_ID = {
+    profile.id: profile
+    for profile in _PROFILES_BY_KIND.values()
+}
+
+# 기존 EvidenceRef 내부 이름은 같은 모듈의 이전 테스트·호출을 깨지 않게 유지한다.
+_PROFILE_ID = _EVIDENCE_REF_PROFILE.id
+_DIRECT_EVIDENCE_FIELDS = _EVIDENCE_REF_PROFILE.direct_evidence_fields
+_CHECK_AUTHORITIES = _EVIDENCE_REF_PROFILE.check_authorities
+_ENGINE_CHECK_IDS = _EVIDENCE_REF_PROFILE.engine_check_ids
 _TOP_LEVEL_KEYS = frozenset({
     "version", "profile", "bindings", "checks", "execution",
 })
@@ -188,22 +242,62 @@ def _candidate_metadata_problems(subject: Mapping[str, object]) -> list[str]:
     return problems
 
 
+def candidate_verification_profile(
+    subject: Mapping[str, object],
+) -> VerificationProfile | None:
+    """현재 구현이 지원하는 candidate verification profile을 반환한다."""
+    profile = _PROFILES_BY_KIND.get(str(subject.get("kind")))
+    if profile is None:
+        return None
+    if (
+        profile.required_format is not None
+        and subject.get("format") != profile.required_format
+    ):
+        return None
+    return profile
+
+
+def registered_candidate_verification_kind(
+    subject: Mapping[str, object],
+) -> bool:
+    """kind가 registry에 있으나 variant가 profile 대상 밖인지 구분한다."""
+    return str(subject.get("kind")) in _PROFILES_BY_KIND
+
+
+def _profile_from_envelope(
+    verification: Mapping[str, object],
+) -> VerificationProfile | None:
+    profile = verification.get("profile")
+    if not isinstance(profile, Mapping):
+        return None
+    return _PROFILES_BY_ID.get(str(profile.get("id")))
+
+
 def _direct_evidence_rows(
     subject: Mapping[str, object],
     store: BrainStore,
+    profile: VerificationProfile | None = None,
 ) -> list[dict[str, object]]:
-    pointers: list[tuple[str, object]] = [
-        ("/evidence_manifest_id", subject.get("evidence_manifest_id")),
-    ]
-    locator = subject.get("locator")
-    if isinstance(locator, Mapping) and "code_locator_id" in locator:
-        pointers.append(("/locator/code_locator_id", locator.get("code_locator_id")))
-    evidence_refs = subject.get("evidence_refs")
-    if isinstance(evidence_refs, list):
-        pointers.extend(
-            (f"/evidence_refs/{index}", object_id)
-            for index, object_id in enumerate(evidence_refs)
-        )
+    selected = profile or candidate_verification_profile(subject)
+    if selected is None:
+        return []
+    pointers: list[tuple[str, object]] = []
+    for field in sorted(
+        selected.direct_evidence_fields - frozenset({"source_content_hash"})
+    ):
+        value = subject.get(field)
+        if isinstance(value, list):
+            pointers.extend(
+                (f"/{field}/{index}", object_id)
+                for index, object_id in enumerate(value)
+            )
+        elif field == "locator":
+            if isinstance(value, Mapping) and "code_locator_id" in value:
+                pointers.append(
+                    ("/locator/code_locator_id", value.get("code_locator_id"))
+                )
+        else:
+            pointers.append((f"/{field}", value))
     rows = []
     for pointer, object_id in pointers:
         target = (
@@ -218,38 +312,79 @@ def _direct_evidence_rows(
                 source_content_hash([target]) if target is not None else None
             ),
         })
+    if "source_content_hash" in selected.direct_evidence_fields:
+        source_ids = subject.get("source_object_ids")
+        current_source_hash = None
+        if (
+            isinstance(source_ids, list)
+            and all(isinstance(item, str) and store.has(item) for item in source_ids)
+        ):
+            current_source_hash = source_content_hash(
+                store.get(object_id) for object_id in source_ids
+            )
+        rows.append({
+            "pointer": "/source_content_hash",
+            "object_id": None,
+            "content_sha256": current_source_hash,
+        })
     return sorted(rows, key=lambda row: (str(row["pointer"]), str(row["object_id"])))
 
 
-def _content_sha256(subject: Mapping[str, object]) -> str:
+def _content_sha256(
+    subject: Mapping[str, object],
+    profile: VerificationProfile | None = None,
+) -> str:
+    selected = profile or candidate_verification_profile(subject)
+    if selected is None:
+        raise ValueError("subject has no supported verification profile")
     return verification_content_hash(
         subject,
-        direct_evidence_fields=_DIRECT_EVIDENCE_FIELDS,
+        direct_evidence_fields=selected.direct_evidence_fields,
     )
 
 
-def _evidence_sha256(subject: Mapping[str, object], store: BrainStore) -> str:
+def _evidence_sha256(
+    subject: Mapping[str, object],
+    store: BrainStore,
+    profile: VerificationProfile | None = None,
+) -> str:
+    selected = profile or candidate_verification_profile(subject)
+    if selected is None:
+        raise ValueError("subject has no supported verification profile")
     return sha256_text(stable_json({
         "projection": "verification-evidence-v1",
-        "rows": _direct_evidence_rows(subject, store),
+        "rows": _direct_evidence_rows(subject, store, selected),
     }))
 
 
-def _rules_sha256() -> str:
+def _rules_sha256(profile: VerificationProfile | None = None) -> str:
+    selected = profile or _EVIDENCE_REF_PROFILE
     return sha256_text(stable_json({
-        "profile": {"id": _PROFILE_ID, "version": _PROFILE_VERSION},
+        "profile": {"id": selected.id, "version": selected.version},
         "checks": [
             {"id": check_id, "authorities": sorted(authorities)}
-            for check_id, authorities in sorted(_CHECK_AUTHORITIES.items())
+            for check_id, authorities in sorted(selected.check_authorities.items())
         ],
         "content_projection": "verification-content-v1",
-        "direct_evidence_fields": sorted(_DIRECT_EVIDENCE_FIELDS),
+        "direct_evidence_fields": sorted(selected.direct_evidence_fields),
         "evidence_projection": "verification-evidence-v1",
-        "ref_types_by_source_type": {
-            source_type: sorted(ref_types)
-            for source_type, ref_types in sorted(_REF_TYPES_BY_SOURCE_TYPE.items())
-        },
+        "profile_rules": (
+            {
+                "ref_types_by_source_type": {
+                    source_type: sorted(ref_types)
+                    for source_type, ref_types
+                    in sorted(_REF_TYPES_BY_SOURCE_TYPE.items())
+                },
+            }
+            if selected is _EVIDENCE_REF_PROFILE
+            else {"required_format": selected.required_format}
+        ),
     }))
+
+
+def _rules_binding(profile: VerificationProfile) -> str:
+    # EvidenceRef의 기존 monkeypatch seam을 유지한다.
+    return _rules_sha256() if profile is _EVIDENCE_REF_PROFILE else _rules_sha256(profile)
 
 
 def _execution_sha256(
@@ -275,48 +410,13 @@ def _execution_sha256(
 def _engine_checks(
     subject: Mapping[str, object],
     store: BrainStore,
+    profile: VerificationProfile | None = None,
 ) -> list[dict[str, str]]:
-    rows = _direct_evidence_rows(subject, store)
+    selected = profile or candidate_verification_profile(subject)
+    if selected is None:
+        return []
+    rows = _direct_evidence_rows(subject, store, selected)
     references_resolve = all(row["content_sha256"] is not None for row in rows)
-    locator = subject.get("locator")
-    code_locator = None
-    code_locator_id = (
-        locator.get("code_locator_id")
-        if isinstance(locator, Mapping)
-        else None
-    )
-    if isinstance(code_locator_id, str) and store.has(code_locator_id):
-        candidate_locator = store.get(code_locator_id)
-        if candidate_locator.get("kind") == "CodeLocator":
-            code_locator = candidate_locator
-    if subject.get("ref_type") == "code_locator":
-        locator_resolves = code_locator is not None
-    else:
-        locator_resolves = isinstance(locator, Mapping) and bool(locator)
-    manifest = None
-    manifest_id = subject.get("evidence_manifest_id")
-    if isinstance(manifest_id, str) and store.has(manifest_id):
-        candidate_manifest = store.get(manifest_id)
-        if candidate_manifest.get("kind") == "EvidenceManifest":
-            manifest = candidate_manifest
-    compatible = bool(
-        manifest is not None
-        and subject.get("ref_type")
-        in _REF_TYPES_BY_SOURCE_TYPE.get(str(manifest.get("source_type")), ())
-    )
-    quote_bound = bool(
-        isinstance(subject.get("summary"), str)
-        and str(subject.get("summary")).strip()
-        and locator_resolves
-        and (
-            subject.get("ref_type") != "code_locator"
-            or (
-                isinstance(code_locator, Mapping)
-                and isinstance(code_locator.get("verified_quote"), str)
-                and bool(str(code_locator.get("verified_quote")).strip())
-            )
-        )
-    )
     checks = {
         "common.evidence-resolved": (
             references_resolve,
@@ -326,19 +426,61 @@ def _engine_checks(
             references_resolve,
             "현재 store의 직접 근거 결속을 사용했다.",
         ),
-        "evidence.locator-resolves": (
-            locator_resolves,
-            "locator가 현재 store에서 해석된다.",
-        ),
-        "evidence.manifest-compatible": (
-            compatible,
-            "manifest source_type과 ref_type이 호환된다.",
-        ),
-        "evidence.quote-bound": (
-            quote_bound,
-            "비어 있지 않은 인용 요약이 locator에 결속된다.",
-        ),
     }
+    if selected is _EVIDENCE_REF_PROFILE:
+        locator = subject.get("locator")
+        code_locator = None
+        code_locator_id = (
+            locator.get("code_locator_id")
+            if isinstance(locator, Mapping)
+            else None
+        )
+        if isinstance(code_locator_id, str) and store.has(code_locator_id):
+            candidate_locator = store.get(code_locator_id)
+            if candidate_locator.get("kind") == "CodeLocator":
+                code_locator = candidate_locator
+        if subject.get("ref_type") == "code_locator":
+            locator_resolves = code_locator is not None
+        else:
+            locator_resolves = isinstance(locator, Mapping) and bool(locator)
+        manifest = None
+        manifest_id = subject.get("evidence_manifest_id")
+        if isinstance(manifest_id, str) and store.has(manifest_id):
+            candidate_manifest = store.get(manifest_id)
+            if candidate_manifest.get("kind") == "EvidenceManifest":
+                manifest = candidate_manifest
+        compatible = bool(
+            manifest is not None
+            and subject.get("ref_type")
+            in _REF_TYPES_BY_SOURCE_TYPE.get(str(manifest.get("source_type")), ())
+        )
+        quote_bound = bool(
+            isinstance(subject.get("summary"), str)
+            and str(subject.get("summary")).strip()
+            and locator_resolves
+            and (
+                subject.get("ref_type") != "code_locator"
+                or (
+                    isinstance(code_locator, Mapping)
+                    and isinstance(code_locator.get("verified_quote"), str)
+                    and bool(str(code_locator.get("verified_quote")).strip())
+                )
+            )
+        )
+        checks.update({
+            "evidence.locator-resolves": (
+                locator_resolves,
+                "locator가 현재 store에서 해석된다.",
+            ),
+            "evidence.manifest-compatible": (
+                compatible,
+                "manifest source_type과 ref_type이 호환된다.",
+            ),
+            "evidence.quote-bound": (
+                quote_bound,
+                "비어 있지 않은 인용 요약이 locator에 결속된다.",
+            ),
+        })
     return [
         {
             "id": check_id,
@@ -363,6 +505,15 @@ def verification_envelope_problems(subject: Mapping[str, object]) -> tuple[str, 
     if not isinstance(verification, Mapping):
         return ("candidate.verification must be an object",)
     problems = []
+    if "kind" in subject:
+        selected = candidate_verification_profile(subject)
+        if selected is None:
+            problems.append("subject has no supported candidate verification profile")
+            selected = _profile_from_envelope(verification)
+    else:
+        selected = _profile_from_envelope(verification)
+    if selected is None:
+        problems.append("verification profile is unsupported")
     if frozenset(verification) != _TOP_LEVEL_KEYS:
         problems.append("verification top-level keys must be exact")
     profile = verification.get("profile")
@@ -398,9 +549,14 @@ def verification_envelope_problems(subject: Mapping[str, object]) -> tuple[str, 
                 problems.append(f"verification.checks[{index}] id must be a string")
                 continue
             check_ids.append(check_id)
-            if check_id not in _CHECK_AUTHORITIES:
+            authorities = (
+                selected.check_authorities
+                if selected is not None
+                else {}
+            )
+            if check_id not in authorities:
                 problems.append(f"verification.checks[{index}] id is not in the profile")
-            elif check.get("authority") not in _CHECK_AUTHORITIES[str(check_id)]:
+            elif check.get("authority") not in authorities[str(check_id)]:
                 problems.append(f"verification.checks[{index}] authority is not allowed")
             if check.get("outcome") not in {"pass", "fail", "needs_human"}:
                 problems.append(f"verification.checks[{index}] invalid outcome")
@@ -408,7 +564,9 @@ def verification_envelope_problems(subject: Mapping[str, object]) -> tuple[str, 
                 problems.append(f"verification.checks[{index}] summary must be non-empty")
         if check_ids != sorted(check_ids) or len(check_ids) != len(set(check_ids)):
             problems.append("verification checks must be sorted and unique")
-        if set(check_ids) != set(_CHECK_AUTHORITIES):
+        if selected is not None and set(check_ids) != set(
+            selected.check_authorities
+        ):
             problems.append("verification checks must exactly match the profile")
     execution = verification.get("execution")
     if not isinstance(execution, Mapping) or frozenset(execution) != _EXECUTION_KEYS:
@@ -476,9 +634,10 @@ def prepare_candidate_verification(
     producer: Mapping[str, object],
     verifiers: Sequence[Mapping[str, object]],
 ) -> dict:
-    """EvidenceRef candidate의 현재 store 결속 v1 envelope를 결정론적으로 만든다."""
-    if subject.get("kind") != "EvidenceRef" or subject.get("status") != "candidate":
-        raise ValueError("verification.evidence-ref requires a candidate EvidenceRef")
+    """지원 candidate의 현재 store 결속 v1 envelope를 결정론적으로 만든다."""
+    selected = candidate_verification_profile(subject)
+    if selected is None or subject.get("status") != "candidate":
+        raise ValueError("subject requires a supported candidate verification profile")
     metadata_problems = _candidate_metadata_problems(subject)
     if metadata_problems:
         raise ValueError("; ".join(metadata_problems))
@@ -486,7 +645,9 @@ def prepare_candidate_verification(
         raise ValueError("checks must contain objects")
     supplied_checks = [dict(check) for check in checks]
     supplied_ids = [check.get("id") for check in supplied_checks]
-    expected_supplied = sorted(set(_CHECK_AUTHORITIES) - _ENGINE_CHECK_IDS)
+    expected_supplied = sorted(
+        set(selected.check_authorities) - selected.engine_check_ids
+    )
     if (
         any(not isinstance(check_id, str) for check_id in supplied_ids)
         or sorted(supplied_ids) != expected_supplied
@@ -496,7 +657,7 @@ def prepare_candidate_verification(
     if any(not isinstance(verifier, Mapping) for verifier in verifiers):
         raise ValueError("verifiers must contain objects")
     normalized_checks = sorted(
-        supplied_checks + _engine_checks(subject, store),
+        supplied_checks + _engine_checks(subject, store, selected),
         key=lambda check: str(check.get("id")),
     )
     normalized_verifiers = sorted(
@@ -508,9 +669,9 @@ def prepare_candidate_verification(
         ),
     )
     bindings = {
-        "content_sha256": _content_sha256(subject),
-        "evidence_sha256": _evidence_sha256(subject, store),
-        "rules_sha256": _rules_sha256(),
+        "content_sha256": _content_sha256(subject, selected),
+        "evidence_sha256": _evidence_sha256(subject, store, selected),
+        "rules_sha256": _rules_binding(selected),
     }
     execution = {
         "workflow": "candidate",
@@ -527,7 +688,7 @@ def prepare_candidate_verification(
     )
     envelope = {
         "version": 1,
-        "profile": {"id": _PROFILE_ID, "version": 1},
+        "profile": {"id": selected.id, "version": selected.version},
         "bindings": bindings,
         "checks": normalized_checks,
         "execution": execution,
@@ -548,7 +709,7 @@ def promotion_review_fields(
 ) -> dict[str, object]:
     """fresh candidate가 ReviewRecord로 옮길 초기 verification 필드를 반환한다."""
     if not isinstance(store, BrainStore):
-        raise ValueError("EvidenceRef promotion requires the current BrainStore")
+        raise ValueError("verified candidate promotion requires the current BrainStore")
     evaluation = evaluate_candidate_verification(dict(subject), store)
     if evaluation.verification_status != "ready":
         reasons = ", ".join(evaluation.reason_codes) or "unknown"
@@ -613,8 +774,9 @@ def candidate_promotion_problems(
     record: Mapping[str, object],
     store: BrainStore,
 ) -> tuple[str, ...]:
-    """lock 안 live store에서 EvidenceRef promotion의 target·record 결속을 검증한다."""
-    if candidate.get("kind") != "EvidenceRef":
+    """lock 안 live store에서 지원 candidate의 target·record 결속을 검증한다."""
+    selected = candidate_verification_profile(candidate)
+    if selected is None:
         return ()
     evaluation = evaluate_candidate_verification(dict(candidate), store)
     if evaluation.verification_status != "ready":
@@ -627,9 +789,13 @@ def candidate_promotion_problems(
     if promoted.get("status") != "reviewed" or "candidate" in promoted:
         problems.append("promotion target must be reviewed without candidate metadata")
     if isinstance(bindings, Mapping):
-        if bindings.get("content_sha256") != _content_sha256(promoted):
+        if bindings.get("content_sha256") != _content_sha256(promoted, selected):
             problems.append("promotion target content binding differs from candidate")
-        if bindings.get("evidence_sha256") != _evidence_sha256(promoted, store):
+        if bindings.get("evidence_sha256") != _evidence_sha256(
+            promoted,
+            store,
+            selected,
+        ):
             problems.append("promotion target evidence binding differs from candidate")
     if record.get("verification") != envelope:
         problems.append("ReviewRecord verification must equal candidate verification")
@@ -710,10 +876,15 @@ def evaluate_candidate_verification(
     """현재 store에서 candidate의 verification 상태와 고정 순서 사유를 계산한다."""
     reasons: set[str] = set()
     capability = CAPABILITY_REGISTRY.get(str(subject.get("kind")))
+    selected = candidate_verification_profile(subject)
     if (
         capability is None
-        or capability.manual_promotion is not ManualPromotionPolicy.ALLOWED
+        or capability.manual_promotion not in {
+            ManualPromotionPolicy.ALLOWED,
+            ManualPromotionPolicy.DEDICATED_VERIFICATION,
+        }
         or subject.get("status") != "candidate"
+        or selected is None
     ):
         reasons.add("kind_not_promotable")
     candidate = subject.get("candidate")
@@ -734,14 +905,17 @@ def evaluate_candidate_verification(
     else:
         if (
             type(verification.get("version")) is not int
-            or verification.get("version") != _PROFILE_VERSION
+            or selected is None
+            or verification.get("version") != selected.version
         ):
             reasons.add("unsupported_version")
         profile = verification.get("profile")
         if (
+            selected is None
+            or
             not isinstance(profile, Mapping)
             or type(profile.get("version")) is not int
-            or profile != {"id": _PROFILE_ID, "version": _PROFILE_VERSION}
+            or profile != {"id": selected.id, "version": selected.version}
         ):
             reasons.add("profile_mismatch")
         problems = verification_envelope_problems(subject)
@@ -750,6 +924,7 @@ def evaluate_candidate_verification(
         checks = verification.get("checks")
         if isinstance(checks, list):
             seen_ids: set[str] = set()
+            authorities = selected.check_authorities if selected is not None else {}
             for check in checks:
                 if not isinstance(check, Mapping):
                     continue
@@ -758,8 +933,8 @@ def evaluate_candidate_verification(
                 if (
                     not isinstance(check_id, str)
                     or
-                    check_id not in _CHECK_AUTHORITIES
-                    or authority not in _CHECK_AUTHORITIES.get(str(check_id), ())
+                    check_id not in authorities
+                    or authority not in authorities.get(str(check_id), ())
                 ):
                     reasons.add("execution_invalid")
                     continue
@@ -770,25 +945,25 @@ def evaluate_candidate_verification(
                     reasons.add("check_failed")
                 elif check.get("outcome") == "needs_human":
                     reasons.add("human_required")
-            if seen_ids != set(_CHECK_AUTHORITIES):
+            if seen_ids != set(authorities):
                 reasons.add("execution_invalid")
-            if seen_ids == set(_CHECK_AUTHORITIES):
-                check_by_id = {
-                    str(check["id"]): check
-                    for check in checks
-                    if isinstance(check, Mapping)
-                }
-                for engine_check in _engine_checks(subject, store):
-                    if check_by_id.get(engine_check["id"]) != engine_check:
-                        reasons.add("execution_invalid")
         bindings = verification.get("bindings")
         execution = verification.get("execution")
-        if isinstance(bindings, Mapping):
-            if bindings.get("content_sha256") != _content_sha256(subject):
+        if isinstance(bindings, Mapping) and selected is not None:
+            content_matches = (
+                bindings.get("content_sha256")
+                == _content_sha256(subject, selected)
+            )
+            evidence_matches = (
+                bindings.get("evidence_sha256")
+                == _evidence_sha256(subject, store, selected)
+            )
+            rules_match = bindings.get("rules_sha256") == _rules_binding(selected)
+            if not content_matches:
                 reasons.add("content_changed")
-            if bindings.get("evidence_sha256") != _evidence_sha256(subject, store):
+            if not evidence_matches:
                 reasons.add("evidence_changed")
-            if bindings.get("rules_sha256") != _rules_sha256():
+            if not rules_match:
                 reasons.add("rules_changed")
             if isinstance(checks, list) and isinstance(execution, Mapping):
                 if bindings.get("execution_sha256") != _execution_sha256(
@@ -797,7 +972,21 @@ def evaluate_candidate_verification(
                     bindings=bindings,
                 ):
                     reasons.add("execution_invalid")
-        if not problems and _review_shape_problems(subject):
+                if content_matches and evidence_matches and rules_match:
+                    check_by_id = {
+                        str(check["id"]): check
+                        for check in checks
+                        if isinstance(check, Mapping) and "id" in check
+                    }
+                    for engine_check in _engine_checks(subject, store, selected):
+                        if check_by_id.get(engine_check["id"]) != engine_check:
+                            reasons.add("execution_invalid")
+        if (
+            not problems
+            and selected is not None
+            and profile == {"id": selected.id, "version": selected.version}
+            and _review_shape_problems(subject)
+        ):
             reasons.add("review_shape_invalid")
     ordered = tuple(reason for reason in _REASON_ORDER if reason in reasons)
     if not ordered:
