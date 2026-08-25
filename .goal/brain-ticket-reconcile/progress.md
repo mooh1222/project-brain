@@ -41,7 +41,10 @@
   소비 데이터 검증 기록, 티켓별 후보 카운터 복구
 - 검증: 후보 2의 엔진·runtime 전체 통과를 유지하고 docs-only repair 뒤 architecture `15 passed`,
   `git diff --check` 통과
-- 다음 행동: 이 기록을 포함한 metadata commit을 고정해 후보 3 exact Standards·Spec review를 수행한다.
+- 검수 경계: 후보 2 exact review에서 현재 코드 수리는 추가 문제 없음으로 판정됐고, 후보 3은 그때
+  발견된 미래 설계와 검증 기록만 수리했다. #3·#6·#9·#10의 설계 검수는 이미 3/3 상한이므로 이
+  루프에서 네 번째 검수를 만들지 않는다. 최신 설계의 독립 확인은 새 design-admission ticket이
+  소유하며, 그 전에는 main 반영·부모 종료·구현 child 발행을 금지한다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
