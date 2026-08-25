@@ -121,7 +121,7 @@
 - 파일: `docs/specs/2026-08-25-context-md-artifact-transaction-design.md`
 - 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
 - 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
-- SHA: 이 progress를 포함한 candidate commit 직후 별도 receipt commit에서 40자리로 기록
+- 설계복귀 후보 2 SHA: d9d91391baece86f87ef3ea5612da76697e763ff
 - 검수 횟수: 네 파일을 한 exact candidate로 한 번만 검수하며 #33은 4/4, #34·#38·#39는 각각 2/3으로 센다.
 - 통과: A1 high, A2~A5 PASS, Critical 0, Major 0
 - 통과 뒤: #33·#34·#38·#39를 설계확정으로 바꾸고, E1~E15·C1~C6·N1~N4·Z1~Z4 각각의 GitHub child
