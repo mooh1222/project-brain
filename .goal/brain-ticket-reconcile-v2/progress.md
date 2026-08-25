@@ -14,7 +14,11 @@
 - 승인된 예외: #2·#4·#5는 각각 현재 3/4이며 최종 후보 4를 한 번만 추가할 수 있음. 후보 4는 아직 생성하지 않음
 - 2026-08-25 추가 승인: #33 설계복귀 상한 1→2·검수 상한 3→4, #34 설계복귀 상한 1→2
 - #38·#39는 기존 설계복귀 1/1 안에서 후보 2를 만들며 상한을 늘리지 않음
-- 권한 경계: 이 기록은 상한만 늘린다. 이번 1단계에서 #2·#4·#5 코드 후보를 만들 권한은 없음
+- 2026-08-25 후보 3 추가 승인: #38 설계복귀 상한 1→2, #34 2→3, #39 1→2. 세 티켓의 검수 상한은
+  3으로 유지하며 각각 남은 마지막 검수 1회만 사용함
+- 후보 3 권한: 후보 2 독립 검수의 Major 네 가지에 해당하는 #38·#34·#39 설계 계약과 이 진행 기록만
+  수정할 수 있음. 구현·#2·#4·#5 후보 생성·main 병합·PR·GitHub 변경은 포함하지 않음
+- 기존 #2·#4·#5 예외의 권한 경계: 상한만 늘어났으며 이번 1단계에서 코드 후보를 만들 권한은 없음
 - 정리 후보 1: `2db3de1bf430c4c663d087dc52ef033dd3923a31`
 - 후보 1 독립 검수: Critical 0 / Major 6 / RETURN
 - 정리 후보 2: `6c4a411c072f5d0546709779bdc0a8645e667d6a`
@@ -30,7 +34,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #33 PASS와 #38·#34·#39 RETURN 근거를 사용자에게 반환하고 추가 승인 전 모든 구현·설계 수정·GitHub 변경을 멈춘다.
+- 다음 행동: 승인된 네 가지 Major만 설계복귀 후보 3으로 고정하고 세 티켓의 마지막 독립 검수를 수행한다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -78,14 +82,14 @@
 
 ## #34 session completion 설계 admission
 
-- 단계: 중지 — 추가 사용자 승인 필요
+- 단계: 설계복귀 후보 3 준비
 - 후보: 2 / 3
 - 검수: 2 / 3
-- 설계복귀: 2 / 2
+- 설계복귀: 3 / 3
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 Critical 0 / Major 2 / RETURN
+- 마지막으로 닫힌 완료 조건: 후보 3 설계복귀 상한 2→3 사용자 승인
 - 마지막 갱신: 2026-08-25
-- 다음 행동: UUID-level cross-variant runner serialization과 과거 closure의 corpus lineage 검증 계약을 새 승인 없이 수정하지 않는다.
+- 다음 행동: UUID-level cross-variant runner serialization과 과거 closure의 corpus lineage 검증 계약만 보완한다.
 
 ### 초기 입장 판정
 
@@ -95,25 +99,25 @@
 
 ## #38 `context_md` object+artifact lifecycle 설계
 
-- 단계: 중지 — 추가 사용자 승인 필요
+- 단계: 설계복귀 후보 3 준비
 - 후보: 2 / 3
 - 검수: 2 / 3
-- 설계복귀: 1 / 1
+- 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 Critical 0 / Major 1 / RETURN
+- 마지막으로 닫힌 완료 조건: 후보 3 설계복귀 상한 1→2 사용자 승인
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #33 prepared evidence를 immutable transaction manifest에 보존하는 exact projection을 새 승인 없이 수정하지 않는다.
+- 다음 행동: #33 prepared evidence를 immutable transaction manifest·sealed identity·receipt/recovery에 보존하는 계약만 보완한다.
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 중지 — 추가 사용자 승인 필요
+- 단계: 설계복귀 후보 3 준비
 - 후보: 2 / 3
 - 검수: 2 / 3
-- 설계복귀: 1 / 1
+- 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 Critical 0 / Major 2 / RETURN
+- 마지막으로 닫힌 완료 조건: 후보 3 설계복귀 상한 1→2 사용자 승인
 - 마지막 갱신: 2026-08-25
-- 다음 행동: UUID-level cross-variant runner lock과 head 없는 첫 terminal report 복구 규칙을 새 승인 없이 수정하지 않는다.
+- 다음 행동: UUID-level cross-variant runner lock과 head 없는 첫 terminal report 복구 규칙만 보완한다.
 
 ## 설계복귀 후보 2 독립 검수 결과
 
