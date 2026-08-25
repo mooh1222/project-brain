@@ -29,6 +29,7 @@
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
 | L4 적재 | ✅ 3경로 + batch 완료 게이트 + P0 적재 무결성 기반 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·workflow validator·semantic finalization(2026-07-23) + coverage·단일 쓰기·receipt·foundation gate(2026-08-05) |
+| 검수·쓰기 정책 확장 | 🟡 미병합 후보 정리 중 | #2~#10 후보를 공개 기능, 내부 부분 구현, 설계 전용으로 다시 나눔. 공개 evidence 준비와 session completion 결속은 아직 설계 단계 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -38,7 +39,22 @@
 
 ## 진행 중
 
-현재 확정되어 진행 중인 작업은 없다. 착수 조건이 있는 후보는 아래 "미뤄둔 작업"에서 관리한다.
+### #2~#13 후보 분리와 설계 복귀 (2026-08-25)
+
+현재 제품 기준점은 `main@b35d351`이다. 과거 통합 후보 `75e97fa`와 정리 branch `272b303`에는
+#2~#10의 코드·테스트가 있지만 `main`에 들어오지 않았고, 공개 ingest 회귀와 미완성 계약이 있어
+전체 병합하지 않는다.
+
+- #2 query/audit, #4 capability registry, #5 snapshot 동결은 각각 별도 최종 후보로 분리한다.
+- #3 session completion과 #6·#9·#10 evidence preparation은 설계로 돌아갔다.
+- #7·#8 profile 계산은 #6의 공개 준비 경계 뒤 다시 검증한다.
+- #11~#13은 상태·효과 소유자와 검증 관측을 먼저 보강한다.
+- `context_md`는 `main`에 builder 함수가 있는 내부 부분 구현이며 공개 명령·생성 artifact 근거는 없다.
+- 지식 초안은 `brain/drafts/<topic-id>.md`를 제안한 별도 설계이며 `ContextProjection`과 합치지 않는다.
+
+정확한 대상 파일, issue dependency, 후보 상한과 단계별 완료 확인은
+[정리 실행 계획](docs/plans/2026-08-25-issues-2-13-cleanup-execution-plan.md)을 따른다. 엔진 코드 수정,
+`main` 병합·push, 기존 issue 종료는 각 단계의 별도 승인 전에는 실행하지 않는다.
 
 ---
 
