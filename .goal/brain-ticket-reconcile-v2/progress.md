@@ -39,8 +39,8 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #34·#39 후보 4 독립 검수를 먼저 닫고, PASS일 때만 네 설계의 구현 child issue·파일·실행
-  순서를 실제 GitHub 번호로 적용하기 전에 다시 승인받는다.
+- 다음 행동: #34·#39 후보 4 독립 검수에서 Major 계약 공백이 각각 1건 남아 두 티켓을 중지했다.
+  추가 설계복귀·재검수·구현 child·GitHub 변경은 사람의 명시적인 방향 변경이나 상한 확장 승인 전까지 하지 않는다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -88,14 +88,15 @@
 
 ## #34 session completion 설계 admission
 
-- 단계: 후보
+- 단계: 중지
 - 후보: 4 / 4
-- 검수: 3 / 4
+- 검수: 4 / 4
 - 설계복귀: 4 / 4
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: generic receipt 보존 wrapper, prepare JSON, normal failed leaf와 marker lock exact 계약을 후보 4에 고정
+- 마지막으로 닫힌 완료 조건: generic receipt 보존 wrapper, prepare JSON, marker UUID lock exact 계약을 후보 4에 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: progress-only receipt로 후보 4 SHA를 고정한 뒤 새 독립 문맥의 마지막 검수 1회를 사용한다.
+- 다음 행동: normal resume의 original finalization baseline 보존 계약이 비어 있고 상한을 모두 썼으므로
+  추가 수정·재검수·구현 child 발행 없이 사용자에게 반환한다.
 
 ### 초기 입장 판정
 
@@ -117,14 +118,15 @@
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 후보
+- 단계: 중지
 - 후보: 4 / 4
-- 검수: 3 / 4
+- 검수: 4 / 4
 - 설계복귀: 3 / 3
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: zero finalization exact plan/result와 session manifest SHA 이름을 후보 4에 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #34와 같은 후보 4 SHA를 독립 검수하고 Major가 하나라도 남으면 추가 수정 없이 중지한다.
+- 다음 행동: zero finalization baseline의 수집·입력·재사용 계약이 비어 있고 상한을 모두 썼으므로
+  추가 수정·재검수·구현 child 발행 없이 사용자에게 반환한다.
 
 ## 설계복귀 후보 2 독립 검수 결과
 
@@ -258,6 +260,33 @@ git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
 candidate의 직계 자식이며 progress의 후보 SHA 한 줄만 바꾸는 clean fixed chain이다. reviewer는 candidate
 blob만 설계 본문으로 보고 receipt는 candidate SHA·횟수 확인에만 사용한다.
 
+## 설계복귀 후보 4 마지막 독립 검수 결과
+
+- 검토 후보: `def7b80bdb06561638bf0569fda139ffe8f00201`
+- progress-only 직계 receipt: `bad83f0749cb3564cc30ca7b47c01495d304aa21`
+- 구조 확인: candidate는 `88b18ac0ab72c5486eea4fd8bcb147d93ae3a562`의 직계 자식이며 progress와
+  두 session spec만 변경, receipt는 candidate의 직계 자식이며 progress 한 줄만 변경, worktree clean,
+  두 구간 `git diff --check` 오류 0개
+- 검토 경계: 새 독립 문맥이 candidate blob만 설계 본문으로 읽고 receipt는 SHA·횟수 확인에만
+  사용했으며, 구현 테스트 결과는 판정 근거에서 제외함
+
+| issue | reviewed_sha | A1 | A2 | A3 | A4 | A5 | Critical | Major | verdict |
+|---|---|---|---|---|---|---|---:|---:|---|
+| #34 | `def7b80bdb06561638bf0569fda139ffe8f00201` | high | RETURN | PASS | PASS | RETURN | 0 | 1 | RETURN |
+| #39 | `def7b80bdb06561638bf0569fda139ffe8f00201` | high | RETURN | PASS | PASS | RETURN | 0 | 1 | RETURN |
+
+- #34 Major: `SessionNormalBatchReportV1` exact schema에 original `isolation_baseline`이 없고 generic report도
+  embed·ref하지 않으며, 현재 runner는 최초 실행 baseline을 report에 보존해 resume에서 필수로 재사용한다.
+  item 실패 뒤 finalization이 null인 session report만으로는 원래 baseline의 durable 출처가 없어 구현자가
+  재수집·실패·별도 보존 중 하나를 선택해야 한다.
+- #39 Major: `ZeroWorkFinalizationPlanV1`에 baseline이 없지만 exact result는 isolation·unmerged baseline
+  값을 요구한다. prepare·최초 run·resume 중 누가 언제 baseline을 수집하고 failed attempt 뒤 어떻게
+  재사용하는지 정해져 있지 않아 같은 입력에서 command 호출 횟수와 result bytes가 갈릴 수 있다.
+- 분류: 두 Major 모두 기존 계약 위반이 아니라 구현 전에 닫아야 할 계약 공백
+- 별도 저장소 표준 위반: 0건
+- 검수 횟수 반영: #34·#39 모두 4/4
+- 판정: `RETURN`. 추가 수정·재검수·구현 child·GitHub 변경 없이 중지한다.
+
 ## 보존 확인
 
 - main WIP 상태 목록 SHA-256: `7be3dcf9c6a119de8c273c7ea804962f477d9921f809dd8161eb3ad75a6a04b9`
@@ -267,6 +296,7 @@ blob만 설계 본문으로 보고 receipt는 candidate SHA·횟수 확인에만
 - 설계복귀 후보 2 commit 전 재확인: main status는 `git status --short --untracked-files=all`, #33은
   `git diff` 기준으로 두 hash 모두 exact 일치
 - 설계복귀 후보 3 최종 검수 뒤 재확인: main status와 #33 WIP diff 두 hash 모두 exact 일치
+- 설계복귀 후보 4 RETURN 기록 전 재확인: main status와 #33 WIP diff 두 hash 모두 exact 일치
 
 ## GitHub 적용 확인
 
