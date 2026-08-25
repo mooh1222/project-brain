@@ -30,7 +30,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 설계복귀 후보 2를 exact commit으로 고정하고 한 번의 독립 검수를 수행한다.
+- 다음 행동: #33 PASS와 #38·#34·#39 RETURN 근거를 사용자에게 반환하고 추가 승인 전 모든 구현·설계 수정·GitHub 변경을 멈춘다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -122,10 +122,12 @@
 - 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
 - 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
 - 설계복귀 후보 2 SHA: d9d91391baece86f87ef3ea5612da76697e763ff
-- 검수 receipt: #33 `A1=high`, `A2~A5=PASS`, Critical 0 / Major 0 / PASS
-- 검수 receipt: #38 `A1=high`, `A2=RETURN`, `A3=RETURN`, `A4=PASS`, `A5=RETURN`, Critical 0 / Major 1 / RETURN
-- 검수 receipt: #34 `A1=high`, `A2=RETURN`, `A3=RETURN`, `A4=PASS`, `A5=RETURN`, Critical 0 / Major 2 / RETURN
-- 검수 receipt: #39 `A1=high`, `A2=RETURN`, `A3=RETURN`, `A4=PASS`, `A5=RETURN`, Critical 0 / Major 2 / RETURN
+| issue | reviewed_sha | A1 | A2 | A3 | A4 | A5 | Critical | Major | verdict |
+|---|---|---|---|---|---|---|---:|---:|---|
+| #33 | `d9d91391baece86f87ef3ea5612da76697e763ff` | high | PASS | PASS | PASS | PASS | 0 | 0 | PASS |
+| #38 | `d9d91391baece86f87ef3ea5612da76697e763ff` | high | RETURN | RETURN | PASS | RETURN | 0 | 1 | RETURN |
+| #34 | `d9d91391baece86f87ef3ea5612da76697e763ff` | high | RETURN | RETURN | PASS | RETURN | 0 | 2 | RETURN |
+| #39 | `d9d91391baece86f87ef3ea5612da76697e763ff` | high | RETURN | RETURN | PASS | RETURN | 0 | 2 | RETURN |
 - 검수 횟수 반영: #33 4/4, #34·#38·#39 각 2/3
 - Major 1: #38 immutable manifest가 #33 prepared evidence/proof를 보존하지 않음
 - Major 2: normal/zero binding별 run root lock이 같은 UUID의 서로 다른 variant 실행을 직렬화하지 않음
