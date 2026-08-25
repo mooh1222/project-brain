@@ -221,17 +221,9 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 p
 
 ## 8. 별도 design admission 종료 조건
 
-구현 테스트는 설계 admission 결과를 만들지 않는다. progress 장부가 40자리 `CANDIDATE_SHA`를 먼저
-고정한 뒤 독립 reviewer가 그 commit의 이 문서와 #39 문서만 읽는다.
-
-```bash
-test -z "$(git status --porcelain)"
-git show "$CANDIDATE_SHA:docs/specs/2026-08-25-session-completion-repair-design.md" >/dev/null
-git show "$CANDIDATE_SHA:docs/specs/2026-08-25-session-zero-work-closure-design.md" >/dev/null
-git diff --check "$CANDIDATE_SHA^..$CANDIDATE_SHA" -- docs/specs/2026-08-25-session-*.md
-```
-
-명령의 기대값은 clean fixed candidate와 diff 오류 0개다. 별도 reviewer receipt가 exact
+구현 테스트는 설계 admission 결과를 만들지 않는다. #33 9절의 candidate + progress-only receipt
+프로토콜로 고정한 `CANDIDATE_SHA`에서 독립 reviewer가 이 문서와 #39 문서를 읽는다. 별도 reviewer
+receipt가 exact
 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2=PASS`, `A3=PASS`, `A4=PASS`, `A5=PASS`, `Critical=0`,
 `Major=0`, `verdict=PASS`일 때만 admission을 통과한다. Major가 하나라도 있으면 테스트 성공과 관계없이
 RETURN으로 기록한다. 이 gate는 구현 완료 조건 5개와 구현 검증 묶음 3개에 포함하지 않는다. 네 문서

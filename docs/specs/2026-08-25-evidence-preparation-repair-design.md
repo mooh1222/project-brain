@@ -348,14 +348,19 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 �
 
 ## 9. 별도 design admission gate
 
-이 gate는 위 구현 완료 조건 6개나 검증 묶음 4개에 포함하지 않는다. progress 장부가 한 40자리
-`CANDIDATE_SHA`를 고정한 뒤 독립 reviewer가 같은 commit의 progress와 #33·#34·#38·#39 네 spec을 한
-번만 읽는다.
+이 gate는 위 구현 완료 조건 6개나 검증 묶음 4개에 포함하지 않는다. commit은 자기 SHA를 자기 파일에
+담을 수 없으므로 두 commit을 쓴다. `CANDIDATE_SHA`는 네 spec과 후보 카운터를 고정하고,
+`RECEIPT_SHA`는 그 직계 자식으로 progress의 `설계복귀 후보 2 SHA` 한 줄만 채운다. 독립 reviewer는
+candidate의 네 spec과 receipt의 progress를 한 번만 읽는다.
 
 ```bash
 test -z "$(git status --porcelain)"
 test "$(git rev-parse "$CANDIDATE_SHA")" = "$CANDIDATE_SHA"
-git show "$CANDIDATE_SHA:.goal/brain-ticket-reconcile-v2/progress.md" >/dev/null
+test "$(git rev-parse "$RECEIPT_SHA^")" = "$CANDIDATE_SHA"
+test "$(git diff --name-only "$CANDIDATE_SHA..$RECEIPT_SHA")" = \
+  ".goal/brain-ticket-reconcile-v2/progress.md"
+git show "$RECEIPT_SHA:.goal/brain-ticket-reconcile-v2/progress.md" | \
+  grep -F -- "설계복귀 후보 2 SHA: $CANDIDATE_SHA"
 for spec in \
   docs/specs/2026-08-25-evidence-preparation-repair-design.md \
   docs/specs/2026-08-25-context-md-artifact-transaction-design.md \
@@ -363,11 +368,13 @@ for spec in \
   docs/specs/2026-08-25-session-zero-work-closure-design.md; do
   git show "$CANDIDATE_SHA:$spec" >/dev/null
 done
-git diff --check "$CANDIDATE_SHA^..$CANDIDATE_SHA" -- \
+git diff --check 0db29d9762c99ae0a2d9c0d5dd35868f831332a0.."$CANDIDATE_SHA" -- \
   .goal/brain-ticket-reconcile-v2/progress.md docs/specs/2026-08-25-*-design.md
+git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
+  .goal/brain-ticket-reconcile-v2/progress.md
 ```
 
-명령 기대값은 clean fixed candidate와 diff 오류 0개다. reviewer receipt는 issue별 exact
+명령 기대값은 clean fixed candidate, progress-only 직계 receipt, diff 오류 0개다. reviewer receipt는 issue별 exact
 `issue`, `reviewed_sha`, `A1`, `A2`, `A3`, `A4`, `A5`, `Critical`, `Major`, `verdict` row를 가진다.
 네 row 모두 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2~A5=PASS`, `Critical=0`, `Major=0`,
 `verdict=PASS`여야 설계를 확정한다. 이 한 review는 #33 4/4, #34·#38·#39 각 2/3으로 센다. 어느

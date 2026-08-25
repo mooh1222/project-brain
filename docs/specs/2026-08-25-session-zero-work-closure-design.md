@@ -266,16 +266,8 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 p
 
 ## 9. 별도 design admission 종료 조건
 
-#34 8절과 같은 고정 candidate를 같은 독립 reviewer가 한 번만 검수한다. 구현 pytest는 이 결과를
-대신하지 않는다.
-
-```bash
-test -z "$(git status --porcelain)"
-git show "$CANDIDATE_SHA:docs/specs/2026-08-25-session-completion-repair-design.md" >/dev/null
-git show "$CANDIDATE_SHA:docs/specs/2026-08-25-session-zero-work-closure-design.md" >/dev/null
-git diff --check "$CANDIDATE_SHA^..$CANDIDATE_SHA" -- docs/specs/2026-08-25-session-*.md
-```
-
-별도 receipt가 exact `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2=PASS`, `A3=PASS`, `A4=PASS`,
+#33 9절의 candidate + progress-only receipt 프로토콜로 고정한 같은 candidate를 같은 독립 reviewer가 한
+번만 검수한다. 구현 pytest는 이 결과를 대신하지 않는다. 별도 receipt가 exact
+`reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2=PASS`, `A3=PASS`, `A4=PASS`,
 `A5=PASS`, `Critical=0`, `Major=0`, `verdict=PASS`일 때만 통과한다. 이 gate는 구현 완료 조건 5개와
 구현 검증 묶음 3개에 포함하지 않는다. 네 문서 공통 receipt와 실패 시 중지 규칙은 #33 9절을 따른다.
