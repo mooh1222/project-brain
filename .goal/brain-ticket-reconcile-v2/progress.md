@@ -18,6 +18,11 @@
   3으로 유지하며 각각 남은 마지막 검수 1회만 사용함
 - 후보 3 권한: 후보 2 독립 검수의 Major 네 가지에 해당하는 #38·#34·#39 설계 계약과 이 진행 기록만
   수정할 수 있음. 구현·#2·#4·#5 후보 생성·main 병합·PR·GitHub 변경은 포함하지 않음
+- 2026-08-25 세션 후보 4 추가 승인: #34 후보·검수·설계복귀 상한을 각각 3→4, #39 후보·검수 상한을
+  3→4·설계복귀 상한을 2→3으로 한 번만 확장함
+- 후보 4 권한: 구현 child 분해 중 current code와 후보 3 spec 사이에서 확인한 session receipt,
+  zero finalization, prepare stdout, normal failed resume·marker lock 네 계약과 이 진행 기록만 수정할 수 있음.
+  구현·#33·#38·#2·#4·#5·ROADMAP·실행 계획·main 병합·PR·GitHub 변경은 포함하지 않음
 - 기존 #2·#4·#5 예외의 권한 경계: 상한만 늘어났으며 이번 1단계에서 코드 후보를 만들 권한은 없음
 - 정리 후보 1: `2db3de1bf430c4c663d087dc52ef033dd3923a31`
 - 후보 1 독립 검수: Critical 0 / Major 6 / RETURN
@@ -34,8 +39,8 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 설계확정된 #33·#38·#34·#39의 구현 child issue·파일·실행 순서를 사용자에게 먼저 제시하고
-  별도 승인을 기다린다.
+- 다음 행동: #34·#39 후보 4 독립 검수를 먼저 닫고, PASS일 때만 네 설계의 구현 child issue·파일·실행
+  순서를 실제 GitHub 번호로 적용하기 전에 다시 승인받는다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -83,14 +88,14 @@
 
 ## #34 session completion 설계 admission
 
-- 단계: 설계확정
-- 후보: 3 / 3
-- 검수: 3 / 3
-- 설계복귀: 3 / 3
+- 단계: 후보
+- 후보: 4 / 4
+- 검수: 3 / 4
+- 설계복귀: 4 / 4
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: UUID 공용 runner lock과 immutable normal receipt lineage로 과거 closure 검증 계약 고정
+- 마지막으로 닫힌 완료 조건: generic receipt 보존 wrapper, prepare JSON, normal failed leaf와 marker lock exact 계약을 후보 4에 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: normal session completion 구현 child issue·파일·검증 순서를 #39보다 먼저 제시하고 별도 승인을 기다린다.
+- 다음 행동: progress-only receipt로 후보 4 SHA를 고정한 뒤 새 독립 문맥의 마지막 검수 1회를 사용한다.
 
 ### 초기 입장 판정
 
@@ -112,15 +117,14 @@
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 설계확정
-- 후보: 3 / 3
-- 검수: 3 / 3
-- 설계복귀: 2 / 2
+- 단계: 후보
+- 후보: 4 / 4
+- 검수: 3 / 4
+- 설계복귀: 3 / 3
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: UUID 공용 runner lock과 최초 유일 tip의 head-only crash recovery 계약 고정
+- 마지막으로 닫힌 완료 조건: zero finalization exact plan/result와 session manifest SHA 이름을 후보 4에 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #34 normal completion 뒤에 실행할 zero-work 구현 child issue·파일·검증 순서를 제시하고
-  별도 승인을 기다린다.
+- 다음 행동: #34와 같은 후보 4 SHA를 독립 검수하고 Major가 하나라도 남으면 추가 수정 없이 중지한다.
 
 ## 설계복귀 후보 2 독립 검수 결과
 
@@ -204,6 +208,55 @@ git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
 - 검수 횟수 반영: #38·#34·#39 모두 3/3
 - 판정: #33·#38·#34·#39 모두 설계확정. 이 판정은 구현·child issue 생성·GitHub 변경·main 병합 권한을
   추가하지 않음
+
+## 구현 child 분해 중 확인한 세션 계약 공백과 후보 4 승인
+
+- 판정 기준: reviewed candidate `1224153b105871281147d502834249d59dbbf98b`의 두 session spec과
+  현재 main 계열 `MutationReceipt`, generic batch report/finalizer, session marker code 사이의 exact seam만
+  읽기 전용으로 대조함. 코드·문서·티켓 전면 감사는 반복하지 않음
+- Major 1: 기존 `MutationReceipt.manifest_sha256`은 mutation journal manifest인데 session item receipt가
+  같은 이름을 추가하도록 적혀 durable bytes와 receipt ID 공식이 둘로 갈림
+- Major 2: zero finalization의 exact input/result key와 index·recall skip 표현이 없어 실행 결과 bytes가 갈림
+- Major 3: `session prepare-batch` 성공 stdout이 plain path와 JSON 중 하나로 고정되지 않음
+- Major 4: normal failed `batch_report`, resume stage·artifact, marker UUID lock path가 exact하지 않아 현재
+  재시도와 프로세스 간 직렬화 판정이 갈림
+- goal-loop 판정: 계약 공백이므로 구현 child 발행을 중지하고 사람에게 올림
+- 사용자 승인: #34 후보·검수·설계복귀 상한 4, #39 후보·검수 상한 4·설계복귀 상한 3으로 한 번만
+  늘려 두 session spec과 이 진행 기록만 후보 4로 고정하고 새 독립 검수 1회를 사용함
+
+## 설계복귀 후보 4 마지막 독립 검수 입력
+
+- 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
+- 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
+- 보존 계약: #33 evidence와 #38 `context_md` spec·코드·ROADMAP·실행 계획은 변경하지 않음
+- 설계복귀 후보 4 SHA: 직계 progress-only receipt에서 40자리 `CANDIDATE_SHA`로 교체
+- 검수 횟수: #34·#39 각각 남은 마지막 1회를 사용해 4/4로 셈
+- 통과: 각 issue row가 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2~A5=PASS`, `Critical=0`,
+  `Major=0`, `verdict=PASS`
+- 중지: 어느 row든 Major 또는 계약 공백이 하나라도 남으면 후보·검수·설계복귀 상한이 모두 끝났으므로
+  추가 수정·재검수·구현 child·GitHub 변경 없이 사용자에게 반환함
+
+```bash
+test -z "$(git status --porcelain)"
+test "$(git rev-parse "$RECEIPT_SHA^")" = "$CANDIDATE_SHA"
+test "$(git diff --name-only "$CANDIDATE_SHA..$RECEIPT_SHA")" = \
+  ".goal/brain-ticket-reconcile-v2/progress.md"
+git show "$RECEIPT_SHA:.goal/brain-ticket-reconcile-v2/progress.md" | \
+  grep -F -- "설계복귀 후보 4 SHA: $CANDIDATE_SHA"
+for spec in \
+  docs/specs/2026-08-25-session-completion-repair-design.md \
+  docs/specs/2026-08-25-session-zero-work-closure-design.md; do
+  git show "$CANDIDATE_SHA:$spec" >/dev/null
+done
+git diff --check 88b18ac0ab72c5486eea4fd8bcb147d93ae3a562.."$CANDIDATE_SHA" -- \
+  .goal/brain-ticket-reconcile-v2/progress.md docs/specs/2026-08-25-session-*-design.md
+git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
+  .goal/brain-ticket-reconcile-v2/progress.md
+```
+
+기대값은 candidate가 `88b18ac`의 직계 자식이며 정확히 progress와 두 session spec만 바꾸고, receipt가
+candidate의 직계 자식이며 progress의 후보 SHA 한 줄만 바꾸는 clean fixed chain이다. reviewer는 candidate
+blob만 설계 본문으로 보고 receipt는 candidate SHA·횟수 확인에만 사용한다.
 
 ## 보존 확인
 

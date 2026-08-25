@@ -1,7 +1,7 @@
 # session zero-work·미해결 후보 종료 설계
 
 - 작성일: 2026-08-25
-- 상태: 설계확정 — 후보 3 독립 검수 PASS, 검수 3/3·설계복귀 2/2
+- 상태: 설계복귀 — 후보 4 검수 대기, 검수 3/4·설계복귀 3/3
 - 선행 계약: [정상 session completion](2026-08-25-session-completion-repair-design.md)
 - 대상: GitHub #39, `zero_objects`, `unresolved_only`, `partial_unresolved`, zero-work `failed`
 
@@ -64,7 +64,18 @@ engine_sha, items, unresolved_candidate_ids, finalization
 ```
 
 `variant=zero_work`, items와 unresolved는 exact `[]`다. actor를 draft에 중복하지 않고 필수
-`--attestation`에서만 가져온다.
+`--attestation`에서만 가져온다. `finalization`은 `ZeroWorkFinalizationPlanV1`이고 exact key는 다음과 같다.
+
+```text
+version, variant, checks, intentional_terminal_ids,
+expected_unmerged_locator_ids
+```
+
+`version=1`, `variant=zero_work`이다. `checks`는 exact canonical 배열
+`["audit","corpus_tests","eval","graph_isolated","lint"]`이며 각 값을 정확히 한 번씩 모두 가져야 한다.
+두 ID 배열은 중복 없는 canonical 오름차순 문자열 배열이다. caller가 index·recall 실행, command·script
+path, Adapter, 추가 write를 고르는 field는 없다. normal의 기존 finalization shape와 nullable union으로
+합치지 않는다.
 
 `ZeroWorkSessionBindingV1` exact key는 다음과 같다.
 
@@ -134,12 +145,26 @@ transcript에서 재추론하지 않는다. producer는 unresolved 목록 완전
 
 ## 5. zero-work immutable execution·receipt·completion
 
-runner는 corpus transaction을 만들지 않고 finalization contract만 실행한다.
+runner는 corpus transaction을 만들지 않고 `ZeroWorkFinalizationPlanV1`만 실행한다.
+`ZeroWorkFinalizationResultV1` exact key는 다음과 같다.
 
-- index rebuild만 `skipped=true`, `reason=zero_objects`
-- lint, audit, graph, eval, 소비 데이터 checks는 draft 선언대로 실행
-- recall checks는 빈 배열과 `reason=zero_objects`를 함께 요구
-- transactions와 item records는 빈 배열
+```text
+version, variant, ok, transactions, item_records,
+commands, isolation, unmerged, recall, errors
+```
+
+`version=1`, `variant=zero_work`, `transactions=[]`, `item_records=[]`다. `commands` exact key는
+`index_rebuild`, `audit`, `corpus_tests`, `eval`, `graph_isolated`, `lint`다. `index_rebuild`는 exact
+`{status:"skipped",ok:true,reason:"zero_objects"}`이고 실제 command를 호출하지 않는다. 나머지 다섯
+command는 plan의 exact 순서대로 모두 실행하며 각 결과 exact key는 `ok`, `exit_code`, `payload`, `stderr`다.
+`payload`는 JSON command의 object 또는 실패 시 null이고 `corpus_tests`는 exact `{stdout:<string>}`다.
+`recall`은 exact `{status:"skipped",reason:"zero_objects",checks:[]}`이고 search command를 호출하지 않는다.
+`isolation` exact key는 `ok`, `baseline_ids`, `current_ids`, `new_ids`, `intentional_terminal_ids`,
+`allowed_new_ids`, `unexpected_new_ids`다. `unmerged` exact key는 `ok`, `baseline_ids`,
+`current_state_available`, `current_ids`, `expected_ids`, `new_ids`, `resolved_ids`, `missing_expected_ids`,
+`unexpected_new_ids`, `baseline_target_head`, `current_target_head`다. 다섯 command와 isolation·unmerged가
+모두 성공하고 `errors=[]`일 때만 top-level `ok=true`다. 실패도 같은 exact shape를 쓰고 errors는 중복 없는
+비어 있지 않은 문자열 배열이다. `ZeroWorkExecutionReportV1.finalization`은 이 result 외의 object를 거부한다.
 
 UUID execution root와 binding run root의 durable path는 다음이다.
 
@@ -172,16 +197,16 @@ unlink+binding-root fsync하고 선택한 규칙을 수행한다. temp가 symlin
 
 ```text
 version, variant, execution_id, attempt, resumed_from_closure_id,
-session_binding_sha256, manifest_sha256,
+session_binding_sha256, session_manifest_sha256,
 execution_state_sha256, before_corpus_fingerprint, after_corpus_fingerprint,
 finalization, failure
 ```
 
 `attempt`는 1부터 시작하는 정수다. 첫 실행은 `resumed_from_closure_id=null`, failed report의 valid resume는
 그 report closure ID와 `attempt+1`을 쓴다. `execution_id`는 자신만 제외한 canonical object hash다. 성공은 before=after=bound expected fingerprint,
-`finalization.ok=true`, `failure=null`이다. 실패는 가능한 검사 원문과 exact `{stage,artifact}` failure를
-가진다. 매 terminal 시도를 새 immutable execution file로 남기므로 나중 재시도가 과거 failure closure를
-바꾸지 않는다.
+`finalization.ok=true`, `failure=null`이다. 실패는 가능한 exact finalization result와 failure exact
+`{stage:"zero_finalization",artifact:"finalization"}`를 가진다. 매 terminal 시도를 새 immutable execution
+file로 남기므로 나중 재시도가 과거 failure closure를 바꾸지 않는다.
 
 runner는 #34 UUID execution root의 공용 `runner.lock`을 anchored exclusive lock으로 잡고, lock 안에서
 zero manifest·binding·attestation을 다시 연 뒤에만 terminal artifact를 읽거나 쓴다. normal runner도 같은
@@ -194,7 +219,7 @@ report의 head-only recovery와 success no-op는 과거 execution·receipt를 �
 값과 비교하지 않는다. failed tip의 새 resume attempt와 terminal report가 없는 새 실행만 current
 fingerprint=bound expected를 요구한다.
 
-`ZeroWorkRunHeadV1` exact key는 `version`, `session_binding_sha256`, `manifest_sha256`, `attempt`,
+`ZeroWorkRunHeadV1` exact key는 `version`, `session_binding_sha256`, `session_manifest_sha256`, `attempt`,
 `closure_id`, `outcome`, `execution_id`다. head는 최초 atomic no-replace create, 이후 atomic replace되는
 직렬화 pointer일 뿐 closure/receipt ID
 입력은 아니다. outcome은 `failed|zero_objects`이고 head attempt·closure·execution은 tip report와
@@ -241,25 +266,27 @@ report만 attempt+1, 과거·다른 report는 `session_zero_work_resume_not_curr
 성공 때만 `ZeroWorkReceiptV1`을 쓴다. exact key는 다음과 같다.
 
 ```text
-version, variant, receipt_id, session_binding_sha256, manifest_sha256,
+version, variant, receipt_id, session_binding_sha256, session_manifest_sha256,
 execution_report_sha256, execution_state_sha256,
 before_corpus_fingerprint, after_corpus_fingerprint,
-finalization_sha256, outcome
+finalization_result_sha256, outcome
 ```
 
 `variant=zero_work`, `outcome=zero_objects`, `receipt_id`는 자신만 제외한 canonical object hash다.
+`finalization_result_sha256`은 execution report 안 exact `ZeroWorkFinalizationResultV1` canonical object
+hash다. binding의 `finalization_sha256`은 plan hash이므로 두 값을 바꾸어 쓰지 않는다.
 
 `ZeroWorkCompletionReportV1` exact key는 다음과 같다.
 
 ```text
-version, variant, session_binding_sha256, manifest_sha256,
+version, variant, session_binding_sha256, session_manifest_sha256,
 attestation_sha256, execution_report, receipt,
 outcome, resume, closure_id
 ```
 
 `execution_report`는 `DurableArtifactRefV1`이다. 성공은 receipt도 artifact ref, outcome `zero_objects`,
 resume `null`이다. 실패는 receipt `null`, outcome `failed`, resume exact
-`{strategy,manifest_sha256}`이고 `strategy=rerun_zero_work_finalization`이다. closure ID는 자기 key만
+`{strategy,session_manifest_sha256}`이고 `strategy=rerun_zero_work_finalization`이다. closure ID는 자기 key만
 제외한 report 전체 exact object를 hash하므로 ref path도 포함한다. 시각 field는 schema에 없다.
 
 ### retry와 crash tail
@@ -291,7 +318,7 @@ before=after=bound expected 관계와 immutable ref를 #34의 historical lineage
 `SessionDeferredReportV1` exact key는 다음과 같다.
 
 ```text
-version, variant, session_binding_sha256, manifest_sha256,
+version, variant, session_binding_sha256, session_manifest_sha256,
 unresolved_candidate_ids, resume, closure_id
 ```
 
@@ -324,7 +351,7 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 p
 | 1. zero/deferred binding·tagged draft/manifest·public seam·UUID 공용 lock과 binding durable root·writer가 exact다 | `.venv/bin/python -m pytest -q tests/test_session_zero_work.py tests/test_cli.py tests/test_session_completion.py -k 'schema or binding or public or durable_root or uuid_runner_lock or cross_variant or owner'` | variant field 혼합 거부, 같은 UUID normal/zero 효과 직렬화, zero는 runner만 head/report 작성, deferred는 prepare만 report 작성 |
 | 2. item×unresolved×attestation×finalization 조합이 네 상태 또는 invalid를 유일하게 고른다 | `.venv/bin/python -m pytest -q tests/test_session_zero_work.py -k 'state_matrix or invalid_combination'` | 표의 조합 exact, invalid는 manifest·corpus·report·receipt·marker 0-write |
 | 3. producer·독립 verifier와 attestation hash chain의 역할·한계가 고정된다 | `.venv/bin/python -m pytest -q tests/test_session_zero_work.py -k 'attestation or producer or verifier or transcript'` | 같은 actor·누락 check·transcript drift 거부, valid canonical hash 재계산 일치 |
-| 4. zero execution·receipt·completion 성공/실패와 retry·최초 head crash tail이 durable하다 | `.venv/bin/python -m pytest -q tests/test_session_zero_work.py tests/test_session_completion.py tests/test_corpus_io.py -k 'zero_objects or finalization or receipt or retry or first_head or head_temp or unique_tip or recovery_required or crash or fingerprint'` | safe temp-only cleanup 뒤 최초 유일 tip head-only 복구, unsafe temp와 non-first/multiple tip conflict, immutable 파일 SHA와 finalization 호출 수 보존, head 없는 success completion marker 0개, exact success no-op |
+| 4. zero execution·receipt·completion 성공/실패와 retry·최초 head crash tail이 durable하다 | `.venv/bin/python -m pytest -q tests/test_session_zero_work.py tests/test_session_completion.py tests/test_corpus_io.py -k 'zero_objects or finalization_schema or index_skip or receipt or retry or first_head or head_temp or unique_tip or recovery_required or crash or fingerprint'` | zero finalization exact result, index/search 호출 0회, safe temp-only cleanup 뒤 최초 유일 tip head-only 복구, unsafe temp와 non-first/multiple tip conflict, immutable 파일 SHA와 finalization 호출 수 보존, exact success no-op |
 | 5. deferred closure가 item 전 멈추고 새 manifest만 허용하며 normal schema와 설치·전체 회귀가 불변이다 | `PATH="$PWD/.venv/bin:$PATH" PYTHONPATH="$PWD/src" .venv/bin/python -m unittest discover -s src/project_brain/templates/ingest/scripts -p 'test_*.py' && PYTHONPATH=src .venv/bin/python -m pytest -q` | deferred transaction·receipt·marker 0개, past chain 재사용 거부, normal schema 불변, 전체 성공 |
 
 구현 독립 검증 묶음은 1) schema·state·actor, 2) zero durable chain, 3) deferred·normal·설치 전체 회귀 세
@@ -332,9 +359,9 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 p
 
 ## 9. 별도 design admission 종료 조건
 
-#33 9절과 진행 기록의 후보 3 candidate + progress-only receipt 프로토콜로 고정한 같은 candidate를
+#33 9절과 진행 기록의 후보 4 candidate + progress-only receipt 프로토콜로 고정한 같은 candidate를
 독립 reviewer가 한 번만 검수한다. 구현 pytest는 이 결과를 대신하지 않는다. 별도 receipt가 exact
 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2=PASS`, `A3=PASS`, `A4=PASS`,
 `A5=PASS`, `Critical=0`, `Major=0`, `verdict=PASS`일 때만 통과한다. 이 gate는 구현 완료 조건 5개와
 구현 검증 묶음 3개에 포함하지 않는다. receipt 형식은 #33 9절을 따르며 Major가 남으면 설계복귀
-2/2·검수 3/3 상태로 추가 수정 없이 중지한다.
+3/3·검수 4/4 상태로 추가 수정 없이 중지한다.

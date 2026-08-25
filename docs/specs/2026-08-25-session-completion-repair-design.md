@@ -1,7 +1,7 @@
 # 정상 세션 완료와 처리 marker 결속 설계
 
 - 작성일: 2026-08-25
-- 상태: #34 설계확정 — 후보 3 독립 검수 PASS, 검수 3/3·설계복귀 3/3
+- 상태: #34 설계복귀 — 후보 4 검수 대기, 검수 3/4·설계복귀 4/4
 - 대상: GitHub #34와 후속 #3
 - 선행 계약: GitHub #33의 actor·loaded engine identity
 - 별도 설계: GitHub #39 [zero-work·미해결 후보 종료](2026-08-25-session-zero-work-closure-design.md)
@@ -44,11 +44,19 @@ project-brain session complete \
   [--replace-legacy-marker-sha256 <64hex>]
 ```
 
-`prepare-batch`는 manifest의 canonical path를 stdout으로 반환한다. session manifest에서는 caller가
-`--output`이나 runner `--report`로 durable 정본 위치를 고르지 못한다. 기존 generic manifest에만 현재
-runner `--report` 호환을 유지한다. normal manifest에 `--attestation`을 주면 고정 오류다. `--resume`은
-같은 run root의 valid normal failed report에만 허용하고 success·다른 variant·다른 binding report면
-item 실행 전 0-write다.
+`prepare-batch` stdout은 JSON 객체 하나와 마지막 LF다. durable file canonical JSON과 달리 CLI 출력은
+현재 CLI 관례인 `ensure_ascii=False`, `indent=2`를 쓰며 ID나 file SHA 입력이 아니다. normal·zero 성공의
+exact key는 `ok`, `version`, `variant`, `next`, `manifest_path`이고 `ok=true`, `version=1`,
+`variant=normal|zero_work`, `next=run`이다. deferred 성공은 같은 key에 `report_path`만 추가하고
+`variant=unresolved_only|partial_unresolved`, `next=resolve_candidates`다.
+`manifest_path`와 `report_path`는 engine이 정한 canonical absolute path다. 실패 stdout exact key는
+`ok`, `error`이고 `ok=false`, `error` exact key는 `code`, `message`다. 성공은 exit 0과 빈 stderr,
+실패는 exit 1을 반환한다.
+
+session manifest에서는 caller가 `--output`이나 runner `--report`로 durable 정본 위치를 고르지 못한다.
+기존 generic manifest에만 현재 runner `--report` 호환을 유지한다. normal manifest에 `--attestation`을
+주면 고정 오류다. `--resume`은 같은 run root의 현재 valid normal failed leaf report에만 허용하고
+success·과거 leaf·다른 variant·다른 binding report면 item 실행 전 0-write다.
 
 UUID execution root와 그 아래 binding run root는 다음처럼 분리한다.
 
@@ -172,74 +180,119 @@ verification_items, items, finalization, unresolved_candidate_ids
 
 `prepare-batch`는 transcript와 모든 item 입력을 metadata→bytes→metadata로 읽어 drift를 확인하고
 projection과 planned objects를 직접 만든다. runner는 실행 직전 전부 다시 계산한다. manifest와 다르면
-item 실행 전 0-write다. 기존 non-session BatchBinding shape는 바꾸지 않고 session item receipt에만
-`session_binding_sha256`, `item_verification_sha256`, `manifest_sha256`을 추가한다.
+item 실행 전 0-write다. 기존 non-session `BatchBinding`과 `MutationReceiptV1`의 exact field·canonical
+bytes·`receipt_id` 공식은 바꾸지 않는다. 기존 `MutationReceiptV1.manifest_sha256`은 계속 mutation journal
+manifest SHA다. 새 session artifact는 session manifest file SHA를 `session_manifest_sha256`으로만 부르며
+bare `manifest_sha256`을 쓰지 않는다.
+
+`SessionItemReceiptV1` exact key는 다음과 같다.
+
+```text
+version, variant, receipt_id, session_binding_sha256,
+session_manifest_sha256, item_key, item_verification_sha256,
+mutation_receipt
+```
+
+`version=1`, `variant=normal`이다. `mutation_receipt`는 journal 또는 durable no-change intent에서 회수해
+`normalize_mutation_receipt()`를 통과한 기존 exact `MutationReceiptV1` object다. 안쪽 receipt의
+`receipt_id`와 `manifest_sha256`은 다시 계산하거나 이름을 바꾸지 않는다. 바깥 `receipt_id`는 자기 key만
+제외한 `SessionItemReceiptV1` canonical object의 SHA-256이다. 따라서 두 ID와 두 manifest SHA는 서로 다른
+이름과 hash 공식으로 보존된다.
+
+runner는 corpus lock 안에서 기존 durable receipt를 먼저 exact 회수한 뒤 wrapper를
+`normal-receipts/<outer-receipt-id>.json`에 create-only+fsync한다. mutation commit 뒤 wrapper 전 crash는
+같은 durable receipt를 다시 회수해 wrapper 꼬리만 완성하며 mutation을 재실행하지 않는다. malformed·다른
+wrapper는 `session_normal_artifact_conflict`로 새 mutation·receipt·report 0-write다.
 
 ## 4. normal report와 receipt chain
 
 `SessionProcessingReportV1` exact key는 다음과 같다.
 
 ```text
-version, variant, session_binding_sha256, manifest_sha256,
+version, variant, attempt, resumed_from_closure_id,
+session_binding_sha256, session_manifest_sha256,
 verification_items, planned_objects, outcome,
 batch_report, corpus_lineage, resume, closure_id
 ```
 
 `variant=normal`이고 `closure_id`는 자신만 제외한 report 전체 exact object의 canonical SHA-256이다.
-report에는 zero-work, attestation, unresolved nullable field가 없다.
+첫 terminal report는 `attempt=1`, `resumed_from_closure_id=null`이고 valid resume이 만든 다음 report는
+부모 failed closure ID와 `attempt+1`을 쓴다. report에는 zero-work, attestation, unresolved nullable
+field가 없다.
+
+`SessionNormalBatchReportV1` exact key는 `version`, `item_records`, `finalization`, `failure`다.
+`version=1`이고 item record exact key는 `item_key`, `status`, `receipt`, `failure`다. status는
+`pending|failed|committed|no_changes`다. committed/no_changes만 receipt에 outer session receipt의
+`DurableArtifactRefV1`을 갖고, failed만 failure exact `{exit_code,stderr}`를 가지며 다른 조합은 null이다.
+`finalization`은 실행 전이면 null, 실행 뒤에는 기존 semantic finalization result의 exact key
+`ok`, `transactions`, `commands`, `isolation`, `unmerged`, `recall_checks`, `errors`다. transactions는
+안쪽 기존 `MutationReceiptV1` 배열이다. 이 batch report는 session이 소유하는 immutable projection이다.
+현재 non-session generic batch report의 exact field와 caller-chosen `--report` 동작은 그대로 두며 session
+report 안에 raw generic report를 embed하거나 별도 generic report path를 참조하지 않는다.
+
+batch `failure`는 성공이면 null, 실패면 `SessionNormalFailureV1`이고 exact key는 `stage`, `artifact`,
+`exit_code`, `stderr`다. stage enum은 `item|finalization` 둘뿐이다. item stage의 artifact는 failed
+`item_key`, finalization stage의 artifact는 exact 문자열 `finalization`이다. receipt 회수·wrapper publish
+실패는 해당 item stage로 합치고 resume가 먼저 durable receipt를 회수하므로 이미 끝난 mutation을 다시
+실행하지 않는다. report publish 중 crash는 failure stage가 아니라 durable scan으로 완성하는 꼬리다.
 
 successful normal report의 `corpus_lineage`는 `SessionCorpusLineageV1`이고 exact key는
 `version`, `before_corpus_fingerprint`, `after_corpus_fingerprint`, `receipt_chain`,
-`finalization_transactions_sha256`이다. `version=1`이다.
-`receipt_chain` row exact key는 다음과 같다.
+`finalization_transactions_sha256`이다. `version=1`이다. `receipt_chain` row exact key는 다음과 같다.
 
 ```text
-item_key, outcome, path, sha256, receipt_id, transaction_id,
+item_key, outcome, path, sha256, receipt_id, mutation_receipt_id, transaction_id,
 before_corpus_fingerprint, after_corpus_fingerprint
 ```
 
-row는 canonical item key 순이고 성공 batch의 item receipt와 정확히 일대일이다. path는 binding
-run-root-relative canonical POSIX path이며 SHA는 LF를 포함한 immutable receipt file bytes hash다. row의
-ID·transaction ID·outcome·before/after 값은 그 receipt에서 byte-exact로 복사한다. 첫 row before는 UUID runner lock을
-잡은 뒤 첫 item 직전에 관측한 corpus fingerprint, 각 다음 row before는 바로 앞 row after와 같고,
-`committed` row의 transaction ID는 64hex, `no_changes` row의 transaction ID는 null이고 before=after다.
-top-level before/after는 각각 첫 before와 마지막 after다.
+row는 canonical item key 순이고 성공 batch의 outer item receipt와 정확히 일대일이다. path는 binding
+run-root-relative canonical POSIX path이며 SHA는 LF를 포함한 immutable wrapper file bytes hash다. outer
+ID는 `receipt_id`, 안쪽 기존 ID는 `mutation_receipt_id`로 복사하고 transaction ID·outcome·before/after
+값은 안쪽 receipt에서 byte-exact로 복사한다. 첫 row before는 UUID runner lock을 잡은 뒤 첫 item 직전에
+관측한 corpus fingerprint, 각 다음 row before는 바로 앞 row after와 같고, `committed` row의 transaction
+ID는 64hex, `no_changes` row의 transaction ID는 null이고 before=after다. top-level before/after는 각각
+첫 before와 마지막 after다.
+
 finalization은 brain corpus를 쓰지 않으며, runner는 마지막 item transaction 뒤 corpus lock 안에서 관측한
 after가 마지막 receipt와 같은지 확인한 뒤에만 successful report를 만든다. `failed` report의
 `corpus_lineage`는 null이다. `finalization_transactions_sha256`은 finalization 원문의 canonical
-`transactions` 배열 hash이며 배열은 receipt chain에서 transaction ID가 null이 아닌 row의 ID와 canonical
-순서로 exact 같아야 한다. finalization의 receipt ID 배열은 모든 receipt-chain row와 exact 같아야 한다.
+`transactions` 배열 hash이며 배열의 generic receipt ID는 receipt chain의 `mutation_receipt_id`와 canonical
+순서로 exact 같아야 한다. outer session receipt ID는 finalization의 generic transaction 배열에 넣지 않는다.
 
-각 `normal-receipts/<receipt-id>.json`은 engine이 만든 canonical item receipt bytes다. `committed`는
-MutationService durable intent→COMMITTED journal에서 회수해 manifest·item·transaction·before/after를
-byte-exact 검증한다. `no_changes`는 durable v2 no-change intent에서 회수해 transaction ID null과
-before=after를 검증한다. runner는 각각 corpus lock 안에서 create-only publish한다. item 사이 다른 UUID
-mutation 때문에 다음 receipt before가 바로 앞 after와 달라지면 성공 lineage를 만들지 않고 durable failed
-report로 끝낸다.
+각 `normal-receipts/<receipt-id>.json`은 engine이 만든 canonical `SessionItemReceiptV1` bytes다.
+`committed`는 `MutationService` durable intent→COMMITTED journal에서 안쪽 receipt를 회수해
+mutation manifest·item·transaction·before/after를 byte-exact 검증한다. `no_changes`는 durable v2
+no-change intent에서 회수해 transaction ID null과 before=after를 검증한다. item 사이 다른 UUID mutation
+때문에 다음 receipt before가 바로 앞 after와 달라지면 성공 lineage를 만들지 않고 durable failed report로
+끝낸다.
 
 모든 item receipt가 연결되고 finalization이 성공하면 마지막 corpus lock 구간에서 current
-fingerprint=마지막 receipt after와 finalization transaction/receipt 배열 일치를 확인한다. 같은 corpus lock을
+fingerprint=마지막 receipt after와 finalization transaction 배열 일치를 확인한다. 같은 corpus lock을
 successful report create-only write, file fsync, binding-root fsync까지 유지한 뒤 푼다. 이 report fsync가
 historical closure의 선형화 지점이며 그 뒤의 mutation만 정상 후속 mutation으로 보고 이미 고정한 lineage를
 바꾸지 않는다.
 
 | outcome | batch_report | resume | marker |
 |---|---|---|---|
-| `committed` | item 1개 이상, 하나 이상 committed, 나머지 committed/no_changes, `finalized=true`, finalization 성공 | `null` | 작성 |
+| `committed` | item 1개 이상, 하나 이상 committed, 나머지 committed/no_changes, finalization 성공 | `null` | 작성 |
 | `no_changes` | item 1개 이상, 전부 exact no-change receipt, 허용된 index skip, finalization 성공 | `null` | 작성 |
-| `failed` | durable item state와 receipt/finalization 원문 | exact `{stage,artifact}` | 금지 |
+| `failed` | 위 exact batch report에 durable item state와 receipt/finalization 원문 | batch failure의 `stage`, `artifact` exact projection | 금지 |
 
 manifest parse·execution-state preflight가 실패하면 session report를 만들지 않는다. item 실행을 시작한 뒤
 실패하면 runner는 현재 immutable receipt와 recovery state를 결속한 failed report를 create-only로
-남긴다. 재호출은 manifest, current execution state, existing item receipt를 검증하고 current runner
-resume 계약으로만 이어 간다. 성공 report가 있으면 모든 참조 bytes를 재검증한 뒤 exact no-op다.
+남긴다. failed `resume` exact key는 `stage`, `artifact`이고 batch failure에서 두 값을 byte-exact 복사한다.
+재호출은 manifest, current execution state, existing item receipt를 검증하고 current runner resume
+계약으로만 이어 간다. 성공 report가 있으면 모든 참조 bytes를 재검증한 뒤 exact no-op다.
+
+valid normal report chain은 root가 하나, parent당 child가 최대 하나, attempt가 1씩 증가하고 success가 leaf인
+불변 chain이다. 모든 report는 root에서 도달 가능하고 leaf가 정확히 하나여야 한다. 별도 root·fork·attempt
+gap·success parent·끊긴 parent는 `session_normal_artifact_conflict`다. `--resume`은 현재 유일한 failed
+leaf path·bytes와 exact 같을 때만 허용하고 옛 failed report는 `session_normal_resume_not_current`로
+item·finalization·report 0-write다.
 
 runner는 UUID execution root의 공용 `runner.lock`을 anchored exclusive lock으로 잡고
-manifest·receipt·normal report scan부터
-item mutation, finalization, terminal report publish까지 유지한다. 같은 manifest의 valid success report가
-있으면 resume 인자와 관계없이 exact no-op로 반환한다. failed resume은 현재 durable item/finalization
-state와 resume stage가 일치하는 유일한 failed report만 받으며 옛 state report는
-`session_normal_resume_not_current`로 item 실행 전 거부한다.
+manifest·receipt·normal report scan부터 item mutation, finalization, terminal report publish까지 유지한다.
+같은 manifest의 valid success report가 있으면 resume 인자와 관계없이 exact no-op로 반환한다.
 
 `SessionCompletion`은 report 값만 믿지 않는다. sibling `manifest.json`, 현재 transcript, durable item
 receipt bytes, report의 `corpus_lineage`, 실행 당시 execution state와 finalization 원문 hash를 다시
@@ -258,14 +311,28 @@ revision·corpus bytes를 현재 상태와 같게 되돌리라고 요구하지 �
 
 marker exact key는 `version`, `state`, `uuid`, `transcript_sha256`, `closure_id`, `outcome`,
 `receipt_ids`, `processed_at`, `replaced_legacy_sha256`다. outcome은 normal의 `committed|no_changes`와 #39의
-`zero_objects`다. normal receipt IDs는 item key 순이고 zero-work는 exact zero receipt ID 하나다.
+`zero_objects`다. normal receipt IDs는 item key 순 outer `SessionItemReceiptV1.receipt_id`이고 zero-work는
+exact zero receipt ID 하나다.
 `SessionCompletion`은 outcome으로 report variant를 고르고 zero-work면 #39 execution·receipt·fingerprint
 chain을 검증한다. v2 marker의 `state=processed`이며 다른 값은 malformed다.
 
-`SessionCompletion`은 anchored sessions directory 안 marker UUID lock을 잡고 marker를 다시 읽는다. 같은
-lock 안에서 transcript와 완전히 publish된 immutable report chain을 재확인하고 temp write, file fsync,
-atomic replace, directory fsync를 수행한다. terminal report 또는 zero head가 없으면 concurrent runner를
-기다리거나 그 state를 고치지 않고 고정 오류와 0-write로 끝낸다.
+marker, marker UUID lock, marker temp의 exact path는 다음과 같다.
+
+```text
+<brain-root>/.brain-local/sessions/<uuid>.json
+<brain-root>/.brain-local/sessions/<uuid>.lock
+<brain-root>/.brain-local/sessions/<uuid>.json.tmp
+```
+
+`SessionCompletion`은 모든 입력을 먼저 read-only 검증한 valid 완료 요청에서만 absent
+`.brain-local/sessions`를 mode `0700` anchored directory로 만들고 parent를 fsync한 뒤 marker lock을 mode
+`0600`, anchored `O_CREAT|O_RDWR|O_NOFOLLOW` create-once하고 sessions directory를 fsync한다. 기존 directory와
+lock은 link count 1인 같은-device 정규 directory/file이어야 하고 lock은 한 번 만든 뒤
+replace·unlink·truncate하지 않는다. 같은 inode에 exclusive lock을 잡은 뒤 marker를 다시 읽고 transcript와
+완전히 publish된 immutable report chain을 재확인하며 temp write, file fsync, atomic replace, directory
+fsync를 수행한다. unsafe parent·lock·교체 inode는 `session_completion_conflict`로 marker/temp 0-write다.
+terminal report 또는 zero head가 없으면 concurrent runner를 기다리거나 그 state를 고치지 않고 고정 오류와
+0-write로 끝낸다. `session list`는 `.json` marker만 읽고 `.lock`과 `.json.tmp`를 무시한다.
 
 | live marker | 요청 | 결과 |
 |---|---|---|
@@ -299,9 +366,9 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 p
 | 완료 조건 | 정확한 명령 | 기대 관측 |
 |---|---|---|
 | 1. normal discriminator·효과 소유자·zero/deferred fail-closed 경계가 하나로 고정된다 | `.venv/bin/python -m pytest -q tests/test_session_completion.py tests/test_cli.py -k 'variant or owner or lock_provision or zero_work_contract or unresolved_contract'` | valid prepare만 UUID lock create-once, invalid prepare lock 0개, normal만 실행, 다른 variant field 혼합·empty/unresolved·writer 우회는 durable 0-write |
-| 2. transcript→verification→planned objects→item receipt→finalization→historical corpus lineage→closure chain이 exact다 | `.venv/bin/python -m pytest -q tests/test_session_completion.py tests/test_corpus_io.py -k 'binding or execution_state or receipt_chain or corpus_lineage or historical or closure or drift'` | committed/no-change receipt 분기와 report-fsync 선형화 성공, report 뒤 다른 session mutation 후 marker 성공, transcript·receipt bytes·lineage·finalization drift는 marker 0-write |
-| 3. committed/no_changes/failed와 public runner·resume 관측이 표와 같다 | `.venv/bin/python -m pytest -q tests/test_session_completion.py tests/test_cli.py -k 'committed or no_changes or failed or resume or preflight'` | normal 3 outcome exact, preflight는 report 없음, success retry exact no-op |
-| 4. UUID 공용 runner lock과 marker absent/same/conflict/legacy/filesystem 상태가 서로 겹치지 않는 lock 경계에서 결정된다 | `.venv/bin/python -m pytest -q tests/test_session.py tests/test_session_completion.py tests/test_session_zero_work.py -k 'uuid_runner_lock or cross_variant or marker or legacy or concurrent or symlink or hardlink'` | valid prepare create-once·same inode 재사용, runner missing lock 0-write, contention 대기 뒤 lock 안 재-preflight, unsafe/replaced/different-device lock 0-write, 같은 UUID normal/zero 효과 직렬화, 다른 UUID lock끼리는 비차단이되 corpus lock·drift 계약 유지, exact marker retry bytes 보존 |
+| 2. transcript→verification→planned objects→item receipt→finalization→historical corpus lineage→closure chain이 exact다 | `.venv/bin/python -m pytest -q tests/test_session_completion.py tests/test_corpus_io.py -k 'binding or execution_state or session_item_receipt or receipt_chain or corpus_lineage or historical or closure or drift'` | generic receipt ID·mutation manifest SHA 불변, outer receipt 결속과 committed/no-change 분기 성공, report 뒤 다른 session mutation 후 marker 성공, transcript·receipt bytes·lineage·finalization drift는 marker 0-write |
+| 3. committed/no_changes/failed와 public prepare·runner·resume 관측이 표와 같다 | `.venv/bin/python -m pytest -q tests/test_session_completion.py tests/test_cli.py -k 'prepare_stdout or committed or no_changes or failed or attempt or resume or preflight'` | prepare variant별 exact JSON, normal 3 outcome과 current failed leaf exact, preflight는 report 없음, success retry exact no-op |
+| 4. UUID 공용 runner lock과 marker absent/same/conflict/legacy/filesystem 상태가 서로 겹치지 않는 lock 경계에서 결정된다 | `.venv/bin/python -m pytest -q tests/test_session.py tests/test_session_completion.py tests/test_session_zero_work.py -k 'uuid_runner_lock or marker_lock or cross_variant or marker or legacy or concurrent or symlink or hardlink'` | valid prepare runner lock create-once·same inode 재사용, runner missing lock 0-write, contention 대기 뒤 lock 안 재-preflight, valid completion만 marker lock create-once, unsafe/replaced/different-device lock 0-write, 같은 UUID normal/zero 효과 직렬화, exact marker retry bytes 보존 |
 | 5. 설치 runtime과 전체 엔진 계약이 구현 고정 후보에서 통과한다 | `PATH="$PWD/.venv/bin:$PATH" PYTHONPATH="$PWD/src" .venv/bin/python -m unittest discover -s src/project_brain/templates/ingest/scripts -p 'test_*.py' && PYTHONPATH=src .venv/bin/python -m pytest -q` | 전체 성공, installer 변경 시 임시 대상 두 번째 설치 report의 변경 배열 모두 빈 값 |
 
 구현 독립 검증 묶음은 1) schema·CLI, 2) runner·receipt·outcome, 3) marker·installer·전체 회귀 세 개다.
@@ -309,10 +376,10 @@ admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 p
 ## 8. 별도 design admission 종료 조건
 
 구현 테스트는 설계 admission 결과를 만들지 않는다. #33 9절의 candidate + progress-only receipt
-프로토콜과 진행 기록의 후보 3 fixed-SHA 절차로 고정한 `CANDIDATE_SHA`에서 독립 reviewer가 이 문서와
+프로토콜과 진행 기록의 후보 4 fixed-SHA 절차로 고정한 `CANDIDATE_SHA`에서 독립 reviewer가 이 문서와
 #39 문서를 읽는다. 별도 reviewer
 receipt가 exact
 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2=PASS`, `A3=PASS`, `A4=PASS`, `A5=PASS`, `Critical=0`,
 `Major=0`, `verdict=PASS`일 때만 admission을 통과한다. Major가 하나라도 있으면 테스트 성공과 관계없이
 RETURN으로 기록한다. 이 gate는 구현 완료 조건 5개와 구현 검증 묶음 3개에 포함하지 않는다. reviewer
-receipt 형식은 #33 9절을 따르며 Major가 남으면 설계복귀 3/3·검수 3/3 상태로 추가 수정 없이 중지한다.
+receipt 형식은 #33 9절을 따르며 Major가 남으면 설계복귀 4/4·검수 4/4 상태로 추가 수정 없이 중지한다.
