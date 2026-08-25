@@ -58,11 +58,11 @@ progress.md`는 당시 후보·검수·설계복귀 기록으로 보존하며 �
 | #2 | 유지·분리 | `9aefa36`의 query/audit·설치 template·관련 테스트만 `main` 위에 재구성 |
 | #4 | 유지·분리 | `698dc3e`의 `capabilities.py`와 `tests/test_capabilities.py` |
 | #5 | 유지·분리 | `160050c`의 snapshot 동결 코드·테스트·runtime map |
-| #3 | 보강 | #34와 zero-work 설계가 각각 입장 통과한 뒤 session runtime 후보 생성 |
-| #6 | 유지·보강 | common verification과 locator/promote 수리는 유지하고 public evidence preparation을 별도 구현 |
-| #7·#8 | 유지·후순위 | #6 공개 경계 뒤 종류별 public ingest/projection/promote 회귀로 다시 고정 |
-| #9 | 분리 | local raw observation과 원격 source-specific Adapter를 별도 ticket으로 분리 |
-| #10 | 분리 | derived output validation·실제 builder child와 `context_md` object+artifact transaction을 분리. parent #10은 둘 다 끝난 뒤에만 종료 |
+| #3 | 보강 | #34와 zero-work 설계가 각각 입장 통과한 뒤 새 session-runtime child issue·새 장부 생성. parent #3에는 새 후보를 직접 만들지 않음 |
+| #6 | 유지·보강 | common verification과 locator/promote 수리는 유지하고 public evidence preparation은 새 child issue에서 구현 |
+| #7·#8 | 유지·후순위 | #6 공개 경계 뒤 종류별 public ingest/projection/promote 회귀를 새 child issue에서 다시 고정 |
+| #9 | 분리 | local raw observation과 원격 source-specific Adapter를 각각 새 child issue로 분리 |
+| #10 | 분리 | derived output validation·실제 builder child와 `context_md` object+artifact child를 새 issue로 분리. parent #10은 둘 다 끝난 뒤에만 종료 |
 | 전체 branch | 폐기 | `272b303` 또는 `75e97fa` 전체 병합과 이를 다음 제품 기준선으로 쓰는 경로 |
 
 ## 문서 적용 원칙
@@ -73,6 +73,19 @@ progress.md`는 당시 후보·검수·설계복귀 기록으로 보존하며 �
 - ADR 0004·0005의 `implementation: not_implemented`는 실제 공개 경계가 합쳐질 때까지 유지한다.
 - 지식 초안 ADR 0006과 `CONTEXT.md`는 이미 개념 경계를 충분히 설명하므로 이번 정리에서 고치지 않는다.
 - 과거 재정리 보고서와 진행 기록은 증거로 보존하되 새 정본 문서로 복사하지 않는다.
+
+## 역사 상한과 새 child 경계
+
+과거 장부의 카운터를 새 장부에서 0으로 초기화하지 않는다.
+
+- #3·#6·#9·#10 parent는 검수 3/3과 설계복귀 1/1에 도달했으므로 새 구현 후보·exact review를
+  parent에 직접 기록하지 않는다. admission을 통과하면 범위가 닫힌 새 구현 child issue와 새 progress
+  block을 만들고 그 child만 새 상한을 사용한다.
+- #7·#8 parent는 후보 3/3이라 새 후보를 직접 만들 수 없다. #6 public 경계가 끝난 뒤 표적 회귀를
+  별도 child로 발행한다.
+- #2·#4·#5만 사용자가 승인한 예외에 따라 parent의 후보 4를 한 번 만들 수 있다.
+- #3·#6·#7·#8·#9·#10 parent는 child 결과와 기존 blocker를 모으는 closeout-only umbrella다. 이번
+  1단계에서는 구현 child를 만들지 않는다.
 
 ## GitHub 목표 구조
 
@@ -172,22 +185,26 @@ tests/test_snapshot.py
 
 ### 4단계: 설계 복귀와 후속 구현
 
+후보 1(`2db3de1`) 독립 검수는 Critical 0 / Major 6 / RETURN이다. #33은 검수 3/3·설계복귀
+1/1에 도달했고 #34도 승인된 설계복귀를 이미 사용했으므로, 아래 순서는 추가 설계·검수 예산을 별도
+승인받기 전에는 시작하지 않는다. 이번 1단계는 반송 상태와 dependency를 정확히 기록하는 데서 멈춘다.
+
 한 shared-checkout writer가 다음 순서로 처리한다.
 
 1. #33 evidence preparation 입장 통과
 2. #34 session completion, #35 direct reviewed, `context_md` 신규 설계의 읽기 전용 검수
 3. zero-work 신규 설계
-4. #34와 zero-work가 모두 통과한 뒤 #3 session runtime
-5. #6 common verification public preparation
-6. #7 → #8 public profile 회귀
-7. #9 local capture와 별도 원격 Adapter
-8. #10의 비-`context_md` derived output validation·실제 builder child
-9. `context_md` object+artifact transaction
-10. #10 parent는 8·9와 기존 blocker가 모두 끝난 뒤에만 종료
+4. #34와 zero-work가 모두 통과한 뒤 새 session-runtime child issue·장부 생성 → 구현 → #3 closeout
+5. #33 통과 뒤 #6용 common verification public preparation child issue·장부 생성
+6. #6 child 완료 뒤 #7 → #8 public profile 회귀 child issue를 각각 생성
+7. #33 통과 뒤 #9 local capture와 원격 Adapter child issue를 각각 생성
+8. #33 통과 뒤 #10의 비-`context_md` derived output validation·실제 builder child 생성
+9. `context_md` 설계 통과 뒤 object+artifact transaction 구현 child 생성
+10. #10 parent는 8·9의 child와 기존 blocker가 모두 끝난 뒤에만 종료
 11. #11 → #12 → #13
 12. 기존 dependency에 따라 #14~#19 뒤에만 지식 초안 #20~#23
 
-각 구현 ticket은 설계 확정 → RED → 구현 → 고정 후보 → 별도 문맥 검수 → 필요한 전체 회귀 →
+각 새 구현 child ticket은 설계 확정 → RED → 구현 → 고정 후보 → 별도 문맥 검수 → 필요한 전체 회귀 →
 병합 승인 → push 승인 → 원격·GitHub 종료 근거 확인으로 닫는다. 계약 공백이 하나라도 나오면 코드를
 고치지 않고 설계로 돌린다.
 

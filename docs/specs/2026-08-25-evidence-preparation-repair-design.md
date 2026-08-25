@@ -1,7 +1,7 @@
 # 후보 검증·전용 증거 공개 준비 핵심 설계
 
 - 작성일: 2026-08-25
-- 상태: #33 재입장 후보, 독립 검수 전
+- 상태: #33 후보 1 독립 검수 RETURN — Critical 0 / Major 2, 검수 3/3·설계복귀 1/1 도달
 - 대상: GitHub #33과 후속 #6·#7·#8·#9·#10
 - 기준 코드 후보: `75e97fa98308b8bd7434070e05a99e69f2a5adef`
 - 보존 입력: `codex/issue-33-evidence-design-admission`의 미커밋 spec

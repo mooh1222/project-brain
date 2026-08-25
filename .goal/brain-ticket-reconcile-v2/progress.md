@@ -13,18 +13,20 @@
 - 기본 전체검사: 2회
 - 승인된 예외: #2·#4·#5는 각각 현재 3/4이며 최종 후보 4를 한 번만 추가할 수 있음. 후보 4는 아직 생성하지 않음
 - 권한 경계: 이 기록은 상한만 늘린다. 이번 1단계에서 #2·#4·#5 코드 후보를 만들 권한은 없음
+- 정리 후보 1: `2db3de1bf430c4c663d087dc52ef033dd3923a31`
+- 후보 1 독립 검수: Critical 0 / Major 6 / RETURN
 - 공통 현재 시각: 2026-08-25 Asia/Seoul
 
 ## 정본·티켓 구조 정리
 
 - 단계: 검수
-- 후보: 1 / 3
-- 검수: 0 / 3
-- 설계복귀: 0 / 1
+- 후보: 2 / 3
+- 검수: 1 / 3
+- 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 문서 7개 exact 범위 고정, architecture docs 15 passed, 원본 WIP hash 보존
+- 마지막으로 닫힌 완료 조건: 후보 1 독립 검수 RETURN과 기존 parent→새 child 장부 경계 반영
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 문서-only commit으로 후보 1 SHA를 고정한 뒤 독립 검수에 넘긴다.
+- 다음 행동: 후보 2에서 실행안의 parent/child 경계만 확인하고 기술 spec은 반송 상태로 보존한다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -63,23 +65,23 @@
 
 - 단계: 검수
 - 후보: 1 / 3
-- 검수: 2 / 3
+- 검수: 3 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: Major 8건을 core와 `context_md`로 분배하고 완료 조건 6개·검증 묶음 4개로 고정
+- 마지막으로 닫힌 완료 조건: Major 8건 소유권 분리, 후보 1 검수 Critical 0 / Major 2 / RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 고정 SHA에서 마지막 검수 3/3으로 A1~A5와 Critical/Major를 판정한다.
+- 다음 행동: 중지. EvidencePlan source exact schema와 전용 `context_md` coordinator 계약을 고칠 추가 설계·검수 예산을 사용자에게 별도 승인받는다.
 
 ## #34 session completion 설계 admission
 
 - 단계: 검수
 - 후보: 1 / 3
-- 검수: 0 / 3
+- 검수: 1 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: normal session을 zero-work·unresolved와 분리하고 완료 조건 5개·검증 묶음 4개로 고정
+- 마지막으로 닫힌 완료 조건: normal/zero 분리, 후보 1 검수 A2/A4/A5 PASS·A3 RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 고정 SHA 독립 검수 뒤 `ready-for-agent`를 제거하고 본문·dependency를 교정한다.
+- 다음 행동: GitHub를 `needs-triage`로 교정한 뒤 중지. 추가 설계복귀 승인 전 완료 조건 5의 admission/test 관측 혼합을 고치지 않는다.
 
 ### 입장 판정
 
@@ -91,26 +93,27 @@
 
 - 단계: 검수
 - 후보: 1 / 3
-- 검수: 0 / 3
-- 설계복귀: 0 / 1
+- 검수: 1 / 3
+- 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: root `CONTEXT.md`·지식 초안 제외와 두 root transaction·artifact 상태표 고정
+- 마지막으로 닫힌 완료 조건: 대상 분리와 상태표 고정, 후보 1 검수 Critical 0 / Major 2 / RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 고정 SHA 독립 검수 뒤 `needs-triage` 신규 issue를 만든다.
+- 다음 행동: `needs-triage` 신규 issue를 만든 뒤 #33 계약·추가 설계 예산을 기다린다.
 
 ## 신규 session zero-work·unresolved closure 설계
 
 - 단계: 검수
 - 후보: 1 / 3
-- 검수: 0 / 3
-- 설계복귀: 0 / 1
+- 검수: 1 / 3
+- 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: normal report와 zero/deferred variant를 분리하고 완료 조건 5개·검증 묶음 4개로 고정
+- 마지막으로 닫힌 완료 조건: normal/zero schema 분리, 후보 1 검수 Critical 0 / Major 2 / RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 고정 SHA 독립 검수 뒤 `needs-triage` 신규 issue를 만든다.
+- 다음 행동: `needs-triage` 신규 issue를 만든 뒤 #34 계약·추가 설계 예산을 기다린다.
 
 ## 보존 확인
 
 - main WIP 상태 목록 SHA-256: `7be3dcf9c6a119de8c273c7ea804962f477d9921f809dd8161eb3ad75a6a04b9`
 - #33 원본 WIP diff SHA-256: `8d9385dab45cd9ea159353354a18fbd1316b79ea6116bc845ecaaac339936b32`
-- 다음 확인: local 후보 고정 전, GitHub 변경 뒤, commit 전
+- 후보 1 고정 뒤 재확인: 두 hash 모두 기준값과 exact 일치
+- 다음 확인: 후보 2 commit 전, GitHub 변경 뒤
