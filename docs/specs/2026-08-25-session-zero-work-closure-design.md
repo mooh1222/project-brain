@@ -1,7 +1,7 @@
 # session zero-work·미해결 후보 종료 설계
 
 - 작성일: 2026-08-25
-- 상태: 설계복귀 후보 3 — 독립 검수 전, 검수 2/3·설계복귀 2/2
+- 상태: 설계확정 — 후보 3 독립 검수 PASS, 검수 3/3·설계복귀 2/2
 - 선행 계약: [정상 session completion](2026-08-25-session-completion-repair-design.md)
 - 대상: GitHub #39, `zero_objects`, `unresolved_only`, `partial_unresolved`, zero-work `failed`
 

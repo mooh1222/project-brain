@@ -1,7 +1,7 @@
 # 정상 세션 완료와 처리 marker 결속 설계
 
 - 작성일: 2026-08-25
-- 상태: #34 설계복귀 후보 3 — 독립 검수 전, 검수 2/3·설계복귀 3/3
+- 상태: #34 설계확정 — 후보 3 독립 검수 PASS, 검수 3/3·설계복귀 3/3
 - 대상: GitHub #34와 후속 #3
 - 선행 계약: GitHub #33의 actor·loaded engine identity
 - 별도 설계: GitHub #39 [zero-work·미해결 후보 종료](2026-08-25-session-zero-work-closure-design.md)

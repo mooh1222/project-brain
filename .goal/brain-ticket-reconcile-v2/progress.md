@@ -34,7 +34,8 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 설계복귀 후보 3 exact SHA를 고정하고 #38·#34·#39의 마지막 독립 검수 3/3을 한 번 수행한다.
+- 다음 행동: 설계확정된 #33·#38·#34·#39의 구현 child issue·파일·실행 순서를 사용자에게 먼저 제시하고
+  별도 승인을 기다린다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -78,18 +79,18 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 A1 high·A2~A5 PASS·Critical 0 / Major 0
 - 마지막 갱신: 2026-08-25
-- 다음 행동: E1~E15 child issue·progress 생성안을 사용자에게 제시하되, #38 RETURN 처리 방향 전에는 구현을 시작하지 않는다.
+- 다음 행동: #38과 함께 E1~E15 child issue·progress 생성안을 사용자에게 제시하고 별도 승인을 기다린다.
 
 ## #34 session completion 설계 admission
 
-- 단계: 설계복귀 후보 3 고정
+- 단계: 설계확정
 - 후보: 3 / 3
-- 검수: 2 / 3
+- 검수: 3 / 3
 - 설계복귀: 3 / 3
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: UUID 공용 runner lock과 immutable normal receipt lineage로 과거 closure 검증 계약 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 후보 3 exact SHA에서 마지막 독립 검수 3/3을 수행한다. Major가 남으면 추가 수정·재검수 없이 중지한다.
+- 다음 행동: normal session completion 구현 child issue·파일·검증 순서를 #39보다 먼저 제시하고 별도 승인을 기다린다.
 
 ### 초기 입장 판정
 
@@ -99,25 +100,27 @@
 
 ## #38 `context_md` object+artifact lifecycle 설계
 
-- 단계: 설계복귀 후보 3 고정
+- 단계: 설계확정
 - 후보: 3 / 3
-- 검수: 2 / 3
+- 검수: 3 / 3
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #33 prepared evidence 원문을 target·Markdown·두 seal·불변 manifest·committed recovery에 결속
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 후보 3 exact SHA에서 마지막 독립 검수 3/3을 수행한다. Major가 남으면 추가 수정·재검수 없이 중지한다.
+- 다음 행동: #33 evidence preparation 뒤에 실행할 `context_md` 구현 child issue·파일·검증 순서를 제시하고
+  별도 승인을 기다린다.
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 설계복귀 후보 3 고정
+- 단계: 설계확정
 - 후보: 3 / 3
-- 검수: 2 / 3
+- 검수: 3 / 3
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: UUID 공용 runner lock과 최초 유일 tip의 head-only crash recovery 계약 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 후보 3 exact SHA에서 마지막 독립 검수 3/3을 수행한다. Major가 남으면 추가 수정·재검수 없이 중지한다.
+- 다음 행동: #34 normal completion 뒤에 실행할 zero-work 구현 child issue·파일·검증 순서를 제시하고
+  별도 승인을 기다린다.
 
 ## 설계복귀 후보 2 독립 검수 결과
 
@@ -175,6 +178,33 @@ git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
 기대값은 clean fixed candidate, progress-only 직계 receipt, diff 오류 0개다. reviewer는 candidate blob만
 설계 본문으로 보고 receipt는 candidate SHA와 횟수 확인에만 사용한다.
 
+## 설계복귀 후보 3 마지막 독립 검수 결과
+
+- 검토 후보: `1224153b105871281147d502834249d59dbbf98b`
+- progress-only 직계 receipt: `09204683bc9938c0fdce3dce560e34e606d569b8`
+- 검토 경계: 새 독립 문맥이 candidate blob만 설계 본문으로 읽고 receipt는 후보 SHA·횟수 확인에만 사용함
+- 구조 확인: candidate는 `aca39f4`의 직계 자식이며 progress와 대상 spec 3개만 변경, receipt는 candidate의
+  직계 자식이며 progress의 후보 SHA 한 줄만 변경, 두 범위 `git diff --check` 오류 0개
+- A1 표기: reviewer 응답의 `PASS`는 세 티켓을 모두 high risk로 분류한 것이 맞다는 뜻이며 아래 gate 값은
+  goal-loop 원형대로 `high`로 기록함
+
+| issue | reviewed_sha | A1 | A2 | A3 | A4 | A5 | Critical | Major | verdict |
+|---|---|---|---|---|---|---|---:|---:|---|
+| #38 | `1224153b105871281147d502834249d59dbbf98b` | high | PASS | PASS | PASS | PASS | 0 | 0 | PASS |
+| #34 | `1224153b105871281147d502834249d59dbbf98b` | high | PASS | PASS | PASS | PASS | 0 | 0 | PASS |
+| #39 | `1224153b105871281147d502834249d59dbbf98b` | high | PASS | PASS | PASS | PASS | 0 | 0 | PASS |
+
+- #38: #33 `prepared_evidence` 원문·target·Markdown hash·두 seal을 immutable manifest에 결속하고
+  receipt/report가 같은 manifest를 참조하며 committed recovery는 live evidence를 다시 실행하지 않음
+- #34: UUID 공용 `runner.lock`이 normal·zero를 binding·variant 경계 너머로 직렬화하고 immutable receipt
+  lineage와 report fsync가 이후 정상 mutation과 무관한 historical closure 기준점을 제공함
+- #39: 최초 유일 tip은 head-only create, parent head 뒤 유일 child tip은 head-only advance로 report→head
+  사이 crash를 복구하며 비최초 head 누락·다중 tip은 conflict로 닫음
+- 별도 저장소 표준 축: 위반·설계 냄새 0건
+- 검수 횟수 반영: #38·#34·#39 모두 3/3
+- 판정: #33·#38·#34·#39 모두 설계확정. 이 판정은 구현·child issue 생성·GitHub 변경·main 병합 권한을
+  추가하지 않음
+
 ## 보존 확인
 
 - main WIP 상태 목록 SHA-256: `7be3dcf9c6a119de8c273c7ea804962f477d9921f809dd8161eb3ad75a6a04b9`
@@ -183,6 +213,7 @@ git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
 - 후보 2 commit 전·GitHub 변경 뒤 재확인: 두 hash 모두 기준값과 exact 일치
 - 설계복귀 후보 2 commit 전 재확인: main status는 `git status --short --untracked-files=all`, #33은
   `git diff` 기준으로 두 hash 모두 exact 일치
+- 설계복귀 후보 3 최종 검수 뒤 재확인: main status와 #33 WIP diff 두 hash 모두 exact 일치
 
 ## GitHub 적용 확인
 

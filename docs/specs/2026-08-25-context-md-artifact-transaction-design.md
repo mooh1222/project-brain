@@ -1,7 +1,7 @@
 # context_md ContextProjection 객체·생성 파일 생명주기 설계
 
 - 작성일: 2026-08-25
-- 상태: 설계복귀 후보 3 — 독립 검수 전, 검수 2/3·설계복귀 2/2
+- 상태: 설계확정 — 후보 3 독립 검수 PASS, 검수 3/3·설계복귀 2/2
 - 선행 계약: [evidence preparation 핵심](2026-08-25-evidence-preparation-repair-design.md)
 - 대상: GitHub #38, `ContextProjection(format=context_md)`와 생성 `docs/contexts/generated/**/CONTEXT.md`
 
