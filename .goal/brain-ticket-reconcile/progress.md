@@ -46,6 +46,17 @@
   루프에서 네 번째 검수를 만들지 않는다. 최신 설계의 독립 확인은 새 design-admission ticket이
   소유하며, 그 전에는 main 반영·부모 종료·구현 child 발행을 금지한다.
 
+## GitHub 자체 티켓 전환
+
+- 설계 admission: #33 evidence, #34 session, #35 direct reviewed, #36 DomainMapping,
+  #37 GlossaryTerm
+- triage 전환: #3, #6, #9, #10, #11, #12, #13
+- native blocker: #3→#34, #6/#9/#10→#33, #11→#35, #12→#36, #13→#37,
+  #35→#33, #36/#37→#35
+- #1~#13 진행 댓글: 각 1개, 2026-08-25 현재 상태와 정리 commit
+  `3e08a3be8c3d838654979e062aeda416e0f26043` 연결
+- 종료: 없음. 모든 parent와 admission ticket을 open으로 유지한다.
+
 ## #2 query·audit 읽기 전용 WIP 안정화
 
 - 단계: 검수
@@ -66,7 +77,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 검수 상한 뒤 최신 수정본을 새 design ticket에서 최종 확인하고 구현 티켓으로 분리한다.
+- 다음 행동: #34에서 최신 수정본을 최종 확인하고 구현 티켓으로 분리한다.
 
 ## #4 19종 capability registry 확장 단계
 
@@ -99,7 +110,7 @@
 - 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 일반 EvidenceRef locator가 바뀌면 `stale/evidence_changed`로 다시 계산되고, 기존 v1 WIP evidence projection은 v2 규칙에서 stale 처리됨 (`tests/test_verification.py`, 18 passed)
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 검수 상한 뒤 최신 evidence preparation 수정본을 새 design ticket에서 최종 확인한다.
+- 다음 행동: #33에서 최신 evidence preparation 수정본을 최종 확인한다.
 
 ## #7 사건·시간·코드 verification profile 연결
 
@@ -133,7 +144,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 최신 evidence preparation 수정본 최종 확인 뒤 local observation과 remote capture 티켓을 분리한다.
+- 다음 행동: #33 최종 확인 뒤 local observation과 remote capture 티켓을 분리한다.
 
 ## #10 파생·종합 객체의 전용 증거 경로
 
@@ -144,7 +155,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 최신 evidence preparation 수정본 최종 확인 뒤 output validation, 실제 builder, artifact transaction 티켓을 분리한다.
+- 다음 행동: #33 최종 확인 뒤 output validation, 실제 builder, artifact transaction 티켓을 분리한다.
 
 ## #11 직접 reviewed 생성·의미 갱신과 단일 검수 이력
 
@@ -155,7 +166,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 없음
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #2~#10 정리 후 입장 조건 A1~A5 판정을 반영한다.
+- 다음 행동: #35에서 입장 조건 A1~A5와 상태·이력 계약을 보강한다.
 
 ### 입장 판정
 
@@ -172,7 +183,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 없음
 - 마지막 갱신: 2026-08-25
-- 다음 행동: DomainMapping common profile 자체와 bundle 대상별 이력·부분 갱신을 분리해 재설계한다.
+- 다음 행동: #36에서 DomainMapping common profile과 bundle 대상별 이력·부분 갱신을 재설계한다.
 
 ### 입장 판정
 
@@ -189,7 +200,8 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: 없음
 - 마지막 갱신: 2026-08-25
-- 다음 행동: candidate 최소 문턱, reviewed 전체 자격, 독립 verifier, audit·migration 적용을 구현 티켓으로 나눌 설계를 만든다.
+- 다음 행동: #37에서 candidate 최소 문턱, reviewed 전체 자격, 독립 verifier,
+  audit·migration 적용을 나눌 설계를 만든다.
 
 ### 입장 판정
 

@@ -133,17 +133,28 @@ Major를 반영했지만, 검수 상한 뒤 최신 수정본의 최종 독립 �
 |---|---|---|
 | #1 | 진행 중 parent | 날짜가 붙은 진행표와 repair child를 연결하되 전체 child와 human gate 전에는 닫지 않음 |
 | #2~#10 | 부분 구현, open 유지 | 최종 후보가 main에 들어가고 exact-candidate review·정해진 회귀 증거가 남은 뒤에만 종료 |
-| #3 | 설계 복귀·triage | session completion design ticket이 최신 수정본을 최종 확인한 뒤 구현 child를 발행 |
-| #6·#9·#10 | 설계 복귀·triage | evidence preparation design ticket이 최신 수정본을 최종 확인한 뒤 foundation/public Adapter child를 발행 |
+| #3 | 설계 복귀·triage | #34가 session completion 최신 수정본을 최종 확인한 뒤 구현 child를 발행 |
+| #6·#9·#10 | 설계 복귀·triage | #33이 evidence preparation 최신 수정본을 최종 확인한 뒤 foundation/public Adapter child를 발행 |
 | #7·#8 | profile 부분 구현, #6 의존 | 종류별 내부 계산은 있으나 public preparation repair 뒤 공개 경계 회귀가 필요 |
-| #11 | `RETURN` | direct reviewed create와 meaningful update/history를 상태표와 구현 ticket으로 분리 |
-| #12 | `RETURN` | bundle target별 history·부분 갱신·legacy 계약을 설계와 구현으로 분리 |
-| #13 | `RETURN` | GlossaryTerm candidate/reviewed 자격, 독립 verifier, 모든 쓰기 경로·audit 적용을 분리 |
+| #11 | `RETURN` | #35에서 direct reviewed create와 meaningful update/history를 상태표와 구현 ticket으로 분리 |
+| #12 | `RETURN` | #36에서 profile과 bundle target별 history·부분 갱신·legacy 계약을 분리 |
+| #13 | `RETURN` | #37에서 GlossaryTerm candidate/reviewed 자격, 독립 verifier, 쓰기 경로를 분리 |
 | #14~#32 | 미착수 유지 | 기존 dependency 순서를 바꾸지 않고 앞 계약이 닫힐 때 하나씩 admission 재검토 |
 
 #11~#13은 동시에 코드를 쓰지 않는다. 서로 dependency가 풀리더라도 verification, mutation,
 schema, promote 파일이 겹치므로 한 shared-checkout writer가 #11 → #12 → #13 순서로 처리한다.
 읽기 전용 설계·검수만 병렬화한다.
+
+## GitHub 동기화 결과
+
+- 새 design admission: #33 evidence preparation, #34 session completion, #35 direct reviewed,
+  #36 DomainMapping, #37 GlossaryTerm
+- state label: #3·#6·#9·#10·#11·#12·#13은 `needs-triage`; #2·#4·#5·#7·#8은
+  기존 `ready-for-agent` 유지
+- native blocker: #3→#34, #6/#9/#10→#33, #11→#35, #12→#36, #13→#37,
+  #35→#33, #36/#37→#35
+- #1~#13에는 구현된 범위, 미구현 경계, 다음 design ticket과 검증 결과를 각각 댓글로 남겼다.
+- #1~#13과 #33~#37은 모두 open이다. main merge, main push, issue close는 실행하지 않았다.
 
 ## 현재 정리 후보 검증
 
