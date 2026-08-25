@@ -146,7 +146,7 @@
 - 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
 - 선행 확정 계약: `docs/specs/2026-08-25-evidence-preparation-repair-design.md`의 #33 PASS 본문은 변경하지 않고
   #38 handoff 기준으로만 읽음
-- 설계복귀 후보 3 SHA: 직계 progress-only receipt에서 40자리 `CANDIDATE_SHA`로 교체
+- 설계복귀 후보 3 SHA: 1224153b105871281147d502834249d59dbbf98b
 - 검수 횟수: #38·#34·#39 각각 남은 마지막 1회를 사용해 3/3으로 셈
 - 통과: 각 issue row가 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2~A5=PASS`, `Critical=0`,
   `Major=0`, `verdict=PASS`
