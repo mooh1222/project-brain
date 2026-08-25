@@ -21,6 +21,17 @@
 - 판정: 후보 1 불합격. #3과 #9·#10, 그리고 연결된 proof 전달 seam은 설계복귀하고, 명확한 locator 결속 위반과 문서 드리프트만 첫 수리 후보로 보낸다.
 - 범위 확장: 발견 없음.
 
+## 후보 2 고정
+
+- 후보 commit: `b1fff1ac74aeef0d2ae1c77bcb2fccd31e9623ca`
+- 포함: EvidenceRef locator evidence projection v2, CodeLocator public promote repo context 전달,
+  architecture·ROADMAP·ADR 현행화, evidence/session repair design, #2~#13 재정리 보고서
+- 전체검사 1: 엔진 `2186 passed, 136 subtests passed`, 설치 runtime `125 OK`, architecture `15 passed`
+- WIP 사전검수: Spec Critical/Important 없음. Standards에서 projection version과 delete preparation
+  모순을 발견해 후보 고정 전에 수리했다.
+- 판정: commit 전 WIP 검수는 exact-candidate 검수로 세지 않는다. 이 기록을 포함한 다음 metadata
+  commit을 고정한 뒤 별도 Standards·Spec exact review를 수행한다.
+
 ## #2 query·audit 읽기 전용 WIP 안정화
 
 - 단계: 검수
