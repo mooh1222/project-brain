@@ -1,7 +1,7 @@
 # context_md ContextProjection 객체·생성 파일 생명주기 설계
 
 - 작성일: 2026-08-25
-- 상태: 후보 2 독립 검수 RETURN — Critical 0 / Major 1, 검수 2/3·설계복귀 1/1; 추가 승인 전 수정 금지
+- 상태: 설계복귀 후보 3 — 독립 검수 전, 검수 2/3·설계복귀 2/2
 - 선행 계약: [evidence preparation 핵심](2026-08-25-evidence-preparation-repair-design.md)
 - 대상: GitHub #38, `ContextProjection(format=context_md)`와 생성 `docs/contexts/generated/**/CONTEXT.md`
 
@@ -72,21 +72,21 @@ object가 없으면 그 한 경로의 orphan 여부를 관측하는 데만 쓴�
 artifact의 exact 정상 bytes는 현재 저장 객체의 `projection_hash`와 일치하는 UTF-8 content다.
 `stale_policy=fail_on_manual_edit`이므로 존재하는 파일의 bytes가 이 hash와 다르면 수동 수정으로 본다.
 
-| object 상태 | artifact 상태 | 요청 | object action | artifact action | 결과·시각 |
-|---|---|---|---|---|---|
-| 없음 | 없음 | build | create | create | object clock 1회 |
-| fresh, locator A | exact A | 같은 build | no_change | no_change | byte-preserving, clock·journal 없음 |
-| fresh, locator A | A 없음 | 같은 build | no_change | create | 누락 파일 복구, object 시각 보존 |
-| fresh, locator A | A bytes drift | 같은 build | no_change | 없음 | `projection_artifact_manual_edit`, 0-write |
-| stale/source 변경, locator A | exact old A | build A | update | update | object clock 1회 |
-| stale/source 변경, locator A | A 없음 | build A | update | create | object clock 1회 |
-| stale/source 변경, locator A | A bytes drift | build A | 없음 | 없음 | 수동 수정 보호, 0-write |
-| locator A | exact A, B 없음 | build B | update | A delete+B create | object clock 1회, 한 transaction |
-| locator A | A 없음·drift 또는 B 존재 | build B | 없음 | 없음 | precondition/collision 오류, 0-write |
-| object 존재 | exact artifact | delete | delete | delete | 한 transaction, 새 object stamp 없음 |
-| object 존재 | artifact 없음·drift | delete | 없음 | 없음 | `projection_artifact_delete_precondition_failed`, object 보존 |
-| object 없음 | artifact 존재 | build/delete | 없음 | 없음 | `projection_artifact_orphan`, 0-write |
-| 준비 뒤 object/source/config/root/artifact drift | 어떤 요청 | apply | 없음 | 없음 | `projection_artifact_snapshot_changed`, 0-write |
+| object 상태 | artifact 상태 | 요청 | object action | artifact action | durable proof | 결과·시각 |
+|---|---|---|---|---|---|---|
+| 없음 | 없음 | build | create | create | prepared evidence exact 1개 | object clock 1회 |
+| fresh, locator A | exact A | 같은 build | no_change | no_change | 없음, lock 안 evidence 재검증만 | byte-preserving, clock·journal 없음 |
+| fresh, locator A | A 없음 | 같은 build | no_change | create | prepared evidence exact 1개 | 누락 파일 복구, object 시각 보존 |
+| fresh, locator A | A bytes drift | 같은 build | no_change | 없음 | 없음 | `projection_artifact_manual_edit`, 0-write |
+| stale/source 변경, locator A | exact old A | build A | update | update | prepared evidence exact 1개 | object clock 1회 |
+| stale/source 변경, locator A | A 없음 | build A | update | create | prepared evidence exact 1개 | object clock 1회 |
+| stale/source 변경, locator A | A bytes drift | build A | 없음 | 없음 | 없음 | 수동 수정 보호, 0-write |
+| locator A | exact A, B 없음 | build B | update | A delete+B create | prepared evidence exact 1개 | object clock 1회, 한 transaction |
+| locator A | A 없음·drift 또는 B 존재 | build B | 없음 | 없음 | 없음 | precondition/collision 오류, 0-write |
+| object 존재 | exact artifact | delete | delete | delete | null, 새 evidence 없음 | 한 transaction, 새 object stamp 없음 |
+| object 존재 | artifact 없음·drift | delete | 없음 | 없음 | 없음 | `projection_artifact_delete_precondition_failed`, object 보존 |
+| object 없음 | artifact 존재 | build/delete | 없음 | 없음 | 없음 | `projection_artifact_orphan`, 0-write |
+| 준비 뒤 object/source/evidence/seal/config/root/artifact drift | 어떤 요청 | apply | 없음 | 없음 | 없음 | `projection_artifact_snapshot_changed`, 0-write |
 
 일반 build는 수동 수정 파일을 덮어쓰거나 지우지 않는다. 누락 artifact만 엔진이 저장 객체 또는 현재
 reviewed source에서 다시 만든 exact bytes로 복구한다. locator A→B와 object delete는 A가 저장 hash와
@@ -117,6 +117,30 @@ delete precondition이다. `prepared_object`는 operation으로 구분하는 tag
   `sealed_delete_identity_sha256`다. `operation=delete`이고 stored object bytes, locator, exact artifact bytes를
   결속하며 EvidencePlan·proof·ReviewRecord는 없다.
 
+build에서 proof의 유일한 원본은 `prepared_object.prepared_evidence`다. coordinator와 apply는 이 값을
+복사한 새 형식, 일부 field projection, 재실행 결과로 교체하지 않는다. delete에는 prepared evidence가
+없으며 이후 모든 직렬화에서 JSON null을 쓴다.
+
+`PreparedContextProjectionV1.sealed_identity_sha256`의 입력인 `ContextProjectionSealV1` exact key는
+다음과 같다.
+
+```text
+version, operation, target_id, prepared_object_identity_sha256,
+prepared_evidence, markdown_sha256, prepared_config,
+root_bindings, artifact_actions
+```
+
+`version=1`이다. build의 target ID는 `after_unstamped_bytes`의 object ID이고 prepared evidence의 target과
+같아야 한다. `prepared_object_identity_sha256`은 #33 `sealed_object_identity_sha256`, prepared evidence는
+#33 exact canonical JSON 값, `markdown_sha256`은 `markdown_bytes` hash다. delete의 target ID와 inner seal은
+`PreparedContextDeleteV1`에서 가져오고 prepared evidence와 Markdown hash는 null이다. outer sealed identity는
+자기 field를 제외한 위 projection의 newline 없는 canonical JSON bytes SHA-256이다.
+
+coordinator는 outer seal을 만든 직후 `PreparedContextProjectionV1`의 위 projection 전체에서 다시 계산해
+exact 비교한다. apply는 corpus lock 안 재준비 결과에서 다시 계산한다. target/action, prepared evidence,
+inner seal, outer seal 중 하나라도 다르면 journal 전에 `projection_artifact_snapshot_changed`로
+object·artifact·index·receipt 0-write다.
+
 `artifact_actions`는 #38이 추가하며 evidence core에는 이 타입을 넣지 않는다.
 receipt/report path와 bytes는 transaction ID와 committed manifest에서 뒤 단계가 파생하며 준비본에 넣지
 않는다. 이 타입만 `MutationService.apply_context_projection()`에 들어갈 수 있고 generic ingest, 일반
@@ -139,7 +163,8 @@ consumer 전용 두 번째 lock은 만들지 않는다. root pin과 before hash 
 manifest top-level exact key는 다음과 같다.
 
 ```text
-version, transaction_id, operation, prepared_config, root_bindings,
+version, transaction_id, operation, target_id, markdown_sha256, prepared_config, root_bindings,
+prepared_object_identity_sha256, prepared_evidence,
 object_actions, artifact_actions, index_actions,
 before_corpus_fingerprint, sealed_identity_sha256
 ```
@@ -151,8 +176,15 @@ mode는 permission bits이며 absent side는 mode와 SHA가 모두 null이다. d
 `create|no_change`다. `index_actions`는 brain-root-relative derived/index file을 같은 file action exact
 shape로 펼친 배열이며 object bytes가 안 바뀌면 exact `[]`다. manifest action에는
 절대 apply path를 저장하지 않고 root-relative path만 둔다. root binding의 recorded absolute root path는
-recovery를 위해 남긴다. transaction ID는 자기 key만 제외한 manifest identity projection의
-canonical SHA-256이고, sealed identity는 config·두 root selector·object/artifact/index actions를 결속한다.
+recovery를 위해 남긴다. build manifest의 target ID, Markdown hash, prepared object identity, prepared
+evidence는 `ContextProjectionSealV1`의 동명 값을 exact 복사하고 delete manifest의 Markdown hash와
+prepared evidence는 null이다. build의 Markdown hash는 destination artifact의 create/update
+`after_sha256`과 같아야 하며 locator A→B에서는 B create action의 `after_sha256`과 같아야 한다.
+prepared evidence를 hash-only 값, 배열 또는 별도 wrapper로 바꾸지 않는다. transaction ID는 자기 key만
+제외한 위 manifest identity projection의 canonical SHA-256이므로 target, #33 inner seal, prepared evidence
+원문, config·root, 모든 object/artifact/index effect와 before corpus fingerprint를 함께 결속한다.
+sealed identity도 4절 공식으로 다시 계산해 같아야 한다. target object action의 after bytes/hash,
+prepared evidence, inner/outer seal이 서로 맞지 않으면 manifest를 만들지 않는다.
 canonical effect 순서는 directory create를 depth/path 순, object file을 target ID/path 순, artifact file을
 path 순, index actions를 path 순으로 마지막에 둔다. before/after가 없으면 해당 SHA는 null이며 다른 생략 표현은
 허용하지 않는다.
@@ -211,7 +243,8 @@ directory/object/artifact/index action → 두 root fsync → after-image 검증
 create-only publish → `reported`다.
 
 - `preparing|prepared|committing`에서 실패·crash면 `applied_actions` 역순으로 두 root와 index를
-  rollback한다. exact 복원이 끝나야 `rolled_back`이다.
+  rollback한다. exact 복원이 끝나야 `rolled_back`이다. proof-bearing manifest는 남아도 receipt/report는
+  만들지 않는다.
 - `next_action_index`가 남은 crash는 action별로 live와 working snapshot을 비교한다. create는
   `live=after + stage 없음`, update는 `live=after + stage=before`, delete는
   `live 없음 + moved=before`, directory create는 `live device/inode=recorded stage + stage 없음`이면 effect
@@ -220,8 +253,12 @@ create-only publish → `reported`다.
   섞였으면 `recovery_required`다. 이 규칙 때문에 leaf effect와 applied-state 기록 사이 crash도 빠지지
   않는다.
 - `committed`는 object·artifact·index after 상태가 fsync·검증된 지점이다. 여기서는 절대 rollback하지
-  않고, manifest에서 receipt/report exact bytes를 다시 계산해 absent 파일은 만들고 exact 파일은
-  재사용한 뒤 `reported`로 진행한다.
+  않고, manifest canonical bytes·transaction ID·target/action·Markdown action 결속·inner/outer seal을 먼저
+  검증한다. 그 뒤
+  proof-bearing manifest에서 receipt/report exact bytes를 다시 계산해 absent 파일은 만들고 exact 파일은
+  재사용한 뒤 `reported`로 진행한다. 이때 live EvidencePlan·source·registry·builder·Adapter를 다시 읽거나
+  evidence/mutation clock을 호출해 과거 proof를 대체하지 않는다. proof 누락·shape 오류·seal 불일치는
+  rollback이나 새 transaction 발급 없이 `recovery_required`다.
 - receipt/report bytes가 다르거나 committed live after가 다르면 `recovery_required`다. 외부 변경을
   덮어쓰거나 새 transaction ID로 다시 발급하지 않는다.
 - `reported|rolled_back`은 terminal이다. exact no-change는 transaction·durable receipt/report 없이 stdout
@@ -243,8 +280,9 @@ rollback을 막지 않는다. 이 둘을 같은 상태로 취급하지 않는다
 
 - `build_context_projection()`은 reviewed source에서 object와 Markdown bytes를 만드는 순수 builder다.
 - projection coordinator는 config/root/output 요청을 해석하고 evidence core에 object preparation을
-  요청한다.
-- `MutationService`만 corpus lock, 두 root pin, journal, apply, rollback/recovery를 소유한다.
+  요청하며 #33 준비본의 prepared evidence와 inner seal을 outer seal에 손실 없이 결속한다.
+- `MutationService`만 corpus lock, 두 root pin, proof-bearing journal, apply,
+  rollback/recovery를 소유한다.
 - 설치 스킬, caller, 일반 `auxiliary_updates`, ID migration은 generated artifact를 쓰거나 지우지 않는다.
 
 object create/update가 있을 때만 mutation clock을 정확히 한 번 호출해 `generated_at`과 object
@@ -257,11 +295,18 @@ object create/update가 있을 때만 mutation clock을 정확히 한 번 호출
 locator A→B는 artifact receipt 하나의 정렬된 `delete A`, `create B` action으로 묶는다.
 
 `ProjectionArtifactTransactionReportV1` exact key는 `version`, `transaction_id`, `manifest_sha256`,
-`root_bindings_sha256`, `object_actions`, `artifact_actions`, `index_actions`, `before_corpus_fingerprint`,
-`after_corpus_fingerprint`, `object_receipt`, `artifact_receipt`, `outcome`이다. outcome은 `committed`다.
+`root_bindings_sha256`, `object_actions`, `artifact_actions`, `index_actions`,
+`before_corpus_fingerprint`, `after_corpus_fingerprint`, `object_receipt`, `artifact_receipt`, `outcome`이다.
+outcome은 `committed`다.
 object/artifact receipt ref는 null 또는 exact `path`, `bytes_sha256`, `receipt_id`다.
 receipt `actions`와 report의 `object_actions`·`artifact_actions`는 해당 manifest action의 exact key와
 canonical 순서를 그대로 투영한다. receipt/report용 다른 action shape나 재정렬은 없다.
+
+object mutation receipt, artifact receipt, transaction report의 `manifest_sha256`은 모두 prepared evidence
+원문을 포함한 같은 불변 manifest file bytes hash다. 각 receipt ID도 이 manifest SHA를 포함한 자기 exact
+payload hash이므로 target+proof 결속을 상속한다. object mutation이면 object receipt가, artifact-only
+복구이면 artifact receipt와 report가 이 결속을 보존한다. 전체 exact no-change에는 manifest·receipt·report가
+없고 delete manifest의 prepared evidence는 null이다.
 
 durable path는 brain root 아래 다음으로 고정한다.
 
@@ -281,11 +326,11 @@ receipt만 남긴다. report와 두 receipt는 같은 manifest SHA를 가져 다
 
 한 writer가 다음 순서로 나누며 각 child는 90분을 넘기지 않는다.
 
-1. C1 `context-dedicated-handoff`: #33 E14의 고정 profile·`PreparedObjectPlanV1`을 소비하는 coordinator 통합 — 완료 조건 1
+1. C1 `context-dedicated-handoff`: #33 E14의 고정 profile·`PreparedObjectPlanV1.prepared_evidence`와 inner/outer seal을 소비하는 coordinator 통합 — 완료 조건 1
 2. C2 `context-root-action-plan`: config/root/path·parent/mount·directory action planner — 완료 조건 1·2
 3. C3 `context-lifecycle-plan`: 순수 builder와 lifecycle state/action planner — 완료 조건 2·4
-4. C4 `context-multiroot-apply`: multi-root leaf publish·pre-commit 역순 rollback — 완료 조건 3
-5. C5 `context-committed-tail`: committed receipt/report tail·artifact-only index 분기 — 완료 조건 3·5
+4. C4 `context-multiroot-apply`: proof-bearing 불변 manifest·multi-root leaf publish·pre-commit 역순 rollback — 완료 조건 3
+5. C5 `context-committed-tail`: proof-bound committed recovery·receipt/report tail·artifact-only index 분기 — 완료 조건 3·5
 6. C6 `context-public-regression`: public build/delete, installer·lint·index와 failure injection·전체 회귀 — 완료 조건 4·5·6
 
 admission PASS 뒤 구현 전에 각 stable ID로 별도 GitHub child issue와 progress block을 만든다. 한 child가
@@ -296,11 +341,11 @@ ticket으로 분리한다.
 
 | 완료 조건 | 정확한 명령 | 기대 관측 |
 |---|---|---|
-| 1. 이름과 #33 handoff·config/root/path 계약이 전용 범위와 same-filesystem 경계를 fail-closed로 고정한다 | `.venv/bin/python -m pytest -q tests/test_projection_artifact_transaction.py -k 'handoff or config or root or path or filesystem or scope'` | 다섯 대상 구분, generic/direct-reviewed 우회·config 불일치·root drift·cross-device·path escape가 journal 전 0-write |
-| 2. 상태표가 create/update/no-change/missing/manual edit/delete/locator 이동/orphan·collision을 유일하게 정한다 | `.venv/bin/python -m pytest -q tests/test_projection_artifact_transaction.py -k 'create or update or no_change or missing or manual_edit or rename or delete or orphan or collision'` | 표의 object/artifact action과 object 시각 횟수가 exact 일치 |
-| 3. 단일 lock·두 root pin·journal이 실패 주입과 crash recovery에서 rollback/roll-forward를 유일하게 정한다 | `.venv/bin/python -m pytest -q tests/test_projection_artifact_transaction.py tests/test_corpus_io.py -k 'rollback or recovery or failure_injection or root_pin or crash_tail or atomic_exchange'` | pre-commit은 두 root 원복, committed는 receipt/report exact roll-forward, after/conflict 손상은 RECOVERY_REQUIRED |
+| 1. 이름과 #33 handoff·prepared evidence·Markdown·inner/outer seal·config/root/path 계약이 전용 범위와 same-filesystem 경계를 fail-closed로 고정한다 | `.venv/bin/python -m pytest -q tests/test_projection_artifact_transaction.py -k 'handoff or prepared_evidence or markdown_binding or sealed_identity or config or root or path or filesystem or scope'` | build evidence·Markdown hash exact 복사와 action 결속·delete null, proof/Markdown/seal mismatch와 generic/direct-reviewed 우회·config 불일치·root drift·cross-device·path escape가 journal 전 0-write |
+| 2. 상태표가 create/update/no-change/missing/manual edit/delete/locator 이동/orphan·collision과 proof 네 상태를 유일하게 정한다 | `.venv/bin/python -m pytest -q tests/test_projection_artifact_transaction.py -k 'create or update or no_change or missing or manual_edit or rename or delete or orphan or collision or proof'` | 표의 object/artifact action·object 시각·build proof exact 1개·전체 no-change proof 없음·delete null·0-write proof 없음이 exact 일치 |
+| 3. 단일 lock·두 root pin·proof-bearing journal이 실패 주입과 crash recovery에서 rollback/roll-forward를 유일하게 정한다 | `.venv/bin/python -m pytest -q tests/test_projection_artifact_transaction.py tests/test_corpus_io.py -k 'rollback or proof_recovery or recovery or failure_injection or root_pin or crash_tail or atomic_exchange'` | pre-commit은 두 root 원복, committed는 evidence 재실행 없이 같은 proof-bound receipt/report를 완성, proof/Markdown action/after/conflict 손상은 RECOVERY_REQUIRED |
 | 4. public builder와 delete가 실제 reviewed source로 객체·Markdown을 함께 관리한다 | `.venv/bin/python -m pytest -q tests/test_cli.py tests/test_context_projection.py -k 'build_context or delete_context or prompt_payload'` | public create/update/delete·누락 복구 성공, source/projection hash 일치, prompt 경로 불변 |
-| 5. durable report·receipt·lint·index가 artifact-only와 object mutation을 구분하고 crash tail에서 중복 발급되지 않는다 | `.venv/bin/python -m pytest -q tests/test_lint.py tests/test_search_index.py tests/test_mutation.py tests/test_projection_artifact_transaction.py -k 'report or receipt or artifact_only or manual_edit or index or committed or reported'` | artifact-only는 object bytes/index 불변, object update만 invalidation, 각 committed tail exact 완성과 conflict 분리 |
+| 5. durable report·receipt·lint·index가 artifact-only와 object mutation을 구분하고 prepared evidence를 crash tail에서도 잃지 않는다 | `.venv/bin/python -m pytest -q tests/test_lint.py tests/test_search_index.py tests/test_mutation.py tests/test_projection_artifact_transaction.py -k 'report or receipt or manifest_binding or artifact_only or prepared_evidence or manual_edit or index or committed or reported'` | object/artifact receipt와 report가 같은 proof-bearing manifest SHA 사용, artifact-only object bytes/index 불변, object update만 invalidation, 각 committed tail exact 완성과 conflict 분리 |
 | 6. 설치와 전체 엔진 회귀가 고정 후보에서 함께 통과한다 | `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_installer.py && PATH="$PWD/.venv/bin:$PATH" PYTHONPATH="$PWD/src" .venv/bin/python -m unittest discover -s src/project_brain/templates/ingest/scripts -p 'test_*.py' && PYTHONPATH=src .venv/bin/python -m pytest -q` | public 명령 설치와 두 번째 설치 무변경, runtime unittest와 전체 pytest 성공 |
 
 독립 검증 묶음은 1) scope·root/path, 2) lifecycle·clock, 3) transaction recovery,
@@ -308,6 +353,6 @@ ticket으로 분리한다.
 
 ## 9. 별도 design admission gate
 
-#33 9절의 한 fixed-SHA review가 이 문서도 함께 본다. 이 gate는 구현 완료 조건 6개와 검증 묶음 4개에
-추가하지 않는다. #38 row가 A1 high, A2~A5 PASS, Critical 0, Major 0일 때만 확정하며 Major가 남으면
-설계복귀 1/1 도달 상태로 추가 수정 없이 중지한다.
+#33 9절과 진행 기록의 후보 3 fixed-SHA protocol로 이 문서를 한 번 검수한다. 이 gate는 구현 완료 조건
+6개와 검증 묶음 4개에 추가하지 않는다. #38 row가 A1 high, A2~A5 PASS, Critical 0, Major 0일 때만
+확정하며 Major가 남으면 설계복귀 2/2·검수 3/3 도달 상태로 추가 수정 없이 중지한다.

@@ -34,7 +34,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 승인된 네 가지 Major만 설계복귀 후보 3으로 고정하고 세 티켓의 마지막 독립 검수를 수행한다.
+- 다음 행동: 설계복귀 후보 3 exact SHA를 고정하고 #38·#34·#39의 마지막 독립 검수 3/3을 한 번 수행한다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -82,14 +82,14 @@
 
 ## #34 session completion 설계 admission
 
-- 단계: 설계복귀 후보 3 준비
-- 후보: 2 / 3
+- 단계: 설계복귀 후보 3 고정
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 3 / 3
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 3 설계복귀 상한 2→3 사용자 승인
+- 마지막으로 닫힌 완료 조건: UUID 공용 runner lock과 immutable normal receipt lineage로 과거 closure 검증 계약 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: UUID-level cross-variant runner serialization과 과거 closure의 corpus lineage 검증 계약만 보완한다.
+- 다음 행동: 후보 3 exact SHA에서 마지막 독립 검수 3/3을 수행한다. Major가 남으면 추가 수정·재검수 없이 중지한다.
 
 ### 초기 입장 판정
 
@@ -99,25 +99,25 @@
 
 ## #38 `context_md` object+artifact lifecycle 설계
 
-- 단계: 설계복귀 후보 3 준비
-- 후보: 2 / 3
+- 단계: 설계복귀 후보 3 고정
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 3 설계복귀 상한 1→2 사용자 승인
+- 마지막으로 닫힌 완료 조건: #33 prepared evidence 원문을 target·Markdown·두 seal·불변 manifest·committed recovery에 결속
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #33 prepared evidence를 immutable transaction manifest·sealed identity·receipt/recovery에 보존하는 계약만 보완한다.
+- 다음 행동: 후보 3 exact SHA에서 마지막 독립 검수 3/3을 수행한다. Major가 남으면 추가 수정·재검수 없이 중지한다.
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 설계복귀 후보 3 준비
-- 후보: 2 / 3
+- 단계: 설계복귀 후보 3 고정
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 3 설계복귀 상한 1→2 사용자 승인
+- 마지막으로 닫힌 완료 조건: UUID 공용 runner lock과 최초 유일 tip의 head-only crash recovery 계약 고정
 - 마지막 갱신: 2026-08-25
-- 다음 행동: UUID-level cross-variant runner lock과 head 없는 첫 terminal report 복구 규칙만 보완한다.
+- 다음 행동: 후보 3 exact SHA에서 마지막 독립 검수 3/3을 수행한다. Major가 남으면 추가 수정·재검수 없이 중지한다.
 
 ## 설계복귀 후보 2 독립 검수 결과
 
@@ -138,6 +138,42 @@
 - Major 3: #34 marker 전 live 전체-corpus fingerprint 재검증이 정상 후속 mutation 뒤 과거 closure를 깨뜨림
 - Major 4: #39 첫 terminal report 뒤 zero head 기록 전 crash 복구가 정의되지 않음
 - 판정: #33만 설계확정. #38·#34·#39는 설계복귀 상한 도달 상태로 중지하며 추가 수정·재검수하지 않음
+
+## 설계복귀 후보 3 마지막 독립 검수 입력
+
+- 파일: `docs/specs/2026-08-25-context-md-artifact-transaction-design.md`
+- 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
+- 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
+- 선행 확정 계약: `docs/specs/2026-08-25-evidence-preparation-repair-design.md`의 #33 PASS 본문은 변경하지 않고
+  #38 handoff 기준으로만 읽음
+- 설계복귀 후보 3 SHA: 직계 progress-only receipt에서 40자리 `CANDIDATE_SHA`로 교체
+- 검수 횟수: #38·#34·#39 각각 남은 마지막 1회를 사용해 3/3으로 셈
+- 통과: 각 issue row가 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2~A5=PASS`, `Critical=0`,
+  `Major=0`, `verdict=PASS`
+- 중지: 어느 row든 Major 또는 계약 공백이 하나라도 남으면 후보·검수·설계복귀 상한이 모두 끝났으므로
+  추가 수정·재검수·구현·GitHub 변경 없이 사용자에게 반환함
+
+```bash
+test -z "$(git status --porcelain)"
+test "$(git rev-parse "$RECEIPT_SHA^")" = "$CANDIDATE_SHA"
+test "$(git diff --name-only "$CANDIDATE_SHA..$RECEIPT_SHA")" = \
+  ".goal/brain-ticket-reconcile-v2/progress.md"
+git show "$RECEIPT_SHA:.goal/brain-ticket-reconcile-v2/progress.md" | \
+  grep -F -- "설계복귀 후보 3 SHA: $CANDIDATE_SHA"
+for spec in \
+  docs/specs/2026-08-25-context-md-artifact-transaction-design.md \
+  docs/specs/2026-08-25-session-completion-repair-design.md \
+  docs/specs/2026-08-25-session-zero-work-closure-design.md; do
+  git show "$CANDIDATE_SHA:$spec" >/dev/null
+done
+git diff --check aca39f4.."$CANDIDATE_SHA" -- \
+  .goal/brain-ticket-reconcile-v2/progress.md docs/specs/2026-08-25-*-design.md
+git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
+  .goal/brain-ticket-reconcile-v2/progress.md
+```
+
+기대값은 clean fixed candidate, progress-only 직계 receipt, diff 오류 0개다. reviewer는 candidate blob만
+설계 본문으로 보고 receipt는 candidate SHA와 횟수 확인에만 사용한다.
 
 ## 보존 확인
 
