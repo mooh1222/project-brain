@@ -34,10 +34,19 @@
 - 판정: 후보 2 불합격. 구현 코드는 그대로 두고 두 설계 계약·진행 카운터를 수리했으며, BB2
   `brain/checks` 13 OK(1 skip)와 임시 corpus actual CodeLocator prepare/promote smoke를 추가했다.
 
+## 후보 3 고정
+
+- 후보 commit: `9d37054c215ad215c2bf513e36f155d58031e4bb`
+- 포함: prompt projection content v2 전이, independent zero-work attestation, change-map에 맞춘 BB2
+  소비 데이터 검증 기록, 티켓별 후보 카운터 복구
+- 검증: 후보 2의 엔진·runtime 전체 통과를 유지하고 docs-only repair 뒤 architecture `15 passed`,
+  `git diff --check` 통과
+- 다음 행동: 이 기록을 포함한 metadata commit을 고정해 후보 3 exact Standards·Spec review를 수행한다.
+
 ## #2 query·audit 읽기 전용 WIP 안정화
 
 - 단계: 검수
-- 후보: 2 / 3
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 0 / 1
 - 전체검사: 1 / 2
@@ -59,7 +68,7 @@
 ## #4 19종 capability registry 확장 단계
 
 - 단계: 구현
-- 후보: 2 / 3
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 0 / 1
 - 전체검사: 1 / 2
@@ -70,7 +79,7 @@
 ## #5 snapshot v1·v2의 19종 대상을 동결
 
 - 단계: 검수
-- 후보: 2 / 3
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 0 / 1
 - 전체검사: 1 / 2
@@ -81,7 +90,7 @@
 ## #6 EvidenceRef로 공통 verification 첫 경로 완성
 
 - 단계: 설계복귀
-- 후보: 2 / 3
+- 후보: 3 / 3
 - 검수: 3 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 1 / 2
@@ -92,7 +101,7 @@
 ## #7 사건·시간·코드 verification profile 연결
 
 - 단계: 검수
-- 후보: 2 / 3
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 0 / 1
 - 전체검사: 1 / 2
@@ -104,7 +113,7 @@
 ## #8 도메인·결정·prompt projection verification profile 연결
 
 - 단계: 검수
-- 후보: 2 / 3
+- 후보: 3 / 3
 - 검수: 2 / 3
 - 설계복귀: 0 / 1
 - 전체검사: 1 / 2
