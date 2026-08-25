@@ -229,7 +229,7 @@ git diff --check "$CANDIDATE_SHA..$RECEIPT_SHA" -- \
 - 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
 - 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
 - 보존 계약: #33 evidence와 #38 `context_md` spec·코드·ROADMAP·실행 계획은 변경하지 않음
-- 설계복귀 후보 4 SHA: 직계 progress-only receipt에서 40자리 `CANDIDATE_SHA`로 교체
+- 설계복귀 후보 4 SHA: def7b80bdb06561638bf0569fda139ffe8f00201
 - 검수 횟수: #34·#39 각각 남은 마지막 1회를 사용해 4/4로 셈
 - 통과: 각 issue row가 `reviewed_sha=$CANDIDATE_SHA`, `A1=high`, `A2~A5=PASS`, `Critical=0`,
   `Major=0`, `verdict=PASS`
