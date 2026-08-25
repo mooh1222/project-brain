@@ -57,6 +57,25 @@
   `3e08a3be8c3d838654979e062aeda416e0f26043` 연결
 - 종료: 없음. 모든 parent와 admission ticket을 open으로 유지한다.
 
+## #33 evidence preparation 설계 admission
+
+- 단계: 설계복귀
+- 후보: 0 / 3
+- 검수: 0 / 3
+- 설계복귀: 1 / 1
+- 전체검사: 0 / 2
+- 검수 설계: `3e08a3be8c3d838654979e062aeda416e0f26043`
+- 반송 기록: `docs/reports/2026-08-25-issue-33-design-admission-return.md`
+- A1: 높음 — 상태·identity·재시도·다중 root transaction 효과를 다룬다.
+- A2: RETURN — 다중 root transaction과 context artifact delete의 효과 소유·복구 조합이 비어 있다.
+- A3: RETURN — 기존 완료 조건마다 정확한 명령과 기대 관측값이 연결돼 있지 않다.
+- A4: RETURN — 기존 완료 조건 7개가 6개 상한을 넘는다.
+- A5: RETURN — 동일 입력에서 외부 동작이 갈리는 Major 계약 공백 8건을 확인했다.
+- 입장 전 독립 조사: 2회. 후보 검수로 세지 않는다.
+- 마지막으로 닫힌 완료 조건: 없음 — #33은 목표에 입장하지 못했다.
+- 마지막 갱신: 2026-08-25
+- 다음 행동: 8개 계약 공백을 설계에 반영한 뒤 A1~A5를 처음부터 다시 판정한다.
+
 ## #2 query·audit 읽기 전용 WIP 안정화
 
 - 단계: 검수
