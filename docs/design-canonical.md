@@ -259,6 +259,27 @@ collapse의 `object_id`와 `after_ids`는 승인된 field-repair rename map으�
 [canonical ID 복구 설계](superpowers/specs/2026-07-31-task17-canonical-id-recovery-design.md)와
 [collision merge 설계](superpowers/specs/2026-08-02-task17-collision-merge-design.md)에 있다.
 
+### 3.4 후보 확인·검증·쓰기 증거 경계 (2026-08-25 현행화)
+
+질의 중 사용자가 후보 뜻을 확인한 것은 그 답변의 의미 근거일 뿐 코퍼스 쓰기 승인이 아니다.
+승격은 별도 명시 요청과 현재 검증이 필요하다. common candidate verification은 대상 내용, 현재
+직접 근거, 적용 규칙, 실행 정보를 묶고, 저장된 ready 표지를 믿지 않고 현재 store와 repo에서
+다시 계산한다. 승격할 때는 대상과 하나의 `ReviewRecord`를 같은 mutation으로 쓴다.
+
+후보를 허용하지 않는 reviewed 전용 종류는 common `ReviewRecord`를 억지로 만들지 않는다. 대신
+현재 target action, source 의미, 종류별 profile, 엔진이 준비한 실행 증거를 묶은 dedicated proof를
+같은 mutation 관문에서 검사한다. 이 proof는 객체 지식이나 사람의 의미 승인을 대신하는 기록이
+아니라, 캡처나 파생 산출물이 지금 읽은 원본과 같은 실행에서 만들어졌음을 증명하는 transaction
+제어 정보다.
+
+통합 후보 `75e97fa`에는 common envelope·readiness·promotion 결속과 dedicated proof 계산·관문이
+부분 구현돼 있다. 그러나 설치된 `ingest`·projection 명령이 증거를 안전하게 준비하는 공개 경로,
+엔진이 발급한 receipt의 출처 결속, session 완료 marker가 durable batch/finalization receipt를
+소비하는 경계는 아직 구현되지 않았다. 현재 동작과 목표 계약을 섞지 않는다. 구현 전 계약은
+[evidence preparation 보강 설계](specs/2026-08-25-evidence-preparation-repair-design.md)와
+[session completion 보강 설계](specs/2026-08-25-session-completion-repair-design.md), 구현·티켓 판정은
+[재정리 보고서](reports/2026-08-25-issues-2-13-reconciliation.md)를 본다.
+
 ## 4. 미결 사항 — 이름 박고 미룸
 
 - **팀 확장 시 reviewed 승격 권한**(미결 5): 각자 promote vs 검수자 지정 (추후 논의 항목 — 팀 공개 시점에).

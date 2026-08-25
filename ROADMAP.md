@@ -29,6 +29,7 @@
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
 | L4 적재 | ✅ 3경로 + batch 완료 게이트 + P0 적재 무결성 기반 | 소급 / 개발 중 / 과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·workflow validator·semantic finalization(2026-07-23) + coverage·단일 쓰기·receipt·foundation gate(2026-08-05) |
+| 검수·쓰기 정책 확장 | 🟡 #2~#10 통합 후보 재검수 중 | 19종 capability, snapshot 동결, common verification, dedicated proof 기반은 후보에 있음. 공개 evidence 준비와 session completion 결속은 repair 설계 단계 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -38,7 +39,46 @@
 
 ## 진행 중
 
-현재 확정되어 진행 중인 작업은 없다. 착수 조건이 있는 후보는 아래 "미뤄둔 작업"에서 관리한다.
+### #2~#13 구현·계약·티켓 재정리 (2026-08-25)
+
+GitHub #2~#10의 통합 후보 `75e97fa98308b8bd7434070e05a99e69f2a5adef`를 main 기준
+`c1b7293cb124d2b46bd37140e15d23b20cbc104e`와 다시 대조하고 있다. 현재 작업은 agent-team Run
+상태가 아니라 이 레포의 코드·테스트·GitHub Issues만으로 진행한다.
+
+후보에 이미 있는 기반은 다음과 같다.
+
+- query·audit 읽기 전용 기본값과 명시적 fetch/cache 쓰기
+- 19종 capability registry와 snapshot v1·v2의 동결된 19종 복원 범위
+- `candidate.verification` v1, 현재 store 기준 readiness 계산, 승격 시 단일 ReviewRecord 결속
+- EvidenceRef·사건·시간·코드·DomainContext·DecisionRecord·`prompt_payload` projection의
+  common profile. capability가 common으로 선언한 GlossaryTerm·DomainMapping profile은 아직 없음
+- 원출처 capture와 파생·종합 객체의 dedicated proof material·mutation gate
+
+독립 검수에서 후보를 바로 main에 반영할 수 없는 결함과 계약 공백도 확인했다.
+
+- 일반 EvidenceRef locator 변경이 evidence binding에 들어가지 않던 결함과 공개 `promote`가
+  CodeLocator readiness 계산에 repo context를 늦게 넘기던 결함은 TDD 수리 후보에 반영했다.
+- 공개 `ingest`·projection 경로가 verification·dedicated proof 준비 함수와 이어지지 않는다.
+- 그래서 기본 공개 `ingest`는 정상 EvidenceManifest bundle도 `dedicated_proof_missing`으로
+  거부한다. profile을 비활성화한 기존 테스트는 공개 경로 완료 근거가 아니다.
+- dedicated execution receipt의 발급 주체와 현재 source·실행 provenance 결속이 닫히지 않았다.
+- `session mark-processed`는 canonical batch/finalization receipt 없이 완료 marker를 쓸 수 있다.
+- architecture와 이 ROADMAP이 새 schema·runtime 경계를 충분히 설명하지 못했던 드리프트는 정리
+  branch에서 현행화했다.
+
+그래서 #2~#10은 open을 유지하고, #3·#6·#9·#10은 설계 복귀했다. DomainMapping profile은 #12,
+GlossaryTerm profile은 #13 재설계에 포함한다. #11~#13은 상태·효과
+소유자와 정확한 acceptance 관측이 부족해 `RETURN`이며 바로 구현하지 않는다. 현재 근거와 다음
+순서는 [재정리 보고서](docs/reports/2026-08-25-issues-2-13-reconciliation.md), repair 계약은
+[evidence preparation 설계](docs/specs/2026-08-25-evidence-preparation-repair-design.md)와
+[session completion 설계](docs/specs/2026-08-25-session-completion-repair-design.md)를 본다.
+
+#7·#8의 종류별 profile 계산은 후보에 구현돼 있지만 완료가 아니다. #6의 public preparation 경계가
+닫힌 뒤 각 공개 명령에서 생성·재계산·승격을 다시 검증해야 한다.
+
+종료 순서는 repair 설계 최신 수정본 최종 확인 → bounded child ticket 구현 → exact-candidate Standards/Spec
+검수 → 전체 엔진·설치 runtime 회귀 → main 반영·push → 증거 댓글과 #2~#10 종료다. 그 전에는
+개별 커밋이나 표적 테스트 통과만으로 완료를 선언하지 않는다.
 
 ---
 

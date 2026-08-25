@@ -69,6 +69,8 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
 | “이 기능이 지금 어떻게 동작해?” | [런타임 지도의 query와 search](runtime-map.md#query와-search는-다르다) | `intent.py`, `router.py`, `search.py`, `tests/test_router.py`, `tests/test_search.py` |
 | 왜 Markdown 지식 문서가 아니라 JSON 객체를 쓰는지 확인 | [설계 정본의 JSON 객체 선택 근거](../design-canonical.md#왜-json-객체를-정본으로-두는가) | [초기 storage layout](../specs/2026-05-28-bb2-brain-storage-layout-design.md), [객체별 JSON 결정](../plans/2026-05-28-bb2-brain-p0-router.md#object-file-encoding-decision), [현재 데이터 계약](data-contracts.md) |
 | 객체를 새로 적재하거나 기존 객체를 고치기 | [데이터 계약](data-contracts.md) | JSON 예시, `assembly.py`, `mutation.py`, `tests/test_assembly.py`, `tests/test_mutation.py` |
+| candidate 검증·승격 또는 dedicated proof를 바꾸기 | [데이터 계약의 검수 증거](data-contracts.md#candidate-verification과-reviewed-쓰기-증거), [런타임 쓰기 경로](runtime-map.md#검수-증거와-mutation-관문) | `capabilities.py`, `verification.py`, `dedicated_proof*.py`, `promote.py`, `mutation.py`와 각 표적 테스트 |
+| #2~#13의 현재 구현·공백·티켓 상태 확인 | [재정리 보고서](../reports/2026-08-25-issues-2-13-reconciliation.md) | 고정 후보 SHA와 현재 checkout의 diff·테스트를 다시 대조 |
 | CodeLocator를 쓰거나 갱신하기 | 데이터 계약의 CodeLocator 행과 정상·실패 예시 | `code_verify.py`, `mutation.py`, `tests/test_code_verify.py`, `tests/test_mutation.py` |
 | 검색·색인·라우터를 바꾸기 | [변경 지도](change-map.md), [검색 내부 구조](../search-internals.md) | 해당 표적 테스트 뒤 소비 데이터 `brain/checks`와 `eval` |
 | mutation·migration을 바꾸기 | [런타임 쓰기 경로](runtime-map.md#코퍼스-객체-쓰기)와 [변경 지도](change-map.md) | `mutation.py`, `corpus_io.py`, migration 관련 모듈과 테스트 |
@@ -84,6 +86,11 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
   제어를 집행한다는 뜻도 아니다. 정확한 적용·미적용 경계는 런타임 지도를 본다.
 - 저장 호환용 schema만 읽고 신규 쓰기 계약을 판단하지 않는다. mutation의 상태 전이,
   CodeLocator repo·SHA·symbol·quote 검증 같은 관문을 함께 봐야 한다.
+- `capabilities.py`는 19종 정책의 비교 기준이지만 모든 기존 runtime 분기를 대체한 단일
+  dispatcher는 아니다. common verification profile과 dedicated proof profile도 현재는 별도
+  registry다. 공개 evidence 준비 경계의 목표 계약과 현재 구현을 섞지 않는다.
+- Python 내부 verification·proof 준비 함수가 있다는 사실만으로 설치된 `ingest`·projection CLI가
+  그 증거를 만들 수 있다고 보지 않는다. 이 공개 경로는 2026-08-25 repair 작업에서 진행 중이다.
 - 검수 객체 정본은 `objects/**` 한 디렉터리로 한정되지 않는다. `BrainStore.object_path()`가
   kind별로 정하는 `objects/**`, `raw/manifests/**`, `indexes/**`, `views/**` 아래 JSON이 모두
   객체 코퍼스다. 검수 전 원문 정본은 `raw/sources/**`이고, `.brain-local/**`은 다시 만들거나

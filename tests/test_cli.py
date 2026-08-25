@@ -1349,6 +1349,69 @@ class TestCliPromote(unittest.TestCase):
         self.assertNotIn("g.neutral.x", after["promotable_candidate_ids"])
         self.assertIn("g.neutral.x", after["source_object_ids"])
 
+    def test_promote_code_locator_uses_resolved_repo_context_for_verification(self):
+        from project_brain.verification import prepare_candidate_verification
+        from tests.test_verification_event_time_code import (
+            _code_candidate,
+            _common_agent_checks,
+            _git_repo,
+        )
+
+        checkout_parent = self.root / ".brain-local" / "fixtures"
+        checkout_parent.mkdir(parents=True)
+        _repo, repo_context, commit_sha = _git_repo(checkout_parent)
+        candidate = _code_candidate(commit_sha)
+        source_manifest = manifest()
+        source_ref = evidence_ref()
+        source_store = BrainStore({
+            source_manifest["id"]: source_manifest,
+            source_ref["id"]: source_ref,
+            candidate["id"]: candidate,
+        })
+        prepared = prepare_candidate_verification(
+            candidate,
+            source_store,
+            checks=_common_agent_checks("대상은 현재 checkout의 코드 위치다."),
+            engine_sha="e" * 40,
+            executed_at="2026-06-04T00:00:00Z",
+            producer={"kind": "agent", "id": "agent:extractor", "version": "1"},
+            verifiers=[],
+            repo_context=repo_context,
+        )
+        for obj in (source_manifest, source_ref, prepared):
+            BrainStore.save_object(self.root, obj)
+
+        argv = [
+            "promote",
+            "--brain-root",
+            str(self.root),
+            "--ids",
+            prepared["id"],
+            "--reviewer",
+            "human:owner",
+            "--reviewed-at",
+            "2026-06-04T00:00:00Z",
+            "--repo-root",
+            str(repo_context.repo_root),
+            "--expected-repo-id",
+            repo_context.expected_repo_id,
+            "--expected-revision-ref",
+            repo_context.expected_revision_ref,
+            *ENGINE_ARGS,
+        ]
+        out = io.StringIO()
+
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            rc = cli.main()
+
+        self.assertEqual(rc, 0, out.getvalue())
+        stored = BrainStore.load(self.root)
+        self.assertEqual(stored.get(prepared["id"])["status"], "reviewed")
+        self.assertEqual(
+            stored.get(f"review.{prepared['id']}")["verification"],
+            prepared["candidate"]["verification"],
+        )
+
     def test_promote_zero_evidence_rejected(self):
         # §6.4 활성 후: 근거 없는 candidate(candidate엔 §6.4 미적용 → 적재는 됨)를 승격하면
         # 승격 결과물(reviewed, 근거 빔)이 쓰기 전 일괄 검증에 걸려 rc=1, 디스크 불변(원자성).

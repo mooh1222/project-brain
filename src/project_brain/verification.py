@@ -41,6 +41,7 @@ class VerificationEvaluation:
 
 
 _PROFILE_VERSION = 1
+_EVIDENCE_PROJECTION = "verification-evidence-v2"
 _COMMON_CHECK_AUTHORITIES = {
     "common.content-supported": frozenset({"agent", "human"}),
     "common.evidence-resolved": frozenset({"engine"}),
@@ -377,6 +378,7 @@ def _direct_evidence_rows(
     if selected is None:
         return []
     pointers: list[tuple[str, object]] = []
+    literal_rows: list[dict[str, object]] = []
     for field in sorted(
         selected.direct_evidence_fields - frozenset({"source_content_hash"})
     ):
@@ -387,13 +389,18 @@ def _direct_evidence_rows(
                 for index, object_id in enumerate(value)
             )
         elif field == "locator":
+            literal_rows.append({
+                "pointer": "/locator",
+                "object_id": None,
+                "content_sha256": sha256_text(stable_json(value)),
+            })
             if isinstance(value, Mapping) and "code_locator_id" in value:
                 pointers.append(
                     ("/locator/code_locator_id", value.get("code_locator_id"))
                 )
         else:
             pointers.append((f"/{field}", value))
-    rows = []
+    rows = list(literal_rows)
     for pointer, object_id in pointers:
         target = (
             store.get(object_id)
@@ -451,7 +458,7 @@ def _evidence_sha256(
     if selected is None:
         raise ValueError("subject has no supported verification profile")
     return sha256_text(stable_json({
-        "projection": "verification-evidence-v1",
+        "projection": _EVIDENCE_PROJECTION,
         "rows": _direct_evidence_rows(
             subject,
             store,
@@ -471,7 +478,7 @@ def _rules_sha256(profile: VerificationProfile | None = None) -> str:
         ],
         "content_projection": "verification-content-v1",
         "direct_evidence_fields": sorted(selected.direct_evidence_fields),
-        "evidence_projection": "verification-evidence-v1",
+        "evidence_projection": _EVIDENCE_PROJECTION,
         "profile_rules": (
             {
                 "ref_types_by_source_type": {

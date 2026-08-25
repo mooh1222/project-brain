@@ -33,30 +33,40 @@
   ],
   "source_paths": [
     "src/project_brain/assembly.py", "src/project_brain/audit.py",
-    "src/project_brain/cli.py", "src/project_brain/config.py",
+    "src/project_brain/capabilities.py", "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
-    "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
+    "src/project_brain/dedicated_proof.py", "src/project_brain/dedicated_proof_capture.py",
+    "src/project_brain/dedicated_proof_derived.py", "src/project_brain/hash_utils.py",
+    "src/project_brain/id_grammar.py", "src/project_brain/ingest.py",
+    "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
     "src/project_brain/mutation.py", "src/project_brain/quote_debt.py",
-    "src/project_brain/reference_fields.py", "src/project_brain/router.py",
+    "src/project_brain/promote.py", "src/project_brain/reference_fields.py",
+    "src/project_brain/router.py",
     "src/project_brain/schema.py", "src/project_brain/search.py",
     "src/project_brain/search_index.py", "src/project_brain/session.py",
     "src/project_brain/snapshot.py", "src/project_brain/store.py",
     "src/project_brain/surface.py", "src/project_brain/task18_binding.py",
     "src/project_brain/task18_binding_verify.py", "src/project_brain/task18_state.py",
-    "src/project_brain/task18_verify.py"
+    "src/project_brain/task18_verify.py", "src/project_brain/verification.py",
+    "src/project_brain/verification_event_time_code.py"
   ],
   "test_paths": [
     "tests/test_architecture_docs.py", "tests/test_assembly.py", "tests/test_audit.py",
+    "tests/test_capabilities.py",
     "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
-    "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_id_grammar.py",
+    "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_dedicated_proof.py",
+    "tests/test_dedicated_proof_capture.py", "tests/test_dedicated_proof_derived.py",
+    "tests/test_id_grammar.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
     "tests/test_router.py",
     "tests/test_schema.py", "tests/test_search.py", "tests/test_search_index.py",
     "tests/test_session.py", "tests/test_snapshot.py", "tests/test_stale_check.py",
     "tests/test_task18_binding.py", "tests/test_task18_binding_verify.py",
-    "tests/test_task18_state.py", "tests/test_task18_verify.py"
+    "tests/test_task18_state.py", "tests/test_task18_verify.py",
+    "tests/test_verification.py", "tests/test_verification_domain_profiles.py",
+    "tests/test_verification_event_time_code.py"
   ],
   "doc_paths": [
     "AGENTS.md", "README.md", "ROADMAP.md", "docs/design-canonical.md",
@@ -140,8 +150,8 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `brain/raw/sources/**` | 소비 데이터 작업의 사람·설치된 적재 스킬. 엔진 CLI에는 직접 writer가 없음 | 검수 전 원문 정본. `raw/manifests/**`의 EvidenceManifest 객체와 다른 경계 | 원출처에서 다시 확보해야 하므로 index처럼 지우지 않음 |
 | `.brain-local/index.db*` | `index rebuild`, `bootstrap`, 적재 finalizer | 객체와 raw로부터 만든 로컬 파생 색인 | `project-brain index rebuild` |
 | `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | query/show가 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
-| `.brain-local/sessions/*.json` | `session mark-processed` | transcript 추출 처리 marker. 지식 객체가 아님 | 같은 UUID를 다시 mark하면 덮어씀 |
-| `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
+| `.brain-local/sessions/*.json` | `session mark-processed` | 현재는 UUID·시각·note뿐인 transcript 처리 marker. batch receipt나 transcript bytes와 결속되지 않은 `ENGINE_GAP` | 같은 UUID를 다시 mark하면 덮어씀 |
+| `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태. dedicated proof는 객체 필드가 아니라 mutation manifest에 결속 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
 | context-replace/migration manifest | 각 `plan` 명령 | exact SHA와 live precondition을 후속 apply에 묶는 파일. 그 자체가 객체 정본은 아님 | 같은 입력과 precondition에서 다시 plan |
 | snapshot | `snapshot create`, migration plan | 적용 전 복구 증거. `snapshot restore`는 brain 복구 전용 | create/verify로 새 snapshot 작성·검증 |
@@ -186,6 +196,35 @@ Task 18 표시 제목 변경은 이 일반 규칙의 예외다. `MutationOperati
 
 coverage는 선언한 identity와 실제 산출물을 결속할 뿐 원문 의미가 완전하다고 추론하지 않는다.
 coverage가 없거나 mode/build binding이 맞지 않으면 objects/raw/index 쓰기 전에 실패한다.
+
+### 검수 증거와 mutation 관문
+
+`capabilities.py`는 19종의 목표 candidate·승격·검수 방식을 한 표로 비교하지만 모든 기존 runtime
+분기를 대체한 dispatcher는 아니다. 실제 common profile은 `verification.py`와
+`verification_event_time_code.py`, dedicated profile은 `dedicated_proof*.py`가 각각 선택한다.
+
+현재 common candidate profile은 EvidenceRef, EventLedgerRecord, TemporalFact, CodeLocator,
+DomainContext, DecisionRecord, `prompt_payload` ContextProjection이다. envelope는 content, 현재 직접
+근거, 규칙, 실행을 결속하고 readiness는 저장 boolean이 아니라 현재 store·repo에서 다시 계산한다.
+fresh promotion은 대상과 single ReviewRecord를 같은 mutation에 쓴다. 다만 공개 `ingest`에는
+비엔진 check와 actor를 받아 envelope를 준비하는 입력이 없어 profile 준비는 Python API에만 있다.
+
+CodeLocator는 현재 checkout repo context가 readiness의 일부다. 기준 후보 `75e97fa`의 공개
+`promote`는 이 context를 verification 계산 뒤에 해석해 CLI 승격이 실패했다. 2026-08-25 정리
+branch는 context를 먼저 해석해 `promote()`와 mutation에 같은 값을 넘기며 공개 CLI 회귀로
+고정했다. 이 수리는 아직 main 동작이 아니다.
+
+dedicated profile은 EvidenceManifest·SpecDocument·SpecRevision·SlideRef·SlackThread와
+CurrentView·KnowledgePage·Insight·`context_md` ContextProjection의 reviewed create/update에 proof를
+요구한다. proof는 target action, current sources, profile과 execution receipt를 mutation manifest에
+묶고 common ReviewRecord를 만들지 않는다.
+
+그러나 공개 `ingest`·projection CLI는 proof를 생성하거나 `MutationService`에 전달할 수 없다. 기본
+MutationService는 reviewed EvidenceManifest create/update를 즉시 강제하므로 정상 assembled bundle도
+`dedicated_proof_missing`으로 실패할 수 있다. `dedicated_proof_profiles=()`를 주입한 테스트는 이
+공개 회귀의 완료 근거가 아니다. engine-issued receipt와 public preparation의 목표 계약은
+[2026-08-25 evidence preparation repair](../specs/2026-08-25-evidence-preparation-repair-design.md)이며
+현재 명령이 아니다.
 
 ### 설치 가능한 별도 P0 최종 gate
 
@@ -305,6 +344,12 @@ redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을
 기본 `stale-check`·`lint`·`graph isolated`는 객체 코퍼스를 바꾸지 않지만,
 `stale-check --write-cache`, `graph export`, `doctor --download`처럼 옵션이나 하위 명령에 따라
 코퍼스 밖 파일을 쓸 수 있다.
+
+`session mark-processed`는 현재 UUID·시각·note만 기록한다. transcript, verification report,
+batch receipt, finalization과 결속되지 않으므로 파일 존재를 정확한 처리 완료 증거로 쓰지 않는다.
+`session complete`와 receipt-bound marker v2는
+[2026-08-25 session completion repair](../specs/2026-08-25-session-completion-repair-design.md)의 목표이고
+아직 CLI 명령 집합에 없다.
 
 snapshot 범위도 분리해 본다.
 

@@ -19,3 +19,12 @@ superseded_by: null
 기존 후보에 검증 정보가 없으면 검증을 통과했다고 추정하지 않고 미검증 후보로 다룬다. 새 후보와 의미 있는 변경부터 이 계약을 적용하고, 기존 후보는 조회·수정·승격하려는 시점에 검증 정보를 보강한다. 명백한 비어휘는 정상 제외하며, 문맥 때문에 반복 오분류될 위험이 있는 경우에만 별도 `GlossaryClassificationRecord`를 사용한다.
 
 근거가 명확해 후보를 거치지 않고 곧바로 `reviewed`로 적재하는 객체도 같은 공통 검사와 종류별 검사를 우회하지 않는다. 이 경로에서는 후보를 억지로 만들지 않고 검증 결과를 해당 ingest 실행과 transaction 증거에 결속한다. 기존 `reviewed` 객체의 의미나 근거를 바꾸는 경우에도 변경된 내용으로 다시 검증하고 같은 mutation에서 검수 증거를 갱신한다.
+
+## 구현 메모 (2026-08-25)
+
+통합 후보 `75e97fa`는 common envelope, 현재 상태 재계산, candidate promotion의 ReviewRecord 결속과
+일부 종류별 profile을 구현했다. 다만 main에 반영되지 않았고 공개 ingest의 준비 경계,
+GlossaryTerm·DomainMapping profile, direct reviewed create/update 이력은 아직 닫히지 않았다. 그래서
+frontmatter의 `implementation: not_implemented`를 유지한다. 정확한 부분 구현과 보강 순서는
+[재정리 보고서](../reports/2026-08-25-issues-2-13-reconciliation.md)와
+[evidence preparation 보강 설계](../specs/2026-08-25-evidence-preparation-repair-design.md)를 본다.

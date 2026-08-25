@@ -192,6 +192,42 @@ def test_status_recomputes_content_evidence_rules_and_execution_bindings(monkeyp
     assert evaluation.reason_codes == ("execution_invalid",)
 
 
+def test_evidence_ref_locator_change_invalidates_fresh_verification():
+    prepared, current_manifest = _prepared_subject()
+    changed = deepcopy(prepared)
+    changed["locator"] = {"section": "2"}
+    store = BrainStore({
+        changed["id"]: changed,
+        current_manifest["id"]: current_manifest,
+    })
+
+    evaluation = evaluate_candidate_verification(changed, store)
+
+    assert evaluation.verification_status == "stale"
+    assert evaluation.reason_codes == ("evidence_changed",)
+
+
+def test_legacy_v1_evidence_projection_is_stale_after_locator_binding_fix(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        verification_module,
+        "_EVIDENCE_PROJECTION",
+        "verification-evidence-v1",
+    )
+    prepared, current_manifest = _prepared_subject()
+    monkeypatch.undo()
+    store = BrainStore({
+        prepared["id"]: prepared,
+        current_manifest["id"]: current_manifest,
+    })
+
+    evaluation = evaluate_candidate_verification(prepared, store)
+
+    assert evaluation.verification_status == "stale"
+    assert evaluation.reason_codes == ("evidence_changed", "rules_changed")
+
+
 def test_multiple_reasons_use_the_specified_fixed_order():
     candidate = _candidate_metadata()
     candidate["candidate_state"] = "conflict"

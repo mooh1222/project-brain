@@ -10,6 +10,11 @@
 - coverage·독립 expected planner: `src/project_brain/coverage.py`, `src/project_brain/assembly.py`
 - 신규·변경 쓰기 관문: `src/project_brain/mutation.py`, `src/project_brain/write_semantics.py`,
   `src/project_brain/code_verify.py`
+- kind별 목표 capability: `src/project_brain/capabilities.py`
+- candidate 검증 envelope와 현재 상태: `src/project_brain/verification.py`,
+  `src/project_brain/verification_event_time_code.py`
+- reviewed 전용 증거: `src/project_brain/dedicated_proof.py`,
+  `src/project_brain/dedicated_proof_capture.py`, `src/project_brain/dedicated_proof_derived.py`
 - 합쳐진 store의 관계 점검: `src/project_brain/lint.py`
 - 실제 검색 입력과 소비: `src/project_brain/surface.py`, `src/project_brain/router.py`,
   `src/project_brain/search.py`, `src/project_brain/audit.py`
@@ -31,6 +36,7 @@ CoverageContract
               └─ MutationService.plan
                   ├─ coverage/build binding + 입력 schema·ID·write semantics
                   ├─ 상태 전환·CodeLocator 검증
+                  ├─ capability에 따른 candidate verification 또는 dedicated proof 관문
                   └─ 합쳐진 store lint
                       └─ MutationService 단일 clock
                           └─ corpus_io transaction 또는 no-op receipt
@@ -102,6 +108,133 @@ template에 든 고정 timestamp는 JSON shape fixture이지 실제 생성 시�
 편집은 이 write boundary를 우회하므로 즉시 탐지를 보장하지 않으며 **다음 audit** 전수 검사에서야
 드러나는 문제가 있을 수 있다.
 
+## candidate verification과 reviewed 쓰기 증거
+
+`capabilities.py`는 19종 각각의 candidate, query 확인, direct reviewed, 수동·자동 승격, 검색
+레인, 갱신 책임, graph, 검수 방식, ReviewRecord 정책을 선언한다. 현재는 기존 분산 정책과의
+드리프트를 잡는 확장 단계다. 모든 schema·query·search·graph 분기가 이 표 하나에서 dispatch되는
+상태라고 확대 해석하지 않는다.
+
+### common candidate verification
+
+현재 common profile 구현 대상은 `EvidenceRef`, `EventLedgerRecord`, `TemporalFact`, `CodeLocator`,
+`DomainContext`, `DecisionRecord`, `format=prompt_payload`인 `ContextProjection`이다. capability에는
+`GlossaryTerm`과 `DomainMapping`도 common으로 선언돼 있지만 두 profile은 아직 구현되지 않았다.
+`GlossaryTerm`은 GitHub #13, `DomainMapping`은 #12 재설계에서 정확한 검사·authority·근거 projection을
+먼저 고정해야 한다.
+
+verification이 없는 legacy candidate는 계속 읽으며 `unverified/verification_missing`이다. 저장된
+`ready` boolean은 없다. `evaluate_candidate_verification()`이 현재 대상, 현재 store, repo가 필요한
+profile, 현재 규칙을 다시 계산해 `ready | unverified | stale | blocked`와 고정 reason 순서를 낸다.
+
+envelope가 있는 candidate의 sibling metadata exact key는 다음 다섯 개다.
+
+```text
+candidate_state, candidate_source, proposed_by, proposed_at, open_questions
+```
+
+`proposed_at`은 timezone-aware ISO 8601이고 `open_questions`는 정렬·중복 없는 비어 있지 않은 문자열
+목록이다. 아래 JSON은 top-level과 중첩 key 구조를 보여 주는 **축약 모양**이다. checks 한 행만
+표시했으므로 그대로 저장할 수 있는 fixture가 아니다. 실행 가능한 exact fixture는
+`tests/test_verification.py`와 종류별 verification 테스트가 만든다.
+
+```json
+{
+  "version": 1,
+  "profile": {"id": "verification.evidence-ref", "version": 1},
+  "bindings": {
+    "content_sha256": "64hex",
+    "evidence_sha256": "64hex",
+    "rules_sha256": "64hex",
+    "execution_sha256": "64hex"
+  },
+  "checks": [
+    {
+      "id": "common.content-supported",
+      "outcome": "pass",
+      "authority": "agent",
+      "summary": "현재 원문이 내용을 뒷받침한다."
+    }
+  ],
+  "execution": {
+    "workflow": "candidate",
+    "engine_sha": "40-or-64-lowercase-hex",
+    "executed_at": "2026-08-25T12:00:00+09:00",
+    "producer": {"kind": "agent", "id": "agent-id", "version": "1"},
+    "verifiers": [],
+    "subject_metadata": {
+      "candidate_state": "ready_for_review",
+      "candidate_source": "session",
+      "proposed_by": "agent-id",
+      "proposed_at": "2026-08-25T11:00:00+09:00",
+      "open_questions": []
+    }
+  }
+}
+```
+
+실제 checks는 profile이 요구한 ID 전체를 정렬·중복 없이 포함해야 한다. caller는 비엔진 check만
+주고 engine authority check는 현재 store·repo에서 계산한다. 내용, 직접 근거, 규칙, 실행 중 하나가
+달라지면 stored envelope를 준비 완료로 보지 않는다. 2026-08-25 정리 branch 수리 기준으로 일반
+EvidenceRef locator도 `/locator` 전체의 canonical value에 결속하며 nested code locator는 현재
+CodeLocator 내용에도 별도로 결속한다. 이 교정은 evidence projection을
+`verification-evidence-v2`로 올리므로 기준 후보의 v1 WIP envelope는 stale이 되고 새로 준비해야
+한다. envelope v1 exact shape와 execution hash 모양은 유지한다. 이 수리는 아직 main 동작이 아니다.
+
+fresh candidate promotion은 candidate metadata를 제거하고 대상과 single ReviewRecord를 한
+transaction에 쓴다. 새 verification 필드를 가진 single ReviewRecord는 다음 세 필드를 함께
+가져야 한다.
+
+```text
+verification, verification_origin, verification_history
+```
+
+현재 구현된 origin은 candidate promotion이며 `verification_origin=candidate_promotion`, 초기
+`verification_history=[]`다. `direct_reviewed_create`와 `reviewed_update` 모양은 parser enum에는
+예약돼 있지만 실제 write/history 정책은 #11 전에는 완료된 경로가 아니다. legacy ReviewRecord는
+세 필드가 모두 없는 모양으로 계속 읽는다. bundle의 target별 verification/history는 #12 범위다.
+
+### dedicated proof
+
+현재 dedicated profile 구현 대상은 다음과 같다.
+
+- capture: `EvidenceManifest`, `SpecDocument`, `SpecRevision`, `SlideRef`, `SlackThread`
+- derived: `CurrentView`, `KnowledgePage`, `Insight`, `format=context_md`인 `ContextProjection`
+
+이 종류의 reviewed create/update가 `MutationService`를 통과하려면 target별 `DedicatedProof`가
+필요하다. candidate와 promotion은 capability에 따라 거부하고 common ReviewRecord를 암묵 생성하지
+않는다. proof는 객체 payload에 넣지 않고 mutation request와 transaction manifest에 결속한다.
+
+아래는 proof의 공통 key 구조만 보여 주는 **축약 모양**이다. profile·target·receipt 값은 설명용이라
+그대로 저장할 수 없으며, profile별 exact receipt는 `tests/test_dedicated_proof_capture.py`와
+`tests/test_dedicated_proof_derived.py`가 생성한다.
+
+```json
+{
+  "version": 1,
+  "target_id": "target.id",
+  "profile": {"id": "dedicated.profile", "version": 1},
+  "action": "create",
+  "subject_sha256": "64hex",
+  "sources": [
+    {"pointer": "/source_object_ids/0", "source_id": "source.id", "content_sha256": "64hex"}
+  ],
+  "inputs": {},
+  "execution": {
+    "producer": {"kind": "agent", "id": "agent-id", "version": "1"},
+    "verifiers": [],
+    "receipt": {"kind": "builder", "id": "64hex"}
+  },
+  "proof_sha256": "64hex"
+}
+```
+
+`MutationService`는 live target action, 현재 source 의미 hash, profile, subject와 proof hash를 다시
+검사한다. 다만 현재 Python 준비 함수는 caller가 준 `{kind,id}` receipt를 받으며, 설치된 `ingest`와
+projection CLI에는 proof를 안전하게 준비해 넘기는 공개 입력이 없다. 이 부분은
+[evidence preparation repair 설계](../specs/2026-08-25-evidence-preparation-repair-design.md)의 목표
+계약이고 아직 현재 동작이 아니다.
+
 ## ID와 참조 공통 규칙
 
 slug는 소문자 영숫자와 단일 하이픈만 쓴다. `EvidenceRef`와 `CodeLocator`의 anchor key에는
@@ -149,25 +282,25 @@ registry는 참조 대상 ID가 존재하는지는 검사하지만, 대부분의
 
 | kind / 역할 | R·조건·금지 | ID·정상 생성·필드 작성자 | 참조와 의도 대상 | 소비처·과거 읽기와 신규 쓰기 |
 |---|---|---|---|---|
-| **EvidenceManifest** / `source` | R `source_type`, `locator`, `captured_at`, `captured_by`, `sensitivity`, `acl`, `redaction_status`. source와 redaction enum 강제 | `manifest.<ctx>.<key>`. 보통 `sources[]` → build. 적재자가 출처·locator·ACL·redaction을 쓰고 build가 공통 meta를 만든다 | 공통 `evidence_refs` 0+; 다른 `EvidenceRef.evidence_manifest_id`가 이 객체를 가리킨다 | provenance와 일부 query 경로의 restricted 판정. 모든 query/search 결과의 ACL 장벽은 아니다. 과거 `redaction_status=none`도 현재 schema/lint에서는 비정상이며 신규 쓰기는 `raw_local|staged|approved|rejected`만 허용 |
-| **EvidenceRef** / `reference` | R `evidence_manifest_id`, `ref_type`, `locator`, `summary`; `ref_type` enum | `evref.<ctx>.<anchor-key>`. code anchor·decision build 또는 직접 입력. 적재자가 원문 위치·요약을 주고 build가 ID/meta·code nested ref를 만든다 | manifest 1; O `/locator/code_locator_id` → CodeLocator 1; 공통 evidence 0+ | provenance, raw/restricted, graph·audit 역연결. 일반 schema·ID·dangling을 통과해야 하며 별도 legacy 완화 없음 |
-| **ReviewRecord** / `review` | R `reviewer`, `reviewed_at`, `verdict`. single은 `target_object_id` 필수이며 bundle 필드 금지. bundle은 `review_scope=mapping_bundle`, `target_object_ids` 1+, `bundle_key`, `confirmation_key` 필수이고 single target 금지 | single `review.<target-id>`, bundle `review.bundle.<ctx>.<key>`. 정상 경로는 `promote()`. 검토자가 판단·대상을 주고 엔진이 record와 대상의 `review_record_id`를 함께 만든다 | single target → canonical object 1; bundle targets/vouched IDs → DomainMapping; 공통 evidence 0+ | promotion·graph·audit. bundle target은 같은 ctx의 DomainMapping이어야 한다. 손작성보다 promote 결과를 사용하며 신규 쓰기에 과거 shape 완화 없음 |
+| **EvidenceManifest** / `source` | R `source_type`, `locator`, `captured_at`, `captured_by`, `sensitivity`, `acl`, `redaction_status`. source와 redaction enum 강제 | `manifest.<ctx>.<key>`. 보통 `sources[]` → build. 적재자가 출처·locator·ACL·redaction을 쓰고 build가 공통 meta를 만든다 | 공통 `evidence_refs` 0+; 다른 `EvidenceRef.evidence_manifest_id`가 이 객체를 가리킨다 | provenance와 일부 query 경로의 restricted 판정. 신규 reviewed create/update는 capture dedicated proof가 필요하다. 과거 `redaction_status=none`도 현재 schema/lint에서는 비정상이며 신규 쓰기는 `raw_local|staged|approved|rejected`만 허용 |
+| **EvidenceRef** / `reference` | R `evidence_manifest_id`, `ref_type`, `locator`, `summary`; `ref_type` enum | `evref.<ctx>.<anchor-key>`. code anchor·decision build 또는 직접 입력. 적재자가 원문 위치·요약을 주고 build가 ID/meta·code nested ref를 만든다 | manifest 1; O `/locator/code_locator_id` → CodeLocator 1; 공통 evidence 0+ | provenance, raw/restricted, graph·audit 역연결. candidate verification과 single promote가 구현됐다. legacy envelope 없음은 읽되 미검증이며, 공개 ingest 준비 seam은 아직 repair 범위다 |
+| **ReviewRecord** / `review` | R `reviewer`, `reviewed_at`, `verdict`. single은 `target_object_id` 필수이며 bundle 필드 금지. 새 single verification을 쓰면 `verification`, `verification_origin`, `verification_history`를 함께 요구. bundle은 `review_scope=mapping_bundle`, `target_object_ids` 1+, `bundle_key`, `confirmation_key` 필수이고 single target 금지 | single `review.<target-id>`, bundle `review.bundle.<ctx>.<key>`. fresh common candidate의 `promote()`가 대상과 single record를 함께 만든다 | single target → canonical object 1; bundle targets/vouched IDs → DomainMapping; 공통 evidence 0+ | candidate promotion·graph·audit. legacy record는 verification trio 없이 읽는다. direct reviewed/history 교체는 #11, bundle target별 verification은 #12 전에는 미구현 |
 | **EventLedgerRecord** / `event` | R `event_type`, `happened_at`, `summary`, `related_objects`; event_type은 현재 자유 문자열 | `ledger.<ctx>.<key>`. 전용 assembly 없음, 직접 입력. 적재자가 사건·시점·관련 객체를 쓴다 | `related_objects` → canonical object 0+; evidence 0+ | 변경 사유 router, TemporalFact의 원인, 검색 표면. 일반 strict write; 기존의 별도 grandfather 규칙 없음 |
 | **TemporalFact** / `fact` | R `subject`, `predicate`, `value`, `scope`, `valid_from`, `derived_from_event_id`, `confidence`; O `valid_until`, `supersedes`; confidence enum. 같은 open reviewed subject/predicate의 다른 값은 충돌 | `fact.<ctx>.<key>`. 전용 assembly 없음, 직접 입력. 적재자가 값·범위·유효시점·파생 사건을 쓴다 | event 1; O supersedes → TemporalFact 1; evidence 0+ | current/as-of/why-changed router, conflict lint, 검색 표면. 과거 값은 보통 reviewed를 유지하고 `valid_until`로 닫는다; 신규 묶음은 dangling·conflict를 통과해야 한다 |
 | **CodeLocator** / `reference` | schema R `repo`, `path`, `locator_source`, `verified_at`; locator source enum. 새/좌표변경/mark-checked에서는 추가로 full `commit_sha`, `symbol`, `verified_quote`, repo context 필요 | `code.<ctx>.<anchor-key>`. `code_anchors[]` build 또는 직접 입력 후 mutation verifier. 적재자가 좌표·quote를 주고 엔진이 실제 git 확인 뒤 `verified_at`와 symbol 기반 title을 확정 | 다른 객체의 `code_locator_ids`, EvidenceRef nested locator가 가리킨다; evidence 0+ | 구현 위치, 검색 표면, stale/quote/symbol audit. `verified_at` 누락은 verifier 전 mutation 입력에만 임시 허용. 좌표 불변 기존 객체는 quote·축약 SHA를 보존할 수 있지만 신규/좌표 변경에는 같은 완화를 적용하지 않는다 |
 | **DomainContext** / `domain` | R `context_key`, `project_id`, `display_name`, `boundary_summary`, `in_scope`, `out_of_scope`, `injection_profile`, `glossary_term_ids`; audience/export format enum. 과거 `path`, `source_format` 금지 | `context.<ctx>`와 `context_key` 결속. context notes에 display/boundary가 있으면 build. 적재자가 경계·scope를 쓰고 build가 기본 audience/meta를 만든다 | glossary IDs → GlossaryTerm 0+; evidence 0+ | scope 추론, glossary·projection source, 검색 표면. legacy `path`/`source_format`은 load 자체와 별개로 현재 lint에서 비정상이며 새 정본에 쓸 수 없다 |
 | **GlossaryTerm** / `domain` | R `context_id`, `term`, `definition`. candidate면 `candidate_state`·`candidate_source`; rejected면 `rejection`; reviewed면 evidence 1+. reviewed가 conflict/open questions를 유지하면 금지. synonyms/aliases는 3자 이상이며 blocklist 일반명사 금지 | `g.<ctx>.<key>`와 context 결속. glossary build, 직접 입력, promote. 적재자가 의미·근거·후보 상태를 쓰고 engine이 ID/meta, promote 시 review 연결을 만든다 | context 1; O review record 1, supersedes 1; evidence → EvidenceRef reviewed 1+ | 정확 의미·질의 정규화·매핑 표면·projection·promotion. 신규 변경은 lifecycle 조건을 모두 통과해야 하고, 과거 ID 문제 보존 외 schema 완화 없음 |
-| **ContextProjection** / `index` | R `context_id`, `format`, `source_object_ids`, `source_content_hash`, `projection_hash`, `generated_at`, `generated_by`, `stale_policy`; format enum, stale policy는 `fail_on_manual_edit`만. ID variant와 format 결속 | context-md builder는 reviewed Context/terms/mappings, reuse builder는 prompt payload를 만든다. 엔진이 ID·hash·locator·시각을 계산하고 적재자는 source 선택/reuse payload를 준다 | context 1; source objects schema상 0+, 공식 creator는 실제 source 전제; evidence 0+ | hash/manual-edit/file lint, context-md export, prompt_payload 전용 reuse 검색 lane. hash를 손으로 추측하지 않는다; stale repair도 허용 필드만 바꾼다 |
-| **CurrentView** / `synthesis` | R `view_type`, `as_of`, `source_fact_ids`, `source_event_ids`, `summary`; view type과 ID 결속 | `view.<view-type>.<key>`. 전용 creator 없음, 직접 입력. 적재자가 집계 시점·요약·sources를 모두 쓴다 | facts → TemporalFact 0+; events → EventLedgerRecord 0+; evidence 0+ | current-status router가 facts와 비교해 stale warning, 검색 표면. 직접 입력은 schema·ID·dangling만으로 전용 집계 정확성이 보장되지 않는다 |
-| **KnowledgePage** / `synthesis` | R `category`, `path`, `summary`, `source_object_ids`, `stale_policy`; category-ID 결속. stale policy enum 없음 | `page.<category>.<key>`. 전용 creator 없음, 직접 입력 | sources → canonical objects 0+; evidence 0+ | 현재 storage·generic graph 중심이며 검색 surface dispatch 없음. `manual` 예시는 shape 통과값일 뿐 제품 정책을 확정하지 않으며 legacy/write 별도 완화 없음 |
+| **ContextProjection** / `index` | R `context_id`, `format`, `source_object_ids`, `source_content_hash`, `projection_hash`, `generated_at`, `generated_by`, `stale_policy`; format enum, stale policy는 `fail_on_manual_edit`만. ID variant와 format 결속 | context-md builder는 reviewed Context/terms/mappings, reuse builder는 prompt payload를 만든다. 엔진이 ID·hash·locator·시각을 계산하고 적재자는 source 선택/reuse payload를 준다 | context 1; source objects schema상 0+, 공식 creator는 실제 source 전제; evidence 0+ | `prompt_payload` candidate는 common verification, reviewed `context_md` create/update는 dedicated proof다. hash/manual-edit/file lint와 reuse lane은 구현됐지만 두 증거 준비의 공개 projection 연결은 repair 범위다 |
+| **CurrentView** / `synthesis` | R `view_type`, `as_of`, `source_fact_ids`, `source_event_ids`, `summary`; view type과 ID 결속 | `view.<view-type>.<key>`. 전용 creator 없음, 직접 입력. 적재자가 집계 시점·요약·sources를 모두 쓴다 | facts → TemporalFact 0+; events → EventLedgerRecord 0+; evidence 0+ | reviewed create/update는 현재 source 의미·as-of·builder receipt dedicated proof를 요구한다. 다만 실제 범용 builder와 공개 ingest Adapter는 아직 없다 |
+| **KnowledgePage** / `synthesis` | R `category`, `path`, `summary`, `source_object_ids`, `stale_policy`; category-ID 결속. stale policy enum 없음 | `page.<category>.<key>`. 전용 creator 없음, 직접 입력 | sources → canonical objects 0+; evidence 0+ | reviewed create/update는 source 의미·stale policy·builder receipt dedicated proof를 요구한다. 현재 storage·generic graph 중심이고 실제 builder·검색 surface·공개 Adapter는 없다 |
 | **IndexRecord** / `index` | R `index_name`, `source_object_id`, `indexed_at`, `content_hash`; index name enum과 ID digest 결속. content hash 의미·형식은 별도 강제 없음 | `index.<index-name>.<source ID digest>`. 전용 creator 없음, 직접 입력; 실제 검색 DB rebuild가 이 kind를 만들지는 않는다 | source object 1; evidence 0+ | storage·generic graph·ID 검증 중심, 검색 surface 없음. 예시 content hash는 정식 ID digest 계산값이지 제품 수준 content hash 계약을 새로 정의하지 않는다 |
-| **SpecDocument** / `reference` | R `source_system`, `canonical_locator`; 전용 enum 없음 | `spec.<document-key>`. 전용 creator 없음, 직접 입력 | evidence 0+; SpecRevision이 이 객체를 가리킨다 | storage·SpecRevision parent·generic graph, 검색 surface 없음. 직접 입력 strict contract 외 별도 legacy 완화 없음 |
-| **SpecRevision** / `reference` | R `spec_document_id`, `revision_label`, `captured_at`, `slide_refs`; document key·revision label-ID 결속. `slide_refs` 요소 구조는 미검증 | `revision.<document-key>.<revision-key>`. 전용 creator 없음, 직접 입력 | spec document 1; `slide_refs`는 의도상 SlideRef지만 registry 밖; evidence 0+ | storage·SlideRef parent·generic graph, 검색 surface 없음. 빈 `slide_refs` 예시는 기능 완성 주장이 아니다 |
-| **SlideRef** / `reference` | R `spec_revision_id`, `slide_no`; revision keys·decimal slide-ID 결속 | `slide.<document-key>.<revision-key>.<decimal>`. 전용 creator 없음, 직접 입력 | spec revision 1; evidence 0+ | storage·generic graph, 검색 surface 없음. ID 결속은 강제하지만 revision 객체의 존재는 합친 store lint에서 확인한다 |
-| **SlackThread** / `source` | R `channel_id`, `thread_ts`, `participants`, `message_refs`, `summary`; participants/message_refs 요소 구조·비공백 규칙 없음 | `slack.<ctx>.<key>`. 전용 creator 없음, 직접 입력 | `message_refs`는 registry 밖; evidence 0+ | storage·generic graph, 검색 surface 없음. 빈 목록 예시는 실제 메시지 모델이나 dangling 검증을 확정하지 않는다 |
+| **SpecDocument** / `reference` | R `source_system`, `canonical_locator`; 전용 enum 없음 | `spec.<document-key>`. 전용 creator 없음, 직접 입력 | evidence 0+; SpecRevision이 이 객체를 가리킨다 | reviewed create/update는 locator·capture receipt dedicated proof를 요구한다. storage·parent·graph 중심이며 공개 capture Adapter는 아직 없다 |
+| **SpecRevision** / `reference` | R `spec_document_id`, `revision_label`, `captured_at`, `slide_refs`; document key·revision label-ID 결속. `slide_refs` 요소 구조는 미검증 | `revision.<document-key>.<revision-key>`. 전용 creator 없음, 직접 입력 | spec document 1; `slide_refs`는 의도상 SlideRef지만 registry 밖; evidence 0+ | reviewed create/update는 document·revision·capture receipt dedicated proof를 요구한다. 빈 `slide_refs` 예시는 기능 완성 주장이 아니다 |
+| **SlideRef** / `reference` | R `spec_revision_id`, `slide_no`; revision keys·decimal slide-ID 결속 | `slide.<document-key>.<revision-key>.<decimal>`. 전용 creator 없음, 직접 입력 | spec revision 1; evidence 0+ | reviewed create/update는 revision·slide·capture receipt dedicated proof를 요구한다. ID 결속과 source 존재는 mutation에서 다시 확인한다 |
+| **SlackThread** / `source` | R `channel_id`, `thread_ts`, `participants`, `message_refs`, `summary`; participants/message_refs 요소 구조·비공백 규칙 없음 | `slack.<ctx>.<key>`. 전용 creator 없음, 직접 입력 | `message_refs`는 registry 밖; evidence 0+ | reviewed create/update는 thread capture dedicated proof를 요구한다. `message_refs` 내부 의미와 공개 capture Adapter는 아직 닫히지 않았다 |
 | **DecisionRecord** / `event` | R `decision_type`, `summary`, `decision`, `source_object_ids`, `affected_context_ids`, `spec_reflected`; 두 enum 강제. evidence는 비어도 정상 | `decision.<ctx>.<key>`. decisions build 또는 직접 입력. 적재자가 판단·근거·affects를 쓰고 build가 IDs/meta와 affected context를 만든다 | sources 보통 EvidenceRef 0+; contexts 0+; O mappings/glossary 0+; evidence 0+ | why-changed, 매핑-결정 관계 lint, 검색 표면. `source_object_ids`가 정본 근거이고 `evidence_refs`는 provenance 보조다. reviewed mapping을 affect하면 mapping의 decision 역참조가 필요 |
 | **DomainMapping** / `domain` | R `context_id`, `mapping_key`, `canonical_summary`, `meaning`, `boundary`, `glossary_term_ids`, `decision_record_ids`; reviewed면 evidence 1+. O `review_state`는 정해진 4개 boolean 키만 | `mapping.<ctx>.<key>`와 context/key 결속. mappings build, 직접 입력, bundle promote. 적재자가 의미·경계·refs를 쓰고 build가 ID/meta 및 decision inverse를 만든다 | context 1; glossary/decision 0+; O code locators/superseded mappings 0+, review record 1; evidence reviewed 1+ | 핵심 query 객체, graph rerank, projection, term promotion, supersession/decision lint. reviewed↔candidate 후퇴 금지; superseded target lifecycle도 merged lint를 통과해야 한다 |
-| **Insight** / `synthesis` | R `body`, `source_object_ids`. candidate 금지. O `insight_type=cross-cutting-risk|operational-lesson`; 전자는 sources 2+, 그 밖은 1+ | `insight.<ctx>.<key>`. 전용 assembly 없음, 검증 뒤 직접 입력. 적재자가 종합 판단·scope·sources를 쓴다 | sources → canonical objects 1+; O code locators 0+; evidence 0+ | reviewed 전용 `advisories` lane과 검색 표면. candidate는 노출 통로가 없어 신규 쓰기에서 거부하며 별도 legacy 후보 보존 정책 없음 |
+| **Insight** / `synthesis` | R `body`, `source_object_ids`. candidate 금지. O `insight_type=cross-cutting-risk|operational-lesson`; 전자는 sources 2+, 그 밖은 1+ | `insight.<ctx>.<key>`. 전용 assembly 없음, 검증 뒤 직접 입력. 적재자가 종합 판단·scope·sources를 쓴다 | sources → canonical objects 1+; O code locators 0+; evidence 0+ | reviewed create/update는 source 의미·종합 verifier·replace receipt dedicated proof를 요구한다. advisories lane은 구현됐지만 실제 synthesis builder와 공개 Adapter는 아직 없다 |
 
 ## 공통 legacy ID 문법과 신규 쓰기 경계
 
@@ -276,8 +409,19 @@ mutation 반례는 setup이 중요하다. CodeLocator는 임시 git repo와 동�
   ID 결속이 별도로 없는 필드는 통과할 수 있다.
 - **registry 밖 목록:** `SpecRevision.slide_refs`, `SlackThread.message_refs`는 type, dangling, rewrite,
   graph edge를 공통으로 검사하지 않는다.
-- **전용 creator/검색 표면 없음:** `KnowledgePage`, `IndexRecord`, `SpecDocument`, `SpecRevision`,
-  `SlideRef`, `SlackThread`는 direct-extra-object와 storage/graph 중심이다.
+- **전용 creator/공개 Adapter/검색 표면의 차이:** dedicated proof material과 mutation gate는
+  `KnowledgePage`, `SpecDocument`, `SpecRevision`, `SlideRef`, `SlackThread`에 생겼지만 실제 creator와
+  설치 CLI Adapter는 아직 없다. `IndexRecord`는 여전히 direct-extra-object와 storage/graph 중심이다.
+- **common profile 미구현:** capability가 common으로 선언한 `GlossaryTerm`, `DomainMapping` profile은
+  아직 없다. 각각 #13과 #12 재설계에서 닫는다.
+- **receipt provenance:** dedicated proof는 현재 caller가 준 receipt ID를 shape·kind 기준으로
+  소비한다. engine/Adapter가 실행에서 ID를 발급하는 공개 계약은 repair 범위다.
+- **공개 ingest 회귀:** 기본 MutationService는 reviewed EvidenceManifest 등 dedicated 대상의
+  create/update에 proof를 요구하지만 공개 ingest는 proof를 만들거나 전달할 수 없다. 정상 bundle도
+  `dedicated_proof_missing`으로 실패할 수 있으며 profile을 비활성화한 테스트는 완료 근거가 아니다.
+- **CodeLocator 공개 승격:** 기준 후보 `75e97fa`는 repo context를 해석하기 전에 candidate
+  verification을 다시 평가해 fresh CodeLocator 승격이 실패했다. 2026-08-25 정리 branch는 context를
+  먼저 해석해 공개 CLI 회귀로 고정한 후보이며 main에는 아직 반영되지 않았다.
 - **자유 의미 필드:** `KnowledgePage.stale_policy`, `IndexRecord.content_hash`, participants/message/slide
   요소 구조는 현재 schema가 제품 정책을 확정하지 않는다.
 - **projection source cardinality:** schema는 `ContextProjection.source_object_ids=[]`도 허용하지만 공식

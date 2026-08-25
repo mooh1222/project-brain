@@ -1103,6 +1103,11 @@ def _run_promote(argv) -> int:
             }
     else:
         objects = [store.get(i) for i in args.ids]
+    repo_context = _resolve_mutation_context(
+        args,
+        brain_root,
+        required=any(obj.get("kind") == "CodeLocator" for obj in objects),
+    )
     # promote.py: (승격 객체, 검토 기록) 둘 다 반환 — 둘 다 저장해야 검토 기록 참조가 살아남는다(§5.2).
     # bundle_key 누락·잘못된 scope 등은 promote가 ValueError로 알리므로 잡아 rc=1로 돌린다(리뷰 minor 반영).
     try:
@@ -1112,16 +1117,12 @@ def _run_promote(argv) -> int:
             reviewed_at=args.reviewed_at,
             review_extra_by_id=review_extra_by_id,
             store=store,
+            repo_context=repo_context,
         )
     except (ValueError, KeyError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
     to_write = promoted + records
-    repo_context = _resolve_mutation_context(
-        args,
-        brain_root,
-        required=any(obj.get("kind") == "CodeLocator" for obj in to_write),
-    )
     try:
         _apply_mutation(
             operation=MutationOperation.PROMOTE,
