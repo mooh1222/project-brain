@@ -30,7 +30,7 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 승인된 상한 안에서 #33·#34와 연결된 #38·#39 설계 후보 2를 고정한다.
+- 다음 행동: 설계복귀 후보 2를 exact commit으로 고정하고 한 번의 독립 검수를 수행한다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -67,25 +67,25 @@
 
 ## #33 evidence preparation 설계 admission
 
-- 단계: 설계복귀
-- 후보: 1 / 3
+- 단계: 설계복귀 후보 2 고정
+- 후보: 2 / 3
 - 검수: 3 / 4
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: Major 8건 소유권 분리, 후보 1 검수 Critical 0 / Major 2 / RETURN
+- 마지막으로 닫힌 완료 조건: EvidencePlan source union·mixed plan·raw snapshot·`generated_by`와 #38 전용 handoff 보강
 - 마지막 갱신: 2026-08-25
-- 다음 행동: EvidencePlan source exact schema와 전용 `context_md` coordinator 계약을 후보 2에 고정한다.
+- 다음 행동: 네 spec의 exact candidate SHA를 기록하고 #33 최종 독립 검수 4/4를 한 번 수행한다. Major가 남으면 추가 연장 없이 중지한다.
 
 ## #34 session completion 설계 admission
 
-- 단계: 설계복귀
-- 후보: 1 / 3
+- 단계: 설계복귀 후보 2 고정
+- 후보: 2 / 3
 - 검수: 1 / 3
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: normal/zero 분리, 후보 1 검수 A2/A4/A5 PASS·A3 RETURN
+- 마지막으로 닫힌 완료 조건: tagged normal 계약, SessionExecutionState, durable run root와 구현 test/design admission 분리
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 구현 테스트와 독립 admission 관측을 분리한 후보 2를 고정한다.
+- 다음 행동: #39와 같은 fixed SHA를 독립 검수하고 결과를 구현 test와 별도로 기록한다.
 
 ### 초기 입장 판정
 
@@ -95,25 +95,39 @@
 
 ## #38 `context_md` object+artifact lifecycle 설계
 
-- 단계: 설계복귀
-- 후보: 1 / 3
+- 단계: 설계복귀 후보 2 고정
+- 후보: 2 / 3
 - 검수: 1 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 대상 분리와 상태표 고정, 후보 1 검수 Critical 0 / Major 2 / RETURN
+- 마지막으로 닫힌 완료 조건: #33 handoff, parent/mount, atomic leaf, pre-commit rollback과 committed receipt/report tail 보강
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #33 전용 handoff와 두-root crash tail을 포함한 후보 2를 함께 고정한다.
+- 다음 행동: #33과 같은 fixed SHA를 독립 검수한다.
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 설계복귀
-- 후보: 1 / 3
+- 단계: 설계복귀 후보 2 고정
+- 후보: 2 / 3
 - 검수: 1 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: normal/zero schema 분리, 후보 1 검수 Critical 0 / Major 2 / RETURN
+- 마지막으로 닫힌 완료 조건: zero/deferred bindings, public variant seam, deferred sole writer와 immutable zero retry chain 보강
 - 마지막 갱신: 2026-08-25
-- 다음 행동: zero/deferred binding·공개 seam·단일 효과 소유자를 포함한 후보 2를 함께 고정한다.
+- 다음 행동: #34와 같은 fixed SHA를 독립 검수한다.
+
+## 설계복귀 후보 2 독립 검수 입력
+
+- 파일: `docs/specs/2026-08-25-evidence-preparation-repair-design.md`
+- 파일: `docs/specs/2026-08-25-context-md-artifact-transaction-design.md`
+- 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
+- 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
+- SHA: 이 progress를 포함한 candidate commit 직후 별도 receipt commit에서 40자리로 기록
+- 검수 횟수: 네 파일을 한 exact candidate로 한 번만 검수하며 #33은 4/4, #34·#38·#39는 각각 2/3으로 센다.
+- 통과: A1 high, A2~A5 PASS, Critical 0, Major 0
+- 통과 뒤: #33·#34·#38·#39를 설계확정으로 바꾸고, E1~E15·C1~C6·N1~N4·Z1~Z4 각각의 GitHub child
+  issue와 progress block 생성안을 사용자에게 먼저 보여준다.
+- 중지: 어느 issue든 Major 또는 contract gap이 하나라도 남으면 모든 설계복귀 상한이 끝난 상태이므로
+  추가 수정·재검수를 시작하지 않고 사용자에게 반환한다.
 
 ## 보존 확인
 
@@ -121,6 +135,8 @@
 - #33 원본 WIP diff SHA-256: `8d9385dab45cd9ea159353354a18fbd1316b79ea6116bc845ecaaac339936b32`
 - 후보 1 고정 뒤 재확인: 두 hash 모두 기준값과 exact 일치
 - 후보 2 commit 전·GitHub 변경 뒤 재확인: 두 hash 모두 기준값과 exact 일치
+- 설계복귀 후보 2 commit 전 재확인: main status는 `git status --short --untracked-files=all`, #33은
+  `git diff` 기준으로 두 hash 모두 exact 일치
 
 ## GitHub 적용 확인
 
