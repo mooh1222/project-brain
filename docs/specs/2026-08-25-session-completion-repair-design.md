@@ -44,9 +44,9 @@ project-brain session prepare-batch \
 ```
 
 `run_ingest_batch.py`는 이 manifest를 소비해 `SessionProcessingReportV1`을 만드는 유일한
-producer다. session-ingest agent는 draft의 item 입력과 의미 판정인
-`unresolved_candidate_ids`만 제안할 수 있고 binding, verification projection, batch report,
-zero-work receipt, outcome, closure ID는 만들지 않는다.
+producer다. session-ingest agent는 draft의 item 입력, 의미 판정인
+`unresolved_candidate_ids`, 또는 아래 zero-work attestation만 제안할 수 있다. binding,
+verification projection, batch report, zero-work receipt, outcome, closure ID는 만들지 않는다.
 
 ```bash
 project-brain session complete \
@@ -116,14 +116,16 @@ coverage를 함께 읽어 공통 contract module로 계산한다. item projectio
   "transcript_size": 123,
   "transcript_sha256": "64hex",
   "verification_projection_sha256": "64hex",
-  "planned_objects_sha256": "64hex"
+  "planned_objects_sha256": "64hex",
+  "zero_work_attestation_sha256": null
 }
 ```
 
 verification projection은 item key 순으로 정렬된 item projection 배열이다. planned objects는 모든
 item coverage의 `expected_objects`를 합친 뒤 `(id,kind)`로 정렬·중복 제거한 배열이다. report의
 `planned_objects`와 batch report의 `item_records[].expected_objects` 합집합이 이 배열과 exact 같아야
-한다.
+한다. `zero_work_attestation_sha256`은 normal·unresolved variant에서 `null`, explicit zero-work에서
+아래 attestation canonical JSON의 SHA-256이다.
 
 기존 비세션 `BatchBinding` shape는 바꾸지 않는다. session batch는 별도
 `SessionBatchBindingV1` variant를 쓰며 기존 필드에 `session_binding_sha256`과
@@ -136,7 +138,7 @@ receipt를 위조할 수 없다.
 
 `prepare-batch`가 받는 draft exact key는 `repo_root`, `expected_repo_id`,
 `expected_revision_ref`, `engine_sha`, `items`, `finalization`, `unresolved_candidate_ids`,
-`zero_work`다. item exact key는 `key`, `verify_json`, `domain_spec_py`이며 세 값은 현재 batch
+`zero_work_attestation`이다. item exact key는 `key`, `verify_json`, `domain_spec_py`이며 세 값은 현재 batch
 manifest와 같은 상대 경로·중복 규칙을 따른다. agent가 만든 draft는 durable 완료 증거가 아니며
 다시 시작할 때 입력으로만 쓴다.
 
@@ -145,31 +147,66 @@ manifest와 같은 상대 경로·중복 규칙을 따른다. agent가 만든 dr
 ```text
 version, session_binding, verification_items, repo_root,
 expected_repo_id, expected_revision_ref, engine_sha, items,
-finalization, unresolved_candidate_ids, zero_work
+finalization, unresolved_candidate_ids, zero_work_attestation
 ```
 
-`version=1`이고 normal variant는 `items`가 한 개 이상, `zero_work=null`이다. 각 manifest item은
+`version=1`이고 normal variant는 `items`가 한 개 이상, `zero_work_attestation=null`이다. 각 manifest item은
 draft와 같은 세 key만 가지며, `verification_items`의 같은 `item_key`와 일대일로 대응한다.
 `prepare-batch`는 transcript와 모든 item 입력을 두 번 읽어 drift를 확인하고, coverage에서
 planned objects와 verification projection을 직접 계산한 뒤 `session_binding`을 만든다. runner는
 실행 직전 같은 파일에서 projection을 다시 계산해 manifest 값과 다르면 0-write로 실패한다.
 
+zero-work의 의미 판정은 엔진이 transcript를 재추출해 발명하지 않는다. agent가 다음 exact
+`ZeroWorkAttestationV1`을 제안하고 producer와 다른 agent 또는 human verifier를 최소 한 명 둔다.
+
+```json
+{
+  "version": 1,
+  "reason": "zero_objects",
+  "claimed_producer": {"kind": "agent", "id": "agent:assembler", "version": "1"},
+  "claimed_verifiers": [
+    {"kind": "agent", "id": "agent:independent-reviewer", "version": "1"}
+  ],
+  "checks": [
+    {
+      "id": "session.zero-work.no-durable-knowledge",
+      "outcome": "pass",
+      "summary": "transcript에서 적재할 durable knowledge가 없다."
+    },
+    {
+      "id": "session.zero-work.no-unresolved-candidates",
+      "outcome": "pass",
+      "summary": "미확정 후보로 남겨야 할 항목도 없다."
+    }
+  ]
+}
+```
+
+actor exact key와 한계는 evidence contract의 claimed identity와 같다. verifier 배열은 identity
+순으로 정렬·중복 없이 두고 producer와 같은 identity를 거부한다. checks는 위 두 ID를 정렬해
+정확히 한 번씩 가지며 outcome은 모두 `pass`, summary는 비어 있지 않아야 한다. 엔진은 이 주장의
+구조·독립성·transcript 결속을 검증하지만 의미적 진실을 재추출해 보증하지 않는다. attestation
+canonical hash는 `SessionBindingV1`, processing report, closure ID, durable zero-work receipt chain에
+결속된다.
+
 zero-item variant는 `items=[]`다. `unresolved_candidate_ids`가 비어 있으면
-`zero_work={"reason":"zero_objects"}`와 아래 zero-work finalization contract를 요구하고,
-한 개 이상이면 `zero_work=null`, `finalization=null`인 `unresolved_only` 입력이다. 다른 조합은
+유효한 `zero_work_attestation`과 아래 zero-work finalization contract를 요구하고,
+한 개 이상이면 `zero_work_attestation=null`, `finalization=null`인 `unresolved_only` 입력이다. 다른 조합은
 parser가 거부한다. normal item과 정렬된 unresolved ID가 함께 있으면 `partial_unresolved` 입력이다.
 v1은 unresolved가 하나라도 있으면 batch item을 실행하지 않는 fail-closed preflight를 사용한다.
 
 ## 4. SessionProcessingReport v1
 
 top-level exact key는 `version`, `session_binding`, `verification_items`, `planned_objects`,
-`unresolved_candidate_ids`, `outcome`, `batch_report`, `zero_work_report`, `zero_work_receipt`,
-`resume`, `closure_id`다.
+`unresolved_candidate_ids`, `zero_work_attestation`, `outcome`, `batch_report`, `zero_work_report`,
+`zero_work_receipt`, `resume`, `closure_id`다.
 
 - `verification_items`는 위 item projection 배열이다.
 - `unresolved_candidate_ids`는 session-ingest agent와 사용자 검토가 만든 정렬·중복 없는 후보 ID다.
   엔진은 transcript 의미를 다시 추출하지 않으므로 이 목록의 의미적 완전성은 producer 경계다.
   다만 목록 자체와 producer가 선택한 결과는 closure에 결속하며 한 개라도 있으면 marker를 금지한다.
+- `zero_work_attestation`은 `zero_objects`에서 manifest와 byte-exact 같은 valid object이고 그 밖에는
+  `null`이다. `SessionCompletion`은 canonical hash와 claimed producer/verifier 경계를 다시 검증한다.
 - `batch_report`는 normal variant에서 현재 설치 runtime의 canonical report exact object다. 공통
   contract module이 현재 top-level exact key set, item record exact shape, finalization, 각 durable
   receipt와 session binding을 검증한다. zero-item과 unresolved preflight에서는 `null`이다.
@@ -205,7 +242,7 @@ runner가 initial batch report를 durable하게 쓴 뒤 실패한 경우만 나�
 |---|---|---|---|
 | `committed` | item 1개 이상, 하나 이상 committed, 나머지 committed/no_changes, 모든 durable SessionBatchBinding exact, `finalized=true`, `finalization.ok=true` | 작성 | `SessionCompletion` |
 | `no_changes` | item 1개 이상, 전부 exact no_changes receipt, index rebuild만 skip, 나머지 finalization 성공 | 작성 | `SessionCompletion` |
-| `zero_objects` | planned와 unresolved가 비고 아래 durable ZeroWorkReceipt exact | 작성 | `SessionCompletion` |
+| `zero_objects` | planned와 unresolved가 비고 independent verifier가 붙은 attestation과 아래 durable ZeroWorkReceipt exact | 작성 | `SessionCompletion` |
 | `unresolved_only` | planned가 비고 unresolved가 한 개 이상, `batch_report=null` | 작성 금지, report 경로로 재개 | 없음 |
 | `partial_unresolved` | planned와 unresolved가 모두 있고 preflight에서 item 실행 전 중단, `batch_report=null` | 작성 금지, draft/검증 단계로 재개 | 없음 |
 | `failed` | normal batch 또는 zero-work finalization 실패·receipt 불일치 | 작성 금지 | 없음 |
@@ -216,7 +253,7 @@ corpus·index·batch report는 batch runner가 소유하고 marker는 `SessionCo
 ### 5.1 explicit zero-work
 
 `zero_objects`를 빈 배열에 대한 `all()` 결과로 `no_changes`라 부르지 않는다. session manifest의
-별도 exact zero-work variant는 `items=[]`, `session_binding`, `zero_work={"reason":"zero_objects"}`를
+별도 exact zero-work variant는 `items=[]`, `session_binding`, 유효한 `zero_work_attestation`을
 가진다. 일반 manifest의 item 최소 1개와 coverage expected object 최소 1개 계약은 유지한다.
 
 batch runner는 transaction을 만들지 않고 다음 관문을 실행한다.
@@ -311,6 +348,7 @@ invalid_marker`로 구분한다. 현재 transcript hash와 맞는 valid v2만 `p
 - `session_unresolved_candidates`
 - `session_receipt_mismatch`
 - `session_zero_work_receipt_invalid`
+- `session_zero_work_attestation_invalid`
 - `session_finalization_incomplete`
 - `session_legacy_marker_precondition_required`
 - `session_completion_conflict`
@@ -319,7 +357,8 @@ invalid_marker`로 구분한다. 현재 transcript hash와 맞는 valid v2만 `p
 
 의존 순서대로 다음 네 ticket으로 나눈다.
 
-1. 공용 canonical schema/hash, `SessionBindingV1`·`SessionBatchBindingV1`, 기존 BatchBinding 읽기 호환
+1. 공용 canonical schema/hash, `ZeroWorkAttestationV1`, `SessionBindingV1`·`SessionBatchBindingV1`,
+   기존 BatchBinding 읽기 호환
 2. batch runner의 session binding 발행·durable recovery와 explicit zero-work receipt
 3. `session complete`, marker v2 UUID lock·재시도·list 상태·명시적 legacy CAS 교체
 4. session-ingest template, architecture 문서, installer 2회 무변경 회귀

@@ -29,16 +29,18 @@
 - 전체검사 1: 엔진 `2186 passed, 136 subtests passed`, 설치 runtime `125 OK`, architecture `15 passed`
 - WIP 사전검수: Spec Critical/Important 없음. Standards에서 projection version과 delete preparation
   모순을 발견해 후보 고정 전에 수리했다.
-- 판정: commit 전 WIP 검수는 exact-candidate 검수로 세지 않는다. 이 기록을 포함한 다음 metadata
-  commit을 고정한 뒤 별도 Standards·Spec exact review를 수행한다.
+- exact 검수: Standards Important 3건(prompt `generated_at`, zero-work 의미 소유자, 후보 카운터),
+  Spec Important 1건(change-map상 소비 데이터 회귀 누락).
+- 판정: 후보 2 불합격. 구현 코드는 그대로 두고 두 설계 계약·진행 카운터를 수리했으며, BB2
+  `brain/checks` 13 OK(1 skip)와 임시 corpus actual CodeLocator prepare/promote smoke를 추가했다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
 - 단계: 검수
-- 후보: 1 / 3
-- 검수: 1 / 3
+- 후보: 2 / 3
+- 검수: 2 / 3
 - 설계복귀: 0 / 1
-- 전체검사: 0 / 2
+- 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
 - 다음 행동: 공통 아키텍처 지도 보강 뒤 완료 조건별 근거표를 확인한다.
@@ -57,10 +59,10 @@
 ## #4 19종 capability registry 확장 단계
 
 - 단계: 구현
-- 후보: 1 / 3
-- 검수: 1 / 3
+- 후보: 2 / 3
+- 검수: 2 / 3
 - 설계복귀: 0 / 1
-- 전체검사: 0 / 2
+- 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
 - 다음 행동: capability의 현재 역할과 아직 분산된 런타임 경계를 아키텍처 지도에 명시한다.
@@ -68,10 +70,10 @@
 ## #5 snapshot v1·v2의 19종 대상을 동결
 
 - 단계: 검수
-- 후보: 1 / 3
-- 검수: 1 / 3
+- 후보: 2 / 3
+- 검수: 2 / 3
 - 설계복귀: 0 / 1
-- 전체검사: 0 / 2
+- 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
 - 다음 행동: 후보 2에서 snapshot 완료 조건별 표적 회귀를 다시 확인한다.
@@ -79,10 +81,10 @@
 ## #6 EvidenceRef로 공통 verification 첫 경로 완성
 
 - 단계: 설계복귀
-- 후보: 1 / 3
+- 후보: 2 / 3
 - 검수: 3 / 3
 - 설계복귀: 1 / 1
-- 전체검사: 0 / 2
+- 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 일반 EvidenceRef locator가 바뀌면 `stale/evidence_changed`로 다시 계산되고, 기존 v1 WIP evidence projection은 v2 규칙에서 stale 처리됨 (`tests/test_verification.py`, 18 passed)
 - 마지막 갱신: 2026-08-25
 - 다음 행동: 검수 상한 뒤 최신 evidence preparation 수정본을 새 design ticket에서 최종 확인한다.
@@ -90,10 +92,10 @@
 ## #7 사건·시간·코드 verification profile 연결
 
 - 단계: 검수
-- 후보: 1 / 3
-- 검수: 1 / 3
+- 후보: 2 / 3
+- 검수: 2 / 3
 - 설계복귀: 0 / 1
-- 전체검사: 0 / 2
+- 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 공개 `promote`가 CodeLocator 준비 때와 mutation 때 같은 repo
   context를 사용함 (새 CLI 회귀 + 기존 promote 회귀 2개, 3 passed)
 - 마지막 갱신: 2026-08-25
@@ -102,10 +104,10 @@
 ## #8 도메인·결정·prompt projection verification profile 연결
 
 - 단계: 검수
-- 후보: 1 / 3
-- 검수: 1 / 3
+- 후보: 2 / 3
+- 검수: 2 / 3
 - 설계복귀: 0 / 1
-- 전체검사: 0 / 2
+- 전체검사: 1 / 2
 - 마지막으로 닫힌 완료 조건: 현재 정리 루프에서는 없음
 - 마지막 갱신: 2026-08-25
 - 다음 행동: #6 설계복귀 결과를 반영한 공개 ingest 경로에서 표적 회귀를 확인한다.

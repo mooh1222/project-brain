@@ -42,6 +42,17 @@
 현재 rules/evidence와 달라 `stale`이 되며 승격 전에 새로 준비해야 한다. main에 출시된 과거
 계약을 migration하는 것이 아니라 통합 후보 안의 결함을 main 반영 전에 한 번 교정하는 전환이다.
 
+`prompt_payload` ContextProjection은 별도 content projection 전이가 필요하다. 현재
+`verification-content-v1`은 `generated_at`을 내용 hash에 넣지만 mutation timestamp policy는
+envelope를 seal한 뒤 exclusive lock에서 이 값을 찍는다. 그대로 구현하면 저장 직후
+`content_changed`다. repair는 common preparation을 공개하기 전에 `verification-content-v2`를
+도입하고 engine-owned 비의미 시각인 `generated_at`을 content projection에서 제외한다. rules
+binding의 content projection discriminator도 v2로 올리므로 과거 prompt WIP envelope는
+`rules_changed`로 stale 처리한다. `projection_hash`, `source_content_hash`, `reuse_payload`는 계속
+내용 결속에 남고 `generated_at`만 mutation clock이 한 번 찍는다. 다른 kind에는 이 필드가 없으므로
+의미 projection이 달라지지 않는다. 이 전이는 현재 코드 수리 완료가 아니라 evidence design
+admission과 첫 구현 ticket의 필수 범위다.
+
 재시도 비교에는 저장하지 않는 내부 `evidence_identity_sha256`을 사용한다. 이 값은 현재 target
 semantic bytes, source, profile/rules, checks, actor claims, engine identity를 묶되 `executed_at`만
 제외한다. 기존 envelope가 live 기준 fresh하고 이 identity가 같으면 envelope 전체를 byte 그대로
@@ -418,7 +429,8 @@ CLI는 첫 실패 하나를 반환한다. 여러 target이면 target ID 순으�
 의존 순서대로 다음 ticket을 만든다. 한 행은 한 writer가 90분 안에 표적 RED와 구현을 닫을 수 있는
 경계다.
 
-1. common v1 envelope 호환과 deterministic retry identity
+1. common v1 envelope shape 호환, evidence projection v2 유지, `generated_at`을 제외하는 content
+   projection v2 전이와 deterministic retry identity
 2. `evidence_contracts.py` 순수 타입·exact parser·오류
 3. 실제 engine identity와 닫힌 Adapter registry
 4. `BaseMutationPreparation`과 same-batch `ProjectedStore`
@@ -466,6 +478,8 @@ validator만 통과시키거나 default profile을 비활성화한 CLI 테스트
 - raw file symlink/hardlink/source drift, repo revision drift, store TOCTOU의 0-write
 - dedicated no-change의 live evidence 재검증과 journal 비생성
 - prepare와 apply clock이 달라도 sealed unstamped intent가 같으면 성공하고, exact retry는 no-change
+- `prompt_payload`는 apply가 `generated_at`을 찍은 뒤에도 fresh이고, content v1 WIP envelope는
+  rules drift로 stale
 - `context_md` public builder의 object+artifact 원자 적용·rollback과 proof,
   `prompt_payload` common projection 경로 분리
 - context_md locator A→B의 old artifact 삭제와 new artifact 생성, path 충돌·config/root drift 0-write

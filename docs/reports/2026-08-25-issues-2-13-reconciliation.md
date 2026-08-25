@@ -151,6 +151,9 @@ schema, promote 파일이 겹치므로 한 shared-checkout writer가 #11 → #12
 - 설치 ingest runtime: `Ran 125 tests`, `OK`
 - architecture 문서 계약: `15 passed`
 - locator v2·CodeLocator promote·문서 표적 묶음: `43 passed`
+- BB2 소비 데이터 `brain/checks`: `Ran 13 tests`, `OK (skipped=1)`; skip은 Task 18 실행 단계 비활성
+- BB2 실제 CodeLocator candidate/promote smoke: 임시 corpus에서 public CLI 성공,
+  `ReviewRecord.verification`과 준비 envelope가 byte-equivalent, 원본 corpus 불변
 - `git diff --check`: 통과
 
 설치 runtime의 첫 실행에서는 격리 worktree에 `.venv`가 없어 batch runner 자식 프로세스가 다른
@@ -158,8 +161,9 @@ Python을 잡았고 `tree_sitter` import 실패 3건이 났다. 엔진 checkout�
 `PYTHONPATH`에 함께 명시해 동일 3건과 전체 125건을 다시 실행하자 통과했다. 후보 동작 실패가 아니라
 검증 환경 provenance 문제였으므로 성공 명령에는 두 경로를 모두 명시한다.
 
-이번 정리 branch는 index 입력이나 실코퍼스 schema를 새로 바꾸지 않았고, 아직 public evidence
-preparation을 구현하지도 않았다. 따라서 실모델 rebuild나 소비 데이터 전체 회귀는 실행하지 않는다.
+이번 정리 branch는 index 입력이나 실코퍼스 schema를 새로 바꾸지 않았고 실제 corpus에 write하지도
+않았다. change-map이 요구한 `brain/checks`와 candidate/promote smoke만 수행했으며 lint·audit·eval·
+실모델 rebuild까지 넓히지 않았다.
 
 ## 다음 실행 순서
 
