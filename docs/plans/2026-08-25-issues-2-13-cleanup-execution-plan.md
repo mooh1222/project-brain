@@ -6,6 +6,7 @@
 - 과거 통합 후보: `75e97fa98308b8bd7434070e05a99e69f2a5adef`
 - 과거 정리 branch: `codex/brain-ticket-reconcile-20260825` (`272b303`)
 - #33 보존 branch: `codex/issue-33-evidence-design-admission` (`8341d7a`)
+- 신규 분리 issue: #38 (`context_md`), #39 (session zero-work·unresolved)
 
 ## 목적과 변경 경계
 
@@ -103,14 +104,14 @@ progress.md`는 당시 후보·검수·설계복귀 기록으로 보존하며 �
    `ready-for-agent`를 제거하고 `needs-triage`로 돌린 뒤 #33을 blocker로 둔다.
 2. evidence preparation 핵심과 `context_md` artifact lifecycle을 분리한다.
    - #33: common/dedicated evidence preparation, public ingest/projection input, identity, receipt, TOCTOU
-   - 신규 issue: `context_md` object+artifact path, action, journal, rollback, recovery
+   - #38: `context_md` object+artifact path, action, journal, rollback, recovery
 3. session completion 핵심과 explicit zero-work를 분리한다.
    - #34: item이 한 개 이상인 session binding, report, marker v2, retry·legacy
-   - 신규 issue: zero-work attestation·finalization·receipt와 unresolved-only/partial-unresolved 재시작
+   - #39: zero-work attestation·finalization·receipt와 unresolved-only/partial-unresolved 재시작
 4. dependency 방향은 `child blocked by blocker`로 검증한다.
    - #34 blocked by #33
-   - `context_md` 신규 issue blocked by #33; #10 closeout blocked by 신규 issue
-   - zero-work 신규 issue blocked by #34; #3 blocked by zero-work 신규 issue
+   - #38 blocked by #33; #10 closeout blocked by #38
+   - #39 blocked by #34; #3 blocked by #39
 
 이 작업은 Wayfinder map 탐색이 아니라 이미 승인된 #1 issue graph의 계약 복구다. Wayfinder 라벨이나
 별도 map issue를 자동으로 만들지 않는다.
@@ -192,14 +193,14 @@ tests/test_snapshot.py
 한 shared-checkout writer가 다음 순서로 처리한다.
 
 1. #33 evidence preparation 입장 통과
-2. #34 session completion, #35 direct reviewed, `context_md` 신규 설계의 읽기 전용 검수
-3. zero-work 신규 설계
+2. #34 session completion, #35 direct reviewed, #38 `context_md` 설계의 읽기 전용 검수
+3. #39 zero-work 설계
 4. #34와 zero-work가 모두 통과한 뒤 새 session-runtime child issue·장부 생성 → 구현 → #3 closeout
 5. #33 통과 뒤 #6용 common verification public preparation child issue·장부 생성
 6. #6 child 완료 뒤 #7 → #8 public profile 회귀 child issue를 각각 생성
 7. #33 통과 뒤 #9 local capture와 원격 Adapter child issue를 각각 생성
 8. #33 통과 뒤 #10의 비-`context_md` derived output validation·실제 builder child 생성
-9. `context_md` 설계 통과 뒤 object+artifact transaction 구현 child 생성
+9. #38 통과 뒤 `context_md` object+artifact transaction 구현 child 생성
 10. #10 parent는 8·9의 child와 기존 blocker가 모두 끝난 뒤에만 종료
 11. #11 → #12 → #13
 12. 기존 dependency에 따라 #14~#19 뒤에만 지식 초안 #20~#23

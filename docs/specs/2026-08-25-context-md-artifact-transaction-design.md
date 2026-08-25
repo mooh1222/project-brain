@@ -3,7 +3,7 @@
 - 작성일: 2026-08-25
 - 상태: 신규 design admission 후보 1 RETURN — Critical 0 / Major 2, #33 계약 보강 전 구현 금지
 - 선행 계약: [evidence preparation 핵심](2026-08-25-evidence-preparation-repair-design.md)
-- 대상: `ContextProjection(format=context_md)`와 생성 `docs/contexts/generated/**/CONTEXT.md`
+- 대상: GitHub #38, `ContextProjection(format=context_md)`와 생성 `docs/contexts/generated/**/CONTEXT.md`
 
 ## 1. 이름과 범위
 

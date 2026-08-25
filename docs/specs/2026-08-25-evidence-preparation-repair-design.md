@@ -5,7 +5,7 @@
 - 대상: GitHub #33과 후속 #6·#7·#8·#9·#10
 - 기준 코드 후보: `75e97fa98308b8bd7434070e05a99e69f2a5adef`
 - 보존 입력: `codex/issue-33-evidence-design-admission`의 미커밋 spec
-- 별도 설계: [context_md object·artifact transaction](2026-08-25-context-md-artifact-transaction-design.md)
+- 별도 설계: GitHub #38 [context_md object·artifact transaction](2026-08-25-context-md-artifact-transaction-design.md)
 
 ## 1. 범위
 

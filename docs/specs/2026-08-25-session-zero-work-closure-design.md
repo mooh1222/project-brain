@@ -3,7 +3,7 @@
 - 작성일: 2026-08-25
 - 상태: 신규 design admission 후보 1 RETURN — Critical 0 / Major 2, #34 계약 보강 전 구현 금지
 - 선행 계약: [정상 session completion](2026-08-25-session-completion-repair-design.md)
-- 대상: `zero_objects`, `unresolved_only`, `partial_unresolved`, zero-work `failed`
+- 대상: GitHub #39, `zero_objects`, `unresolved_only`, `partial_unresolved`, zero-work `failed`
 
 ## 1. 분리 원칙
 

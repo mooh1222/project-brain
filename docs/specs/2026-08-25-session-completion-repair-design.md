@@ -4,7 +4,7 @@
 - 상태: #34 후보 1 독립 검수 RETURN — Critical 0 / Major 1, 추가 설계복귀 승인 전 수정 금지
 - 대상: GitHub #34와 후속 #3
 - 선행 계약: GitHub #33의 actor·loaded engine identity
-- 별도 설계: [zero-work·미해결 후보 종료](2026-08-25-session-zero-work-closure-design.md)
+- 별도 설계: GitHub #39 [zero-work·미해결 후보 종료](2026-08-25-session-zero-work-closure-design.md)
 
 ## 1. 범위
 

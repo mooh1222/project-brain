@@ -15,18 +15,20 @@
 - 권한 경계: 이 기록은 상한만 늘린다. 이번 1단계에서 #2·#4·#5 코드 후보를 만들 권한은 없음
 - 정리 후보 1: `2db3de1bf430c4c663d087dc52ef033dd3923a31`
 - 후보 1 독립 검수: Critical 0 / Major 6 / RETURN
+- 정리 후보 2: `6c4a411c072f5d0546709779bdc0a8645e667d6a`
+- 후보 2 구조 검수: Critical 0 / Major 0 / Minor 0 / PASS
 - 공통 현재 시각: 2026-08-25 Asia/Seoul
 
 ## 정본·티켓 구조 정리
 
-- 단계: 검수
+- 단계: 1단계 완료
 - 후보: 2 / 3
-- 검수: 1 / 3
+- 검수: 2 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: 후보 1 독립 검수 RETURN과 기존 parent→새 child 장부 경계 반영
+- 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 후보 2에서 실행안의 parent/child 경계만 확인하고 기술 spec은 반송 상태로 보존한다.
+- 다음 행동: 중지. #33·#34 추가 설계·검수 예산 또는 별도 다음 단계 승인을 기다린다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -89,7 +91,7 @@
 - 이유: 완료 조건 7개로 A4 상한을 넘고, 조건별 정확한 검증 명령·기대 관측 연결이 없어 A3도 닫히지 않음
 - 재개 조건: #33을 blocker로 추가하고 core와 zero-work를 각각 완료 조건 6개 이하로 분리
 
-## 신규 `context_md` object+artifact lifecycle 설계
+## #38 `context_md` object+artifact lifecycle 설계
 
 - 단계: 검수
 - 후보: 1 / 3
@@ -100,7 +102,7 @@
 - 마지막 갱신: 2026-08-25
 - 다음 행동: `needs-triage` 신규 issue를 만든 뒤 #33 계약·추가 설계 예산을 기다린다.
 
-## 신규 session zero-work·unresolved closure 설계
+## #39 session zero-work·unresolved closure 설계
 
 - 단계: 검수
 - 후보: 1 / 3
@@ -116,4 +118,16 @@
 - main WIP 상태 목록 SHA-256: `7be3dcf9c6a119de8c273c7ea804962f477d9921f809dd8161eb3ad75a6a04b9`
 - #33 원본 WIP diff SHA-256: `8d9385dab45cd9ea159353354a18fbd1316b79ea6116bc845ecaaac339936b32`
 - 후보 1 고정 뒤 재확인: 두 hash 모두 기준값과 exact 일치
-- 다음 확인: 후보 2 commit 전, GitHub 변경 뒤
+- 후보 2 commit 전·GitHub 변경 뒤 재확인: 두 hash 모두 기준값과 exact 일치
+
+## GitHub 적용 확인
+
+- #3 blocked by `[34,39]`
+- #10 blocked by `[4,6,33,38]`
+- #33 blocked by `[]`
+- #34 blocked by `[33]`
+- #38 blocked by `[33]`
+- #39 blocked by `[34]`
+- #3·#10·#33·#34·#38·#39: 모두 OPEN, labels exact `enhancement,needs-triage`
+- Wayfinder 다섯 label이 붙은 issue: 모두 0개
+- local main·origin/main·실제 원격 main: `b35d351ee77093392ca170f799d0edc1a8414070`
