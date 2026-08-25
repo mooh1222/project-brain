@@ -67,25 +67,25 @@
 
 ## #33 evidence preparation 설계 admission
 
-- 단계: 설계복귀 후보 2 고정
+- 단계: 설계확정
 - 후보: 2 / 3
-- 검수: 3 / 4
+- 검수: 4 / 4
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: EvidencePlan source union·mixed plan·raw snapshot·`generated_by`와 #38 전용 handoff 보강
+- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 A1 high·A2~A5 PASS·Critical 0 / Major 0
 - 마지막 갱신: 2026-08-25
-- 다음 행동: 네 spec의 exact candidate SHA를 기록하고 #33 최종 독립 검수 4/4를 한 번 수행한다. Major가 남으면 추가 연장 없이 중지한다.
+- 다음 행동: E1~E15 child issue·progress 생성안을 사용자에게 제시하되, #38 RETURN 처리 방향 전에는 구현을 시작하지 않는다.
 
 ## #34 session completion 설계 admission
 
-- 단계: 설계복귀 후보 2 고정
+- 단계: 중지 — 추가 사용자 승인 필요
 - 후보: 2 / 3
-- 검수: 1 / 3
+- 검수: 2 / 3
 - 설계복귀: 2 / 2
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: tagged normal 계약, SessionExecutionState, durable run root와 구현 test/design admission 분리
+- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 Critical 0 / Major 2 / RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #39와 같은 fixed SHA를 독립 검수하고 결과를 구현 test와 별도로 기록한다.
+- 다음 행동: UUID-level cross-variant runner serialization과 과거 closure의 corpus lineage 검증 계약을 새 승인 없이 수정하지 않는다.
 
 ### 초기 입장 판정
 
@@ -95,39 +95,43 @@
 
 ## #38 `context_md` object+artifact lifecycle 설계
 
-- 단계: 설계복귀 후보 2 고정
+- 단계: 중지 — 추가 사용자 승인 필요
 - 후보: 2 / 3
-- 검수: 1 / 3
+- 검수: 2 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: #33 handoff, parent/mount, atomic leaf, pre-commit rollback과 committed receipt/report tail 보강
+- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 Critical 0 / Major 1 / RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #33과 같은 fixed SHA를 독립 검수한다.
+- 다음 행동: #33 prepared evidence를 immutable transaction manifest에 보존하는 exact projection을 새 승인 없이 수정하지 않는다.
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 설계복귀 후보 2 고정
+- 단계: 중지 — 추가 사용자 승인 필요
 - 후보: 2 / 3
-- 검수: 1 / 3
+- 검수: 2 / 3
 - 설계복귀: 1 / 1
 - 전체검사: 0 / 2
-- 마지막으로 닫힌 완료 조건: zero/deferred bindings, public variant seam, deferred sole writer와 immutable zero retry chain 보강
+- 마지막으로 닫힌 완료 조건: 후보 2 독립 검수 Critical 0 / Major 2 / RETURN
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #34와 같은 fixed SHA를 독립 검수한다.
+- 다음 행동: UUID-level cross-variant runner lock과 head 없는 첫 terminal report 복구 규칙을 새 승인 없이 수정하지 않는다.
 
-## 설계복귀 후보 2 독립 검수 입력
+## 설계복귀 후보 2 독립 검수 결과
 
 - 파일: `docs/specs/2026-08-25-evidence-preparation-repair-design.md`
 - 파일: `docs/specs/2026-08-25-context-md-artifact-transaction-design.md`
 - 파일: `docs/specs/2026-08-25-session-completion-repair-design.md`
 - 파일: `docs/specs/2026-08-25-session-zero-work-closure-design.md`
 - 설계복귀 후보 2 SHA: d9d91391baece86f87ef3ea5612da76697e763ff
-- 검수 횟수: 네 파일을 한 exact candidate로 한 번만 검수하며 #33은 4/4, #34·#38·#39는 각각 2/3으로 센다.
-- 통과: A1 high, A2~A5 PASS, Critical 0, Major 0
-- 통과 뒤: #33·#34·#38·#39를 설계확정으로 바꾸고, E1~E15·C1~C6·N1~N4·Z1~Z4 각각의 GitHub child
-  issue와 progress block 생성안을 사용자에게 먼저 보여준다.
-- 중지: 어느 issue든 Major 또는 contract gap이 하나라도 남으면 모든 설계복귀 상한이 끝난 상태이므로
-  추가 수정·재검수를 시작하지 않고 사용자에게 반환한다.
+- 검수 receipt: #33 `A1=high`, `A2~A5=PASS`, Critical 0 / Major 0 / PASS
+- 검수 receipt: #38 `A1=high`, `A2=RETURN`, `A3=RETURN`, `A4=PASS`, `A5=RETURN`, Critical 0 / Major 1 / RETURN
+- 검수 receipt: #34 `A1=high`, `A2=RETURN`, `A3=RETURN`, `A4=PASS`, `A5=RETURN`, Critical 0 / Major 2 / RETURN
+- 검수 receipt: #39 `A1=high`, `A2=RETURN`, `A3=RETURN`, `A4=PASS`, `A5=RETURN`, Critical 0 / Major 2 / RETURN
+- 검수 횟수 반영: #33 4/4, #34·#38·#39 각 2/3
+- Major 1: #38 immutable manifest가 #33 prepared evidence/proof를 보존하지 않음
+- Major 2: normal/zero binding별 run root lock이 같은 UUID의 서로 다른 variant 실행을 직렬화하지 않음
+- Major 3: #34 marker 전 live 전체-corpus fingerprint 재검증이 정상 후속 mutation 뒤 과거 closure를 깨뜨림
+- Major 4: #39 첫 terminal report 뒤 zero head 기록 전 crash 복구가 정의되지 않음
+- 판정: #33만 설계확정. #38·#34·#39는 설계복귀 상한 도달 상태로 중지하며 추가 수정·재검수하지 않음
 
 ## 보존 확인
 
