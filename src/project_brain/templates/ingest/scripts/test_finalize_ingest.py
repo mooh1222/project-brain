@@ -148,7 +148,12 @@ class SemanticFinalizerTest(unittest.TestCase):
                 payload = {"ok": True, "summary": {"failed": 0}}
             elif command[:3] == ["project-brain", "graph", "isolated"]:
                 payload = {"ok": True, "isolated": current_isolated}
-            elif command == ["project-brain", "audit", "--no-fetch"]:
+            elif command == [
+                "project-brain",
+                "audit",
+                "--no-fetch",
+                "--write-stale-cache",
+            ]:
                 payload = audit_payload if audit_payload is not None else {
                     "ok": True,
                     "stale": {
@@ -230,7 +235,7 @@ class SemanticFinalizerTest(unittest.TestCase):
             ["project-brain", "lint"],
             ["project-brain", "eval"],
             ["project-brain", "graph", "isolated"],
-            ["project-brain", "audit", "--no-fetch"],
+            ["project-brain", "audit", "--no-fetch", "--write-stale-cache"],
             ["python3", "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
              "-p", "test_*.py"],
             ["project-brain", "search", self.contract["recall_checks"][0]["query"]],
@@ -724,7 +729,11 @@ class SemanticFinalizerTest(unittest.TestCase):
             self.contract,
             {"ok": True, "isolated_ids": ["code.before"], "target_head": "TARGET",
              "unmerged_locator_ids": []},
-            runner=self._runner(failures=("project-brain audit --no-fetch",)),
+            runner=self._runner(
+                failures=(
+                    "project-brain audit --no-fetch --write-stale-cache",
+                )
+            ),
         )
 
         self.assertFalse(report["ok"])
@@ -742,7 +751,9 @@ class SemanticFinalizerTest(unittest.TestCase):
         report = self._finalize(module,
             self.contract, baseline,
             runner=self._runner(
-                failures=("project-brain audit --no-fetch",),
+                failures=(
+                    "project-brain audit --no-fetch --write-stale-cache",
+                ),
                 audit_payload={"ok": False, "stale": {"error": "git state unavailable"}},
             ),
         )

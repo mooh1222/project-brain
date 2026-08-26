@@ -264,15 +264,15 @@ class IngestSkillContractTest(unittest.TestCase):
         ):
             self.assertIn(token, session)
         for token in (
-            "lint + Git stale/reachability + exact quote",
+            "lint, 고립 객체, stale/reachability, exact quote",
             "stale.target_head",
             "stale.unmerged_anchors",
             "code_quotes",
             "anchor_unverifiable",
             "`not_ancestor`는",
-            "advisory이며",
-            "`--no-stale`는 Git 없는 환경에서만",
-            "명시적으로 건너뛴다",
+            "경고이며",
+            "project-brain audit --no-stale",
+            "검사를 건너뛰므로",
             "configured default_branch",
             "Git blob",
             "공백·줄바꿈을 정규화하지 않는다",
@@ -321,13 +321,14 @@ class IngestSkillContractTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
 
         for text in (canonical, installed):
-            intro = text[:text.index("## 언제")]
-            self.assertIn("세 건강 신호", intro)
-            self.assertIn("별도의 정확한 코드 인용 검증", intro)
+            intro = text[:text.index("## 기본 실행")]
+            self.assertIn("무결성, 고립 객체, 코드 드리프트", intro)
+            self.assertIn("정확한 코드 인용 검증", intro)
+            self.assertIn("기본 실행은 읽기 전용", intro)
             start = text.index("project-brain audit --no-stale")
             end = text.index("## 세 신호 읽기", start)
             gitless = text[start:end]
-            for token in ("Git stale/reachability", "exact quote", "code_quotes", "건너"):
+            for token in ("Git 기반 검사", "exact quote", "code_quotes", "건너"):
                 self.assertIn(token, gitless)
             self.assertNotIn("code_quotes가 통과", gitless)
 

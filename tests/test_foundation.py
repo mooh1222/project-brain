@@ -1044,8 +1044,14 @@ def test_foundation_command_set_has_exact_order_and_forbids_mutating_commands(tm
     )
     assert rows[1].argv[-4:] == ("-s", "brain/checks", "-p", "test_*.py")
     assert rows[2].argv[-3:] == ("lint", "--brain-root", str(brain))
-    assert rows[3].argv[-6:] == (
-        "audit", "--brain-root", str(brain), "--repo-root", str(repo), "--no-fetch"
+    assert rows[3].argv[-7:] == (
+        "audit",
+        "--brain-root",
+        str(brain),
+        "--repo-root",
+        str(repo),
+        "--no-fetch",
+        "--write-stale-cache",
     )
     assert rows[4].argv[-3:] == ("eval", "--brain-root", str(brain))
     rendered = "\n".join(" ".join(row.argv) for row in rows)

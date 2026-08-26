@@ -445,7 +445,7 @@ ingest 뒤 자동으로 실행되는 finalizer가 아니며, semantic finalizer�
 2. 같은 target에 installer를 두 번 실행한다. 첫 report는 설치된 관리 파일과 control file을
    target-relative POSIX 경로로 기록하고, 두 번째 report의 `created/updated/removed/adopted/skipped`
    다섯 배열은 모두 비어 있어야 한다.
-3. `verify`가 installed runtime unittest → BB2 checks → lint → `audit --no-fetch` → eval → 임시
+3. `verify`가 installed runtime unittest → BB2 checks → lint → `audit --no-fetch --write-stale-cache` → eval → 임시
    디렉터리 coverage build dry smoke의 고정 6개 command를 순서대로 실행한다. 각 command 전후
    상태는 baseline과 같아야 하며 audit이 만든 stale cache 변화만 허용한다. coverage smoke 출력은
    임시 디렉터리에만 쓴다.

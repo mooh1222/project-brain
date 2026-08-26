@@ -87,3 +87,37 @@ def test_session_completion_uses_the_receipt_bound_cli_not_mark_processed():
     ):
         assert required in session_extract
     assert "session mark-processed" not in session_extract
+
+
+def test_query_skill_keeps_default_use_read_only():
+    query = _installed_skill("query")
+
+    for required in (
+        "기본 조회는 읽기 전용",
+        "명시적인 쓰기 요청",
+        "demo-brain-ingest",
+        "demo-brain-session-ingest",
+    ):
+        assert required in query
+
+    for automatic_write in (
+        "project-brain promote",
+        "projection build-reuse",
+        "project-brain index rebuild",
+    ):
+        assert automatic_write not in query
+
+
+def test_audit_skill_reports_read_only_diagnostics_before_opt_in_updates():
+    audit = _installed_skill("audit")
+
+    for required in (
+        "기본 실행은 읽기 전용",
+        "project-brain audit",
+        "--fetch --write-stale-cache",
+        "checked",
+        "skipped",
+        "failures",
+        "명시적인 수정 요청",
+    ):
+        assert required in audit

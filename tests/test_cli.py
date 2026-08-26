@@ -162,6 +162,56 @@ class TestCli(unittest.TestCase):
         # answer JSON이 나옴(QueryRouter.answer 결과 형태)
         self.assertIn("intents", answer)
 
+    def test_cli_query_and_simple_confirmation_leave_corpus_index_cache_and_git_unchanged(self):
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+
+        for obj in (manifest(), evidence_ref(), candidate_term()):
+            BrainStore.save_object(self.root, obj)
+        db = self.root / ".brain-local" / "index.db"
+        rebuild(self.root, db, embedder=StubEmbedder())
+        stale_set = self.root / ".brain-local" / "stale-set.json"
+        stale_set.write_bytes(b'{"computed_at":"before-query"}\n')
+        _commit_git_fixture(self.root)
+
+        def snapshot() -> dict[str, bytes]:
+            return {
+                str(path.relative_to(self.root)): path.read_bytes()
+                for path in sorted(self.root.rglob("*"))
+                if path.is_file() and ".git" not in path.parts
+            }
+
+        def git_status() -> str:
+            return subprocess.run(
+                ["git", "-C", str(self.root), "status", "--porcelain=v1"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        before_files = snapshot()
+        before_git = git_status()
+        for question in ("용어가 무슨 뜻이야?", "맞아"):
+            out = io.StringIO()
+            with mock.patch(
+                "sys.argv",
+                [
+                    "cli",
+                    "query",
+                    "--brain-root",
+                    str(self.root),
+                    "--db",
+                    str(db),
+                    "--stub-embedder",
+                    question,
+                ],
+            ), redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+            self.assertIsInstance(json.loads(out.getvalue()), dict)
+
+        self.assertEqual(snapshot(), before_files)
+        self.assertEqual(git_status(), before_git)
+
     def test_explicit_query_subcommand_routes_without_becoming_query_text(self):
         with mock.patch.object(cli, "_run_query", return_value=0) as run_query, \
              mock.patch("sys.argv", ["cli", "query", "왜 바뀌었어?"]):
@@ -2451,7 +2501,7 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(payload["code_quotes"],
                          {"ok": True, "checked": 1, "skipped": 0, "failures": []})
 
-    def test_audit_without_stale_cache_write_runs_full_git_checks(self):
+    def test_audit_defaults_to_read_only_and_runs_full_git_checks(self):
         from tests.test_stale_check import code_locator
 
         repo_root = self.brain.parent
@@ -2489,8 +2539,6 @@ class TestCliSearch(unittest.TestCase):
                 str(self.brain),
                 "--repo-root",
                 str(repo_root),
-                "--no-fetch",
-                "--no-stale-cache-write",
             ],
         ), redirect_stdout(out):
             rc = cli.main()
@@ -2509,6 +2557,25 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(payload["locators"][0]["code_quote"], "verified")
         self.assertIsNone(payload["cache_written"])
         self.assertEqual(stale_set.read_bytes(), bound_bytes)
+
+    def test_audit_fetch_and_stale_cache_updates_require_positive_flags(self):
+        report = {"ok": True}
+        out = io.StringIO()
+        with mock.patch(
+            "project_brain.audit.run_audit",
+            return_value=report,
+        ) as run_audit, redirect_stdout(out):
+            rc = cli._run_audit([
+                "--brain-root",
+                str(self.brain),
+                "--fetch",
+                "--write-stale-cache",
+            ])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), report)
+        self.assertTrue(run_audit.call_args.kwargs["fetch"])
+        self.assertTrue(run_audit.call_args.kwargs["write_stale_cache"])
 
     def test_audit_fails_closed_on_global_git_error(self):
         from project_brain.stale_check import GitError
