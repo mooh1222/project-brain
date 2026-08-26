@@ -19,6 +19,21 @@
 
 명시적으로 지정된 PR은 확인할 수 있지만, 외부 PR을 자동 triage 대기열로 수집하지 않는다.
 
+## 검증 통과 후 바로 반영
+
+구현을 시작한 issue는 필수 검사와 독립 검수를 통과하고 계약 위반·계약 공백이 0건이면 추가
+승인을 기다리지 않고 같은 작업 흐름에서 끝낸다.
+
+1. issue 소유 변경만 골라 commit한다.
+2. 작업 branch를 push한다.
+3. `main`과 원격 기준점이 예상대로면 fast-forward 또는 일반 merge로 `main`에 반영해 push한다.
+4. issue에 commit SHA, 검사 결과, 검수 결과를 댓글로 남기고 닫은 뒤 상태를 다시 확인한다.
+
+사용자가 `local-only`, `commit까지만`, `push 금지`, `PR만 생성`, `issue를 열어둬`라고 지정한
+경우에만 해당 효과를 생략한다. 원격 `main` 이동, merge conflict, branch protection·CI 실패,
+사용자 변경과의 겹침, 사람 전용 gate가 있으면 그 지점에서 멈추고 장애를 보고한다. force push,
+보호 규칙 우회, 사용자 변경 덮어쓰기는 하지 않는다.
+
 ## Wayfinding operations
 
 `wayfinder`는 하나의 map issue와 그 아래 child issue를 사용한다.
