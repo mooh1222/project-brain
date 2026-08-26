@@ -46,8 +46,10 @@
 전체 병합하지 않는다.
 
 - #2 query/audit, #4 capability registry, #5 snapshot 동결은 각각 별도 최종 후보로 분리한다.
-- #3 session completion은 #34 normal과 #39 zero-work로, #6·#9·#10 evidence preparation은 #33
-  object core와 #38 `context_md` artifact lifecycle로 분리돼 설계로 돌아갔다.
+- #3 session completion은 실제 item 적재의 #34 normal만 남긴다. #39 zero-work·미해결 후보 실행 설계는
+  2026-08-26 폐기했고, 미래 일괄 적재의 BB2 `--dry-run`·중복 방지는 #40에서 필요가 생길 때 논의한다.
+  #6·#9·#10 evidence preparation은 #33 object core와 #38 `context_md` artifact lifecycle로 분리돼
+  설계로 돌아갔다.
 - #7·#8 profile 계산은 #6의 공개 준비 경계 뒤 다시 검증한다.
 - #11~#13은 상태·효과 소유자와 검증 관측을 먼저 보강한다.
 - `context_md`는 `main`에 builder 함수가 있는 내부 부분 구현이며 공개 명령·생성 artifact 근거는 없다.

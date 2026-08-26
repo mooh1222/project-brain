@@ -1,12 +1,16 @@
 # GitHub #2~#13 정리 실행 계획
 
+> 2026-08-26 결정: #39 zero-work·미해결 후보 실행 설계는 구현하지 않는다. 미해결 후보는 #34 normal
+> 적재 시작 전 멈추고, 판단 후 처음부터 다시 준비한다. 실제 일괄 적재의 BB2 `--dry-run`과 중복 방지는
+> 미래 논의 #40으로 옮겼다. 아래의 과거 #39 분리·검수 기록은 결정 경위로만 읽는다.
+
 - 승인일: 2026-08-25
 - 코드 기준점: `b35d351ee77093392ca170f799d0edc1a8414070`
 - 작업 branch: `codex/brain-ticket-reconcile-v2-20260825`
 - 과거 통합 후보: `75e97fa98308b8bd7434070e05a99e69f2a5adef`
 - 과거 정리 branch: `codex/brain-ticket-reconcile-20260825` (`272b303`)
 - #33 보존 branch: `codex/issue-33-evidence-design-admission` (`8341d7a`)
-- 신규 분리 issue: #38 (`context_md`), #39 (session zero-work·unresolved)
+- 분리 issue: #38 (`context_md`), 폐기 #39 (session zero-work·unresolved), 미래 논의 #40 (일괄 적재)
 
 ## 목적과 변경 경계
 
@@ -18,7 +22,7 @@
 
 - 이 실행 계획과 새 진행 기록 작성
 - evidence preparation과 `context_md` artifact lifecycle 설계 분리
-- session completion과 zero-work closure 설계 분리
+- session completion 분리 기록과 #39 zero-work closure 폐기 결정 반영
 - GitHub #34의 입장 상태 교정과 신규 설계 issue·dependency 생성
 - #2·#4·#5의 최종 분리 후보를 위해 후보 상한을 각각 3회에서 4회로 한 번만 확장
 
@@ -59,7 +63,7 @@ progress.md`는 당시 후보·검수·설계복귀 기록으로 보존하며 �
 | #2 | 유지·분리 | `9aefa36`의 query/audit·설치 template·관련 테스트만 `main` 위에 재구성 |
 | #4 | 유지·분리 | `698dc3e`의 `capabilities.py`와 `tests/test_capabilities.py` |
 | #5 | 유지·분리 | `160050c`의 snapshot 동결 코드·테스트·runtime map |
-| #3 | 보강 | #34와 zero-work 설계가 각각 입장 통과한 뒤 새 session-runtime child issue·새 장부 생성. parent #3에는 새 후보를 직접 만들지 않음 |
+| #3 | 보강 | #34 normal 계약이 닫힌 뒤 새 session-runtime child issue·새 장부 생성. parent #3에는 새 후보를 직접 만들지 않음. #39는 구현하지 않음 |
 | #6 | 유지·보강 | common verification과 locator/promote 수리는 유지하고 public evidence preparation은 새 child issue에서 구현 |
 | #7·#8 | 유지·후순위 | #6 공개 경계 뒤 종류별 public ingest/projection/promote 회귀를 새 child issue에서 다시 고정 |
 | #9 | 분리 | local raw observation과 원격 source-specific Adapter를 각각 새 child issue로 분리 |
@@ -105,13 +109,14 @@ progress.md`는 당시 후보·검수·설계복귀 기록으로 보존하며 �
 2. evidence preparation 핵심과 `context_md` artifact lifecycle을 분리한다.
    - #33: common/dedicated evidence preparation, public ingest/projection input, identity, receipt, TOCTOU
    - #38: `context_md` object+artifact path, action, journal, rollback, recovery
-3. session completion 핵심과 explicit zero-work를 분리한다.
+3. session completion은 실제 item이 있는 normal 경로만 남긴다.
    - #34: item이 한 개 이상인 session binding, report, marker v2, retry·legacy
-   - #39: zero-work attestation·finalization·receipt와 unresolved-only/partial-unresolved 재시작
+   - 미해결 후보: durable artifact 없이 적재 시작 전 중지하고, 판단 후 normal 경로를 처음부터 다시 준비
+   - #39: 폐기. 미래 일괄 적재의 미리보기·중복 방지는 #40에서 필요가 생길 때 논의
 4. dependency 방향은 `child blocked by blocker`로 검증한다.
    - #34 blocked by #33
    - #38 blocked by #33; #10 closeout blocked by #38
-   - #39 blocked by #34; #3 blocked by #39
+   - #3 blocked by #34; #39는 dependency graph에서 제거
 
 이 작업은 Wayfinder map 탐색이 아니라 이미 승인된 #1 issue graph의 계약 복구다. Wayfinder 라벨이나
 별도 map issue를 자동으로 만들지 않는다.
@@ -132,7 +137,7 @@ progress.md`는 당시 후보·검수·설계복귀 기록으로 보존하며 �
 
 완료 조건:
 
-- 네 설계는 각각 완료 조건 6개 이하, 독립 검증 묶음 4개 이하이다.
+- 구현 대상으로 남은 #33·#34·#38 설계는 각각 완료 조건 6개 이하, 독립 검증 묶음 4개 이하이다.
 - 각 완료 조건에 정확한 명령과 기대 관측값이 연결된다.
 - 새 문맥의 독립 검수가 A1~A5와 계약 공백/계약 위반을 판정한다.
 - `git diff --check`와 `tests/test_architecture_docs.py`가 통과한다.
@@ -194,16 +199,15 @@ tests/test_snapshot.py
 
 1. #33 evidence preparation 입장 통과
 2. #34 session completion, #35 direct reviewed, #38 `context_md` 설계의 읽기 전용 검수
-3. #39 zero-work 설계
-4. #34와 zero-work가 모두 통과한 뒤 새 session-runtime child issue·장부 생성 → 구현 → #3 closeout
-5. #33 통과 뒤 #6용 common verification public preparation child issue·장부 생성
-6. #6 child 완료 뒤 #7 → #8 public profile 회귀 child issue를 각각 생성
-7. #33 통과 뒤 #9 local capture와 원격 Adapter child issue를 각각 생성
-8. #33 통과 뒤 #10의 비-`context_md` derived output validation·실제 builder child 생성
-9. #38 통과 뒤 `context_md` object+artifact transaction 구현 child 생성
-10. #10 parent는 8·9의 child와 기존 blocker가 모두 끝난 뒤에만 종료
-11. #11 → #12 → #13
-12. 기존 dependency에 따라 #14~#19 뒤에만 지식 초안 #20~#23
+3. #34 normal 계약을 실제 구현 후보에서 닫은 뒤 새 session-runtime child issue·장부 생성 → 구현 → #3 closeout
+4. #33 통과 뒤 #6용 common verification public preparation child issue·장부 생성
+5. #6 child 완료 뒤 #7 → #8 public profile 회귀 child issue를 각각 생성
+6. #33 통과 뒤 #9 local capture와 원격 Adapter child issue를 각각 생성
+7. #33 통과 뒤 #10의 비-`context_md` derived output validation·실제 builder child 생성
+8. #38 통과 뒤 `context_md` object+artifact transaction 구현 child 생성
+9. #10 parent는 7·8의 child와 기존 blocker가 모두 끝난 뒤에만 종료
+10. #11 → #12 → #13
+11. 기존 dependency에 따라 #14~#19 뒤에만 지식 초안 #20~#23
 
 각 새 구현 child ticket은 설계 확정 → RED → 구현 → 고정 후보 → 별도 문맥 검수 → 필요한 전체 회귀 →
 병합 승인 → push 승인 → 원격·GitHub 종료 근거 확인으로 닫는다. 계약 공백이 하나라도 나오면 코드를

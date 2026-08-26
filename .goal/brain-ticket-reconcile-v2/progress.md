@@ -1,6 +1,6 @@
 # Brain 티켓 정리 v2 진행 기록
 
-- 범위: #2~#13 후보 분리, #33~#39 설계 복귀, `context_md`와 session zero-work 계약 분리
+- 범위: #2~#13 후보 분리, #33~#38 설계 복귀, #39 폐기, #40 미래 일괄 적재 논의
 - 기준점: `b35d351ee77093392ca170f799d0edc1a8414070`
 - 조율자: 현재 Codex 세션 한 곳
 - 실행 방식: Project Brain 저장소와 GitHub Issues만 사용. agent-team 스킬·엔진·Run은 사용하지 않음
@@ -39,8 +39,8 @@
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: #38·#39 생성, label·dependency·본문 exact 역조회, 후보 2 구조 검수 PASS
 - 마지막 갱신: 2026-08-25
-- 다음 행동: #34·#39 후보 4 독립 검수에서 Major 계약 공백이 각각 1건 남아 두 티켓을 중지했다.
-  추가 설계복귀·재검수·구현 child·GitHub 변경은 사람의 명시적인 방향 변경이나 상한 확장 승인 전까지 하지 않는다.
+- 다음 행동: #39를 구현 경로에서 제거하고 #34 normal resume가 현재 generic batch report의 적재 전 상태를
+  그대로 보존하도록 실제 코드·테스트 파일을 특정해 사용자에게 제시한다.
 
 ## #2 query·audit 읽기 전용 WIP 안정화
 
@@ -88,15 +88,15 @@
 
 ## #34 session completion 설계 admission
 
-- 단계: 중지
+- 단계: 준비
 - 후보: 4 / 4
 - 검수: 4 / 4
 - 설계복귀: 4 / 4
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: generic receipt 보존 wrapper, prepare JSON, marker UUID lock exact 계약을 후보 4에 고정
-- 마지막 갱신: 2026-08-25
-- 다음 행동: normal resume의 original finalization baseline 보존 계약이 비어 있고 상한을 모두 썼으므로
-  추가 수정·재검수·구현 child 발행 없이 사용자에게 반환한다.
+- 마지막 갱신: 2026-08-26
+- 다음 행동: 별도 session baseline 저장소를 만들지 않고 현재 generic runner report의 적재 전 상태를
+  normal resume가 그대로 이어받는 구현 경계와 #33 선행 파일을 읽기 전용으로 특정한다.
 
 ### 초기 입장 판정
 
@@ -118,15 +118,15 @@
 
 ## #39 session zero-work·unresolved closure 설계
 
-- 단계: 중지
+- 단계: 폐기
 - 후보: 4 / 4
 - 검수: 4 / 4
 - 설계복귀: 3 / 3
 - 전체검사: 0 / 2
 - 마지막으로 닫힌 완료 조건: zero finalization exact plan/result와 session manifest SHA 이름을 후보 4에 고정
-- 마지막 갱신: 2026-08-25
-- 다음 행동: zero finalization baseline의 수집·입력·재사용 계약이 비어 있고 상한을 모두 썼으므로
-  추가 수정·재검수·구현 child 발행 없이 사용자에게 반환한다.
+- 마지막 갱신: 2026-08-26
+- 다음 행동: 구현하지 않는다. 미래 일괄 적재의 BB2 `--dry-run`과 중복 방지는 #40에서 필요가 생길 때
+  별도 구현 티켓으로 분리한다.
 
 ## 설계복귀 후보 2 독립 검수 결과
 
@@ -287,6 +287,21 @@ blob만 설계 본문으로 보고 receipt는 candidate SHA·횟수 확인에만
 - 검수 횟수 반영: #34·#39 모두 4/4
 - 판정: `RETURN`. 추가 수정·재검수·구현 child·GitHub 변경 없이 중지한다.
 
+## 2026-08-26 #39 폐기와 미래 일괄 적재 분리
+
+- 사용자 판단: 세션에 저장할 지식이 정말 없었는지는 Brain 엔진이 증명할 필요가 없다. 과거 세션 추출
+  누락은 감수 가능한 범위이고, 활성 세션은 사용자가 같은 문맥에서 바로 교정할 수 있다.
+- 비용 판정: Brain 전체 검사·평가·그래프·색인은 중요한 지식 누락을 증명하지 못하므로 zero-work 전용
+  finalization·attestation·receipt·report·head·retry는 비용만 늘린다.
+- BB2 읽기 전용 관측: 현재 `bb2_client`로 보이는 세션 84개, 기존 완료 표시 3개, 서로 겹치는 UUID 0개.
+  사용자 WIP·세션 본문·Brain corpus·marker write는 0개다.
+- #39 결정: 구현하지 않고 `wontfix`로 종료한다. 미해결 후보가 있으면 durable artifact 없이 normal 적재
+  시작 전에 멈추고 판단 후 처음부터 다시 준비한다.
+- 미래 논의: GitHub #40 `[Future Discussion] 과거 세션 일괄 적재의 미리보기·중복 방지`. 실제 기능이
+  필요해질 때 BB2 `--dry-run`, 처리·건너뜀 이유, 성공한 세션의 중복 방지를 함께 결정한다.
+- #34 영향: zero-work와 deferred variant를 제거하고 실제 item이 있는 normal 적재·실패 재개·완료 표시만
+  남긴다. 후보 5 설계-only 반복은 하지 않는다.
+
 ## 보존 확인
 
 - main WIP 상태 목록 SHA-256: `7be3dcf9c6a119de8c273c7ea804962f477d9921f809dd8161eb3ad75a6a04b9`
@@ -297,15 +312,17 @@ blob만 설계 본문으로 보고 receipt는 candidate SHA·횟수 확인에만
   `git diff` 기준으로 두 hash 모두 exact 일치
 - 설계복귀 후보 3 최종 검수 뒤 재확인: main status와 #33 WIP diff 두 hash 모두 exact 일치
 - 설계복귀 후보 4 RETURN 기록 전 재확인: main status와 #33 WIP diff 두 hash 모두 exact 일치
+- #39 폐기 문서 수정 전 재확인: main status와 #33 WIP diff 두 hash 모두 exact 일치
 
 ## GitHub 적용 확인
 
-- #3 blocked by `[34,39]`
+- #3 blocked by `[34]`
 - #10 blocked by `[4,6,33,38]`
 - #33 blocked by `[]`
 - #34 blocked by `[33]`
 - #38 blocked by `[33]`
-- #39 blocked by `[34]`
-- #3·#10·#33·#34·#38·#39: 모두 OPEN, labels exact `enhancement,needs-triage`
+- #39 blocked by `[]`, CLOSED, labels exact `enhancement,wontfix`
+- #40 blocked by `[]`, OPEN, labels exact `enhancement,needs-triage`
+- #3·#10·#33·#34·#38: OPEN, labels exact `enhancement,needs-triage`
 - Wayfinder 다섯 label이 붙은 issue: 모두 0개
 - local main·origin/main·실제 원격 main: `b35d351ee77093392ca170f799d0edc1a8414070`
