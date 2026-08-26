@@ -203,6 +203,41 @@ class SemanticFinalizerTest(unittest.TestCase):
         self.assertEqual(report["recall_checks"][0]["missing_object_ids"], [])
         self.assertEqual(report["recall_checks"][0]["missing_code_locator_object_ids"], [])
 
+    def test_all_no_change_receipts_skip_only_index_rebuild(self):
+        module = load_module()
+        calls = []
+        delegate = self._runner()
+
+        def runner(command):
+            calls.append(command)
+            return delegate(command)
+
+        report = self._finalize(
+            module,
+            self.contract,
+            ["code.before"],
+            transaction_results=[NO_CHANGE_TRANSACTION],
+            runner=runner,
+        )
+
+        self.assertNotIn(["project-brain", "index", "rebuild"], calls)
+        self.assertEqual(report["commands"]["index_rebuild"]["payload"], {
+            "ok": True,
+            "skipped": True,
+            "reason": "all ingest receipts are no_changes",
+        })
+        for command in (
+            ["project-brain", "lint"],
+            ["project-brain", "eval"],
+            ["project-brain", "graph", "isolated"],
+            ["project-brain", "audit", "--no-fetch"],
+            ["python3", "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
+             "-p", "test_*.py"],
+            ["project-brain", "search", self.contract["recall_checks"][0]["query"]],
+        ):
+            self.assertIn(command, calls)
+        self.assertTrue(report["ok"])
+
     def test_finalizer_compares_expected_and_verified_per_item(self):
         module = load_module()
         bad = {**NO_CHANGE_TRANSACTION, "verified_objects": []}

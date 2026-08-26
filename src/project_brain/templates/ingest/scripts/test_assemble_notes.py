@@ -195,14 +195,42 @@ class BuildNotesTest(unittest.TestCase):
 class NormalizeTest(unittest.TestCase):
     def _groups(self):
         return [
-            {"group": "g1", "verify": {"corrected_atoms": [_atom("m1")]}, "extract": {"atoms": []}},
-            {"group": "g2", "verify": {"corrected_atoms": []},
-             "extract": {"atoms": [_atom("m2")]}},  # CASE: 빈 corrected_atoms → extract.atoms 폴백
+            {"group": "g1", "verify": {"verdict": "fixed", "corrected_atoms": [_atom("m1")]},
+             "extract": {"atoms": []}},
+            {"group": "g2", "verify": {"verdict": "pass", "corrected_atoms": [_atom("m2")]},
+             "extract": {"atoms": [_atom("m2")]}},
         ]
 
     def test_list_form(self):  # main-map 형태
         atoms = normalize(self._groups(), SPEC)
         self.assertEqual([a["mapping_key"] for a in atoms], ["m1", "m2"])
+
+    def test_missing_or_unresolved_verdict_never_falls_back_to_extracted_atoms(self):
+        spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g1"]))
+        for verify in (
+            {"corrected_atoms": []},
+            {"verdict": "needs_user", "corrected_atoms": [_atom("m1")]},
+        ):
+            with self.subTest(verify=verify):
+                with self.assertRaises(CoverageError) as raised:
+                    normalize([{
+                        "group": "g1",
+                        "extract": {"atoms": [_atom("m1")]},
+                        "verify": verify,
+                    }], spec)
+                self.assertEqual(raised.exception.code, "verify_result_invalid")
+
+    def test_pass_verdict_must_preserve_the_extracted_verification_atoms(self):
+        spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g1"]))
+
+        with self.assertRaises(CoverageError) as raised:
+            normalize([{
+                "group": "g1",
+                "extract": {"atoms": [_atom("m1")]},
+                "verify": {"verdict": "pass", "corrected_atoms": [_atom("m2")]},
+            }], spec)
+
+        self.assertEqual(raised.exception.code, "verify_result_invalid")
 
     def test_groups_wrapped_form(self):  # ball-select 형태
         atoms = normalize({"groups": self._groups()}, SPEC)
@@ -231,7 +259,7 @@ class NormalizeTest(unittest.TestCase):
         for malformed in (None, {"group": None}, {"group": 7}):
             with self.subTest(malformed=malformed):
                 verify = {"groups": [
-                    {"group": "g1", "verify": {"corrected_atoms": []}},
+                    {"group": "g1", "verify": {"verdict": "fixed", "corrected_atoms": []}},
                     malformed,
                 ]}
                 with self.assertRaises(CoverageError) as raised:
@@ -240,7 +268,7 @@ class NormalizeTest(unittest.TestCase):
 
     def test_corrections_applied(self):
         spec = dict(SPEC, CORRECTIONS={"m1": {"meaning": "고친 의미", "drop_terms": ["t1"]}})
-        groups = [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1", terms=["t1", "keep"])]},
+        groups = [{"group": "g1", "verify": {"verdict": "fixed", "corrected_atoms": [_atom("m1", terms=["t1", "keep"])]},
                    "extract": {"atoms": []}}]
         spec = dict(spec, COVERAGE=_coverage(verify_groups=["g1"]))
         atoms = normalize(groups, spec)
@@ -252,7 +280,7 @@ class NormalizeTest(unittest.TestCase):
         def hook(atoms):
             calls.append(len(atoms)); return atoms[:1]
         spec = dict(SPEC, HOOK=hook, COVERAGE=_coverage(verify_groups=["g1"]))
-        groups = [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1"), _atom("m2")]}, "extract": {"atoms": []}}]
+        groups = [{"group": "g1", "verify": {"verdict": "fixed", "corrected_atoms": [_atom("m1"), _atom("m2")]}, "extract": {"atoms": []}}]
         atoms = normalize(groups, spec)
         self.assertEqual(calls, [2])
         self.assertEqual(len(atoms), 1)
@@ -260,7 +288,7 @@ class NormalizeTest(unittest.TestCase):
 
 class EndToEndTest(unittest.TestCase):
     def test_assemble_notes(self):
-        groups = {"groups": [{"group": "g1", "verify": {"corrected_atoms": [_atom("m1", terms=["t1"])]},
+        groups = {"groups": [{"group": "g1", "verify": {"verdict": "fixed", "corrected_atoms": [_atom("m1", terms=["t1"])]},
                               "extract": {"atoms": []}}]}
         spec = dict(SPEC, COVERAGE=_coverage(verify_groups=["g1"]))
         notes = assemble_notes(groups, spec)

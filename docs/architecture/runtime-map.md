@@ -23,7 +23,7 @@
     "migration display post-verify", "migration display verify-plan",
     "migration id apply", "migration id plan", "migration quote-debt build",
     "migration quote-debt verify", "projection build-reuse", "projection refresh",
-    "session list", "session mark-processed", "snapshot create", "snapshot restore",
+    "session complete", "session list", "session mark-processed", "snapshot create", "snapshot restore",
     "snapshot verify"
   ],
   "mutation_operations": [
@@ -140,7 +140,7 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `brain/raw/sources/**` | 소비 데이터 작업의 사람·설치된 적재 스킬. 엔진 CLI에는 직접 writer가 없음 | 검수 전 원문 정본. `raw/manifests/**`의 EvidenceManifest 객체와 다른 경계 | 원출처에서 다시 확보해야 하므로 index처럼 지우지 않음 |
 | `.brain-local/index.db*` | `index rebuild`, `bootstrap`, 적재 finalizer | 객체와 raw로부터 만든 로컬 파생 색인 | `project-brain index rebuild` |
 | `.brain-local/stale-set.json` | `stale-check --write-cache`, 기본 `audit` | query/show가 읽는 계산 결과 cache | stale-check 또는 audit 재실행 |
-| `.brain-local/sessions/*.json` | `session mark-processed` | transcript 추출 처리 marker. 지식 객체가 아님 | 같은 UUID를 다시 mark하면 덮어씀 |
+| `.brain-local/sessions/*.json` | `session complete` | transcript·batch manifest·finalization report·durable receipt에 결속한 처리 marker v2. 지식 객체가 아님 | 같은 valid v2 요청은 기존 bytes 보존 no-op. `session mark-processed`는 report 없이는 쓰지 않고 실패 |
 | `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
 | context-replace/migration manifest | 각 `plan` 명령 | exact SHA와 live precondition을 후속 apply에 묶는 파일. 그 자체가 객체 정본은 아님 | 같은 입력과 precondition에서 다시 plan |
@@ -289,7 +289,7 @@ redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을
 | `index rebuild` | 검증 후 원자 교체하는 index DB, `<db>.lock`, 같은 디렉터리의 임시 DB | 없음. 객체·raw를 읽음 |
 | `stale-check --write-cache` | `.brain-local/stale-set.json` | 없음 |
 | `audit` | 기본 실행에서 stale-set cache | 없음. `--no-stale`이면 cache 쓰기와 stale·quote 검사를 생략 |
-| `session mark-processed` | `.brain-local/sessions/<uuid>.json` | 없음 |
+| `session complete` | `.brain-local/sessions/<uuid>.json` | transcript·manifest·report·durable receipt가 exact일 때만 marker v2를 쓴다. `session mark-processed`는 marker를 쓰지 않고 report 필요 오류로 끝난다 |
 | `graph export` | 지정한 HTML | 없음 |
 | `context-replace plan` | 지정한 manifest | 없음 |
 | `migration ... plan` | snapshot, manifest, 모드별 분류 artifact | 없음 |
@@ -344,7 +344,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 | 최상위 | 지원 경로 |
 |---|---|
 | `index` | `index rebuild` |
-| `session` | `session list`, `session mark-processed` |
+| `session` | `session list`, `session complete`, `session mark-processed` |
 | `projection` | `projection build-reuse`, `projection refresh` |
 | `graph` | `graph isolated`, `graph export` |
 | `snapshot` | `snapshot create`, `snapshot verify`, `snapshot restore` |

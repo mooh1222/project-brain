@@ -143,7 +143,9 @@ ingest(
 )  # 승격 결과도 exact direct coverage로 다시 검증·저장
 ```
 
-**사용 시점 단건 확정**(C 루프 — 답하다 사람이 "맞다")은 `project-brain promote`가 한다. 승격 객체 + 검토 기록을 둘 다 저장하고,
+**사용 시점 단건 확정**은 사용자가 승격 대상과 승격 동작을 명시한 요청에서만
+`project-brain promote`로 실행한다. "맞다" 같은 단순 확인은 검증 준비나 승격 요청으로 확대하지
+않으며 아무 쓰기도 실행하지 않는다. 승격 객체 + 검토 기록을 둘 다 저장하고,
 쓰기 전 일괄 schema 검증(근거 없는 후보면 §6.4로 거부)·사후 lint까지 한 번에 처리한다:
 
 ```bash
@@ -356,7 +358,10 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    `new_ids`, `resolved_ids`, `missing_expected_ids`, `unexpected_new_ids`, `current_target_head`는 `null`이다.
    이때 `errors`의 audit/stale 오류를 확인해 Git 문제를 고친 뒤 같은 baseline으로 다시 실행한다.
 
-5. verify 출력의 변칙(빈 corrected_atoms 등)은 domain_spec.CORRECTIONS(선언적)로, 진짜 novel만 HOOK으로. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록.
+5. verify는 그룹마다 `verdict=pass|fixed`와 `corrected_atoms` 배열을 명시한다. `pass`는
+   `extract.atoms`와 정확히 같아야 하고, `fixed`는 검증자가 확정한 배열이다. verdict·배열 누락이나
+   `needs_user`는 조립 실패다. 이미 확인된 의미 보정은 domain_spec.CORRECTIONS(선언적)로,
+   진짜 novel만 HOOK으로 처리한다. HOOK 쓰면 `references/ingest-case-log.md`에 1줄 기록한다.
 
 채운 예(형태): 14결정·{groups} 래핑형 / 0결정·list형(CORRECTIONS 사용). 변칙 누적은 `references/ingest-case-log.md` 참고.
 
@@ -386,6 +391,9 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
    index rebuild는 잠금으로 동시 실행을 막고, 임시 파일에 완성본을 만든 뒤 유효성을 검사하고
    원자적으로 교체한다. 교체 뒤 내구성 확인까지 끝나야 완료다. 교체 뒤 내구성 실패는 새 색인이
    보이더라도 성공으로 숨기지 말고 `committed` 상태와 함께 보고한다.
+   모든 authoritative receipt가 `outcome=no_changes`면 finalizer는 실제 rebuild를 호출하지 않고
+   `commands.index_rebuild.payload.skipped=true`, reason=`all ingest receipts are no_changes`를 남긴다.
+   lint·eval·실코퍼스 가드·audit·회상·고립 관문은 그대로 실행한다.
 3. **골든셋 회귀 + 실코퍼스 가드** — 새 적재가 기존 회상을 깨뜨리지 않았는지(기능마다
    골든셋 시나리오를 늘려가는 게 P2 방침). 객체 색인 행은 가드가 디스크의 색인 대상 kind
    `.json` 수를 세서 `indexed - raw_chunks`와 자동 대조하니 손으로 갱신하지 않는다

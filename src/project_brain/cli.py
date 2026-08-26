@@ -1275,15 +1275,34 @@ def _run_index(argv) -> int:
     return 0
 
 
+class _SessionArgumentError(ValueError):
+    """session 명령의 argparse 오류를 stdout JSON 응답으로 바꾸기 위한 내부 오류."""
+
+
+class _SessionArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise _SessionArgumentError(message)
+
+
+def _session_failure(error_code: str, error: str) -> int:
+    print(json.dumps({
+        "ok": False,
+        "error_code": error_code,
+        "error": error,
+    }, ensure_ascii=False, indent=2))
+    return 1
+
+
 def _run_session(argv) -> int:
-    """세션 transcript 스캔·처리 마킹 (스펙 §7) — (다) 과거 세션 추출의 CLI 보조.
+    """세션 transcript 스캔과 receipt-bound 완료 marker의 CLI 보조.
 
     `session list [--unprocessed] [--project <substr>] [--transcript-root <p>] [--brain-root <p>]`
-    `session mark-processed <uuid> [--note <text>] [--brain-root <p>]`
+    `session complete <uuid> --transcript <p> --manifest <p> --report <p> [--brain-root <p>]`
 
-    추출 판단은 스킬(Claude) 몫 — 여기는 결정론 스캔·마킹만(경계 불변).
+    transcript의 의미 판단은 스킬 몫이다. 이 CLI는 generic batch의 완료 증거를 다시
+    확인한 경우에만 marker v2를 쓴다.
     """
-    parser = argparse.ArgumentParser(prog="cli session")
+    parser = _SessionArgumentParser(prog="cli session")
     sub = parser.add_subparsers(dest="action", required=True)
 
     p_list = sub.add_parser("list")
@@ -1294,14 +1313,49 @@ def _run_session(argv) -> int:
     p_list.add_argument("--brain-root", help="brain root (마킹 대조, 기본: config)")
 
     p_mark = sub.add_parser("mark-processed")
-    p_mark.add_argument("uuid")
-    p_mark.add_argument("--note", help="비고 (예: '미합의 2건' — 스펙 §4)")
+    p_mark.add_argument("uuid", nargs="?")
+    p_mark.add_argument("--note", help="더 이상 완료 marker 근거로 쓰지 않는 구형 비고")
     p_mark.add_argument("--brain-root", help="brain root (기본: config)")
 
-    args = parser.parse_args(argv)
-    from project_brain.session import mark_processed, scan_sessions
+    p_complete = sub.add_parser("complete")
+    p_complete.add_argument("uuid")
+    p_complete.add_argument("--transcript", required=True,
+                            help="완료할 세션 transcript JSONL")
+    p_complete.add_argument("--manifest", required=True,
+                            help="generic ingest batch manifest")
+    p_complete.add_argument("--report", required=True,
+                            help="generic ingest batch final report")
+    p_complete.add_argument("--brain-root", help="brain root (기본: config)")
 
-    brain_root = resolve_brain_root(args.brain_root)
+    try:
+        args = parser.parse_args(argv)
+    except _SessionArgumentError as exc:
+        return _session_failure("session_argument_invalid", str(exc))
+
+    if args.action == "mark-processed":
+        return _session_failure(
+            "session_completion_report_required",
+            "session complete에 transcript, manifest, report를 함께 지정해야 합니다",
+        )
+
+    try:
+        brain_root = resolve_brain_root(args.brain_root)
+    except (
+        ConfigError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        AttributeError,
+    ) as exc:
+        return _session_failure("session_configuration_invalid", str(exc))
+
+    from project_brain.session import (
+        SessionCompletionError,
+        complete_session,
+        scan_sessions,
+    )
+
     if args.action == "list":
         sessions = scan_sessions(
             transcript_root=args.transcript_root,
@@ -1312,8 +1366,17 @@ def _run_session(argv) -> int:
             sessions = [s for s in sessions if not s["processed"]]
         print(json.dumps({"ok": True, "sessions": sessions}, ensure_ascii=False, indent=2))
         return 0
-    record = mark_processed(args.uuid, brain_root=brain_root, note=args.note)
-    print(json.dumps({"ok": True, "record": record}, ensure_ascii=False, indent=2))
+    try:
+        completed = complete_session(
+            args.uuid,
+            transcript=args.transcript,
+            manifest=args.manifest,
+            report=args.report,
+            brain_root=brain_root,
+        )
+    except SessionCompletionError as exc:
+        return _session_failure(exc.code, exc.detail)
+    print(json.dumps(completed, ensure_ascii=False, indent=2))
     return 0
 
 

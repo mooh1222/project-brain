@@ -756,6 +756,28 @@ class RawIndexTest(unittest.TestCase):
         stats = rebuild(brain, db)
         self.assertEqual(stats["raw_chunks"], 0)
 
+    def test_pending_and_development_backlog_never_enter_the_normal_index(self):
+        (self.brain / "pending").mkdir()
+        (self.brain / "backlog").mkdir()
+        (self.brain / "pending" / "insights.md").write_text(
+            "검증되지 않은 고유합성어\n", encoding="utf-8"
+        )
+        (self.brain / "backlog" / "development.md").write_text(
+            "나중에 할 고유개선어\n", encoding="utf-8"
+        )
+
+        rebuild(self.brain, self.db, embedder=self.embedder)
+        conn = sqlite3.connect(str(self.db))
+        try:
+            surface = "\n".join(
+                row[0]
+                for row in conn.execute("SELECT surface_text FROM documents")
+            )
+        finally:
+            conn.close()
+        self.assertNotIn("고유합성어", surface)
+        self.assertNotIn("고유개선어", surface)
+
 
 class VectorIndexTest(unittest.TestCase):
     """벡터 색인·KNN·scope 후처리 — 전부 stub embedder(결정론, §5·§10)."""

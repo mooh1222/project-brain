@@ -43,6 +43,7 @@ from tests.test_ingest import (
     evidence_ref,
     manifest,
 )
+from tests.test_session import _completion_artifacts
 
 ENGINE_ARGS = ("--engine-sha", "e" * 40)
 
@@ -2809,11 +2810,124 @@ class TestCliInstallDoctor(unittest.TestCase):
 
 class CliSessionTest(unittest.TestCase):
     def _run_cli(self, argv):
+        rc, output = self._run_cli_result(argv)
+        self.assertEqual(rc, 0)
+        return output
+
+    def _run_cli_result(self, argv):
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
-        self.assertEqual(rc, 0)
-        return out.getvalue()
+        return rc, out.getvalue()
+
+    def _run_session_failure(self, argv, *, resolve_error=None):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch("sys.argv", ["cli"] + argv))
+            if resolve_error is not None:
+                stack.enter_context(mock.patch.object(
+                    cli, "resolve_brain_root", side_effect=resolve_error,
+                ))
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                try:
+                    rc = cli.main()
+                except SystemExit as exc:
+                    rc = exc.code
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_session_argument_and_configuration_failures_use_stdout_json(self):
+        cases = (
+            (
+                ["session", "complete", "abc"],
+                None,
+                "session_argument_invalid",
+            ),
+            (
+                ["session", "list", "--not-a-session-option"],
+                None,
+                "session_argument_invalid",
+            ),
+            (
+                ["session", "list"],
+                cli.ConfigError("brain root unavailable"),
+                "session_configuration_invalid",
+            ),
+        )
+        for argv, resolve_error, error_code in cases:
+            with self.subTest(argv=argv):
+                rc, stdout, stderr = self._run_session_failure(
+                    argv, resolve_error=resolve_error,
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stderr, "")
+                payload = json.loads(stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error_code"], error_code)
+                self.assertTrue(payload["error"])
+
+    def test_session_config_loader_failures_use_stdout_json(self):
+        cases = (
+            ("config_absent", None, None),
+            ("relative_brain_root", None, "relative-brain"),
+            ("malformed_json", b"{", None),
+            ("top_level_list", b"[]", None),
+            ("top_level_scalar", b"1", None),
+            ("invalid_utf8", b"\xff", None),
+            ("brain_root_list", b'{"brain_root": []}', None),
+            ("read_failure", b'{"brain_root": "brain"}', OSError("config unreadable")),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, config_bytes, third in cases:
+                with self.subTest(name=name):
+                    project = root / name
+                    project.mkdir()
+                    config_path = project / ".project-brain.json"
+                    argv = ["session", "list"]
+                    read_error = None
+                    if config_bytes is not None:
+                        config_path.write_bytes(config_bytes)
+                    if isinstance(third, str):
+                        argv.extend(["--brain-root", third])
+                    elif isinstance(third, OSError):
+                        read_error = third
+
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch(
+                            "project_brain.config.Path.cwd", return_value=project,
+                        ))
+                        if read_error is not None:
+                            stack.enter_context(mock.patch(
+                                "project_brain.config.Path.read_text",
+                                side_effect=read_error,
+                            ))
+                        rc, stdout, stderr = self._run_session_failure(argv)
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stderr, "")
+                    self.assertNotIn("Traceback", stdout)
+                    payload = json.loads(stdout)
+                    self.assertEqual(set(payload), {"ok", "error_code", "error"})
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error_code"], "session_configuration_invalid")
+                    self.assertTrue(payload["error"])
+
+    def test_session_mark_processed_without_uuid_is_a_json_refusal(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain_root = Path(td) / "brain"
+            rc, stdout, stderr = self._run_session_failure([
+                "session", "mark-processed", "--brain-root", str(brain_root),
+            ])
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(stderr, "")
+            payload = json.loads(stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error_code"], "session_completion_report_required")
+            self.assertIn("session complete", payload["error"])
+            self.assertFalse((brain_root / ".brain-local" / "sessions").exists())
 
     def test_session_list_outputs_json_with_processed_flag(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2840,22 +2954,72 @@ class CliSessionTest(unittest.TestCase):
                 '{"type": "user", "cwd": "/x", "timestamp": "t"}\n', encoding="utf-8")
             (proj / "def.jsonl").write_text(
                 '{"type": "user", "cwd": "/x", "timestamp": "t"}\n', encoding="utf-8")
-            brain_root = Path(td) / "brain"
-            self._run_cli(["session", "mark-processed", "abc",
-                           "--brain-root", str(brain_root)])
+            artifacts = _completion_artifacts(Path(td) / "artifacts", uuid="abc")
+            self._run_cli([
+                "session", "complete", "abc",
+                "--transcript", str(artifacts["transcript"]),
+                "--manifest", str(artifacts["manifest"]),
+                "--report", str(artifacts["report"]),
+                "--brain-root", str(artifacts["brain_root"]),
+            ])
             out = self._run_cli(["session", "list", "--transcript-root", str(root),
-                                 "--brain-root", str(brain_root), "--unprocessed"])
+                                 "--brain-root", str(artifacts["brain_root"]), "--unprocessed"])
             payload = json.loads(out)
             self.assertEqual([s["uuid"] for s in payload["sessions"]], ["def"])
 
-    def test_session_mark_processed_writes_note(self):
+    def test_session_complete_writes_v2_marker_and_keeps_same_bytes_on_retry(self):
         with tempfile.TemporaryDirectory() as td:
-            brain_root = Path(td)
-            out = self._run_cli(["session", "mark-processed", "abc",
-                                 "--brain-root", str(brain_root), "--note", "미합의 1건"])
-            payload = json.loads(out)
-            self.assertTrue(payload["ok"])
-            self.assertEqual(payload["record"]["note"], "미합의 1건")
+            artifacts = _completion_artifacts(Path(td))
+            argv = [
+                "session", "complete", "abc",
+                "--transcript", str(artifacts["transcript"]),
+                "--manifest", str(artifacts["manifest"]),
+                "--report", str(artifacts["report"]),
+                "--brain-root", str(artifacts["brain_root"]),
+            ]
+
+            first = json.loads(self._run_cli(argv))
+            marker = artifacts["brain_root"] / ".brain-local" / "sessions" / "abc.json"
+            first_bytes = marker.read_bytes()
+            second = json.loads(self._run_cli(argv))
+
+            self.assertTrue(first["ok"])
+            self.assertEqual(first["state"], "processed")
+            self.assertEqual(second["receipt_ids"], first["receipt_ids"])
+            self.assertEqual(marker.read_bytes(), first_bytes)
+
+    def test_session_complete_preserves_legacy_marker_and_mark_processed_refuses(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifacts = _completion_artifacts(Path(td))
+            marker = artifacts["brain_root"] / ".brain-local" / "sessions" / "abc.json"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            legacy_bytes = b'{"uuid":"abc","processed_at":"old","note":"legacy"}\n'
+            marker.write_bytes(legacy_bytes)
+            complete_argv = [
+                "session", "complete", "abc",
+                "--transcript", str(artifacts["transcript"]),
+                "--manifest", str(artifacts["manifest"]),
+                "--report", str(artifacts["report"]),
+                "--brain-root", str(artifacts["brain_root"]),
+            ]
+
+            rc, output = self._run_cli_result(complete_argv)
+            payload = json.loads(output)
+
+            self.assertEqual(rc, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error_code"], "legacy_unverified")
+            self.assertEqual(marker.read_bytes(), legacy_bytes)
+
+            fresh_brain = Path(td) / "fresh-brain"
+            rc, output = self._run_cli_result([
+                "session", "mark-processed", "abc",
+                "--brain-root", str(fresh_brain),
+            ])
+            payload = json.loads(output)
+            self.assertEqual(rc, 1)
+            self.assertEqual(payload["error_code"], "session_completion_report_required")
+            self.assertFalse((fresh_brain / ".brain-local" / "sessions" / "abc.json").exists())
 
 
 class RunBuildTest(unittest.TestCase):
