@@ -154,7 +154,7 @@ def test_runtime_map_states_non_corpus_write_boundaries():
         "search의 다섯 채널",
         "principal별 ACL을 집행하지 않는다",
         "session mark-processed",
-        "audit은 stale-set cache를 쓴다",
+        "기본 `audit`은 현재 로컬 Git 기준",
     )
     missing = [phrase for phrase in required_phrases if phrase not in text]
     assert missing == []

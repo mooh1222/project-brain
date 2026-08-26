@@ -1480,14 +1480,34 @@ def _run_audit(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli audit")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--repo-root", help="git 레포 루트 (기본: brain-root의 부모)")
-    parser.add_argument("--no-fetch", action="store_true", help="git fetch 생략(오프라인·테스트)")
+    fetch_group = parser.add_mutually_exclusive_group()
+    fetch_group.add_argument(
+        "--fetch",
+        action="store_true",
+        help="원격 default branch를 fetch한 뒤 검사(명시적 갱신)",
+    )
+    fetch_group.add_argument(
+        "--no-fetch",
+        dest="fetch",
+        action="store_false",
+        help="git fetch 생략(호환 옵션; 기본값)",
+    )
+    parser.set_defaults(fetch=False)
     parser.add_argument("--no-stale", action="store_true",
                         help="stale-check 생략(git 없는 환경) — lint·isolated만 돈다")
-    parser.add_argument(
-        "--no-stale-cache-write",
+    cache_group = parser.add_mutually_exclusive_group()
+    cache_group.add_argument(
+        "--write-stale-cache",
         action="store_true",
-        help="전체 audit을 실행하되 stale-set cache는 쓰지 않는다",
+        help="stale 검사 결과를 query/show용 cache에 기록(명시적 갱신)",
     )
+    cache_group.add_argument(
+        "--no-stale-cache-write",
+        dest="write_stale_cache",
+        action="store_false",
+        help="stale-set cache를 쓰지 않음(호환 옵션; 기본값)",
+    )
+    parser.set_defaults(write_stale_cache=False)
     parser.add_argument(
         "--timestamp-details-file",
         help="객체 ID를 포함한 timestamp 진단 JSON의 absolute 출력 경로",
@@ -1504,9 +1524,9 @@ def _run_audit(argv) -> int:
         brain_root=brain_root,
         repo_root=Path(args.repo_root) if args.repo_root else brain_root.parent,
         default_branch=default_branch,
-        fetch=not args.no_fetch,
+        fetch=args.fetch,
         no_stale=args.no_stale,
-        write_stale_cache=not args.no_stale_cache_write,
+        write_stale_cache=args.write_stale_cache,
         principal=None,
         acl_evaluator=None,
         now=now_kst(),
