@@ -145,6 +145,34 @@ plan_base -> ProjectedStore -> prepare_evidence -> seal -> apply_prepared
 | `seal` | base plan + evidence | envelope/proof가 들어간 sealed unstamped object bytes와 identity | 없음 |
 | `apply_prepared` | sealed plan + live 재관측 | stamped object, journal, mutation receipt, index invalidation | `MutationService` 하나 |
 
+### 3.1 E2 base plan 입력·snapshot·semantic identity 계약
+
+`plan_base(...)`와 `ProjectedStore`의 현재 작은 object-only interface는 유지한다. action 판정은 기존
+`classify_object_actions`, capability 판정은 기존 `CAPABILITY_REGISTRY`, semantic SHA는
+`hash_utils.py`의 `source_content_hash`가 각각 정본이다. 이 계약은 새 Adapter·파일 관측·E3 이후 책임을
+추가하지 않는다.
+
+- 두 E2 공개 seam은 `after_images`의 각 ID와 `delete_ids`의 각 ID를 먼저 같은 순수 preflight로
+  검증한다. ID는 `str()` 변환·trim·NFC normalize를 하지 않은 non-empty exact Python `str`이어야 하고,
+  각 집합 안에는 중복이 없어야 하며 두 집합은 disjoint여야 한다. 모든 delete ID는 live store에 존재해야
+  한다. 이 structural/state 위반은 다른 처리를 하지 않고 결정론적으로
+  `EvidencePreparationError.code=evidence_base_plan_invalid` 하나로 실패한다. 경우별 error code를
+  추가하지 않는다.
+- `plan_base(...)`는 이 preflight가 끝난 뒤에만 action과 `EvidencePlanRequirement`를 만든다. 성공한
+  plan에서는 target마다 exact target ID를 가진 requirement가 정확히 하나이고, 둘의 target 집합도 같다.
+  입력 오류와 성공 모두 file·clock·Adapter·journal·receipt에 0효과여야 한다.
+- `ProjectedStore`는 읽기 전용 interface만이 아니라, 생성 시점의 live store와 after-image(계획된 delete
+  제외)를 보관하는 deep immutable snapshot이다. caller·live store·중첩 mapping/list의 이후 mutation이
+  보관 상태로 스며들 수 없고, `get`·`all`·`by_kind`는 호출마다 fresh deep copy를 돌려준다. 반환값을
+  중첩해서 바꿔도 snapshot이나 다음 호출의 반환값은 바뀌지 않는다.
+- object semantic SHA는 언제나 exact `source_content_hash((unstamped_object,))`다. delete는 before bytes와
+  before SHA만, create는 base bytes와 base SHA만, update는 둘 다 가진다. no_change의 before/base bytes와
+  before/base SHA는 의미상 동등한 수준이 아니라 exact 동일해야 한다.
+- E2 public seam 테스트는 delete의 before SHA를 계산 helper나 다른 target 값이 아닌 독립 literal로,
+  no_change의 before/base bytes와 SHA를 서로 비교만 하지 않는 독립 literal로 고정한다. 같은 exact ID의
+  after-image/delete 충돌은 `evidence_base_plan_invalid` code와 error-path의 file·clock·Adapter·journal·receipt
+  0효과를 public seam에서 함께 고정한다.
+
 base action exact enum은 `create|update|delete|no_change`다. delete는 evidence entry를 받지 않고 현재
 delete 권한을 넓히지 않는다. ProjectedStore에서는 제거된 것으로 보인다. base plan을 전부 만든 뒤 각
 target을 다음 세 requirement로 분류하고 나서 entry를 matching한다.
