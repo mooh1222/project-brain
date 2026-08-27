@@ -60,9 +60,11 @@ common profile registry가 check ID의 필수 집합과 authority를 정한다. 
 caller가 source ID·hash를 따로 덮어쓸 수 없다. kind·variant와 source variant가 맞지 않으면
 `evidence_source_variant_mismatch`로 0-write 실패한다.
 
-`raw_source_observation.path`는 absolute·빈 segment·`.`·`..`·backslash를 거부한다. brain root pin에서
-각 component를 no-follow로 열고 마지막 대상이 `link_count=1`인 정규 파일인지 확인한다. 준비 시 metadata
-→ bytes → metadata를 읽어 같은 값인지 확인하고 다음 exact snapshot을 만든다.
+`raw_source_observation.path`는 absolute·빈 segment·`.`·`..`·backslash와 POSIX pathname API에
+전달할 수 없는 NUL(`U+0000`)을 거부하며, 이 parser-level 위반은
+`evidence_plan_schema_invalid`이다. brain root pin에서 각 component를 no-follow로 열고 마지막 대상이
+`link_count=1`인 정규 파일인지 확인한다. 준비 시 metadata → bytes → metadata를 읽어 같은 값인지 확인하고
+다음 exact snapshot을 만든다.
 
 ```text
 root, path, parent_bindings,
@@ -77,6 +79,45 @@ inode, link count, mode, size, bytes 중 하나가 달라지면 Adapter 실행�
 
 caller는 source claim만 주며 raw `candidate.verification`, profile·Adapter ID, action, engine SHA, proof,
 receipt ID는 만들 수 없다. 닫힌 registry가 kind·variant에서 mode·profile·source variant를 하나만 고른다.
+
+### 2.1 E1 parser·matcher의 고정 public contract
+
+E1의 public seam은 `parse_evidence_plan(data) -> EvidencePlanV1`, `EvidencePlanV1.canonical_bytes()`,
+`EvidencePlanV1.match(requirements)`뿐이다. `canonical_bytes()`는 parse 때 검증한 newline 없는 canonical
+payload bytes를 그대로 돌려준다. `parse_evidence_plan`의 `data`는 `bytes`여야 하며, non-bytes, UTF-8/JSON,
+canonical form, top-level 또는 nested shape의 모든 caller 입력 위반은 raw `TypeError`·`KeyError`·decoder 예외를
+새지 않고 `EvidencePlanError("evidence_plan_schema_invalid")` 하나로 끝난다.
+
+`match(requirements)`의 `requirements`는 한 번 순회할 수 있는 iterable이고, 각 항목은 오직
+`EvidencePlanRequirement(target_id: str, requirement: str, forbidden_code: str | None = None)` 인스턴스여야
+한다. mapping·tuple·문자열 등 duck-typed 항목, 순회할 수 없는 값, 세 필드의 type/값 위반은 모두
+`evidence_plan_schema_invalid`이다. `requirement`의 닫힌 enum은 정확히
+`optional_unverified|required|forbidden`이다. `target_id`는 plan entry와 같은 non-empty Python `str`이며,
+trim 뒤 NFC인 값을 caller가 이미 넘겨야 한다; matcher가 trim·normalize하지 않는다. requirement 입력 순서는
+의미가 없고 matcher가 이 canonical `target_id`를 Python `str` code-point 오름차순으로 정렬해 판정한다.
+같은 exact `target_id`가 두 번 나오면 `evidence_plan_schema_invalid`이며, 성공 결과의 `entries`와
+`omitted_optional_target_ids`도 같은 오름차순이다.
+
+`optional_unverified`와 `required`의 `forbidden_code`는 반드시 `None`이다. `forbidden`은 반드시
+`plan_base`의 닫힌 target classifier가 고른 아래 exact closed set의 한 값만 가진다.
+
+| classifier가 판정한 target | `forbidden_code` |
+|---|---|
+| delete | `evidence_plan_delete_target` |
+| direct-reviewed common create/update | `direct_reviewed_evidence_unavailable` |
+| generic `context_md` 또는 등록 profile이 없는 kind/profile | `evidence_profile_unavailable` |
+| 등록 profile의 선택된 Adapter가 unavailable | `evidence_adapter_unavailable` |
+
+즉 JSON plan·CLI·일반 caller가 임의 문자열을 선택할 수 없고, set 밖의 값·누락한 값은
+`evidence_plan_schema_invalid`이다. matcher는 이 값을 새로 고르거나 바꾸지 않고, 검증된 값을 가진
+forbidden target에 entry가 있을 때 그 exact code를 그대로 관측시킨다. 이 소유권 설명은 `plan_base`의
+새 interface·adapter를 추가로 설계하지 않으며, 현재 `EvidencePlanRequirement` 세 필드를 그대로 동결한다.
+
+parse와 requirement validation이 끝난 뒤의 match 오류 우선순위는 입력 순서와 무관하게
+`forbidden entry present`(위 classifier code) → `required entry missing`(`evidence_plan_missing`) → 남은
+plan entry(`evidence_plan_target_unused`)다. 같은 단계에서 둘 이상이면 가장 작은 `target_id`를 먼저
+고른다. 따라서 required 누락·forbidden entry·unused entry가 한 호출에 함께 있어도 forbidden code가
+먼저 나고, structural/canonical requirement 위반은 이 판정보다 앞서 `evidence_plan_schema_invalid`이다.
 
 common envelope v1의 저장 shape와 `executed_at`을 포함하는 execution hash는 유지하되 다음 두
 projection만 v2로 고정한다.
