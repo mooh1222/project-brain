@@ -28,6 +28,29 @@ from project_brain.snapshot import (
 from project_brain.store import BrainStore
 
 
+_SNAPSHOT_V1_V2_OBJECT_KINDS = {
+    "CodeLocator": "objects/code",
+    "ContextProjection": "indexes/context_projections",
+    "CurrentView": "views/current",
+    "DecisionRecord": "objects/decisions",
+    "DomainContext": "objects/domain",
+    "DomainMapping": "objects/mappings",
+    "EventLedgerRecord": "objects/ledger",
+    "EvidenceManifest": "raw/manifests",
+    "EvidenceRef": "objects/evidence_refs",
+    "GlossaryTerm": "objects/domain",
+    "IndexRecord": "indexes/records",
+    "Insight": "objects/insights",
+    "KnowledgePage": "views/knowledge",
+    "ReviewRecord": "objects/reviews",
+    "SlackThread": "objects/comms",
+    "SlideRef": "objects/specs",
+    "SpecDocument": "objects/specs",
+    "SpecRevision": "objects/specs",
+    "TemporalFact": "objects/facts",
+}
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -927,6 +950,51 @@ def test_create_snapshot_covers_full_contract_and_verifies(tmp_path):
     }]
 
 
+def test_create_snapshot_keeps_version_2_kind_contract_frozen_when_registry_grows(
+    tmp_path,
+):
+    request, _ = _snapshot_fixture(tmp_path)
+    expanded_registry = {
+        **BrainStore._KIND_DIR,
+        "FutureKind": "objects/future",
+    }
+
+    with mock.patch.object(BrainStore, "_KIND_DIR", expanded_registry):
+        result = create_snapshot(request)
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["brain_targets"]["object_kinds"] == (
+        _SNAPSHOT_V1_V2_OBJECT_KINDS
+    )
+    assert set(manifest["corpus"]["kind_counts"]) == set(
+        _SNAPSHOT_V1_V2_OBJECT_KINDS
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_existing_snapshot_verification_ignores_later_registry_growth(
+    tmp_path,
+    version,
+):
+    request, _ = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    expected_sha256 = result.manifest_sha256
+    if version == 1:
+        expected_sha256 = _rewrite_snapshot_as_version_1(result)
+    expanded_registry = {
+        **BrainStore._KIND_DIR,
+        "FutureKind": "objects/future",
+    }
+
+    with mock.patch.object(BrainStore, "_KIND_DIR", expanded_registry):
+        verification = verify_snapshot(
+            result.snapshot_root,
+            expected_manifest_sha256=expected_sha256,
+        )
+
+    assert verification.ok is True
+
+
 def test_create_snapshot_records_and_applies_exact_regular_file_mode(tmp_path):
     request, paths = _snapshot_fixture(tmp_path)
     paths["source_a"].chmod(0o640)
@@ -1147,6 +1215,76 @@ def test_restore_snapshot_replaces_captured_scope_and_removes_new_entries(tmp_pa
         result.snapshot_root,
         expected_manifest_sha256=result.manifest_sha256,
     ).ok is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "directory", "expected_code"),
+    [
+        ("FutureKind", "objects/future", "restore_target_kind_unsupported"),
+        ("FutureKind", "objects/domain", "restore_target_kind_unsupported"),
+        (
+            "GlossaryClassificationRecord",
+            "objects/glossary_classifications",
+            "legacy_snapshot_uncovered_targets",
+        ),
+    ],
+)
+def test_version_2_restore_rejects_later_kind_before_mutation(
+    tmp_path,
+    kind,
+    directory,
+    expected_code,
+):
+    request, paths = _snapshot_fixture(tmp_path)
+    result = create_snapshot(request)
+    future_path = request.brain_root / directory / "future.json"
+    _write(
+        future_path,
+        json.dumps({"id": "future", "kind": kind}).encode("utf-8"),
+    )
+    before = {
+        path.relative_to(request.brain_root).as_posix(): path.read_bytes()
+        for path in request.brain_root.rglob("*")
+        if path.is_file()
+    }
+    expanded_registry = {
+        **BrainStore._KIND_DIR,
+        kind: directory,
+    }
+
+    with mock.patch.object(BrainStore, "_KIND_DIR", expanded_registry):
+        with pytest.raises(SnapshotError) as caught:
+            restore_snapshot(
+                result.snapshot_root,
+                request.brain_root,
+                expected_manifest_sha256=result.manifest_sha256,
+            )
+
+    assert caught.value.code == expected_code
+    assert kind in caught.value.detail
+    assert {
+        path.relative_to(request.brain_root).as_posix(): path.read_bytes()
+        for path in request.brain_root.rglob("*")
+        if path.is_file()
+    } == before
+    assert not snapshot._restore_state_root(request.brain_root).exists()
+
+
+def test_version_2_restore_still_supports_an_empty_target(tmp_path):
+    request, paths = _snapshot_fixture(tmp_path)
+    original_object = paths["object"].read_bytes()
+    result = create_snapshot(request)
+    shutil.rmtree(request.brain_root)
+    request.brain_root.mkdir()
+
+    restored = restore_snapshot(
+        result.snapshot_root,
+        request.brain_root,
+        expected_manifest_sha256=result.manifest_sha256,
+    )
+
+    assert restored.snapshot_id == request.snapshot_id
+    assert paths["object"].read_bytes() == original_object
 
 
 def test_restore_snapshot_reproduces_captured_mode_and_preserves_live_mode(tmp_path):
