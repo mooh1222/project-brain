@@ -31,6 +31,8 @@ project-brain draft list
 ## 만들기
 
 ASCII lowercase kebab-case topic ID와 선택에 충분한 제목·범위를 정한 뒤 엔진 template으로 만든다.
+기획서나 현행 문서가 있으면 그 자료를 초기 source packet으로 삼는다.
+없으면 사용자 대화와 현재 코드에서 시작한다.
 
 ```bash
 project-brain draft create <topic-id> \

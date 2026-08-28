@@ -30,7 +30,7 @@
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
-| 어휘 기준·지식 초안 | 🟡 replacement 진행 중 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬 완료. #51 실제 BB2 파일럿은 미구현 |
+| 어휘 기준·지식 초안 | ✅ 대체 범위 완료 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬, #51 실제 BB2 로컬 전용 파일럿 완료 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -48,7 +48,7 @@ replacement 시작 런타임 기준점은 `aa4101ec8fe62878b9a554b471be66d519cf4
 과거 열린 그래프는 대응표를 남기고 `NOT_PLANNED`로 정리한다. 이미 닫힌 완료 이슈와 구현 기록은
 보존한다.
 
-현재 main의 분류는 다음과 같다.
+현재 main과 BB2 로컬 전용 파일럿의 분류는 다음과 같다.
 
 - **공개 경로에 연결됨**: #2 query/audit 기본 읽기 전용, #3 receipt-bound `session complete`,
   #5 snapshot v1·v2 19종 동결, #48 공통 어휘 기준과 ingest·session-ingest·audit 조건부 연결,
@@ -57,15 +57,16 @@ replacement 시작 런타임 기준점은 `aa4101ec8fe62878b9a554b471be66d519cf4
 - **내부 정책·부분 기반**: #4 `capabilities.py`는 분산 runtime 분기를 대체하지 않는 설명·드리프트
   검사 registry다. #41 `evidence_plan.py`와 #42~#43 `evidence_preparation.py`는 직접 테스트만 있고
   public ingest·promote·CLI·설치 스킬에서 import하거나 호출하지 않는다.
-- **미구현**: #51 실제 BB2 초안·어휘 감사 파일럿, `GlossaryClassificationRecord`, 공통
-  verification 공개 적용.
+- **실제 BB2 파일럿 완료**: #51 샐리 카누 초안·어휘 감사를 BB2 로컬 커밋으로 완료했다. 기존
+  Brain 객체·raw·index는 바꾸지 않았고, 무관한 로컬 이력이 섞인 브랜치는 원격에 push하지 않았다.
+- **미구현·범위 밖 유지**: `GlossaryClassificationRecord`, 공통 verification 공개 적용.
 
 replacement spec #47의 활성 결과는 네 개로 제한한다.
 
 1. #48 공통 어휘 기준 reference와 ingest·session-ingest·audit 연결 — 구현 완료
 2. #49 대표어·동의어·별칭 회수 통일 — 구현 완료
 3. #50 지식 초안 모듈·CLI·`brain-draft` 설치 스킬 — 구현 완료
-4. #51 실제 BB2 샐리 카누 초안·어휘 감사 파일럿
+4. #51 실제 BB2 샐리 카누 초안·어휘 감사 파일럿 — BB2 로컬 전용 완료
 
 공통 candidate verification, `GlossaryClassificationRecord`, #44~#46, 전체 BB2 어휘 migration,
 초안 정식화·close·자동 라우팅은 이 범위 밖이다. 구현 중 계약 공백이 발견돼도 새 admission이나
@@ -78,14 +79,28 @@ replacement spec #47의 활성 결과는 네 개로 제한한다.
   안이 아니며, #40의 Claude·Codex·Orca 세션 source 범위와 배치 계약을 정한 뒤 별도로 재검토한다.
 - #4·#41~#43: 현재 main에 동결한다. 실제 필요나 유지비가 확인될 때 재사용·격리를 별도로 결정한다.
 
-현재 BB2 설치본은 엔진 템플릿과 완전히 같지 않다. BB2 session-ingest reference는 거부되는
-`session mark-processed`를 아직 안내하고, audit 스킬은 기본 읽기 전용·명시적
-`--fetch --write-stale-cache` 계약과 다른 옛 옵션을 포함한다. 새 draft 설치 스킬의 채택과 실제 BB2 파일럿은
-사용자 수정 파일을 덮지 않고 이 차이를 명시적으로 병합·채택해야 한다.
+현재 BB2 설치본은 엔진 템플릿과 완전히 같지 않다. #51에서 새 draft 스킬과 공통 어휘 기준을
+설치하고, 기존 ingest·session-ingest·audit 프로젝트 overlay에는 관련 pointer만 명시적으로
+병합했다. installer는 사용자 수정 파일을 보존했으며, 나머지 overlay 차이는 #47 완료 결과나
+엔진 템플릿 관리 범위로 확대하지 않는다.
 
 ---
 
 ## 완료 단계
+
+### #51 실제 BB2 샐리 카누 지식 초안·어휘 감사 — 완료 (2026-08-28, BB2 로컬 전용)
+
+BB2 `docs/bb2-brain-object-model`에서 `sally-canoe-glossary-audit` 초안을 spec-v8과 live Event API·
+Join API 위키로 만들고, 전체 GlossaryTerm 1,181개를 읽기 전용으로 측정했다. 샐리 카누 125개는
+독립 유지 19, 통합·대표어 교정 17, 상위 DomainMapping·CodeLocator 보존 76, 무객체 제거 후보 7,
+사용자 판단 필요 6으로 빠짐없이 분류했으며 기존 객체와 색인은 수정하지 않았다.
+
+- 다른 새 세션이 과거 대화 없이 초안을 발견·설명하고 expected SHA로 갱신했다. stale SHA는
+  기존 bytes를 바꾸지 않고 실패했고, 사용자는 실제 재개 비용이 줄었다고 확인했다.
+- BrainStore·raw·index fingerprint와 bytes·일반 query·graph·snapshot 대상은 생성·갱신 전후
+  같았다. 엔진 회귀와 실제 BB2 검증을 분리해 통과했다.
+- BB2 커밋은 `a045328448`, `2e5382c118`, `e66fefd731`이다. 기존 로컬 이력과 dirty 파일을
+  보존하기 위해 원격 push는 하지 않았고 GitHub #51은 이 로컬 증거로 `COMPLETED` 처리했다.
 
 ### #50 지식 초안 모듈·CLI와 `brain-draft` 설치 스킬 — 완료 (2026-08-28)
 

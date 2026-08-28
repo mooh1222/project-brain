@@ -175,6 +175,11 @@ def test_draft_skill_owns_lifecycle_and_session_ingest_only_routes_material():
         "소비 프로젝트 정책과 사용자가 준 권한",
     ):
         assert boundary in draft
+    for source_rule in (
+        "기획서나 현행 문서가 있으면 그 자료를 초기 source packet으로 삼는다",
+        "없으면 사용자 대화와 현재 코드에서 시작한다",
+    ):
+        assert source_rule in draft
 
     assert "demo-brain-draft" in session
     assert "진행 중·미결 재료" in session

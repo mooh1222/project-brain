@@ -94,7 +94,8 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
   verification이 공개 ingest·promote에 적용된다고 해석하지 않는다. 현재 production caller는 없다.
 - 공통 어휘 기준 reference는 ingest·session-ingest·draft·audit 네 소비 경로가 조건부로 함께
   읽고 query는 읽지 않는다. `brain/drafts/<topic-id>.md`용 모듈·CLI·다섯 번째 설치 스킬은
-  #50에서 구현됐고, 실제 BB2 파일럿은 #51에 남아 있다.
+  #50에서 구현됐고, 실제 BB2 파일럿은 #51의 로컬 전용 커밋과 완료 댓글로 검증됐다. BB2 원격
+  push는 하지 않았다.
 
 ## 작은 계보 메모
 
