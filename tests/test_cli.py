@@ -3685,6 +3685,7 @@ class TestCliTopLevelHelp(unittest.TestCase):
                 cli.main()
         text = out.getvalue()
         self.assertIn("graph", text)
+        self.assertIn("draft", text)
         self.assertIn("ingest", text)
         self.assertIn("search", text)
         # bare "show"는 "-h: show this help message"와 겹쳐 거짓통과 — 서브커맨드

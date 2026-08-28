@@ -9,13 +9,14 @@
 {
   "schema_version": 1,
   "top_level_commands": [
-    "audit", "bootstrap", "build", "context-replace", "doctor", "eval", "graph",
+    "audit", "bootstrap", "build", "context-replace", "doctor", "draft", "eval", "graph",
     "index", "ingest", "install", "lint", "mark-checked", "migration", "projection",
     "promote", "promote-auto", "query", "search", "session", "show", "snapshot",
     "stale-check"
   ],
   "subcommand_paths": [
-    "context-replace apply", "context-replace plan", "graph export", "graph isolated",
+    "context-replace apply", "context-replace plan", "draft create", "draft lint",
+    "draft list", "draft show", "draft update", "graph export", "graph isolated",
     "index rebuild", "migration canonical-repair apply", "migration canonical-repair plan",
     "migration display apply", "migration display binding-create",
     "migration display binding-verify", "migration display closure-create",
@@ -35,6 +36,7 @@
     "src/project_brain/assembly.py", "src/project_brain/audit.py",
     "src/project_brain/capabilities.py", "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
+    "src/project_brain/draft.py",
     "src/project_brain/evidence_plan.py", "src/project_brain/evidence_preparation.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
@@ -51,6 +53,7 @@
     "tests/test_architecture_docs.py", "tests/test_assembly.py", "tests/test_audit.py",
     "tests/test_capabilities.py", "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
     "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_id_grammar.py",
+    "tests/test_draft.py", "tests/test_draft_cli.py",
     "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
@@ -111,6 +114,9 @@ flowchart LR
     Derived --> Search
     Search --> Channels[results · candidates · raw_excerpts · advisories · projection_reuse]
 
+    Config --> Draft[draft create · list · show · update · lint]
+    Draft --> DraftFiles[brain/drafts: Git 추적 비색인 Markdown]
+
     Config --> Inspect[show · lint · graph · eval]
     Objects --> Inspect
     Config --> Audit[audit · stale-check]
@@ -157,6 +163,7 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `.brain-local/index.db*` | `index rebuild`, `bootstrap`, 적재 finalizer | 객체와 raw로부터 만든 로컬 파생 색인 | `project-brain index rebuild` |
 | `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | query/show가 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
 | `.brain-local/sessions/*.json` | `session complete` | transcript·batch manifest·finalization report·durable receipt에 결속한 처리 marker v2. 지식 객체가 아님 | 같은 valid v2 요청은 기존 bytes 보존 no-op. `session mark-processed`는 report 없이는 쓰지 않고 실패 |
+| `brain/drafts/*.md` | `draft create`, expected-SHA `draft update` | 여러 작업 구간에서 이어갈 주제별 Git 추적 초안. BrainStore·raw·index·query·graph·snapshot 입력이 아님 | 원본이므로 자동 재생성 대상 아님. list/show/lint는 읽기, update는 같은 디렉터리 원자 교체 |
 | `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
 | context-replace/migration manifest | 각 `plan` 명령 | exact SHA와 live precondition을 후속 apply에 묶는 파일. 그 자체가 객체 정본은 아님 | 같은 입력과 precondition에서 다시 plan |
@@ -354,6 +361,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 |---|---|---|
 | 조립·적재·검수 | `build`, `ingest`, `promote`, `promote-auto`, `mark-checked` | build 출력과 실제 mutation을 분리 |
 | 조회·회상 | `query`, `search`, `show` | query 폴백과 search fresh-index 요구를 분리 |
+| 지식 초안 | `draft` | 정식 코퍼스 밖 Markdown의 create/list/show/update/lint만 소유 |
 | 색인·평가·projection | `index`, `eval`, `projection` | index는 파생물, projection write는 mutation |
 | 점검·감사 | `lint`, `audit`, `stale-check`, `graph` | 코퍼스 불변 점검과 별도 cache/export 쓰기를 구분 |
 | 세션·복구·대규모 변경 | `session`, `snapshot`, `context-replace`, `migration` | marker·snapshot·plan과 apply를 구분 |
@@ -365,6 +373,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 |---|---|
 | `index` | `index rebuild` |
 | `session` | `session list`, `session complete`, `session mark-processed` |
+| `draft` | `draft create`, `draft list`, `draft show`, `draft update`, `draft lint` |
 | `projection` | `projection build-reuse`, `projection refresh` |
 | `graph` | `graph isolated`, `graph export` |
 | `snapshot` | `snapshot create`, `snapshot verify`, `snapshot restore` |
@@ -385,8 +394,9 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
   원격·stale cache 갱신은 `--fetch`, `--write-stale-cache`로 각각 명시한다.
 - `eval --check-ids`는 모델 없이 기대 ID 실존을 확인한다. 일반 `eval`은 소비 데이터의 골든셋과
   검색 구현을 사용한다.
-- 현재 설치기는 query, ingest, session-ingest, audit 스킬 네 개를 소비 프로젝트에 심는다. 제안된
-  `brain-draft` 다섯 번째 스킬은 아직 구현되지 않았다. ingest 스킬의
+- 현재 설치기는 query, ingest, session-ingest, draft, audit 스킬 다섯 개를 소비 프로젝트에
+  심는다. draft 모듈과 CLI는 config가 해석한 `brain/drafts/`만 다루며 BrainStore·raw·index·
+  query·graph·snapshot 입력을 바꾸지 않는다. ingest 스킬의
   runtime은 assemble → build → ingest → semantic finalization을 수행하며 엔진 pytest와 별도로
   `src/project_brain/templates/ingest/scripts`의 unittest를 통과해야 한다.
 

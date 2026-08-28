@@ -74,7 +74,7 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
 | mutation·migration을 바꾸기 | [런타임 쓰기 경로](runtime-map.md#코퍼스-객체-쓰기)와 [변경 지도](change-map.md) | `mutation.py`, `corpus_io.py`, migration 관련 모듈과 테스트 |
 | 설치 스킬이나 runtime을 바꾸기 | [변경 지도의 CLI·config·installer 행](change-map.md#변경별-검증-표) | `tests/test_installer.py`와 설치되는 runtime의 unittest |
 | #4·#41~#43의 현재 상태 확인 | [런타임 지도의 실행 흐름 밖 내부 기반](runtime-map.md#현재-실행-흐름-밖의-내부-기반) | `capabilities.py`, `evidence_plan.py`, `evidence_preparation.py`와 직접 테스트. public caller가 없음을 별도로 확인 |
-| 어휘 기준·지식 초안 변경 | [ROADMAP의 현재 replacement 범위](../../ROADMAP.md#현재-기준-재설정과-작은-replacement-spec-2026-08-28), [변경 지도](change-map.md) | 현재는 미구현. 과거 #1 그래프가 아니라 승인된 #47~#51과 현재 코드에 대조 |
+| 어휘 기준·지식 초안 변경 | [ROADMAP의 현재 replacement 범위](../../ROADMAP.md#현재-기준-재설정과-작은-replacement-spec-2026-08-28), [변경 지도](change-map.md) | `draft.py`, draft CLI·설치 스킬과 표적 테스트. 실제 BB2 파일럿은 #51에 대조 |
 | 지금 끝난 일과 다음 후보 확인 | [ROADMAP](../../ROADMAP.md) | 연결된 완료 보고서와 현재 checkout 재검증 |
 
 ## 현재 경계에서 주의할 점
@@ -92,9 +92,9 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
   다시 계산할 수 있는 로컬 산출물이다.
 - `capabilities.py`, `evidence_plan.py`, `evidence_preparation.py`가 main에 있다는 사실만으로 공통
   verification이 공개 ingest·promote에 적용된다고 해석하지 않는다. 현재 production caller는 없다.
-- 공통 어휘 기준 reference와 ingest·session-ingest·audit의 조건부 연결은 #48에서 installer에
-  들어왔다. `brain/drafts/<topic-id>.md`용 모듈·CLI·다섯 번째 설치 스킬과 실제 BB2 파일럿은
-  #50~#51 대상이며 아직 구현되지 않았다.
+- 공통 어휘 기준 reference는 ingest·session-ingest·draft·audit 네 소비 경로가 조건부로 함께
+  읽고 query는 읽지 않는다. `brain/drafts/<topic-id>.md`용 모듈·CLI·다섯 번째 설치 스킬은
+  #50에서 구현됐고, 실제 BB2 파일럿은 #51에 남아 있다.
 
 ## 작은 계보 메모
 

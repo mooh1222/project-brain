@@ -65,11 +65,11 @@ def test_installed_ingest_paths_share_one_conditional_glossary_criterion():
             name: (skills / f"demo-brain-{name}" / "SKILL.md").read_text(
                 encoding="utf-8"
             )
-            for name in ("ingest", "session-ingest", "audit", "query")
+            for name in ("ingest", "session-ingest", "draft", "audit", "query")
         }
 
         assert criterion_path.is_file()
-        for name in ("session-ingest", "audit", "query"):
+        for name in ("session-ingest", "draft", "audit", "query"):
             assert not (
                 skills
                 / f"demo-brain-{name}"
@@ -77,7 +77,7 @@ def test_installed_ingest_paths_share_one_conditional_glossary_criterion():
                 / "glossary-criteria.md"
             ).exists()
         sibling_reference = "../demo-brain-ingest/references/glossary-criteria.md"
-        for name in ("session-ingest", "audit"):
+        for name in ("session-ingest", "draft", "audit"):
             resolved = (
                 skills / f"demo-brain-{name}" / sibling_reference
             ).resolve(strict=True)
@@ -97,6 +97,11 @@ def test_installed_ingest_paths_share_one_conditional_glossary_criterion():
         "기존 `GlossaryTerm`의 어휘 품질을 감사할 때 "
         "`../demo-brain-ingest/references/glossary-criteria.md`를 먼저 읽는다."
         in installed_skills["audit"]
+    )
+    assert "어휘 관찰을 잠정 분류할 때" in installed_skills["draft"]
+    assert (
+        "../demo-brain-ingest/references/glossary-criteria.md"
+        in installed_skills["draft"]
     )
     for audit_trigger in ("어휘 감사", "코드 토큰 과잉 적재"):
         assert audit_trigger in installed_skills["audit"]
@@ -145,6 +150,36 @@ def test_installed_ingest_paths_share_one_conditional_glossary_criterion():
     assert "`GlossaryTerm` 아님" in example_rows["IDLE"]
     assert "`DomainMapping`" in example_rows["IDLE"]
     assert "무객체" in example_rows["RPMAP"]
+
+
+def test_draft_skill_owns_lifecycle_and_session_ingest_only_routes_material():
+    draft = _installed_skill("draft")
+    session = _installed_skill("session-ingest")
+
+    for command in (
+        "project-brain draft list",
+        "project-brain draft create",
+        "project-brain draft show",
+        "project-brain draft update",
+        "project-brain draft lint",
+    ):
+        assert command in draft
+    assert draft.index("project-brain draft list") < draft.index(
+        "project-brain draft show"
+    )
+    for boundary in (
+        "선택받기 전에는 본문 전체를 읽지 않는다",
+        "draft_stale_sha",
+        "한 초안에는 한 번에 한",
+        "정식 Brain 객체나 raw 원문, 일반 query의 근거가 아니다",
+        "소비 프로젝트 정책과 사용자가 준 권한",
+    ):
+        assert boundary in draft
+
+    assert "demo-brain-draft" in session
+    assert "진행 중·미결 재료" in session
+    assert "정식 적재 가능한 지식" in session
+    assert "지식 초안의 생성·재개·갱신 수명주기" in session
 
 
 def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():

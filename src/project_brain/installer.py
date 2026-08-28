@@ -2,7 +2,7 @@
 
 산출물:
   1. .project-brain.json — 없으면 생성, 있으면 보존(누락 키만 옵션값으로 보충).
-  2. .agents/skills/<project>-brain-{query,ingest,session-ingest,audit}/...
+  2. .agents/skills/<project>-brain-{query,ingest,session-ingest,draft,audit}/...
      — templates/<skill>/ 디렉토리를 통째 walk·렌더 주입(SKILL.md + references/ + scripts/).
   3. .project-brain-manifest.json — 심은 파일 경로+sha256.
 
@@ -31,6 +31,7 @@ _SKILLS = {
     "query": "brain-query",
     "ingest": "brain-ingest",
     "session-ingest": "brain-session-ingest",
+    "draft": "brain-draft",
     "audit": "brain-audit",
 }
 

@@ -1,8 +1,8 @@
 ---
 status: accepted
 decision_date: 2026-08-14
-implementation: not_implemented
-contract_status: mvp_scope_revalidated_2026-08-28
+implementation: implemented_issue_50
+contract_status: mvp_implemented_2026-08-28
 superseded_by: null
 ---
 

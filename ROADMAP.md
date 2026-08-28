@@ -30,7 +30,7 @@
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
-| 어휘 기준·지식 초안 | 🟡 replacement 진행 중 | #48 공통 어휘 기준과 세 설치 스킬 연결, #49 대표어·동의어·별칭의 어휘·매핑 회수 통일 완료. #50~#51 지식 초안 MVP·실제 BB2 파일럿은 미구현 |
+| 어휘 기준·지식 초안 | 🟡 replacement 진행 중 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬 완료. #51 실제 BB2 파일럿은 미구현 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -52,18 +52,19 @@ replacement 시작 런타임 기준점은 `aa4101ec8fe62878b9a554b471be66d519cf4
 
 - **공개 경로에 연결됨**: #2 query/audit 기본 읽기 전용, #3 receipt-bound `session complete`,
   #5 snapshot v1·v2 19종 동결, #48 공통 어휘 기준과 ingest·session-ingest·audit 조건부 연결,
-  #49 대표어·동의어·별칭의 reviewed 어휘·매핑 동등 회수.
+  #49 대표어·동의어·별칭의 reviewed 어휘·매핑 동등 회수, #50 지식 초안 모듈·CLI와 다섯 번째
+  설치 스킬.
 - **내부 정책·부분 기반**: #4 `capabilities.py`는 분산 runtime 분기를 대체하지 않는 설명·드리프트
   검사 registry다. #41 `evidence_plan.py`와 #42~#43 `evidence_preparation.py`는 직접 테스트만 있고
   public ingest·promote·CLI·설치 스킬에서 import하거나 호출하지 않는다.
-- **미구현**: 지식 초안 모듈·CLI·다섯 번째 설치 스킬, `GlossaryClassificationRecord`,
-  공통 verification 공개 적용.
+- **미구현**: #51 실제 BB2 초안·어휘 감사 파일럿, `GlossaryClassificationRecord`, 공통
+  verification 공개 적용.
 
 replacement spec #47의 활성 결과는 네 개로 제한한다.
 
 1. #48 공통 어휘 기준 reference와 ingest·session-ingest·audit 연결 — 구현 완료
 2. #49 대표어·동의어·별칭 회수 통일 — 구현 완료
-3. #50 지식 초안 모듈·CLI·`brain-draft` 설치 스킬
+3. #50 지식 초안 모듈·CLI·`brain-draft` 설치 스킬 — 구현 완료
 4. #51 실제 BB2 샐리 카누 초안·어휘 감사 파일럿
 
 공통 candidate verification, `GlossaryClassificationRecord`, #44~#46, 전체 BB2 어휘 migration,
@@ -79,12 +80,27 @@ replacement spec #47의 활성 결과는 네 개로 제한한다.
 
 현재 BB2 설치본은 엔진 템플릿과 완전히 같지 않다. BB2 session-ingest reference는 거부되는
 `session mark-processed`를 아직 안내하고, audit 스킬은 기본 읽기 전용·명시적
-`--fetch --write-stale-cache` 계약과 다른 옛 옵션을 포함한다. 새 설치 스킬과 실제 BB2 파일럿은
+`--fetch --write-stale-cache` 계약과 다른 옛 옵션을 포함한다. 새 draft 설치 스킬의 채택과 실제 BB2 파일럿은
 사용자 수정 파일을 덮지 않고 이 차이를 명시적으로 병합·채택해야 한다.
 
 ---
 
 ## 완료 단계
+
+### #50 지식 초안 모듈·CLI와 `brain-draft` 설치 스킬 — 완료 (2026-08-28)
+
+config가 해석한 `brain/drafts/<ASCII-kebab-topic-id>.md`만 소유하는 `draft.py`와
+`project-brain draft create/list/show/update/lint`를 추가했다. v1 Markdown 구조·UTF-8·실제
+경로를 lint하고, show의 SHA와 같은 expected SHA에서만 같은 디렉터리의 임시 파일을 원자
+교체한다. stale SHA와 잘못된 본문은 기존 파일을 바꾸지 않는다.
+
+- 목록은 topic ID·제목·범위·갱신 시각만 반환한다. 설치되는 model-invoked `brain-draft`는
+  하나의 명확한 초안만 바로 재개하고 여러 후보는 본문을 읽기 전에 사용자 선택을 받는다.
+- session-ingest는 현재·과거 세션 재료 추출만 맡고, 미결 내용은 draft로, 확인된 내용은
+  ingest로 넘긴다. 공통 어휘 기준은 ingest reference 한 파일을 조건부로 읽는다.
+- drafts는 BrainStore·raw·index·일반 query·graph·snapshot에서 제외되며 엔진은 Git
+  stage·commit을 실행하지 않는다. 정식화·close·자동 라우팅·history·receipt·시작 hook은
+  범위 밖으로 유지했다.
 
 ### #49 대표어·동의어·별칭의 의미 매핑 회수 통일 — 완료 (2026-08-28)
 

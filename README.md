@@ -41,14 +41,14 @@ uv tool install -e ./project-brain
 
 ```bash
 cd <프로젝트 루트>
-project-brain install --project <이름>   # config + 스킬 4종(조회/적재/세션/audit) 주입(manifest 추적)
+project-brain install --project <이름>   # config + 스킬 5종(조회/적재/세션/초안/audit) 주입(manifest 추적)
 project-brain install --project <이름> --default-branch develop --repo myorg/myrepo  # 스킬의 {{DEFAULT_BRANCH}}·{{REPO}} 값 채움
 project-brain install --project <이름> --force  # manifest에 기록된 사용자 수정 파일도 덮어 갱신
 project-brain doctor                      # 환경·프로젝트 상태 진단
 project-brain bootstrap                   # install → brain/objects가 있으면 색인 재구축 → doctor
 ```
 
-`install`은 `.agents/skills/<이름>-brain-{query,ingest,session-ingest,audit}/` 4종을 엔진 `templates/`에서
+`install`은 `.agents/skills/<이름>-brain-{query,ingest,session-ingest,draft,audit}/` 5종을 엔진 `templates/`에서
 렌더해 심는다 — SKILL.md 한 장이 아니라 `templates/<skill>/` 디렉토리 통째(SKILL.md +
 references/ + scripts/ 포함)를 주입한다. 설치 직후 어시스턴트(Claude 등)가 코퍼스를 보고 description 트리거
 어휘를 프로젝트 어휘로 맞춤 제안하는 단계까지가 온보딩이다 — 맞춤된 스킬 파일은
@@ -79,6 +79,11 @@ project-brain promote --ids ...          # candidate → reviewed 승격 (검토
 project-brain eval                       # 골든셋 회귀 (실모델)
 project-brain eval --check-ids           # 골든셋 기대 id 실존 가드 (모델 불필요)
 project-brain show <id>                  # 객체 본문 + 1-hop 이웃(종류·제목) 펼쳐보기
+project-brain draft list                 # 주제별 지식 초안 선택 metadata만 보기
+project-brain draft create <topic-id> --title ... --scope ...  # v1 초안 생성
+project-brain draft show <topic-id>      # 초안 본문 + 현재 SHA 보기
+project-brain draft update <topic-id> --expected-sha ... --content-file ...
+project-brain draft lint [topic-id]      # 초안 구조·UTF-8·실제 경로 검사
 project-brain doctor [--download]         # 환경 진단. --download는 모델 cache를 채움
 project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (코퍼스 불변)
 project-brain graph export out.html      # 코퍼스 불변, 지정한 HTML 파일은 씀
@@ -107,6 +112,11 @@ project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매
 브랜치 이력에 없거나 코드가 달라진 경우에만 다시 확인한 SHA로 갱신한다.
 
 전체 명령 목록은 `project-brain --help`, 각 명령 상세는 `project-brain <명령> --help`로 본다.
+
+`brain/drafts/<topic-id>.md`는 여러 작업 구간에서 이어갈 Git 추적 Markdown이다. 정식 Brain
+객체·raw 원문·일반 query 근거·색인·graph·snapshot 입력이 아니므로 초안 변경만으로 index를
+재구축하지 않는다. `draft update`는 `show`가 반환한 SHA가 같을 때만 같은 디렉터리에서 원자
+교체하며, 엔진은 Git stage·commit을 실행하지 않는다.
 
 ## 적재 실행 경로
 

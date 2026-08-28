@@ -24,6 +24,7 @@ _SIMPLE_SUBCOMMAND_RUNNERS = {
     "graph": cli._run_graph,
     "snapshot": cli._run_snapshot,
     "context-replace": cli._run_context_replace,
+    "draft": cli._run_draft,
 }
 
 
@@ -155,6 +156,7 @@ def test_runtime_map_states_non_corpus_write_boundaries():
         "principal별 ACL을 집행하지 않는다",
         "session mark-processed",
         "기본 `audit`은 현재 로컬 Git 기준",
+        "BrainStore·raw·index·query·graph·snapshot 입력이 아님",
     )
     missing = [phrase for phrase in required_phrases if phrase not in text]
     assert missing == []

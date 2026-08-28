@@ -1,4 +1,4 @@
-"""install — 프로젝트에 config + 스킬 4종을 멱등 설치하고 manifest로 추적한다.
+"""install — 프로젝트에 config + 스킬 5종을 멱등 설치하고 manifest로 추적한다.
 
 파일 단위 보존 모델: manifest에 기록된 해시와 디스크가 일치할 때만 갱신(도구 소유),
 불일치(사용자 수정)·manifest 밖(사용자 소유)은 건드리지 않고 보고한다 —
@@ -205,11 +205,12 @@ class InstallTest(unittest.TestCase):
         cfg = json.loads((self.target / CONFIG_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(cfg["project"], "demo")
         self.assertEqual(cfg["brain_root"], "brain")
-        # 스킬 4종 렌더 주입
+        # 스킬 5종 렌더 주입
         query = self._skill("demo-brain-query").read_text(encoding="utf-8")
         self.assertIn("name: demo-brain-query", query)
         self.assertTrue(self._skill("demo-brain-ingest").exists())
         self.assertTrue(self._skill("demo-brain-session-ingest").exists())
+        self.assertTrue(self._skill("demo-brain-draft").exists())
         self.assertTrue(self._skill("demo-brain-audit").exists())
         # manifest에 심은 파일 기록 — 키는 target 기준 상대 경로(머신 이식성)
         manifest = json.loads(
@@ -315,6 +316,33 @@ class InstallTest(unittest.TestCase):
         relative = criterion.relative_to(self.target).as_posix()
         self.assertIn(relative, third["skipped"])
         self.assertEqual(criterion.read_text(encoding="utf-8"), user_content)
+
+    def test_fifth_draft_skill_is_idempotent_and_preserves_user_edit(self):
+        first = install(self.target, project="demo")
+        draft = self._skill("demo-brain-draft")
+        second = install(self.target, project="demo")
+
+        rendered = draft.read_text(encoding="utf-8")
+        self.assertIn("name: demo-brain-draft", rendered)
+        for command in ("list", "create", "show", "update", "lint"):
+            self.assertIn(f"project-brain draft {command}", rendered)
+        self.assertIn(
+            "../demo-brain-ingest/references/glossary-criteria.md",
+            rendered,
+        )
+        self.assertFalse(
+            (draft.parent / "references" / "glossary-criteria.md").exists()
+        )
+        self.assertIn(draft.relative_to(self.target).as_posix(), first["created"])
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+
+        user_content = rendered + "\n사용자 프로젝트 규칙\n"
+        draft.write_text(user_content, encoding="utf-8")
+        third = install(self.target, project="demo")
+
+        self.assertIn(draft.relative_to(self.target).as_posix(), third["skipped"])
+        self.assertEqual(draft.read_text(encoding="utf-8"), user_content)
 
     def test_p0_bb2_install_reports_exact_controls_and_installs_only_runtime_script(self):
         config = {

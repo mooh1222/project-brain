@@ -681,7 +681,7 @@ def _run_query(argv) -> int:
     parser = argparse.ArgumentParser(
         epilog=(
             "서브커맨드 (상세는 `project-brain <명령> --help`):\n"
-            "  적재·검수   build  ingest  promote  promote-auto  session\n"
+            "  적재·검수   build  ingest  promote  promote-auto  session  draft\n"
             "  검색·색인   search  show  index  eval  projection\n"
             "  그래프      graph (isolated · export)\n"
             "  점검·진단   lint  doctor  bootstrap  stale-check  mark-checked\n"
@@ -1492,6 +1492,109 @@ def _run_show(argv) -> int:
     return 0
 
 
+def _run_draft(argv) -> int:
+    """주제별 지식 초안의 생성·목록·읽기·갱신·lint CLI."""
+    parser = argparse.ArgumentParser(prog="cli draft")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    create_parser = sub.add_parser("create")
+    create_parser.add_argument("topic_id")
+    create_parser.add_argument("--title", required=True)
+    create_parser.add_argument("--scope", required=True)
+    create_parser.add_argument("--source", action="append", default=[])
+    create_parser.add_argument(
+        "--brain-root",
+        help="초안이 있는 Brain root (기본: config .project-brain.json)",
+    )
+
+    list_parser = sub.add_parser("list")
+    list_parser.add_argument(
+        "--brain-root",
+        help="초안이 있는 Brain root (기본: config .project-brain.json)",
+    )
+
+    show_parser = sub.add_parser("show")
+    show_parser.add_argument("topic_id")
+    show_parser.add_argument(
+        "--brain-root",
+        help="초안이 있는 Brain root (기본: config .project-brain.json)",
+    )
+
+    update_parser = sub.add_parser("update")
+    update_parser.add_argument("topic_id")
+    update_parser.add_argument("--expected-sha", required=True)
+    update_parser.add_argument(
+        "--content-file",
+        required=True,
+        help="교체할 완전한 v1 Markdown UTF-8 파일",
+    )
+    update_parser.add_argument(
+        "--brain-root",
+        help="초안이 있는 Brain root (기본: config .project-brain.json)",
+    )
+
+    lint_parser = sub.add_parser("lint")
+    lint_parser.add_argument("topic_id", nargs="?")
+    lint_parser.add_argument(
+        "--brain-root",
+        help="초안이 있는 Brain root (기본: config .project-brain.json)",
+    )
+    args = parser.parse_args(argv)
+
+    from project_brain.draft import (
+        DraftError,
+        create,
+        lint as lint_drafts,
+        list_drafts,
+        show,
+        update,
+    )
+
+    return_code = 0
+    try:
+        brain_root = resolve_brain_root(args.brain_root)
+        if args.action == "create":
+            draft = create(
+                brain_root,
+                topic_id=args.topic_id,
+                title=args.title,
+                scope=args.scope,
+                sources=args.source,
+            )
+            payload = {"ok": True, "draft": draft}
+        elif args.action == "list":
+            payload = {"ok": True, "drafts": list_drafts(brain_root)}
+        elif args.action == "show":
+            payload = {"ok": True, "draft": show(brain_root, args.topic_id)}
+        elif args.action == "update":
+            try:
+                content = Path(args.content_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise DraftError(
+                    "draft_content_read_failed",
+                    f"갱신 content 파일을 읽을 수 없습니다: {exc}",
+                ) from exc
+            payload = {"ok": True, "draft": update(
+                brain_root,
+                args.topic_id,
+                expected_sha=args.expected_sha,
+                content=content,
+            )}
+        else:
+            problems = lint_drafts(brain_root, topic_id=args.topic_id)
+            payload = {"ok": not problems, "problems": problems}
+            return_code = 0 if not problems else 1
+    except DraftError as exc:
+        print(json.dumps(
+            {"ok": False, **exc.as_dict()},
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return return_code
+
+
 def _run_eval(argv) -> int:
     """검색층 평가 하네스 실행 (스펙 §8). 검색층 미구현이면 빈 응답 stub로
     빨간 베이스라인을 측정한다(슬라이스 1의 의도된 상태) — implemented=false 표기.
@@ -1624,7 +1727,7 @@ def _run_audit(argv) -> int:
 
 
 def _run_install(argv) -> int:
-    """프로젝트에 config + 스킬 4종을 멱등 설치 (installer.py — manifest 추적).
+    """프로젝트에 config + 스킬 5종을 멱등 설치 (installer.py — manifest 추적).
 
     설치 직후 어시스턴트가 코퍼스를 보고 스킬 description 트리거 어휘를 맞춤
     제안하는 단계는 사람·에이전트 몫이다 — CLI는 범용 템플릿 주입까지만."""
@@ -3174,6 +3277,8 @@ def main() -> int:
             return _run_search(argv[1:])
         if argv and argv[0] == "show":
             return _run_show(argv[1:])
+        if argv and argv[0] == "draft":
+            return _run_draft(argv[1:])
         if argv and argv[0] == "eval":
             return _run_eval(argv[1:])
         if argv and argv[0] == "lint":

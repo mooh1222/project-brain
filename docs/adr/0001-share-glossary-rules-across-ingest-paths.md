@@ -1,7 +1,7 @@
 ---
 status: accepted
 decision_date: 2026-08-14
-implementation: partial_issue_48
+implementation: implemented_issues_48_50
 contract_status: mvp_scope_revalidated_2026-08-28
 superseded_by: null
 ---
@@ -16,4 +16,4 @@ superseded_by: null
 
 이 reference는 실제 프로젝트 이름·독립 개념·명명 근거·코드 토큰 제외, 비어휘 의미의 DomainMapping·CodeLocator·무객체 라우팅, 대표어·동의어·별칭, 어휘 후보 최소 문턱, 사용자 판단이 필요한 모호성과 구체적인 정답·반례를 다룬다. `GlossaryClassificationRecord`, 공통 verification hash, BB2 migration 실행 절차는 이 문서의 범위가 아니다.
 
-2026-08-28 #48에서 reference와 ingest·session-ingest·audit의 조건부 연결을 구현했다. query는 읽지 않는다. 아직 설치되지 않은 brain-draft 연결은 #50에서 추가하므로 이 ADR 전체 구현 상태는 partial이다.
+2026-08-28 #48에서 reference와 ingest·session-ingest·audit의 조건부 연결을 구현했고, #50에서 brain-draft의 어휘 관찰 분기를 같은 reference에 연결했다. query는 읽지 않으며 네 소비 경로 모두 설치 결과에서 한 파일로 resolve된다.

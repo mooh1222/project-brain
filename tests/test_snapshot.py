@@ -17,6 +17,7 @@ import pytest
 
 from project_brain import cli as brain_cli
 from project_brain import snapshot
+from project_brain.draft import create as create_draft
 from project_brain.snapshot import (
     SnapshotError,
     SnapshotRequest,
@@ -961,6 +962,26 @@ def _snapshot_fixture(
             "managed": managed,
         },
     )
+
+
+def test_snapshot_excludes_knowledge_drafts(tmp_path):
+    request, _ = _snapshot_fixture(tmp_path)
+    draft = create_draft(
+        request.brain_root,
+        topic_id="snapshot-excluded",
+        title="스냅샷 제외 초안",
+        scope="정식 코퍼스 밖",
+        updated_at="2026-08-28T18:30:00+09:00",
+    )
+
+    result = create_snapshot(request)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+    assert all(
+        not entry["path"].startswith("drafts/")
+        for entry in manifest["files"]
+    )
+    assert not (result.snapshot_root / "payload" / "brain" / draft["path"]).exists()
 
 
 def test_create_snapshot_rejects_non_git_repo_and_engine_roots(tmp_path):
