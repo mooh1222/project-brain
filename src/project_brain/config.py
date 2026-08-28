@@ -37,17 +37,47 @@ def find_config(start=None) -> Path | None:
     return None
 
 
+def _config_document(start=None) -> tuple[Path, dict] | None:
+    cfg_path = find_config(start=start)
+    if cfg_path is None:
+        return None
+    return cfg_path, json.loads(cfg_path.read_text(encoding="utf-8"))
+
+
+def _configured_brain_root(
+    cfg_path: Path,
+    raw: dict,
+    *,
+    follow_symlinks: bool,
+) -> Path:
+    configured = cfg_path.parent / raw.get("brain_root", "brain")
+    if follow_symlinks:
+        return configured.resolve()
+    return Path(os.path.abspath(configured))
+
+
+def _missing_path_error(what: str) -> ConfigError:
+    return ConfigError(
+        f"{what} 경로를 알 수 없다 — 플래그로 직접 주거나, 프로젝트 루트에 "
+        f"{CONFIG_FILENAME}을 만들어라(`project-brain install`이 생성)."
+    )
+
+
 def load_config(start=None) -> dict | None:
     """config를 읽어 경로 필드를 절대화해 돌려준다. 파일이 없으면 None.
 
     반환: {path, root, brain_root, db, scenarios, project, repo, default_branch}
     """
-    cfg_path = find_config(start=start)
-    if cfg_path is None:
+    document = _config_document(start=start)
+    if document is None:
         return None
-    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg_path, raw = document
     root = cfg_path.parent
-    brain_root = (root / raw.get("brain_root", "brain")).resolve()
+    brain_root = _configured_brain_root(
+        cfg_path,
+        raw,
+        follow_symlinks=True,
+    )
     db = (root / raw["db"]).resolve() if "db" in raw \
         else brain_root / ".brain-local" / "index.db"
     scenarios = (root / raw["scenarios"]).resolve() if "scenarios" in raw \
@@ -70,10 +100,7 @@ def _resolve(explicit, key: str, what: str, start=None) -> Path:
     cfg = load_config(start=start)
     if cfg is not None:
         return cfg[key]
-    raise ConfigError(
-        f"{what} 경로를 알 수 없다 — 플래그로 직접 주거나, 프로젝트 루트에 "
-        f"{CONFIG_FILENAME}을 만들어라(`project-brain install`이 생성)."
-    )
+    raise _missing_path_error(what)
 
 
 def resolve_brain_root(explicit=None, start=None) -> Path:
@@ -88,16 +115,15 @@ def resolve_brain_root_no_follow(explicit=None, start=None) -> Path:
     if explicit is not None:
         brain_root = Path(explicit)
     else:
-        cfg_path = find_config(start=start)
-        if cfg_path is None:
-            raise ConfigError(
-                "brain 코퍼스 경로를 알 수 없다 — 플래그로 직접 주거나, 프로젝트 루트에 "
-                f"{CONFIG_FILENAME}을 만들어라(`project-brain install`이 생성)."
-            )
-        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
-        brain_root = Path(os.path.abspath(
-            cfg_path.parent / raw.get("brain_root", "brain")
-        ))
+        document = _config_document(start=start)
+        if document is None:
+            raise _missing_path_error("brain 코퍼스")
+        cfg_path, raw = document
+        brain_root = _configured_brain_root(
+            cfg_path,
+            raw,
+            follow_symlinks=False,
+        )
     if not brain_root.is_absolute():
         raise ConfigError("brain 코퍼스 경로는 absolute path여야 한다.")
     return brain_root

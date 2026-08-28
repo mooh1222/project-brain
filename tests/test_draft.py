@@ -661,3 +661,63 @@ def test_update_rejects_metadata_shifted_out_of_the_fixed_v1_header(tmp_path):
 
     assert exc.value.code == "draft_title_invalid"
     assert show(tmp_path, "shifted-header") == created
+
+
+def test_update_rejects_unscoped_text_between_header_and_first_section(tmp_path):
+    created = create(
+        tmp_path,
+        topic_id="unscoped-header",
+        title="고정 헤더 초안",
+        scope="검사 범위",
+        updated_at=UPDATED,
+    )
+    invalid = created["content"].replace(
+        f"Updated: {UPDATED}\n\n## 범위",
+        f"Updated: {UPDATED}\n\nUnexpected: value\n\n## 범위",
+    )
+
+    with pytest.raises(DraftError) as exc:
+        update(
+            tmp_path,
+            "unscoped-header",
+            expected_sha=created["sha256"],
+            content=invalid,
+        )
+
+    assert exc.value.code == "draft_sections_invalid"
+    assert show(tmp_path, "unscoped-header") == created
+
+
+def test_lint_ignores_heading_like_lines_inside_fenced_code(tmp_path):
+    created = create(
+        tmp_path,
+        topic_id="fenced-content",
+        title="코드 예시 초안",
+        scope="검사 범위",
+        updated_at=UPDATED,
+    )
+    content = created["content"].replace(
+        "## 확인된 이해\n\n## 어휘 관찰",
+        """## 확인된 이해
+
+```bash
+# shell comment
+## 문서 절이 아닌 출력 예시
+Topic ID: not-metadata
+Updated: not-a-time
+<!-- project-brain-draft:v1 -->
+```
+
+## 어휘 관찰""",
+    )
+
+    updated = update(
+        tmp_path,
+        "fenced-content",
+        expected_sha=created["sha256"],
+        content=content,
+    )
+
+    assert lint(tmp_path, topic_id="fenced-content") == []
+    assert updated["topic_id"] == "fenced-content"
+    assert updated["title"] == "코드 예시 초안"

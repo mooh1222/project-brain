@@ -147,15 +147,33 @@ def _render(
     )
 
 
-def _section(text: str, heading: str) -> str:
-    marker = f"## {heading}\n"
-    start = text.index(marker) + len(marker)
-    end = len(text)
-    for later in _SECTION_HEADINGS[_SECTION_HEADINGS.index(heading) + 1:]:
-        candidate = text.find(f"## {later}\n", start)
-        if candidate != -1:
-            end = min(end, candidate)
-    return text[start:end].strip()
+def _outside_fenced_code(lines: list[str]) -> list[tuple[int, str]]:
+    """CommonMark fenced code 밖의 줄과 원래 줄 번호만 반환한다."""
+    result: list[tuple[int, str]] = []
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        marker = stripped[:1]
+        marker_length = 0
+        if indent <= 3 and marker in {"`", "~"}:
+            marker_length = len(stripped) - len(stripped.lstrip(marker))
+
+        if fence is not None:
+            fence_marker, minimum_length = fence
+            if (
+                marker == fence_marker
+                and marker_length >= minimum_length
+                and not stripped[marker_length:].strip()
+            ):
+                fence = None
+            continue
+
+        if marker_length >= 3:
+            fence = (marker, marker_length)
+            continue
+        result.append((index, line))
+    return result
 
 
 def _parse_content(
@@ -165,7 +183,9 @@ def _parse_content(
     relative = f"drafts/{path.name}"
     problems: list[dict[str, str]] = []
     lines = text.splitlines()
-    if lines.count(DRAFT_MARKER) != 1 or not text.startswith(
+    outside = _outside_fenced_code(lines)
+    outside_lines = [line for _, line in outside]
+    if outside_lines.count(DRAFT_MARKER) != 1 or not text.startswith(
         f"{DRAFT_MARKER}\n"
     ):
         problems.append({
@@ -175,7 +195,7 @@ def _parse_content(
         })
         return None, problems
 
-    h1_lines = [line for line in lines if line.startswith("# ")]
+    h1_lines = [line for _, line in outside if line.startswith("# ")]
     title = (
         h1_lines[0].removeprefix("# ")
         if len(h1_lines) == 1
@@ -194,76 +214,76 @@ def _parse_content(
             "detail": "marker 다음 줄에 비어 있지 않은 H1 제목이 정확히 하나 있어야 합니다",
         })
 
-    topic_lines = [
-        line.removeprefix("Topic ID: ")
-        for line in lines
-        if line.startswith("Topic ID: ")
-    ]
-    topic_id = topic_lines[0] if len(topic_lines) == 1 else ""
-    topic_valid = (
-        len(topic_lines) == 1
-        and _TOPIC_ID.fullmatch(topic_id) is not None
-    )
-    if not topic_valid:
-        problems.append({
-            "path": relative,
-            "code": "draft_topic_id_invalid",
-            "detail": "ASCII kebab-case Topic ID가 정확히 하나 있어야 합니다",
-        })
-    elif topic_id != path.stem:
-        problems.append({
-            "path": relative,
-            "code": "draft_topic_id_mismatch",
-            "detail": "Topic ID가 초안 파일명과 일치해야 합니다",
-        })
-    elif title_layout_valid and (
-        len(lines) <= 3 or lines[3] != f"Topic ID: {topic_id}"
-    ):
-        problems.append({
-            "path": relative,
-            "code": "draft_topic_id_invalid",
-            "detail": "Topic ID가 v1 header의 고정 위치에 있어야 합니다",
-        })
+    topic_id = ""
+    updated = ""
+    header_layout_valid = False
+    if title_layout_valid:
+        topic_line = lines[3] if len(lines) > 3 else ""
+        topic_id = topic_line.removeprefix("Topic ID: ")
+        topic_valid = (
+            len(lines) > 3
+            and lines[2] == ""
+            and topic_line.startswith("Topic ID: ")
+            and _TOPIC_ID.fullmatch(topic_id) is not None
+        )
+        if not topic_valid:
+            problems.append({
+                "path": relative,
+                "code": "draft_topic_id_invalid",
+                "detail": "ASCII kebab-case Topic ID가 v1 header의 고정 위치에 있어야 합니다",
+            })
+        elif topic_id != path.stem:
+            problems.append({
+                "path": relative,
+                "code": "draft_topic_id_mismatch",
+                "detail": "Topic ID가 초안 파일명과 일치해야 합니다",
+            })
+        else:
+            updated_line = lines[4] if len(lines) > 4 else ""
+            updated = updated_line.removeprefix("Updated: ")
+            updated_valid = (
+                updated_line.startswith("Updated: ")
+                and _valid_updated(updated)
+            )
+            if not updated_valid:
+                problems.append({
+                    "path": relative,
+                    "code": "draft_updated_invalid",
+                    "detail": "timezone이 있는 ISO 8601 Updated가 v1 header의 고정 위치에 있어야 합니다",
+                })
+            else:
+                header_layout_valid = True
 
-    updated_lines = [
-        line.removeprefix("Updated: ")
-        for line in lines
-        if line.startswith("Updated: ")
-    ]
-    updated = updated_lines[0] if len(updated_lines) == 1 else ""
-    updated_valid = len(updated_lines) == 1 and _valid_updated(updated)
-    if not updated_valid:
-        problems.append({
-            "path": relative,
-            "code": "draft_updated_invalid",
-            "detail": "timezone이 있는 ISO 8601 Updated가 정확히 하나 있어야 합니다",
-        })
-    elif title_layout_valid and topic_valid and topic_id == path.stem and (
-        len(lines) <= 4 or lines[4] != f"Updated: {updated}"
-    ):
-        problems.append({
-            "path": relative,
-            "code": "draft_updated_invalid",
-            "detail": "Updated가 v1 header의 고정 위치에 있어야 합니다",
-        })
-
-    h2_headings = [
-        line.removeprefix("## ")
-        for line in lines
+    h2_entries = [
+        (index, line.removeprefix("## "))
+        for index, line in outside
         if line.startswith("## ")
     ]
+    h2_headings = [heading for _, heading in h2_entries]
     if tuple(h2_headings) != _SECTION_HEADINGS:
         problems.append({
             "path": relative,
             "code": "draft_sections_invalid",
             "detail": "필수 H2 절이 정확히 한 번씩 정해진 순서로 있어야 합니다",
         })
+    elif header_layout_valid and (
+        len(lines) <= 5
+        or lines[5] != ""
+        or h2_entries[0][0] != 6
+    ):
+        problems.append({
+            "path": relative,
+            "code": "draft_sections_invalid",
+            "detail": "첫 H2 절은 v1 header 바로 다음 고정 위치에 있어야 합니다",
+        })
     if problems:
         return None, problems
+    scope_start = h2_entries[0][0] + 1
+    scope_end = h2_entries[1][0]
     return {
         "topic_id": topic_id,
         "title": title,
-        "scope": _section(text, "범위"),
+        "scope": "\n".join(lines[scope_start:scope_end]).strip(),
         "updated": updated,
     }, []
 
