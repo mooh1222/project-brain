@@ -93,8 +93,9 @@ replacement spec #47의 활성 결과는 네 개로 제한한다.
 회수한다. exact 어휘는 recall top-K 밖으로 밀려도 먼저 포함하며 scope 추론용 기존 매처와
 candidate 노출·`avoid` 교정 경로는 바꾸지 않았다.
 
-- `DomainMapping` 색인 표면도 참조 어휘의 `term`·`synonyms`·`aliases`를 모두 이어받는다.
-  `EXTRACTOR_VERSION=4`로 올려 예전 DB가 새 계약을 조용히 재사용하지 못하게 했다.
+- `DomainMapping` 색인 표면도 reviewed 참조 어휘의 `term`·`synonyms`·`aliases`를 모두
+  이어받는다. candidate 참조 어휘는 기존 `term`·`synonyms`만 유지한다. 추출기 버전은 4로
+  올렸고, aliases가 있는 코퍼스는 표면 기반 fingerprint가 달라져 예전 DB를 stale로 거부한다.
 - 실제 BB2에서 실모델 색인을 한 번 재구축해 객체 7,881개와 raw chunk 1,583개를 v4 DB에
   적재했다. `KAMEHAMEHA`·`광선 발사`·`광선발사` 세 질의가 모두 같은 reviewed 어휘와
   `mapping.petskill-kamehameha.skill-code-registration`을 회수했다.

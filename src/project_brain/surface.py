@@ -56,6 +56,18 @@ def _norm_list(value) -> list[str]:
     return out
 
 
+def glossary_name_surfaces(obj: dict, *, include_aliases: bool = True) -> list[str]:
+    """GlossaryTerm의 검색 이름 표면을 term → synonyms → aliases 순으로 돌려준다."""
+    parts: list[str] = []
+    term = _norm_str(obj.get("term"))
+    if term is not None:
+        parts.append(term)
+    parts.extend(_norm_list(obj.get("synonyms")))
+    if include_aliases:
+        parts.extend(_norm_list(obj.get("aliases")))
+    return parts
+
+
 def _surface_glossary_term(obj, store) -> list[str]:
     # spec §2.1: term, synonyms, aliases, avoid, definition, boundary
     # (avoid/boundary는 실코퍼스 GlossaryTerm에 없지만 있으면 포함.)
@@ -71,8 +83,8 @@ def _surface_glossary_term(obj, store) -> list[str]:
 
 def _surface_domain_mapping(obj, store) -> list[str]:
     # spec §2.1: meaning, boundary, canonical_summary + 참조 용어의 term/synonyms/aliases.
-    # 이름 종류에 검색 권한 차이를 두지 않는 라우터 _matched_mappings 계약을 계승하고,
-    # 없는 참조 id는 건너뜀.
+    # reviewed 어휘는 이름 종류에 검색 권한 차이를 두지 않는다. candidate는 기존
+    # term/synonyms만 유지하고 aliases는 reviewed 매핑 표면으로 승격하지 않는다.
     parts: list[str] = []
     for field in ("canonical_summary", "meaning", "boundary"):
         s = _norm_str(obj.get(field))
@@ -82,11 +94,10 @@ def _surface_domain_mapping(obj, store) -> list[str]:
         if store is None or not store.has(term_id):
             continue
         term = store.get(term_id)
-        s = _norm_str(term.get("term"))
-        if s is not None:
-            parts.append(s)
-        parts.extend(_norm_list(term.get("synonyms")))
-        parts.extend(_norm_list(term.get("aliases")))
+        parts.extend(glossary_name_surfaces(
+            term,
+            include_aliases=term.get("status") == "reviewed",
+        ))
     return parts
 
 

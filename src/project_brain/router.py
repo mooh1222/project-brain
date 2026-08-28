@@ -5,6 +5,7 @@ from pathlib import Path
 from project_brain.intent import classify_query
 from project_brain.status import answer_status, claim_status
 from project_brain.store import BrainStore
+from project_brain.surface import glossary_name_surfaces
 
 _SCOPE_TOKEN_RE = re.compile(r"[0-9A-Za-z._-]+")
 
@@ -674,9 +675,7 @@ class QueryRouter:
         """
         matched: list[tuple[dict, str]] = []
         for term in self._reviewed_by_kind("GlossaryTerm"):
-            surfaces = [term.get("term")]
-            surfaces.extend(term.get("synonyms") or [])
-            surfaces.extend(term.get("aliases") or [])
+            surfaces = glossary_name_surfaces(term)
             matching = [surface for surface in surfaces if surface and surface in query]
             if matching:
                 matched.append((term, max(matching, key=len)))
@@ -699,18 +698,17 @@ class QueryRouter:
         for term in self.store.by_kind("GlossaryTerm"):
             if term.get("status") != "candidate":
                 continue
-            surfaces = {term.get("term")}
-            surfaces.update(term.get("synonyms") or [])
-            surfaces.update(term.get("aliases") or [])
+            surfaces = glossary_name_surfaces(term)
             if any(surface and surface in query for surface in surfaces):
                 result.append(term)
         return result
 
     def _matched_mappings(self, query: str) -> list[dict]:
         """query에 등장하는 용어 텍스트로 reviewed DomainMapping을 찾는다.
-        매핑이 검수 단위이므로, 참조하는 GlossaryTerm이 candidate여도 term/synonym/alias 텍스트를
-        매핑의 언어 표면(language surface)으로 써서 매칭한다 (spec §3.3/§9). 답변 내용은 후보 용어
-        정의가 아니라 reviewed 매핑에서 나오므로 candidate 정의가 노출되지는 않는다."""
+        매핑이 검수 단위이므로, 참조하는 GlossaryTerm이 candidate여도 기존 term/synonym 텍스트는
+        매핑의 언어 표면(language surface)으로 쓴다 (spec §3.3/§9). alias는 reviewed 어휘만
+        위임해 candidate 노출 권한을 넓히지 않는다. 답변 내용은 후보 용어 정의가 아니라 reviewed
+        매핑에서 나오므로 candidate 정의가 노출되지는 않는다."""
         result = []
         for mapping in self._reviewed_by_kind("DomainMapping"):
             surfaces: set[str] = set()
@@ -718,12 +716,10 @@ class QueryRouter:
                 if not self.store.has(term_id):
                     continue
                 term = self.store.get(term_id)
-                if term.get("term"):
-                    surfaces.add(term["term"])
-                for synonym in term.get("synonyms") or []:
-                    surfaces.add(synonym)
-                for alias in term.get("aliases") or []:
-                    surfaces.add(alias)
+                surfaces.update(glossary_name_surfaces(
+                    term,
+                    include_aliases=term.get("status") == "reviewed",
+                ))
             if any(surface and surface in query for surface in surfaces):
                 result.append(mapping)
         return result

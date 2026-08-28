@@ -147,6 +147,24 @@ class ExtractDomainMappingTest(unittest.TestCase):
         self.assertIn("카약", surface)
         self.assertIn("미나의카약별칭", surface)
 
+    def test_candidate_referenced_term_aliases_not_delegated(self):
+        # candidate의 기존 term/synonym 매칭은 보존하되 alias를 reviewed 매핑 권한으로
+        # 승격하지 않는다.
+        t = glossary_term(
+            "g.ref",
+            term="카약 후보",
+            definition="d",
+            aliases=["미나의카약후보"],
+            status="candidate",
+            synonyms=["카약 후보 동의어"],
+        )
+        m = domain_mapping(glossary_term_ids=["g.ref"])
+        surface = extract_surface(m, store_of(t, m))
+
+        self.assertIn("카약 후보", surface)
+        self.assertIn("카약 후보 동의어", surface)
+        self.assertNotIn("미나의카약후보", surface)
+
     def test_extractor_version_bumped_for_mapping_alias_delegation(self):
         self.assertGreaterEqual(EXTRACTOR_VERSION, 4)
 

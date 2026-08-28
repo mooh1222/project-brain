@@ -108,6 +108,30 @@ class TestCandidateExposure(unittest.TestCase):
         gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
         self.assertIn("g.a", [c["id"] for c in gloss["candidate_terms"]])
 
+    def test_candidate_alias_does_not_gain_reviewed_mapping_access(self):
+        from tests.test_search import domain_mapping, glossary_term
+
+        term = glossary_term(
+            "g.canoe",
+            term="카누 레이스 후보",
+            aliases=["샐리의 카누 후보"],
+            status="candidate",
+        )
+        mapping = domain_mapping(
+            "m.canoe",
+            meaning="별도 검수된 카누 의미",
+            glossary_term_ids=["g.canoe"],
+        )
+        answer = QueryRouter(store_of(term, mapping)).answer("샐리의 카누 후보 무슨 뜻?")
+        section = next(
+            item for item in answer["sections"]
+            if item["intent"] == "glossary_meaning"
+        )
+
+        self.assertEqual(section["mappings"], [])
+        self.assertIn(term["id"], [item["id"] for item in section["candidate_terms"]])
+        self.assertTrue(answer["needs_clarification"])
+
     def test_irrelevant_candidate_not_exposed(self):
         # 질의에 안 나오는 term은 노출 안 함(노이즈 배제)
         store = store_of(context(glossary_term_ids=[]),

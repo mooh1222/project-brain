@@ -44,7 +44,7 @@ from project_brain.search_index import (
     search_vector,
 )
 from project_brain.store import BrainStore
-from project_brain.surface import extract_surface
+from project_brain.surface import extract_surface, glossary_name_surfaces
 from project_brain.tokenize_ko import tokenize
 
 # 기본 brain root·색인 DB는 프로젝트 config(.project-brain.json)에서 해석한다(§4) —
@@ -640,11 +640,10 @@ def _registry_surfaces(store) -> set[str]:
     길이 _REGISTRY_MIN_SURFACE_LEN 이상만, 소문자화. 질의와 D1(부분문자열) 대조용."""
     surfaces: set[str] = set()
     for term in store.by_kind("GlossaryTerm"):
-        for v in (term.get("term"), *(term.get("synonyms") or []), *(term.get("aliases") or [])):
-            if isinstance(v, str):
-                s = v.strip().lower()
-                if len(s) >= _REGISTRY_MIN_SURFACE_LEN:
-                    surfaces.add(s)
+        for value in glossary_name_surfaces(term):
+            surface = value.lower()
+            if len(surface) >= _REGISTRY_MIN_SURFACE_LEN:
+                surfaces.add(surface)
     return surfaces
 
 
