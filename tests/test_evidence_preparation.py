@@ -1,18 +1,27 @@
 from collections.abc import Callable
 import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
 import time
 from types import MappingProxyType
 from unittest import mock
 
 import pytest
 
-from project_brain import corpus_io
+from project_brain import corpus_io, evidence_preparation, foundation
 from project_brain.evidence_preparation import (
+    BasePlanTarget,
+    EvidenceLoadedIdentity,
     EvidencePreparationError,
     ProjectedStore,
+    capture_evidence_loaded_identity,
+    capture_loaded_adapter_identity,
     plan_base,
+    verify_evidence_loaded_identity,
 )
-from project_brain.evidence_plan import EvidencePlanRequirement
+from project_brain.evidence_plan import EvidencePlanRequirement, parse_evidence_plan
 from project_brain.mutation import MutationService
 from project_brain.store import BrainStore
 
@@ -36,6 +45,212 @@ def _decoded(value: bytes) -> dict:
     return json.loads(value.decode("utf-8"))
 
 
+def _commit_test_engine(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "e3@test.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "E3 Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "fixture"],
+        check=True,
+    )
+
+
+def _identity_fixture(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+    engine_root = (tmp_path / "engine").resolve()
+    package = engine_root / "src/project_brain"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(b"\n")
+    (package / "cli.py").write_bytes(b"def main(): pass\n")
+    adapter_module = package / "evidence_preparation.py"
+    adapter_module.write_bytes(b"adapter-v1\n")
+    (engine_root / "pyproject.toml").write_bytes(b"[project]\nname='fixture'\n")
+    (engine_root / "uv.lock").write_bytes(b"version = 1\n")
+    _commit_test_engine(engine_root)
+
+    brain_root = (tmp_path / "brain").resolve()
+    raw = brain_root / "raw/sources/issue-43.md"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"raw source v1\n")
+    monkeypatch.setattr(
+        foundation,
+        "resolved_project_brain_file",
+        lambda: package / "__init__.py",
+    )
+    monkeypatch.setattr(
+        foundation,
+        "resolved_cli_source_file",
+        lambda: package / "cli.py",
+    )
+    monkeypatch.setattr(
+        evidence_preparation,
+        "_loaded_adapter_module_path",
+        lambda: adapter_module,
+    )
+    return engine_root, brain_root, adapter_module
+
+
+def _source_entry(target_id: str, source: dict[str, object]):
+    return parse_evidence_plan(
+        (
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "target_id": target_id,
+                            "source": source,
+                            "claimed_producer": {
+                                "kind": "agent",
+                                "id": "issue-43-test",
+                                "version": "1",
+                            },
+                            "claimed_verifiers": [],
+                        },
+                    ],
+                    "version": 1,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+    ).entries[0]
+
+
+def _raw_source_entry(target_id: str, raw_path: str):
+    return _source_entry(
+        target_id,
+        {"type": "raw_source_observation", "path": raw_path},
+    )
+
+
+def _raw_source_target(
+    target_id: str = "manifest.ctx.source",
+    kind: str = "EvidenceManifest",
+) -> BasePlanTarget:
+    return BasePlanTarget(
+        target_id=target_id,
+        kind=kind,
+        action="create",
+        before_unstamped_bytes=None,
+        before_semantic_sha256=None,
+        base_unstamped_bytes=b"{}",
+        base_semantic_sha256="0" * 64,
+    )
+
+
+def _capture_raw_identity(
+    engine_root: Path,
+    brain_root: Path,
+    raw_path: str = "raw/sources/issue-43.md",
+):
+    target = _raw_source_target()
+    return capture_evidence_loaded_identity(
+        engine_root=engine_root,
+        brain_root=brain_root,
+        target=target,
+        entry=_raw_source_entry(target.target_id, raw_path),
+    )
+
+
+def test_loaded_identity_is_capture_only_deeply_immutable_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    with pytest.raises(TypeError):
+        EvidenceLoadedIdentity(
+            engine_root=engine_root,
+            brain_root=brain_root,
+            target_kind="EvidenceManifest",
+            raw_path="raw/sources/issue-43.md",
+            engine={},
+            adapter={},
+            raw_snapshot={},
+        )
+
+    identity = _capture_raw_identity(engine_root, brain_root)
+
+    with pytest.raises(TypeError):
+        identity.engine["head"] = "caller-forged"
+    with pytest.raises(TypeError):
+        identity.adapter["id"] = "caller-forged"
+    with pytest.raises(TypeError):
+        identity.raw_snapshot["file"]["bytes_sha256"] = "0" * 64
+
+    (brain_root / "raw/sources/issue-43.md").write_bytes(b"raw source v2\n")
+    _assert_identity_drift_is_zero_write(identity)
+
+
+def test_loaded_adapter_identity_uses_only_base_target_and_e1_raw_source(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, module = _identity_fixture(tmp_path, monkeypatch)
+    target = _raw_source_target()
+    entry = _raw_source_entry(target.target_id, "raw/sources/issue-43.md")
+
+    adapter = capture_evidence_loaded_identity(
+        engine_root=engine_root,
+        brain_root=brain_root,
+        target=target,
+        entry=entry,
+    ).adapter
+
+    assert (
+        adapter.id,
+        adapter.version,
+        adapter.module_path,
+        adapter.module_sha256,
+    ) == (
+        "local_raw_observation",
+        "1",
+        str(module),
+        "7a2084cf00ac07d47f1385f3534bc87202862e783aba40dc5705e80aa5f0af47",
+    )
+
+    for mismatched_target, mismatched_entry in (
+        (
+            target,
+            _raw_source_entry("manifest.ctx.other", "raw/sources/issue-43.md"),
+        ),
+        (
+            _raw_source_target(kind="SpecDocument"),
+            entry,
+        ),
+        (
+            target,
+            _source_entry(target.target_id, {"type": "existing_sources"}),
+        ),
+    ):
+        with pytest.raises(EvidencePreparationError) as raised:
+            capture_evidence_loaded_identity(
+                engine_root=engine_root,
+                brain_root=brain_root,
+                target=mismatched_target,
+                entry=mismatched_entry,
+            )
+
+        assert raised.value.code == "evidence_source_variant_mismatch"
+
+    with pytest.raises(EvidencePreparationError) as raised:
+        capture_evidence_loaded_identity(
+            engine_root=engine_root,
+            brain_root=brain_root,
+            target=_raw_source_target("mapping.ctx.source", "DomainMapping"),
+            entry=_raw_source_entry("mapping.ctx.source", "raw/sources/issue-43.md"),
+        )
+
+    assert raised.value.code == "evidence_adapter_unavailable"
+
+
 def _object(
     object_id: str,
     *,
@@ -54,6 +269,228 @@ def _object(
         "updated_at": stamp,
         **fields,
     }
+
+
+def test_loaded_adapter_identity_uses_closed_raw_registry_and_loaded_module_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    module = (tmp_path / "local_raw_adapter.py").resolve()
+    module.write_bytes(b"adapter-v1\n")
+    monkeypatch.setattr(
+        evidence_preparation,
+        "_loaded_adapter_module_path",
+        lambda: module,
+    )
+
+    for target_id, kind in (
+        ("manifest.ctx.source", "EvidenceManifest"),
+        ("spec.document", "SpecDocument"),
+        ("revision.document.one", "SpecRevision"),
+        ("slide.document.one.1", "SlideRef"),
+        ("slack.ctx.thread", "SlackThread"),
+    ):
+        target = _raw_source_target(target_id, kind)
+        adapter = capture_loaded_adapter_identity(
+            target=target,
+            entry=_raw_source_entry(target_id, "raw/sources/issue-43.md"),
+        )
+        assert (
+            adapter.id,
+            adapter.version,
+            adapter.module_path,
+            adapter.module_sha256,
+        ) == (
+            "local_raw_observation",
+            "1",
+            str(module),
+            "7a2084cf00ac07d47f1385f3534bc87202862e783aba40dc5705e80aa5f0af47",
+        )
+
+
+def test_raw_snapshot_parent_binding_rejects_symlink_and_hardlink_to_initial_invalid(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    brain_root = (tmp_path / "brain").resolve()
+    source_directory = brain_root / "raw/sources"
+    source_directory.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "outside-source.md"
+    target.write_bytes(b"outside\n")
+    symlink = source_directory / "symlink.md"
+    symlink.symlink_to(target)
+
+    with pytest.raises(EvidencePreparationError) as raised:
+        _capture_raw_identity(engine_root, brain_root, "raw/sources/symlink.md")
+
+    assert raised.value.code == "evidence_raw_source_invalid"
+
+    hardlinked = source_directory / "hardlinked.md"
+    hardlinked.write_bytes(b"hardlinked\n")
+    os.link(hardlinked, source_directory / "second-name.md")
+
+    with pytest.raises(EvidencePreparationError) as raised:
+        _capture_raw_identity(engine_root, brain_root, "raw/sources/hardlinked.md")
+
+    assert raised.value.code == "evidence_raw_source_invalid"
+
+
+def test_loaded_identity_maps_unreadable_initial_raw_source_to_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+
+    with pytest.raises(EvidencePreparationError) as raised:
+        _capture_raw_identity(engine_root, brain_root, "raw/sources/missing.md")
+
+    assert raised.value.code == "evidence_raw_source_unavailable"
+
+
+def test_identity_drift_is_zero_write_when_loaded_engine_changes(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    identity = _capture_raw_identity(engine_root, brain_root)
+    (engine_root / "src/project_brain/cli.py").write_bytes(b"def main(): changed\n")
+
+    _assert_identity_drift_is_zero_write(identity)
+
+
+def _assert_identity_drift_is_zero_write(identity) -> None:
+
+    filesystem = mock.Mock(side_effect=AssertionError("filesystem write called"))
+    journal = mock.Mock(side_effect=AssertionError("journal called"))
+    receipt = mock.Mock(side_effect=AssertionError("receipt called"))
+    clock = mock.Mock(side_effect=AssertionError("clock called"))
+    mutation = mock.Mock(side_effect=AssertionError("mutation called"))
+    with (
+        mock.patch.object(BrainStore, "save_object", filesystem),
+        mock.patch.object(corpus_io, "apply_transaction", journal),
+        mock.patch.object(corpus_io, "record_no_change_receipt", receipt),
+        mock.patch.object(MutationService, "apply", mutation),
+        mock.patch.object(time, "time", clock),
+    ):
+        with pytest.raises(EvidencePreparationError) as raised:
+            verify_evidence_loaded_identity(identity)
+
+    assert raised.value.code == "evidence_snapshot_changed"
+    assert not filesystem.called
+    assert not journal.called
+    assert not receipt.called
+    assert not mutation.called
+    assert not clock.called
+
+
+def test_identity_drift_is_zero_write_when_loaded_adapter_module_changes(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    identity = _capture_raw_identity(engine_root, brain_root)
+    adapter_module.write_bytes(b"adapter-v2\n")
+
+    _assert_identity_drift_is_zero_write(identity)
+
+
+def test_identity_drift_is_zero_write_when_raw_snapshot_parent_binding_changes_after_ordered_capture(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    original_parent = brain_root / "raw/sources/briefs"
+    original_source = original_parent / "issue-43.md"
+    original_parent.mkdir()
+    original_source.write_bytes(b"raw source v1\n")
+    identity = _capture_raw_identity(
+        engine_root,
+        brain_root,
+        "raw/sources/briefs/issue-43.md",
+    )
+
+    assert (
+        identity.raw_snapshot.root.path,
+        identity.raw_snapshot.root.device,
+        identity.raw_snapshot.root.inode,
+    ) == (
+        str(brain_root),
+        brain_root.stat().st_dev,
+        brain_root.stat().st_ino,
+    )
+    assert identity.raw_snapshot.path == "raw/sources/briefs/issue-43.md"
+    assert [
+        (binding.path, binding.device, binding.inode)
+        for binding in identity.raw_snapshot.parent_bindings
+    ] == [
+        ("raw", (brain_root / "raw").stat().st_dev, (brain_root / "raw").stat().st_ino),
+        (
+            "raw/sources",
+            (brain_root / "raw/sources").stat().st_dev,
+            (brain_root / "raw/sources").stat().st_ino,
+        ),
+        (
+            "raw/sources/briefs",
+            original_source.parent.stat().st_dev,
+            original_source.parent.stat().st_ino,
+        ),
+    ]
+
+    original_parent.rename(brain_root / "raw/sources/briefs-before")
+    rebound_parent = brain_root / "raw/sources/briefs"
+    rebound_parent.mkdir()
+    (rebound_parent / "issue-43.md").write_bytes(b"raw source v1\n")
+
+    _assert_identity_drift_is_zero_write(identity)
+
+
+def test_identity_drift_is_zero_write_when_brain_root_rebinds(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    identity = _capture_raw_identity(engine_root, brain_root)
+    moved = tmp_path / "moved-brain"
+    brain_root.rename(moved)
+    shutil.copytree(moved, brain_root)
+
+    _assert_identity_drift_is_zero_write(identity)
+
+
+def test_identity_drift_is_zero_write_when_brain_root_rebind_preserves_raw_subtree(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    identity = _capture_raw_identity(engine_root, brain_root)
+    source = brain_root / "raw/sources/issue-43.md"
+    captured_root = (brain_root.stat().st_dev, brain_root.stat().st_ino)
+    captured_parent = (source.parent.stat().st_dev, source.parent.stat().st_ino)
+    captured_file = (source.stat().st_dev, source.stat().st_ino, source.read_bytes())
+
+    moved = tmp_path / "moved-brain"
+    brain_root.rename(moved)
+    brain_root.mkdir()
+    (moved / "raw").rename(brain_root / "raw")
+
+    source = brain_root / "raw/sources/issue-43.md"
+    assert (brain_root.stat().st_dev, brain_root.stat().st_ino) != captured_root
+    assert (source.parent.stat().st_dev, source.parent.stat().st_ino) == captured_parent
+    assert (source.stat().st_dev, source.stat().st_ino, source.read_bytes()) == captured_file
+
+    _assert_identity_drift_is_zero_write(identity)
+
+
+def test_identity_drift_is_zero_write_when_raw_file_changes(
+    tmp_path,
+    monkeypatch,
+):
+    engine_root, brain_root, _adapter_module = _identity_fixture(tmp_path, monkeypatch)
+    identity = _capture_raw_identity(engine_root, brain_root)
+    (brain_root / "raw/sources/issue-43.md").write_bytes(b"raw source v2\n")
+
+    _assert_identity_drift_is_zero_write(identity)
 
 
 @pytest.mark.parametrize(

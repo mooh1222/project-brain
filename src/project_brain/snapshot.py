@@ -156,6 +156,38 @@ class SafeTreeEntry:
     sha256: str
 
 
+@dataclass(frozen=True)
+class RootedRegularFileParentBinding:
+    path: str
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class RootedRegularFileRootBinding:
+    path: str
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class RootedRegularFile:
+    device: int
+    inode: int
+    link_count: int
+    mode: int
+    size: int
+    bytes_sha256: str
+
+
+@dataclass(frozen=True)
+class RootedRegularFileSnapshot:
+    root: RootedRegularFileRootBinding
+    path: str
+    parent_bindings: tuple[RootedRegularFileParentBinding, ...]
+    file: RootedRegularFile
+
+
 def _fail(
     code: str,
     detail: str,
@@ -395,6 +427,263 @@ def read_regular_no_follow(path: Path) -> tuple[bytes, int]:
         if file_fd is not None:
             os.close(file_fd)
         os.close(parent_fd)
+
+
+def _rooted_regular_file_open_error(
+    root: Path,
+    relative: str,
+    exc: OSError,
+) -> None:
+    code = (
+        "symlink_forbidden"
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}
+        else "source_unavailable"
+    )
+    _fail(code, f"cannot read {root / relative}: {exc}", paths=(root / relative,))
+
+
+def _same_rooted_regular_file_metadata(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_nlink,
+        left.st_mode,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_nlink,
+        right.st_mode,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
+
+
+def _after_rooted_regular_file_read_hook(root: Path, relative: str) -> None:
+    """Deterministic test seam for a root replacement after file capture."""
+
+
+def capture_rooted_regular_file(
+    root: Path,
+    relative: str,
+) -> RootedRegularFileSnapshot:
+    """Capture one no-follow regular file below a pinned, single-device root."""
+
+    root = Path(root)
+    if not root.is_absolute() or root != Path(os.path.abspath(root)):
+        _fail("request_invalid", f"tree root must be exact absolute: {root}")
+    relative = _safe_relative(relative)
+    root_fd = _open_absolute_directory(root, create=False)
+    directory_records: list[tuple[str, int, str, int, os.stat_result]] = []
+    current_fd = os.dup(root_fd)
+    current_fd_is_untracked = True
+    file_fd: int | None = None
+    try:
+        root_stat = os.fstat(root_fd)
+        root_device = root_stat.st_dev
+        prefix = ""
+        for part in PurePosixPath(relative).parts[:-1]:
+            prefix = f"{prefix}/{part}" if prefix else part
+            try:
+                before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            except OSError as exc:
+                _rooted_regular_file_open_error(root, relative, exc)
+            if stat.S_ISLNK(before.st_mode):
+                _fail(
+                    "symlink_forbidden",
+                    f"cannot traverse symlink path: {root / relative}",
+                    paths=(root / relative,),
+                )
+            if before.st_dev != root_device:
+                _fail(
+                    "filesystem_mismatch",
+                    f"path crosses a filesystem boundary: {root / relative}",
+                    paths=(root / relative,),
+                )
+            try:
+                child_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=current_fd,
+                )
+            except OSError as exc:
+                _rooted_regular_file_open_error(root, relative, exc)
+            child_stat = os.fstat(child_fd)
+            if child_stat.st_dev != root_device:
+                os.close(child_fd)
+                _fail(
+                    "filesystem_mismatch",
+                    f"path crosses a filesystem boundary: {root / relative}",
+                    paths=(root / relative,),
+                )
+            if not stat.S_ISDIR(child_stat.st_mode) or not _same_stat(before, child_stat):
+                os.close(child_fd)
+                _fail(
+                    "source_fingerprint_changed",
+                    f"directory changed while opening: {root / prefix}",
+                    paths=(root / prefix,),
+                )
+            directory_records.append(
+                (prefix, os.dup(current_fd), part, child_fd, child_stat)
+            )
+            if current_fd_is_untracked:
+                os.close(current_fd)
+            current_fd = child_fd
+            current_fd_is_untracked = False
+
+        leaf = PurePosixPath(relative).name
+        try:
+            before = os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
+        except OSError as exc:
+            _rooted_regular_file_open_error(root, relative, exc)
+        if stat.S_ISLNK(before.st_mode):
+            _fail(
+                "symlink_forbidden",
+                f"source is a symlink: {root / relative}",
+                paths=(root / relative,),
+            )
+        if not stat.S_ISREG(before.st_mode):
+            _fail(
+                "source_type_invalid",
+                f"source is not a regular file: {root / relative}",
+                paths=(root / relative,),
+            )
+        if before.st_nlink != 1:
+            _fail(
+                "source_link_count_invalid",
+                f"source must have one link: {root / relative}",
+                paths=(root / relative,),
+            )
+        if before.st_dev != root_device:
+            _fail(
+                "filesystem_mismatch",
+                f"file is on another filesystem: {root / relative}",
+                paths=(root / relative,),
+            )
+        try:
+            file_fd = os.open(
+                leaf,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=current_fd,
+            )
+        except OSError as exc:
+            _rooted_regular_file_open_error(root, relative, exc)
+        opened = os.fstat(file_fd)
+        if opened.st_dev != root_device:
+            _fail(
+                "filesystem_mismatch",
+                f"file is on another filesystem: {root / relative}",
+                paths=(root / relative,),
+            )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not _same_rooted_regular_file_metadata(before, opened)
+        ):
+            _fail(
+                "source_fingerprint_changed",
+                f"source changed while opening: {root / relative}",
+                paths=(root / relative,),
+            )
+
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(file_fd)
+        try:
+            rebound = os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
+        except OSError as exc:
+            _rooted_regular_file_open_error(root, relative, exc)
+        if (
+            not _same_rooted_regular_file_metadata(before, after)
+            or not _same_rooted_regular_file_metadata(before, rebound)
+            or size != after.st_size
+        ):
+            _fail(
+                "source_fingerprint_changed",
+                f"source changed while reading: {root / relative}",
+                paths=(root / relative,),
+            )
+        _after_rooted_regular_file_read_hook(root, relative)
+
+        for path, parent_guard, name, directory_fd, captured in reversed(directory_records):
+            current = os.fstat(directory_fd)
+            try:
+                rebound = os.stat(name, dir_fd=parent_guard, follow_symlinks=False)
+            except OSError as exc:
+                _rooted_regular_file_open_error(root, relative, exc)
+            if (
+                (captured.st_dev, captured.st_ino)
+                != (current.st_dev, current.st_ino)
+                or (captured.st_dev, captured.st_ino)
+                != (rebound.st_dev, rebound.st_ino)
+            ):
+                _fail(
+                    "source_fingerprint_changed",
+                    f"directory changed while reading: {root / path}",
+                    paths=(root / path,),
+                )
+
+        rebound_root_fd = _open_absolute_directory(root, create=False)
+        try:
+            rebound_root = os.fstat(rebound_root_fd)
+        finally:
+            os.close(rebound_root_fd)
+        if (root_stat.st_dev, root_stat.st_ino) != (
+            rebound_root.st_dev,
+            rebound_root.st_ino,
+        ):
+            _fail(
+                "source_fingerprint_changed",
+                f"tree root changed while reading: {root}",
+                paths=(root,),
+            )
+
+        return RootedRegularFileSnapshot(
+            root=RootedRegularFileRootBinding(
+                path=str(root),
+                device=root_stat.st_dev,
+                inode=root_stat.st_ino,
+            ),
+            path=relative,
+            parent_bindings=tuple(
+                RootedRegularFileParentBinding(
+                    path=path,
+                    device=captured.st_dev,
+                    inode=captured.st_ino,
+                )
+                for path, _guard, _name, _directory, captured in directory_records
+            ),
+            file=RootedRegularFile(
+                device=before.st_dev,
+                inode=before.st_ino,
+                link_count=before.st_nlink,
+                mode=stat.S_IMODE(before.st_mode),
+                size=before.st_size,
+                bytes_sha256=digest.hexdigest(),
+            ),
+        )
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_records:
+            for _path, parent_guard, _name, directory_fd, _captured in reversed(directory_records):
+                os.close(parent_guard)
+                os.close(directory_fd)
+        elif current_fd_is_untracked:
+            os.close(current_fd)
+        os.close(root_fd)
 
 
 def _fingerprint_regular(path: Path) -> tuple[str, int, int]:

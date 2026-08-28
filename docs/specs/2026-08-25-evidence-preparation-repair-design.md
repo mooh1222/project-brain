@@ -67,13 +67,14 @@ caller가 source ID·hash를 따로 덮어쓸 수 없다. kind·variant와 sourc
 다음 exact snapshot을 만든다.
 
 ```text
-root, path, parent_bindings,
+root={path,device,inode}, path, parent_bindings,
 file={device,inode,link_count,mode,size,bytes_sha256}
 ```
 
-snapshot top-level exact key는 `root`, `path`, `parent_bindings`, `file`이다. `root=brain`이고
+snapshot top-level exact key는 `root`, `path`, `parent_bindings`, `file`이다. `root`는 capture 당시
+normalized brain root의 `{path,device,inode}`이고,
 `parent_bindings`는 `raw`부터 direct parent까지 `{path,device,inode}`를 깊이 순으로 가진다. apply lock
-안에서도 같은 anchored read를 반복한다. parent, path,
+안에서도 같은 anchored read를 반복한다. root binding, parent, path,
 inode, link count, mode, size, bytes 중 하나가 달라지면 Adapter 실행이나 journal 전에
 `evidence_snapshot_changed`다. raw file bytes를 journal에 복사하거나 caller가 준 hash를 신뢰하지 않는다.
 
@@ -317,6 +318,42 @@ path·device·inode, HEAD, `core_tracked_tree_sha256`, 실제 import된 `project
 Adapter identity exact key는 `id`, `version`, `module_path`, `module_sha256`이다. 닫힌 registry가
 kind·variant에서 Adapter를 고르고 실제 로드한 module bytes를 hash한다. caller는 Adapter ID·version·
 module path를 지정할 수 없다. 준비 뒤 module bytes가 달라지면 0-write다.
+
+### 5.1 E3 loaded identity와 handoff 고정 계약
+
+E3의 public seam은 순수 capture/verify뿐이다. `EvidenceLoadedIdentity`의 생성은 capture factory만
+수행하며, engine·adapter·raw snapshot 전체를 깊게 불변인 값으로 보관한다. 따라서 nested mapping·list를
+남기지 않고, caller는 속성이나 내부 값을 바꾸거나 새 관측값으로 baseline을 대체할 수 없다. verify는 이
+capture factory가 만든 값만 기준으로 현재 관측값을 비교한다.
+
+Adapter selector의 입력은 `plan_base`가 만든 `BasePlanTarget`과 E1이 검증한 source뿐이다. caller의
+`target_kind`나 Adapter ID를 받지 않고, target ID를 `parse_id`로 해석한 exact
+`(kind, variant, source.type)`를 registry key로 쓴다. local raw 다섯 kind
+(`EvidenceManifest`, `SpecDocument`, `SpecRevision`, `SlideRef`, `SlackThread`)에는
+`(kind, default, raw_source_observation)`만 닫힌 row로 등록한다. kind·variant·source 불일치는
+`evidence_source_variant_mismatch`, 등록되지 않은 row는 `evidence_adapter_unavailable`이며, 선택 결과는
+실제로 로드한 Adapter module의 path와 bytes SHA-256을 identity에 기록한다.
+
+raw snapshot capture와 재관측은 `evidence_preparation`에서 FD 순회를 다시 구현하지 않고, `snapshot`
+모듈의 하나의 canonical rooted primitive가 전부 소유한다. 이 primitive는 pinned root의 device·inode를
+기준으로 모든 parent와 leaf FD의 device가 같음을 확인하고, 깊이 순서의 parent bindings, regular file의
+`link_count=1`, metadata → bytes → metadata 일치를 함께 만든다. 끝에서는 root path를 no-follow로 다시
+열어 original root의 device·inode와 비교한다. caller path shape 오류는 `evidence_plan_schema_invalid`, 최초
+관측의 symlink·hardlink·filesystem mismatch는 `evidence_raw_source_invalid`, 최초 read 불가는
+`evidence_raw_source_unavailable`이다. 준비 뒤 engine·module·root·parent·file 중 하나가 바뀌거나 재관측에
+실패하면 언제나 `evidence_snapshot_changed`다.
+
+E4의 prepared value는 raw source target마다 이 immutable E3 identity를 필수 field로 그대로 보존한다.
+E5의 `apply_prepared()`는 exclusive lock 안에서 Adapter 실행, clock 사용, journal·receipt·mutation보다 먼저
+그 identity를 byte-exact로 재관측한다. E3는 pure capture/verify unit만 소유하고, 실제 effect-order
+integration은 E5가 소유한다.
+
+후보 2의 최소 완료 회귀는 다음을 고정한다.
+
+- nested engine·adapter·raw snapshot mutation 시도가 verifier baseline을 바꾸지 못한다.
+- kind·variant·source mismatch와 닫힌 registry 밖 선택은 고정 오류로 실패한다.
+- cross-device 이동과 root rebind를 rooted primitive가 거부한다.
+- engine·module·root·parent·file drift는 E5 lock 안에서 잡히며 Adapter·clock·journal·receipt·mutation 0-effect다.
 
 CodeLocator처럼 repo evidence가 필요한 profile만 기존 `RepoContext`의 선택적 repo
 root·device·inode·configured repo ID·target revision을 요구한다. 이 root는 코드 근거 관측용이며

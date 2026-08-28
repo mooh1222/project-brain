@@ -661,6 +661,52 @@ def _ensure_engine_checkout(engine_root: Path) -> tuple[str, str]:
     return str(import_file), str(cli_file)
 
 
+def capture_loaded_engine_identity(engine_root: Path) -> dict[str, object]:
+    """실제로 로드한 engine checkout의 E3 신원을 읽기 전용으로 관측한다."""
+
+    engine_root = Path(engine_root)
+    try:
+        root = _root_identity(engine_root, label="engine")
+        engine_git = _capture_git(engine_root, label="engine_root")
+        _reject_engine_core_dirt(engine_git)
+        import_file, cli_source_file = _ensure_engine_checkout(engine_root)
+        core_tracked_tree_sha256 = _git_core_tree_sha(
+            engine_root,
+            engine_git.head,
+        )
+
+        current_root = _root_identity(engine_root, label="engine")
+        current_git = _capture_git(engine_root, label="engine_root")
+        _reject_engine_core_dirt(current_git)
+        if root != current_root or engine_git.head != current_git.head:
+            _fail(
+                "engine_identity_unavailable",
+                "engine checkout changed during identity capture",
+                paths=(engine_root,),
+            )
+    except FoundationError as exc:
+        if exc.code in {"engine_core_dirty", "engine_checkout_mismatch"}:
+            raise
+        raise FoundationError(
+            "engine_identity_unavailable",
+            exc.detail,
+            paths=exc.paths,
+            cause_code=exc.code,
+        ) from exc
+
+    return {
+        "root": {
+            "path": root["path"],
+            "device": root["device"],
+            "inode": root["inode"],
+        },
+        "head": engine_git.head,
+        "core_tracked_tree_sha256": core_tracked_tree_sha256,
+        "import_file": import_file,
+        "cli_source_file": cli_source_file,
+    }
+
+
 def _file_receipt(root: Path, relative: str, *, optional: bool = False) -> dict[str, object]:
     try:
         receipt = capture_tree_receipt(root, [relative])

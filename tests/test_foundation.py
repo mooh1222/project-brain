@@ -22,6 +22,7 @@ from project_brain.foundation import (
     canonical_receipt_bytes,
     capture_corpus_receipt,
     capture_foundation_baseline,
+    capture_loaded_engine_identity,
     capture_search_index_receipt,
     capture_stale_set_receipt,
     capture_tree_receipt,
@@ -240,6 +241,72 @@ def test_baseline_has_exact_top_level_shape(foundation_fixture):
     assert baseline["engine"]["entrypoint"] == "project_brain.cli:main"
     assert baseline["engine"]["status_porcelain_v1_z_base64"] == ""
     assert baseline["bb2"]["status_porcelain_v1_z_base64"]
+
+
+def test_loaded_engine_identity_binds_root_head_core_and_loaded_sources(
+    foundation_fixture,
+):
+    identity = capture_loaded_engine_identity(foundation_fixture.engine)
+    baseline = _capture(foundation_fixture)
+
+    assert identity == {
+        "root": {
+            "path": str(foundation_fixture.engine),
+            "device": foundation_fixture.engine.stat().st_dev,
+            "inode": foundation_fixture.engine.stat().st_ino,
+        },
+        "head": baseline["engine"]["head"],
+        "core_tracked_tree_sha256": baseline["engine"]["core_tracked_tree_sha256"],
+        "import_file": str(
+            foundation_fixture.engine / "src/project_brain/__init__.py"
+        ),
+        "cli_source_file": str(
+            foundation_fixture.engine / "src/project_brain/cli.py"
+        ),
+    }
+
+
+def test_loaded_engine_identity_rejects_dirty_core(foundation_fixture):
+    _write(
+        foundation_fixture.engine / "src/project_brain/untracked_core.py",
+        b"x = 1\n",
+    )
+
+    with pytest.raises(FoundationError) as raised:
+        capture_loaded_engine_identity(foundation_fixture.engine)
+
+    assert raised.value.code == "engine_core_dirty"
+
+
+@pytest.mark.parametrize(
+    "source_resolver",
+    ("resolved_project_brain_file", "resolved_cli_source_file"),
+)
+def test_loaded_engine_identity_rejects_loaded_source_outside_checkout(
+    foundation_fixture,
+    monkeypatch,
+    source_resolver,
+):
+    monkeypatch.setattr(
+        foundation,
+        source_resolver,
+        lambda: Path("/tmp/another-checkout/project_brain.py"),
+    )
+
+    with pytest.raises(FoundationError) as raised:
+        capture_loaded_engine_identity(foundation_fixture.engine)
+
+    assert raised.value.code == "engine_checkout_mismatch"
+
+
+def test_loaded_engine_identity_rejects_non_git_package_root(tmp_path):
+    engine_root = (tmp_path / "not-a-git-checkout").resolve()
+    engine_root.mkdir()
+
+    with pytest.raises(FoundationError) as raised:
+        capture_loaded_engine_identity(engine_root)
+
+    assert raised.value.code == "engine_identity_unavailable"
 
 
 def test_public_task18_corpus_receipts_are_low_level_and_exact(foundation_fixture):

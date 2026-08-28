@@ -56,7 +56,7 @@ def _plan(*entries: dict[str, object]) -> dict[str, object]:
     return {"version": 1, "entries": list(entries)}
 
 
-def test_rejects_exact_shape():
+def test_rejects_exact_shape_raw_snapshot_parent_binding():
     valid = _plan(_entry(
         target_id="raw.alpha",
         source={"type": "raw_source_observation", "path": "raw/sources/alpha.txt"},

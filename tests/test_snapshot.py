@@ -305,6 +305,107 @@ else:
     assert completed.stdout.strip() == "source_type_invalid"
 
 
+def test_rooted_regular_file_rejects_cross_device_leaf(tmp_path):
+    root = (tmp_path / "brain").resolve()
+    source = root / "raw/sources/issue-43.md"
+    _write(source, b"raw source\n")
+    source_inode = source.stat().st_ino
+    original_fstat = snapshot.os.fstat
+
+    def cross_device_leaf(descriptor: int):
+        observed = original_fstat(descriptor)
+        if observed.st_ino != source_inode:
+            return observed
+        values = list(observed)
+        values[2] = observed.st_dev + 1
+        return os.stat_result(values)
+
+    with mock.patch.object(snapshot.os, "fstat", side_effect=cross_device_leaf):
+        with pytest.raises(SnapshotError) as raised:
+            snapshot.capture_rooted_regular_file(root, "raw/sources/issue-43.md")
+
+    assert raised.value.code == "filesystem_mismatch"
+
+
+def test_rooted_regular_file_captures_ordered_parent_bindings_and_file_bytes(tmp_path):
+    root = (tmp_path / "brain").resolve()
+    source = root / "raw/sources/briefs/issue-43.md"
+    _write(source, b"raw source v1\n")
+
+    captured = snapshot.capture_rooted_regular_file(
+        root,
+        "raw/sources/briefs/issue-43.md",
+    )
+
+    assert (
+        captured.root.path,
+        captured.root.device,
+        captured.root.inode,
+    ) == (
+        str(root),
+        root.stat().st_dev,
+        root.stat().st_ino,
+    )
+    assert captured.path == "raw/sources/briefs/issue-43.md"
+    assert [
+        (binding.path, binding.device, binding.inode)
+        for binding in captured.parent_bindings
+    ] == [
+        ("raw", (root / "raw").stat().st_dev, (root / "raw").stat().st_ino),
+        (
+            "raw/sources",
+            (root / "raw/sources").stat().st_dev,
+            (root / "raw/sources").stat().st_ino,
+        ),
+        (
+            "raw/sources/briefs",
+            source.parent.stat().st_dev,
+            source.parent.stat().st_ino,
+        ),
+    ]
+    assert (
+        captured.file.device,
+        captured.file.inode,
+        captured.file.link_count,
+        captured.file.mode,
+        captured.file.size,
+        captured.file.bytes_sha256,
+    ) == (
+        source.stat().st_dev,
+        source.stat().st_ino,
+        1,
+        source.stat().st_mode & 0o777,
+        14,
+        "619f3f6d7e587520abe6bfa61159a7be87e98616c93fb96c50f70a077a412503",
+    )
+
+
+def test_rooted_regular_file_rejects_root_rebind_after_read(tmp_path, monkeypatch):
+    root = (tmp_path / "brain").resolve()
+    source = root / "raw/sources/issue-43.md"
+    _write(source, b"raw source\n")
+    moved = tmp_path / "moved-brain"
+
+    def replace_root_after_read(captured_root: Path, relative: str) -> None:
+        assert captured_root == root
+        assert relative == "raw/sources/issue-43.md"
+        root.rename(moved)
+        shutil.copytree(moved, root)
+
+    monkeypatch.setattr(
+        snapshot,
+        "_after_rooted_regular_file_read_hook",
+        replace_root_after_read,
+        raising=False,
+    )
+
+    with pytest.raises(SnapshotError) as raised:
+        snapshot.capture_rooted_regular_file(root, "raw/sources/issue-43.md")
+
+    assert raised.value.code == "source_fingerprint_changed"
+    assert "tree root changed while reading" in raised.value.detail
+
+
 def test_verify_git_root_clean_returns_exact_head_and_empty_status(tmp_path):
     root, head = _clean_git_repo(tmp_path)
 
