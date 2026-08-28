@@ -176,8 +176,8 @@ def _outside_fenced_code(lines: list[str]) -> list[tuple[int, str]]:
     return result
 
 
-def _atx_heading_level(line: str) -> int | None:
-    """CommonMark의 0~3칸 들여쓴 ATX heading level을 판정한다."""
+def _atx_heading(line: str) -> tuple[int, str] | None:
+    """CommonMark ATX heading의 level과 닫는 #을 뺀 내용을 반환한다."""
     stripped = line.lstrip(" ")
     if len(line) - len(stripped) > 3 or not stripped.startswith("#"):
         return None
@@ -186,7 +186,38 @@ def _atx_heading_level(line: str) -> int | None:
         return None
     if len(stripped) > level and stripped[level] not in {" ", "\t"}:
         return None
-    return level
+    remainder = stripped[level:]
+    if not remainder:
+        return level, ""
+    content = remainder.lstrip(" \t").rstrip(" \t")
+    closing_start = len(content.rstrip("#"))
+    if closing_start < len(content) and (
+        closing_start == 0 or content[closing_start - 1] in {" ", "\t"}
+    ):
+        content = content[:closing_start].rstrip(" \t")
+    return level, content
+
+
+def _setext_heading_levels(
+    lines: list[str],
+    outside: list[tuple[int, str]],
+) -> list[int]:
+    """fenced code 밖 CommonMark Setext H1/H2 level을 반환한다."""
+    outside_indices = {index for index, _ in outside}
+    levels: list[int] = []
+    for index, line in outside:
+        match = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
+        if match is None or index == 0 or index - 1 not in outside_indices:
+            continue
+        previous = lines[index - 1]
+        if (
+            not previous.strip()
+            or len(previous) - len(previous.lstrip(" ")) > 3
+            or _atx_heading(previous) is not None
+        ):
+            continue
+        levels.append(1 if match.group(1).startswith("=") else 2)
+    return levels
 
 
 def _parse_content(
@@ -208,22 +239,26 @@ def _parse_content(
         })
         return None, problems
 
-    h1_lines = [
-        line
-        for _, line in outside
-        if _atx_heading_level(line) == 1
+    atx_entries = [
+        (index, line, parsed)
+        for index, line in outside
+        if (parsed := _atx_heading(line)) is not None
     ]
+    h1_entries = [entry for entry in atx_entries if entry[2][0] == 1]
+    setext_levels = _setext_heading_levels(lines, outside)
     title = (
-        h1_lines[0].removeprefix("# ")
-        if len(h1_lines) == 1
+        h1_entries[0][2][1]
+        if len(h1_entries) == 1
         else ""
     )
     title_layout_valid = (
-        len(h1_lines) == 1
+        len(h1_entries) + setext_levels.count(1) == 1
+        and len(h1_entries) == 1
         and bool(title.strip())
-        and h1_lines[0].startswith("# ")
+        and h1_entries[0][1] == f"# {title}"
         and len(lines) > 1
-        and lines[1] == h1_lines[0]
+        and h1_entries[0][0] == 1
+        and lines[1] == h1_entries[0][1]
     )
     if not title_layout_valid:
         problems.append({
@@ -274,11 +309,14 @@ def _parse_content(
 
     h2_entries = [
         (index, line.removeprefix("## "))
-        for index, line in outside
-        if _atx_heading_level(line) == 2
+        for index, line, parsed in atx_entries
+        if parsed[0] == 2
     ]
     h2_headings = [heading for _, heading in h2_entries]
-    if tuple(h2_headings) != _SECTION_HEADINGS:
+    if (
+        setext_levels.count(2)
+        or tuple(h2_headings) != _SECTION_HEADINGS
+    ):
         problems.append({
             "path": relative,
             "code": "draft_sections_invalid",

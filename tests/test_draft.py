@@ -755,3 +755,50 @@ def test_lint_counts_indented_commonmark_h1_and_h2_as_real_headings(
 
     assert exc.value.code == "draft_title_invalid"
     assert show(tmp_path, "indented-heading") == created
+
+
+def test_lint_counts_setext_h1_and_h2_as_real_headings(tmp_path):
+    created = create(
+        tmp_path,
+        topic_id="setext-heading",
+        title="Setext 제목 검사",
+        scope="검사 범위",
+        updated_at=UPDATED,
+    )
+    content = created["content"].replace(
+        "## 확인된 이해\n\n## 어휘 관찰",
+        """## 확인된 이해
+
+추가 H1
+===
+
+추가 H2
+---
+
+## 어휘 관찰""",
+    )
+
+    with pytest.raises(DraftError) as exc:
+        update(
+            tmp_path,
+            "setext-heading",
+            expected_sha=created["sha256"],
+            content=content,
+        )
+
+    assert exc.value.code == "draft_title_invalid"
+    assert show(tmp_path, "setext-heading") == created
+
+
+def test_create_rejects_an_atx_title_that_commonmark_parses_as_empty(tmp_path):
+    with pytest.raises(DraftError) as exc:
+        create(
+            tmp_path,
+            topic_id="empty-atx-title",
+            title="#",
+            scope="검사 범위",
+            updated_at=UPDATED,
+        )
+
+    assert exc.value.code == "draft_title_invalid"
+    assert list(tmp_path.rglob("*.md")) == []
