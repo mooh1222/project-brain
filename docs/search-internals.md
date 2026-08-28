@@ -111,6 +111,9 @@ SQLite DB 안에 테이블이 4개 만들어진다(`search_index.py:80-108`, `SC
   지문과 다르면 "색인이 낡았다"며 거부하고 `rebuild`를 안내한다(`search.py:315-331`). 낡은
   색인으로 옛 상태를 회상하는 조용한 오답을 막으려는 장치다. 스키마 버전이 코드와 다를
   때도 `StaleIndexError`로 거부한다(`search_index.py:324-332`).
+- `DomainMapping` 표면은 자체 의미·경계뿐 아니라 참조 `GlossaryTerm`의
+  `term`·`synonyms`·`aliases`를 함께 받는다(`surface.py:_surface_domain_mapping`). 별칭 위임을
+  추가한 추출기 버전은 4이며, 예전 색인은 meta 불일치로 rebuild가 필요하다.
 
 ## 4. 검색 융합 (`search.py`)
 

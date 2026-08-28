@@ -603,14 +603,20 @@ class QueryRouter:
     def _glossary_meaning_objects(self, query: str, exclude: set[str]) -> list[dict]:
         """glossary_meaning source가 적재할 DomainContext/GlossaryTerm(§7 전량→top-K).
 
-        색인이 있으면 recall top-K 중 DomainContext/GlossaryTerm만, 없으면 기존
+        이름이 정확히 맞은 reviewed GlossaryTerm은 recall 순위와 무관하게 먼저 넣는다.
+        나머지는 색인이 있으면 recall top-K 중 DomainContext/GlossaryTerm만, 없으면 기존
         전량(DomainContext + reviewed GlossaryTerm)으로 폴백한다. 정확 매칭 매핑과의
         중복은 kind 필터가 구조적으로 막고(두 공급원 다 매핑을 못 돌려줌), exclude는
-        그 보증이 바뀔 때를 위한 방어선이다(2026-06-10 리뷰 — 서술 정정)."""
+        이미 넣은 객체까지 함께 거른다."""
+        exact_terms = [
+            term for term in self._matched_reviewed_name_terms(query)
+            if term["id"] not in exclude
+        ]
+        excluded_ids = exclude | {term["id"] for term in exact_terms}
         recalled = self._recalled_objects_of_kind(query, {"DomainContext", "GlossaryTerm"})
         if recalled is None:
             recalled = self._reviewed_by_kind("DomainContext") + self._reviewed_by_kind("GlossaryTerm")
-        return [obj for obj in recalled if obj["id"] not in exclude]
+        return exact_terms + [obj for obj in recalled if obj["id"] not in excluded_ids]
 
     def _facts_derived_from(self, event_ids: set[str]) -> list[dict]:
         """주어진 event들에서 파생된 reviewed TemporalFact. fact는 derived_from_event_id로
@@ -659,6 +665,32 @@ class QueryRouter:
                 result.append(term)
         return result
 
+    def _matched_reviewed_name_terms(self, query: str) -> list[dict]:
+        """대표어·동의어·별칭이 query에 등장한 reviewed GlossaryTerm을 찾는다.
+
+        scope 추론용 _matched_glossary_terms는 그대로 두고 glossary_meaning 응답에만
+        사용한다. 한 질의에서 여러 표면이 맞으면 각 어휘의 가장 긴 표면을 기준으로,
+        더 긴 다른 어휘 표면에 포함되는 짧은 매칭은 기존 우선순위처럼 제외한다.
+        """
+        matched: list[tuple[dict, str]] = []
+        for term in self._reviewed_by_kind("GlossaryTerm"):
+            surfaces = [term.get("term")]
+            surfaces.extend(term.get("synonyms") or [])
+            surfaces.extend(term.get("aliases") or [])
+            matching = [surface for surface in surfaces if surface and surface in query]
+            if matching:
+                matched.append((term, max(matching, key=len)))
+
+        return [
+            term for term, surface in matched
+            if not any(
+                other is not term
+                and len(other_surface) > len(surface)
+                and surface in other_surface
+                for other, other_surface in matched
+            )
+        ]
+
     def _matched_candidate_terms(self, query: str) -> list[dict]:
         """query 텍스트에 term/synonyms/aliases가 등장하는 candidate GlossaryTerm.
         노출 전용(spec §4.2) — 충돌 해소·scope 추론 입력에는 절대 넣지 않는다.
@@ -676,7 +708,7 @@ class QueryRouter:
 
     def _matched_mappings(self, query: str) -> list[dict]:
         """query에 등장하는 용어 텍스트로 reviewed DomainMapping을 찾는다.
-        매핑이 검수 단위이므로, 참조하는 GlossaryTerm이 candidate여도 그 term/synonym 텍스트를
+        매핑이 검수 단위이므로, 참조하는 GlossaryTerm이 candidate여도 term/synonym/alias 텍스트를
         매핑의 언어 표면(language surface)으로 써서 매칭한다 (spec §3.3/§9). 답변 내용은 후보 용어
         정의가 아니라 reviewed 매핑에서 나오므로 candidate 정의가 노출되지는 않는다."""
         result = []
@@ -690,6 +722,8 @@ class QueryRouter:
                     surfaces.add(term["term"])
                 for synonym in term.get("synonyms") or []:
                     surfaces.add(synonym)
+                for alias in term.get("aliases") or []:
+                    surfaces.add(alias)
             if any(surface and surface in query for surface in surfaces):
                 result.append(mapping)
         return result

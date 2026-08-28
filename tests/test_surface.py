@@ -127,7 +127,7 @@ class ExtractDomainMappingTest(unittest.TestCase):
             self.assertIn(token, surface)
 
     def test_referenced_term_surface_delegated(self):
-        # 참조 용어의 term/synonyms가 매핑 표면에 포함 (router._matched_mappings 계승)
+        # 참조 용어의 term/synonyms/aliases가 매핑 표면에 포함 (router._matched_mappings 계승)
         t = glossary_term("g.ref", term="targetStages", definition="목표 스테이지 수",
                           synonyms=["목표개수"], status="candidate")
         m = domain_mapping(glossary_term_ids=["g.ref"])
@@ -137,15 +137,18 @@ class ExtractDomainMappingTest(unittest.TestCase):
         # 참조 용어의 definition은 매핑 표면에 포함하지 않음(라우터 매핑 경로와 동일)
         self.assertNotIn("목표 스테이지 수", surface)
 
-    def test_referenced_term_aliases_not_delegated(self):
-        # 매핑 표면 위임은 term+synonyms만 — aliases는 포함 안 함(router.py:379-397)
+    def test_referenced_term_aliases_delegated(self):
+        # 이름 종류에 따른 검색 권한 차이가 없도록 aliases도 매핑 표면에 위임한다.
         t = glossary_term("g.ref", term="카약", definition="d",
                           aliases=["미나의카약별칭"], status="reviewed",
                           synonyms=[])
         m = domain_mapping(glossary_term_ids=["g.ref"])
         surface = extract_surface(m, store_of(t, m))
         self.assertIn("카약", surface)
-        self.assertNotIn("미나의카약별칭", surface)
+        self.assertIn("미나의카약별칭", surface)
+
+    def test_extractor_version_bumped_for_mapping_alias_delegation(self):
+        self.assertGreaterEqual(EXTRACTOR_VERSION, 4)
 
     def test_missing_referenced_id_skipped(self):
         # store에 없는 term_id는 건너뜀(KeyError 안 남)

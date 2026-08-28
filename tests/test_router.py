@@ -298,6 +298,39 @@ class TestGlossaryReviewedExposure(unittest.TestCase):
         self.assertIn("glossary_meaning", answer["intents"])
         self.assertIn("g.r", answer["source_object_ids"])
 
+    def test_canonical_synonym_and_alias_recover_same_reviewed_mapping(self):
+        from tests.test_search import domain_mapping, glossary_term
+
+        term = glossary_term(
+            "g.canoe",
+            term="카누 레이스",
+            synonyms=["카누 경기"],
+            aliases=["샐리 카누"],
+        )
+        mapping = domain_mapping(
+            "m.canoe",
+            meaning="샐리가 참가하는 카누 경주의 검수된 의미",
+            glossary_term_ids=["g.canoe"],
+        )
+        store = store_of(term, mapping)
+
+        recovered = []
+        for name in (term["term"], term["synonyms"][0], term["aliases"][0]):
+            answer = QueryRouter(store).answer(f"{name} 무슨 뜻?")
+            section = next(
+                item for item in answer["sections"]
+                if item["intent"] == "glossary_meaning"
+            )
+            recovered.append((
+                [item["id"] for item in section["mappings"]],
+                [object_id for object_id in section["object_ids"] if object_id == term["id"]],
+            ))
+
+        self.assertEqual(
+            recovered,
+            [([mapping["id"]], [term["id"]])] * 3,
+        )
+
 
 # ── 슬라이스 5: 라우터 의미 회상 통합(§7) ──────────────────────────────────────
 import tempfile
@@ -460,6 +493,49 @@ class TestRouterRecallTopK(unittest.TestCase):
         self.assertGreaterEqual(len(gloss["object_ids"]), 1)
         self.assertLessEqual(len(gloss["object_ids"]), 5)
         self.assertLess(len(gloss["object_ids"]), 12)
+
+    def test_exact_alias_term_survives_recall_topk(self):
+        # 실제 BB2처럼 graph support가 있는 매핑들이 top-K를 차지해도, 질의에 정확히
+        # 맞은 reviewed GlossaryTerm은 연결 매핑과 함께 빠지지 않아야 한다.
+        objs = [
+            st_glossary_term(
+                "g.beam",
+                term="KAMEHAMEHA",
+                synonyms=["광선 발사"],
+                aliases=["광선발사"],
+            ),
+            domain_mapping(
+                "m.beam",
+                meaning="광선발사 스킬 등록 의미",
+                glossary_term_ids=["g.beam"],
+            ),
+        ]
+        for i in range(8):
+            objs.extend([
+                st_glossary_term(
+                    f"g.noise{i}",
+                    term=f"경쟁용어{i}",
+                    definition=f"광선발사 검색 경쟁 의미 {i}",
+                ),
+                domain_mapping(
+                    f"m.noise{i}",
+                    meaning=f"광선발사 검색 경쟁 의미 {i}",
+                    glossary_term_ids=[f"g.noise{i}"],
+                ),
+            ])
+        self._rebuild(objs)
+
+        answer = self._router().answer("광선발사 무슨 뜻?")
+        section = next(
+            item for item in answer["sections"]
+            if item["intent"] == "glossary_meaning"
+        )
+
+        self.assertEqual(
+            [item["id"] for item in section["mappings"]],
+            ["mapping.neutral.beam"],
+        )
+        self.assertIn("g.neutral.beam", section["object_ids"])
 
     def test_evidence_provenance_combined_impl_uses_topk(self):
         # 후속 a(P2 4번): evidence_provenance가 implementation_location과 결합되면

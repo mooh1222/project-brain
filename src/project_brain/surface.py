@@ -23,8 +23,9 @@ content_hash는 객체 JSON 전체가 아니라 추출 표면 + status의 SHA-25
 
 from project_brain.hash_utils import sha256_text
 
-# 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거). v2: Insight 추출기 추가(2026-06-15). v3: ContextProjection 추출기 추가(2026-06-17).
-EXTRACTOR_VERSION = 3
+# 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거). v2: Insight 추출기 추가(2026-06-15).
+# v3: ContextProjection 추출기 추가(2026-06-17). v4: DomainMapping에 참조 어휘 aliases 위임(2026-08-28).
+EXTRACTOR_VERSION = 4
 
 # §2.1 색인 제외 kind. 이 목록에 든 kind는 extract_surface가 None을 돌려준다.
 # 표에 없는(미지원) kind도 None이 되도록, 추출은 _EXTRACTORS dispatch로만 한다.
@@ -69,9 +70,9 @@ def _surface_glossary_term(obj, store) -> list[str]:
 
 
 def _surface_domain_mapping(obj, store) -> list[str]:
-    # spec §2.1: meaning, boundary, canonical_summary + 참조 용어의 term/synonyms.
-    # 참조 용어 표면 위임은 현 라우터 _matched_mappings(router.py:379-397) 로직 계승 —
-    # term + synonyms만 더하고(aliases는 라우터 매핑 경로도 안 씀), 없는 id는 건너뜀.
+    # spec §2.1: meaning, boundary, canonical_summary + 참조 용어의 term/synonyms/aliases.
+    # 이름 종류에 검색 권한 차이를 두지 않는 라우터 _matched_mappings 계약을 계승하고,
+    # 없는 참조 id는 건너뜀.
     parts: list[str] = []
     for field in ("canonical_summary", "meaning", "boundary"):
         s = _norm_str(obj.get(field))
@@ -85,6 +86,7 @@ def _surface_domain_mapping(obj, store) -> list[str]:
         if s is not None:
             parts.append(s)
         parts.extend(_norm_list(term.get("synonyms")))
+        parts.extend(_norm_list(term.get("aliases")))
     return parts
 
 
