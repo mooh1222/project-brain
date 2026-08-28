@@ -92,8 +92,9 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
   다시 계산할 수 있는 로컬 산출물이다.
 - `capabilities.py`, `evidence_plan.py`, `evidence_preparation.py`가 main에 있다는 사실만으로 공통
   verification이 공개 ingest·promote에 적용된다고 해석하지 않는다. 현재 production caller는 없다.
-- 공통 어휘 기준 reference와 `brain/drafts/<topic-id>.md`용 모듈·CLI·설치 스킬은 #47 아래
-  #48~#51의 대상이며 아직 현재 CLI나 installer의 일부가 아니다.
+- 공통 어휘 기준 reference와 ingest·session-ingest·audit의 조건부 연결은 #48에서 installer에
+  들어왔다. `brain/drafts/<topic-id>.md`용 모듈·CLI·다섯 번째 설치 스킬과 실제 BB2 파일럿은
+  #50~#51 대상이며 아직 구현되지 않았다.
 
 ## 작은 계보 메모
 

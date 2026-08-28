@@ -1,7 +1,7 @@
 ---
 status: accepted
 decision_date: 2026-08-14
-implementation: not_implemented
+implementation: partial_issue_48
 contract_status: mvp_scope_revalidated_2026-08-28
 superseded_by: null
 ---
@@ -21,3 +21,5 @@ superseded_by: null
 새 기준은 앞으로 생성되는 어휘에만 적용하지 않는다. 기존 코퍼스의 `GlossaryTerm`도 현재 `reviewed` 상태를 정답으로 간주하지 않고 같은 기준으로 읽기 전용 재감사한다. 결과는 실제 어휘 유지, 코드 세부사항으로 재분류, 기존 어휘의 동의어·별칭으로 병합, 문맥별 다른 뜻으로 분리, 사용자 판단이 필요한 모호성으로 나눈다. 감사 자체는 객체를 자동 삭제·수정하지 않으며, 독립 검증을 통과한 보고와 사용자 예외 판정이 끝난 뒤 별도 migration으로 반영한다.
 
 첫 BB2 재감사는 실제 코퍼스 전체의 기계적 현황을 읽기 전용으로 측정하고, 개별 의미 판정과 변경 계획은 샐리의 카누 도메인부터 시작한다. 엔진의 합성 회귀는 구조적 안전망으로 계속 실행하지만 의미·검색·migration의 최종 판정을 임시 코퍼스나 fixture 성공으로 대신하지 않고 실제 BB2 데이터에서 확인한다. 첫 변경 전 기준점은 `docs/bb2-brain-object-model`의 `59422f05ea`이며, 승인된 변경을 한 묶음씩 적용한다. mutation 실패는 transaction rollback을 확인하고 사후 검증 실패는 즉시 멈춰 해당 묶음만 직전 기준점으로 복구한 뒤, Git 비추적 색인은 복구된 객체 코퍼스에서 다시 만든다.
+
+2026-08-28 #48은 이 결정을 설치되는 에이전트 판정 기준과 정답·반례로 구현했다. 엔진 쓰기 관문, 기존 코퍼스 migration, 대표어·동의어·별칭 회수 통일은 아직 구현하지 않았으므로 이 ADR 전체 구현 상태는 partial이다.

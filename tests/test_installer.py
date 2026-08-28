@@ -291,6 +291,31 @@ class InstallTest(unittest.TestCase):
         self.assertNotIn("{{DEFAULT_BRANCH}}", audit)
         self.assertIn("session-snapshot filtering은 Project Brain install 범위 밖", ingest_tools)
 
+    def test_glossary_criterion_installs_once_is_idempotent_and_preserves_user_edit(self):
+        install(self.target, project="demo")
+        criterion = (
+            self._skill_dir("demo-brain-ingest")
+            / "references"
+            / "glossary-criteria.md"
+        )
+        second = install(self.target, project="demo")
+
+        self.assertTrue(criterion.is_file())
+        self.assertEqual(
+            list((self.target / ".agents" / "skills").rglob("glossary-criteria.md")),
+            [criterion],
+        )
+        for field in ("created", "updated", "removed", "adopted", "skipped"):
+            self.assertEqual(second[field], [], field)
+
+        user_content = criterion.read_text(encoding="utf-8") + "\n사용자 보충 기준\n"
+        criterion.write_text(user_content, encoding="utf-8")
+        third = install(self.target, project="demo")
+
+        relative = criterion.relative_to(self.target).as_posix()
+        self.assertIn(relative, third["skipped"])
+        self.assertEqual(criterion.read_text(encoding="utf-8"), user_content)
+
     def test_p0_bb2_install_reports_exact_controls_and_installs_only_runtime_script(self):
         config = {
             "project": "bb2",

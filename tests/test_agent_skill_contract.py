@@ -47,6 +47,106 @@ def test_confirmation_requires_an_explicit_promotion_target_and_operation():
         assert required in tools
 
 
+def test_installed_ingest_paths_share_one_conditional_glossary_criterion():
+    with TemporaryDirectory() as td:
+        target = Path(td)
+        install(
+            target,
+            project="demo",
+            brain_root="brain",
+            default_branch="trunk",
+            repo="demo-repo",
+        )
+        skills = target / ".agents" / "skills"
+        ingest_root = skills / "demo-brain-ingest"
+        criterion_path = ingest_root / "references" / "glossary-criteria.md"
+        criterion = criterion_path.read_text(encoding="utf-8")
+        installed_skills = {
+            name: (skills / f"demo-brain-{name}" / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            for name in ("ingest", "session-ingest", "audit", "query")
+        }
+
+        assert criterion_path.is_file()
+        for name in ("session-ingest", "audit", "query"):
+            assert not (
+                skills
+                / f"demo-brain-{name}"
+                / "references"
+                / "glossary-criteria.md"
+            ).exists()
+        sibling_reference = "../demo-brain-ingest/references/glossary-criteria.md"
+        for name in ("session-ingest", "audit"):
+            resolved = (
+                skills / f"demo-brain-{name}" / sibling_reference
+            ).resolve(strict=True)
+            assert resolved == criterion_path.resolve(strict=True)
+
+    assert (
+        "`GlossaryTerm`을 생성하거나 변경할 때 "
+        "`references/glossary-criteria.md`를 먼저 읽는다."
+        in installed_skills["ingest"]
+    )
+    assert (
+        "현재 세션이나 과거 세션에서 어휘 후보를 추출할 때 "
+        "`../demo-brain-ingest/references/glossary-criteria.md`를 먼저 읽는다."
+        in installed_skills["session-ingest"]
+    )
+    assert (
+        "기존 `GlossaryTerm`의 어휘 품질을 감사할 때 "
+        "`../demo-brain-ingest/references/glossary-criteria.md`를 먼저 읽는다."
+        in installed_skills["audit"]
+    )
+    for audit_trigger in ("어휘 감사", "코드 토큰 과잉 적재"):
+        assert audit_trigger in installed_skills["audit"]
+    assert "glossary-criteria.md" not in installed_skills["query"]
+
+    for role_boundary in (
+        "현재 세션과 과거 세션",
+        "진행 중·미결 재료",
+        "정식 적재 가능한 지식",
+    ):
+        assert role_boundary in installed_skills["session-ingest"]
+
+    for required in (
+        "실제 이름 사용",
+        "독립 개념",
+        "명명 근거",
+        "enum·필드·변수명",
+        "`DomainMapping`",
+        "`CodeLocator`",
+        "무객체",
+        "대표어",
+        "동의어",
+        "별칭",
+        "`candidate GlossaryTerm`",
+        "사용자 판단",
+    ):
+        assert required in criterion
+
+    example_rows = {
+        expression: next(
+            line for line in criterion.splitlines() if f"| `{expression}` |" in line
+        )
+        for expression in (
+            "입장팝업",
+            "OriginalPopup",
+            "카누 레이스 상태",
+            "IDLE",
+            "RPMAP",
+        )
+    }
+    assert "`GlossaryTerm`" in example_rows["입장팝업"]
+    assert "`GlossaryTerm` 아님" in example_rows["OriginalPopup"]
+    assert "`CodeLocator`" in example_rows["OriginalPopup"]
+    assert "`GlossaryTerm`" in example_rows["카누 레이스 상태"]
+    assert "`DomainMapping`" in example_rows["카누 레이스 상태"]
+    assert "`GlossaryTerm` 아님" in example_rows["IDLE"]
+    assert "`DomainMapping`" in example_rows["IDLE"]
+    assert "무객체" in example_rows["RPMAP"]
+
+
 def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():
     ingest = _installed_skill("ingest")
     session = _installed_skill("session-ingest")

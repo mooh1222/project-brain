@@ -1,9 +1,10 @@
 ---
 name: {{PROJECT}}-brain-audit
 description: |
-  Use when {{PROJECT}} Brain 코퍼스의 무결성, 고립 객체, 오래된 코드 근거, 인용문 상태를
-  점검할 때. "brain 점검", "코퍼스 상태", "stale 체크", "고아 객체" 요청에서는
-  읽기 전용 진단을 먼저 실행하고 수정은 sibling ingest 스킬로 넘긴다.
+  Use when {{PROJECT}} Brain 코퍼스의 무결성, 고립 객체, 오래된 코드 근거, 인용문 상태,
+  어휘 품질을 점검할 때. "brain 점검", "코퍼스 상태", "stale 체크", "고아 객체",
+  "어휘 감사", "코드 토큰 과잉 적재" 요청에서는 읽기 전용 진단을 먼저 실행하고 수정은
+  sibling ingest 스킬로 넘긴다.
 ---
 
 # {{PROJECT}} Brain 코퍼스 감사 (audit)
@@ -11,6 +12,10 @@ description: |
 감사는 코퍼스 상태를 **먼저 보고**하는 진단 절차다. 무결성, 고립 객체, 코드 드리프트와
 정확한 코드 인용 검증을 함께 보되, 기본 실행은 읽기 전용이다. 객체 연결·수정·제거는 감사
 결과와 명시적인 수정 요청이 모두 있을 때 `{{PROJECT}}-brain-ingest`로 넘긴다.
+
+기존 `GlossaryTerm`의 어휘 품질을 감사할 때 `../{{PROJECT}}-brain-ingest/references/glossary-criteria.md`를 먼저 읽는다.
+일반 무결성·stale 감사에서는 읽을 필요가 없다. 어휘 감사도 현재 `reviewed` 상태를 정답으로
+가정하거나 자동 수정하지 않고, 같은 기준에 따른 판정과 근거부터 보고한다.
 
 ## 기본 실행
 

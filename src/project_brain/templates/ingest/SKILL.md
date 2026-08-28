@@ -34,6 +34,9 @@ description: |
 상태축과 머지 전·후 경계는 `references/scope.md`가 정한다.
 상태 이름을 적었다고 적재나 이력 확인이 끝난 것으로 간주하지 않는다.
 
+`GlossaryTerm`을 생성하거나 변경할 때 `references/glossary-criteria.md`를 먼저 읽는다.
+어휘를 만들거나 바꾸지 않는 적재에서는 이 기준을 읽을 필요가 없다.
+
 ## 절대 규칙
 
 1. Source Intake를 먼저 선언하고, 대상과 이번 소스 묶음을 분리한다.
@@ -144,6 +147,7 @@ workflow 최상위 상태만으로 완료를 선언하지 않는다.
 
 ## Reference routing
 
+- `references/glossary-criteria.md`: `GlossaryTerm` 생성·변경 전에 실제 프로젝트 이름과 코드 토큰을 구분하고 비어휘 의미의 라우팅을 정할 때 읽는다.
 - `references/scope.md`: 적용 시나리오, 세 상태축, 머지 전·후 경계가 필요할 때 읽는다.
 - `references/object-model.md`: 필수 필드, enum, 연결, 논리 key, 완성 ID, 코드 앵커 key, 동의어·별칭을 다룰 때 읽는다.
 - `references/judgment.md`: 변경이 기존 사실을 대체·보완·충돌시키는지 판정할 때 읽는다.

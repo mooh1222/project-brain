@@ -30,7 +30,7 @@
 | L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
-| 어휘 기준·지식 초안 | 🟡 replacement 티켓 준비 완료 | #47 아래 #48~#51로 공통 어휘 기준·별칭 회수·지식 초안 MVP·실제 BB2 파일럿을 다시 정의. 현재 구현은 없음 |
+| 어휘 기준·지식 초안 | 🟡 replacement 진행 중 | #48 공통 어휘 기준과 세 설치 스킬 연결 완료. #49~#51 별칭 회수·지식 초안 MVP·실제 BB2 파일럿은 미구현 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -42,24 +42,25 @@
 
 ### 현재 기준 재설정과 작은 replacement spec (2026-08-28)
 
-현재 런타임 코드 기준점은 `aa4101ec8fe62878b9a554b471be66d519cf4bc8`이다. 그 뒤의 기준선 문서와
-Git ignore 정리는 엔진 동작을 바꾸지 않는다. 과거 #1 통합 명세와 열린 하위 그래프는 새 실행
-계약으로 사용하지 않는다. #47과 후속 #48~#51이 승인된 새 실행 계약이며, 과거 열린 그래프는
-대응표를 남기고 `NOT_PLANNED`로 정리한다. 이미 닫힌 완료 이슈와 구현 기록은 보존한다.
+replacement 시작 런타임 기준점은 `aa4101ec8fe62878b9a554b471be66d519cf4bc8`이다. 그 뒤 기준선
+문서와 Git ignore 정리를 거쳐 #48이 설치 스킬 계약을 처음 바꿨다. 과거 #1 통합 명세와 열린
+하위 그래프는 새 실행 계약으로 사용하지 않는다. #47과 후속 #48~#51이 승인된 새 실행 계약이며,
+과거 열린 그래프는 대응표를 남기고 `NOT_PLANNED`로 정리한다. 이미 닫힌 완료 이슈와 구현 기록은
+보존한다.
 
 현재 main의 분류는 다음과 같다.
 
 - **공개 경로에 연결됨**: #2 query/audit 기본 읽기 전용, #3 receipt-bound `session complete`,
-  #5 snapshot v1·v2 19종 동결.
+  #5 snapshot v1·v2 19종 동결, #48 공통 어휘 기준과 ingest·session-ingest·audit 조건부 연결.
 - **내부 정책·부분 기반**: #4 `capabilities.py`는 분산 runtime 분기를 대체하지 않는 설명·드리프트
   검사 registry다. #41 `evidence_plan.py`와 #42~#43 `evidence_preparation.py`는 직접 테스트만 있고
   public ingest·promote·CLI·설치 스킬에서 import하거나 호출하지 않는다.
-- **미구현**: 공통 어휘 기준 reference, 대표어·동의어·별칭의 매핑 회수 통일, 지식 초안 모듈·CLI·
-  다섯 번째 설치 스킬, `GlossaryClassificationRecord`, 공통 verification 공개 적용.
+- **미구현**: 대표어·동의어·별칭의 매핑 회수 통일, 지식 초안 모듈·CLI·다섯 번째 설치 스킬,
+  `GlossaryClassificationRecord`, 공통 verification 공개 적용.
 
 replacement spec #47의 활성 결과는 네 개로 제한한다.
 
-1. #48 공통 어휘 기준 reference와 ingest·session-ingest·audit 연결
+1. #48 공통 어휘 기준 reference와 ingest·session-ingest·audit 연결 — 구현 완료
 2. #49 대표어·동의어·별칭 회수 통일
 3. #50 지식 초안 모듈·CLI·`brain-draft` 설치 스킬
 4. #51 실제 BB2 샐리 카누 초안·어휘 감사 파일럿

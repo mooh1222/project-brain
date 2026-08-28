@@ -13,6 +13,9 @@ description: |
 # {{PROJECT}} Brain 세션 적재 — 진행 중 개발 + 과거 세션 추출
 
 추출 판단은 작업자가 하고 CLI는 기록·마킹·스캔을 맡는다. 객체 모양과 갱신은 sibling ingest 스킬이 정본이다.
+이 스킬은 현재 세션과 과거 세션에서 재사용할 자료를 추출·분류한다. 진행 중·미결 재료는
+정식 객체로 밀어 넣지 않고 지식 초안 재료로 구분하며, 정식 적재 가능한 지식만 sibling ingest
+절차로 넘긴다. 지식 초안의 생성·재개·갱신 수명주기는 이 스킬이 맡지 않는다.
 
 ## 어느 시나리오인가
 
@@ -24,6 +27,7 @@ description: |
 
 ## 공통 불변 규칙
 
+- 현재 세션이나 과거 세션에서 어휘 후보를 추출할 때 `../{{PROJECT}}-brain-ingest/references/glossary-criteria.md`를 먼저 읽는다. 어휘 후보가 없는 세션 작업에서는 읽지 않으며 기준을 이 스킬에 복제하지 않는다.
 - 적재와 최종화는 `{{PROJECT}}-brain-ingest/references/ingest-tools.md` 및 `{{PROJECT}}-brain-ingest/references/completeness-checklist.md`를 직접 따른다. direct/assembled 모두 coverage 없는 쓰기를 허용하지 않고 단계 수는 여기 복제하지 않는다.
 - 적재로 raw 청크 수가 변하면 실코퍼스 가드의 `EXPECTED_RAW_CHUNKS`(`{{BRAIN_ROOT}}/checks/test_real_corpus.py`)를 **의식적으로 갱신**하고 같은 커밋에 포함한다(객체 색인 행은 디스크의 색인 대상 `.json` 수로 자동 대조되니 손갱신 불필요).
 - 많은 객체를 바꾸기 전 복구 기준이 필요하면 승인된 작업 경로만 명시적으로 stage·commit한다.

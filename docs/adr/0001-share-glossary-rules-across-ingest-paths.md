@@ -1,7 +1,7 @@
 ---
 status: accepted
 decision_date: 2026-08-14
-implementation: not_implemented
+implementation: partial_issue_48
 contract_status: mvp_scope_revalidated_2026-08-28
 superseded_by: null
 ---
@@ -15,3 +15,5 @@ superseded_by: null
 운영 정본은 엔진의 `templates/ingest/references/glossary-criteria.md` 한 파일로 두고 소비 프로젝트에는 `<project>-brain-ingest/references/glossary-criteria.md`로 한 번만 설치한다. ingest는 `GlossaryTerm` 생성·변경 때, session-ingest는 현재 또는 과거 세션에서 어휘 후보를 추출할 때, brain-draft는 어휘 관찰을 잠정 분류할 때, audit은 기존 어휘 품질을 감사할 때 이 reference를 읽는다. query는 읽지 않으며 어느 스킬도 기준이나 template을 자기 본문에 복제하지 않는다. installer 계약 테스트는 네 소비 경로의 조건부 pointer가 같은 파일을 가리키는지 확인한다.
 
 이 reference는 실제 프로젝트 이름·독립 개념·명명 근거·코드 토큰 제외, 비어휘 의미의 DomainMapping·CodeLocator·무객체 라우팅, 대표어·동의어·별칭, 어휘 후보 최소 문턱, 사용자 판단이 필요한 모호성과 구체적인 정답·반례를 다룬다. `GlossaryClassificationRecord`, 공통 verification hash, BB2 migration 실행 절차는 이 문서의 범위가 아니다.
+
+2026-08-28 #48에서 reference와 ingest·session-ingest·audit의 조건부 연결을 구현했다. query는 읽지 않는다. 아직 설치되지 않은 brain-draft 연결은 #50에서 추가하므로 이 ADR 전체 구현 상태는 partial이다.

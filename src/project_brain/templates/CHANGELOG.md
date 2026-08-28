@@ -10,6 +10,18 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-08-28 — 공통 어휘 판정 기준과 세 적재 경로 연결
+
+실제 프로젝트 이름과 단순 코드 토큰을 구분하는 단일 기준을 ingest의
+`references/glossary-criteria.md`로 추가했다. ingest는 `GlossaryTerm` 생성·변경 때,
+session-ingest는 현재·과거 세션의 어휘 후보 추출 때, audit은 기존 어휘 품질 감사 때만 같은
+설치 파일을 읽는다. query는 이 기준을 읽지 않는다.
+
+기준은 비어휘 의미를 `DomainMapping`·`CodeLocator`·무객체로 보내고, 대표어·동의어·별칭,
+candidate 최소 문턱, 사용자 판단이 필요한 모호성, `입장팝업`·`OriginalPopup`·`카누 레이스
+상태`·`IDLE`·`RPMAP` 판정 예시를 고정한다. 이 변경은 판정 객체·공통 verification·기존
+코퍼스 자동 수정을 추가하지 않는다.
+
 ## 2026-07-23 — 코드 앵커 SHA 머지 규칙 정정
 
 커밋 SHA는 머지로 바뀌지 않으며, fast-forward와 일반 merge에서는 작업 브랜치 커밋이

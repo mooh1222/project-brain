@@ -21,6 +21,7 @@ SESSION_TEMPLATE_ROOT = ROOT / "src" / "project_brain" / "templates" / "session-
 SKILL = TEMPLATE_ROOT / "SKILL.md"
 REFERENCES = TEMPLATE_ROOT / "references"
 REQUIRED_REFERENCES = (
+    "glossary-criteria.md",
     "scope.md",
     "object-model.md",
     "judgment.md",
