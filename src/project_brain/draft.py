@@ -158,23 +158,10 @@ def _section(text: str, heading: str) -> str:
     return text[start:end].strip()
 
 
-def _document(path: Path, payload: bytes) -> dict[str, str]:
-    text = payload.decode("utf-8")
-    lines = text.splitlines()
-    topic_id = lines[3].removeprefix("Topic ID: ")
-    updated = lines[4].removeprefix("Updated: ")
-    return {
-        "topic_id": topic_id,
-        "title": lines[1].removeprefix("# "),
-        "scope": _section(text, "범위"),
-        "updated": updated,
-        "path": f"drafts/{path.name}",
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "content": text,
-    }
-
-
-def _content_problems(path: Path, text: str) -> list[dict[str, str]]:
+def _parse_content(
+    path: Path,
+    text: str,
+) -> tuple[dict[str, str] | None, list[dict[str, str]]]:
     relative = f"drafts/{path.name}"
     problems: list[dict[str, str]] = []
     lines = text.splitlines()
@@ -186,41 +173,80 @@ def _content_problems(path: Path, text: str) -> list[dict[str, str]]:
             "code": "draft_marker_invalid",
             "detail": "project-brain-draft:v1 marker가 첫 줄에 정확히 하나 있어야 합니다",
         })
+        return None, problems
+
     h1_lines = [line for line in lines if line.startswith("# ")]
-    if len(h1_lines) != 1 or not h1_lines[0].removeprefix("# ").strip():
+    title = (
+        h1_lines[0].removeprefix("# ")
+        if len(h1_lines) == 1
+        else ""
+    )
+    title_layout_valid = (
+        len(h1_lines) == 1
+        and bool(title.strip())
+        and len(lines) > 1
+        and lines[1] == h1_lines[0]
+    )
+    if not title_layout_valid:
         problems.append({
             "path": relative,
             "code": "draft_title_invalid",
-            "detail": "비어 있지 않은 H1 제목이 정확히 하나 있어야 합니다",
+            "detail": "marker 다음 줄에 비어 있지 않은 H1 제목이 정확히 하나 있어야 합니다",
         })
+
     topic_lines = [
         line.removeprefix("Topic ID: ")
         for line in lines
         if line.startswith("Topic ID: ")
     ]
-    if len(topic_lines) != 1 or _TOPIC_ID.fullmatch(topic_lines[0]) is None:
+    topic_id = topic_lines[0] if len(topic_lines) == 1 else ""
+    topic_valid = (
+        len(topic_lines) == 1
+        and _TOPIC_ID.fullmatch(topic_id) is not None
+    )
+    if not topic_valid:
         problems.append({
             "path": relative,
             "code": "draft_topic_id_invalid",
             "detail": "ASCII kebab-case Topic ID가 정확히 하나 있어야 합니다",
         })
-    elif topic_lines[0] != path.stem:
+    elif topic_id != path.stem:
         problems.append({
             "path": relative,
             "code": "draft_topic_id_mismatch",
             "detail": "Topic ID가 초안 파일명과 일치해야 합니다",
         })
+    elif title_layout_valid and (
+        len(lines) <= 3 or lines[3] != f"Topic ID: {topic_id}"
+    ):
+        problems.append({
+            "path": relative,
+            "code": "draft_topic_id_invalid",
+            "detail": "Topic ID가 v1 header의 고정 위치에 있어야 합니다",
+        })
+
     updated_lines = [
         line.removeprefix("Updated: ")
         for line in lines
         if line.startswith("Updated: ")
     ]
-    if len(updated_lines) != 1 or not _valid_updated(updated_lines[0]):
+    updated = updated_lines[0] if len(updated_lines) == 1 else ""
+    updated_valid = len(updated_lines) == 1 and _valid_updated(updated)
+    if not updated_valid:
         problems.append({
             "path": relative,
             "code": "draft_updated_invalid",
             "detail": "timezone이 있는 ISO 8601 Updated가 정확히 하나 있어야 합니다",
         })
+    elif title_layout_valid and topic_valid and topic_id == path.stem and (
+        len(lines) <= 4 or lines[4] != f"Updated: {updated}"
+    ):
+        problems.append({
+            "path": relative,
+            "code": "draft_updated_invalid",
+            "detail": "Updated가 v1 header의 고정 위치에 있어야 합니다",
+        })
+
     h2_headings = [
         line.removeprefix("## ")
         for line in lines
@@ -232,7 +258,32 @@ def _content_problems(path: Path, text: str) -> list[dict[str, str]]:
             "code": "draft_sections_invalid",
             "detail": "필수 H2 절이 정확히 한 번씩 정해진 순서로 있어야 합니다",
         })
-    return problems
+    if problems:
+        return None, problems
+    return {
+        "topic_id": topic_id,
+        "title": title,
+        "scope": _section(text, "범위"),
+        "updated": updated,
+    }, []
+
+
+def _content_problems(path: Path, text: str) -> list[dict[str, str]]:
+    return _parse_content(path, text)[1]
+
+
+def _document(path: Path, payload: bytes) -> dict[str, str]:
+    text = payload.decode("utf-8")
+    parsed, problems = _parse_content(path, text)
+    if parsed is None:
+        problem = problems[0]
+        raise DraftError(problem["code"], problem["detail"])
+    return {
+        **parsed,
+        "path": f"drafts/{path.name}",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "content": text,
+    }
 
 
 def create(

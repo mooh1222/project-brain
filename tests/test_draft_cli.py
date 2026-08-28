@@ -141,3 +141,30 @@ def test_draft_lint_returns_json_and_nonzero_for_a_broken_draft(tmp_path, monkey
     assert [problem["code"] for problem in broken["problems"]] == [
         "draft_marker_invalid"
     ]
+
+
+def test_configured_symlinked_brain_root_cannot_escape_draft_writes(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    outside_root = tmp_path / "outside-brain"
+    project_root.mkdir()
+    outside_root.mkdir()
+    (project_root / "brain").symlink_to(outside_root, target_is_directory=True)
+    (project_root / ".project-brain.json").write_text(
+        json.dumps({"brain_root": "brain"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project_root)
+
+    rc, payload = _run_cli(
+        "draft",
+        "create",
+        "escaped-topic",
+        "--title",
+        "이탈 초안",
+        "--scope",
+        "이탈 범위",
+    )
+
+    assert rc == 1
+    assert payload["error_code"] == "draft_path_invalid"
+    assert not (outside_root / "drafts" / "escaped-topic.md").exists()

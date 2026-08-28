@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 CONFIG_FILENAME = ".project-brain.json"
@@ -77,6 +78,26 @@ def _resolve(explicit, key: str, what: str, start=None) -> Path:
 
 def resolve_brain_root(explicit=None, start=None) -> Path:
     brain_root = _resolve(explicit, "brain_root", "brain 코퍼스", start=start)
+    if not brain_root.is_absolute():
+        raise ConfigError("brain 코퍼스 경로는 absolute path여야 한다.")
+    return brain_root
+
+
+def resolve_brain_root_no_follow(explicit=None, start=None) -> Path:
+    """draft 쓰기 검사용으로 symlink를 해소하지 않은 Brain root를 반환한다."""
+    if explicit is not None:
+        brain_root = Path(explicit)
+    else:
+        cfg_path = find_config(start=start)
+        if cfg_path is None:
+            raise ConfigError(
+                "brain 코퍼스 경로를 알 수 없다 — 플래그로 직접 주거나, 프로젝트 루트에 "
+                f"{CONFIG_FILENAME}을 만들어라(`project-brain install`이 생성)."
+            )
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        brain_root = Path(os.path.abspath(
+            cfg_path.parent / raw.get("brain_root", "brain")
+        ))
     if not brain_root.is_absolute():
         raise ConfigError("brain 코퍼스 경로는 absolute path여야 한다.")
     return brain_root

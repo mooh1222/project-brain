@@ -15,6 +15,7 @@ from project_brain.config import (
     ConfigError,
     load_config,
     resolve_brain_root,
+    resolve_brain_root_no_follow,
     resolve_default_branch,
     resolve_scenarios_path,
 )
@@ -1552,7 +1553,7 @@ def _run_draft(argv) -> int:
 
     return_code = 0
     try:
-        brain_root = resolve_brain_root(args.brain_root)
+        brain_root = resolve_brain_root_no_follow(args.brain_root)
         if args.action == "create":
             draft = create(
                 brain_root,

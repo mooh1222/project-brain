@@ -636,3 +636,28 @@ def test_update_rejects_a_malformed_expected_sha_without_writing(tmp_path):
 
     assert exc.value.code == "draft_expected_sha_invalid"
     assert show(tmp_path, "sha-topic") == created
+
+
+def test_update_rejects_metadata_shifted_out_of_the_fixed_v1_header(tmp_path):
+    created = create(
+        tmp_path,
+        topic_id="shifted-header",
+        title="고정 헤더 초안",
+        scope="검사 범위",
+        updated_at=UPDATED,
+    )
+    shifted = created["content"].replace(
+        "<!-- project-brain-draft:v1 -->\n",
+        "<!-- project-brain-draft:v1 -->\n고정 구조 밖 텍스트\n",
+    )
+
+    with pytest.raises(DraftError) as exc:
+        update(
+            tmp_path,
+            "shifted-header",
+            expected_sha=created["sha256"],
+            content=shifted,
+        )
+
+    assert exc.value.code == "draft_title_invalid"
+    assert show(tmp_path, "shifted-header") == created
