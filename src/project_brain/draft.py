@@ -176,6 +176,19 @@ def _outside_fenced_code(lines: list[str]) -> list[tuple[int, str]]:
     return result
 
 
+def _atx_heading_level(line: str) -> int | None:
+    """CommonMark의 0~3칸 들여쓴 ATX heading level을 판정한다."""
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3 or not stripped.startswith("#"):
+        return None
+    level = len(stripped) - len(stripped.lstrip("#"))
+    if not 1 <= level <= 6:
+        return None
+    if len(stripped) > level and stripped[level] not in {" ", "\t"}:
+        return None
+    return level
+
+
 def _parse_content(
     path: Path,
     text: str,
@@ -195,7 +208,11 @@ def _parse_content(
         })
         return None, problems
 
-    h1_lines = [line for _, line in outside if line.startswith("# ")]
+    h1_lines = [
+        line
+        for _, line in outside
+        if _atx_heading_level(line) == 1
+    ]
     title = (
         h1_lines[0].removeprefix("# ")
         if len(h1_lines) == 1
@@ -204,6 +221,7 @@ def _parse_content(
     title_layout_valid = (
         len(h1_lines) == 1
         and bool(title.strip())
+        and h1_lines[0].startswith("# ")
         and len(lines) > 1
         and lines[1] == h1_lines[0]
     )
@@ -257,7 +275,7 @@ def _parse_content(
     h2_entries = [
         (index, line.removeprefix("## "))
         for index, line in outside
-        if line.startswith("## ")
+        if _atx_heading_level(line) == 2
     ]
     h2_headings = [heading for _, heading in h2_entries]
     if tuple(h2_headings) != _SECTION_HEADINGS:
