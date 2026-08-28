@@ -10,3 +10,12 @@ __pycache__/
 .worktrees/
 # 영상·문서 분석 도구가 만드는 로컬 출력
 /va-out/
+# agent-team (local state — do not commit)
+.agent-team/
+.goal/
+.agents/state/
+.agents/team/
+.agents/team-commit-hygiene/
+.codex/hooks.json
+.claude/settings.local.json
+.github/hooks/agent-team-worker.json
