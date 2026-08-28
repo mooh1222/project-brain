@@ -1,12 +1,14 @@
 ---
-status: accepted
+status: proposed
 decision_date: 2026-08-14
 implementation: not_implemented
-contract_status: integrated_spec_published
+contract_status: deferred_outside_replacement_scope
 superseded_by: null
 ---
 
 # 후보 확인과 승격 승인을 분리한다
+
+2026-08-28 재검토에서는 이 흐름을 replacement spec 범위에서 제외했다. 현재 query·promote 동작을 아래 제안으로 확대 해석하지 않으며, 실제 사용자 확인과 쓰기 승인 사이의 관측된 문제가 다시 범위를 요구할 때 별도로 재검토한다.
 
 질의에서 후보 내용을 사용자가 `맞다`고 확인한 답은 모호성을 푸는 근거이지 Brain 쓰기 승인이 아니다. 사용자가 `바로 승격해줘`라고 명시하면 종류별 검증을 거쳐 통과한 대상을 같은 요청에서 승격할 수 있고, `승격 준비 목록에 넣어둬`라고 명시하면 나중에 승격할 수 있도록 검증 결과를 보존하되 객체는 후보 상태로 유지한다. 단순 확인만 받았으면 현재 답변에만 반영하고 코퍼스는 바꾸지 않는다.
 

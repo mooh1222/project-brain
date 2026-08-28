@@ -1,12 +1,14 @@
 ---
-status: accepted
+status: proposed
 decision_date: 2026-08-14
-implementation: not_implemented
-contract_status: integrated_spec_published
+implementation: partial_internal_unwired
+contract_status: deferred_outside_replacement_scope
 superseded_by: null
 ---
 
 # 후보 안에 검증 결과를 보존한다
+
+2026-08-28 재검토에서는 공통 후보 verification을 replacement spec 범위에서 제외했다. `evidence_plan.py`와 `evidence_preparation.py`의 내부 기반은 main에 있지만 공개 ingest·promote·CLI·설치 스킬 호출자가 없으며, 아래 계약을 현재 실행 경로나 후속 작업의 선행조건으로 사용하지 않는다. 실제 필요나 유지비가 확인될 때 재사용·격리 여부를 별도로 판단한다.
 
 후보 검증을 위해 `ObjectVerificationRecord`나 `GlossaryQualificationRecord` 같은 객체 종류를 새로 만들지 않는다. 모든 승격 가능한 후보는 기존 `candidate` 영역 하나에 공통 검사와 종류별 검사의 현재 결과를 함께 보존한다. 공통 검사는 대상 내용·근거·현재 유효성·미해결 질문을 다루고, 어휘에는 실제 프로젝트 이름·독립 개념·적절한 크기·대표 이름·중복·소유 도메인 검사를, 코드 위치와 의미 매핑 등에는 각 종류에 맞는 검사를 추가한다.
 

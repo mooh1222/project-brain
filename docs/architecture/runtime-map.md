@@ -33,8 +33,9 @@
   ],
   "source_paths": [
     "src/project_brain/assembly.py", "src/project_brain/audit.py",
-    "src/project_brain/cli.py", "src/project_brain/config.py",
+    "src/project_brain/capabilities.py", "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
+    "src/project_brain/evidence_plan.py", "src/project_brain/evidence_preparation.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
     "src/project_brain/mutation.py", "src/project_brain/quote_debt.py",
@@ -48,8 +49,9 @@
   ],
   "test_paths": [
     "tests/test_architecture_docs.py", "tests/test_assembly.py", "tests/test_audit.py",
-    "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
+    "tests/test_capabilities.py", "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
     "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_id_grammar.py",
+    "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
     "tests/test_router.py",
@@ -131,6 +133,20 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 `--snapshot-verify`, `--expected-engine-head`, `--expected-bb2-head`를 함께 결속해
 `--report` 자체를 closure receipt로 만든다. 독립 검증은 같은 receipt를 `--closure`로
 받으며 생성 시각을 다시 입력받지 않는다.
+
+## 현재 실행 흐름 밖의 내부 기반
+
+다음 모듈은 main에 있지만 위 실행 흐름이나 CLI 명령에 연결된 public feature가 아니다.
+
+| 내부 기반 | 현재 역할 | 공개 경계 |
+|---|---|---|
+| `capabilities.py` | 19종 객체의 정책 설명과 분산 kind 집합 드리프트 검사 | schema·query·search·promote·mutation·graph의 runtime 분기를 아직 대체하지 않음 |
+| `evidence_plan.py` | canonical evidence plan을 불변 값으로 파싱·검증 | production caller 없음. `test_evidence_plan.py`가 직접 경계만 검증 |
+| `evidence_preparation.py` | object-only base plan, projected store, loaded engine·adapter·raw 신원 준비 | production caller 없음. public ingest·promote·CLI·설치 스킬에 연결되지 않음 |
+
+이 모듈들은 #4·#41~#43의 완료된 내부 기반으로 동결한다. 직접 테스트 통과는 해당 모듈 계약의
+증거지만 사용자 기능이 활성화됐다는 뜻은 아니다. #44~#46을 매몰비용 때문에 이어서 구현하거나
+새 replacement spec의 선행조건으로 사용하지 않는다.
 
 ## 저장면과 권위
 
@@ -369,7 +385,8 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
   원격·stale cache 갱신은 `--fetch`, `--write-stale-cache`로 각각 명시한다.
 - `eval --check-ids`는 모델 없이 기대 ID 실존을 확인한다. 일반 `eval`은 소비 데이터의 골든셋과
   검색 구현을 사용한다.
-- 설치기는 query, ingest, session-ingest, audit 스킬을 소비 프로젝트에 심는다. ingest 스킬의
+- 현재 설치기는 query, ingest, session-ingest, audit 스킬 네 개를 소비 프로젝트에 심는다. 제안된
+  `brain-draft` 다섯 번째 스킬은 아직 구현되지 않았다. ingest 스킬의
   runtime은 assemble → build → ingest → semantic finalization을 수행하며 엔진 pytest와 별도로
   `src/project_brain/templates/ingest/scripts`의 unittest를 통과해야 한다.
 

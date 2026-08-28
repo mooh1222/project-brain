@@ -1,12 +1,14 @@
 ---
-status: accepted
+status: proposed
 decision_date: 2026-08-14
 implementation: not_implemented
-contract_status: integrated_spec_published
+contract_status: deferred_until_repeated_misclassification_evidence
 superseded_by: null
 ---
 
 # 문맥 의존 어휘 판정을 정식 비색인 객체로 재사용한다
+
+2026-08-28 재검토에서는 이 객체를 첫 어휘 기준 범위에 넣지 않기로 했다. 명백한 enum·필드·변수명은 공통 기준으로 제외하고, 같은 문맥과 표현이 그 기준만으로 풀리지 않아 반복해서 오분류되는 실제 사례가 확인될 때에만 별도 판정 객체가 필요한지 다시 검토한다. 아래 내용은 그 조건이 충족될 경우의 과거 제안이며 현재 구현 계약이 아니다.
 
 공통 규칙만으로 반복 판정하기 어려운 표현을 새 `GlossaryTerm`으로 만들지 않기로 확정하면 정식 비색인 객체 `GlossaryClassificationRecord`로 남긴다. 이 객체들의 모음을 어휘 판정 명부라고 부른다. 명백한 함수·필드·enum 같은 일반 코드 토큰은 공통 규칙으로 제외하고 개별 객체를 만들지 않으며, 지식 초안이나 `rejected GlossaryTerm`을 탈락 판정 저장소로 사용하지 않는다.
 
