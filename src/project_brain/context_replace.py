@@ -8,6 +8,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from project_brain.context_projection import is_prompt_payload_projection
 from project_brain.mutation import (
     MutationManifest,
     MutationOperation,
@@ -142,7 +143,12 @@ def plan_context_replace(
     }
     if context_id not in current_context and context_id not in set(desired_ids):
         _fail("context_missing", f"context object is missing: {context_id}")
-    removed_ids = set(current_context) - set(desired_by_id)
+    omitted_ids = set(current_context) - set(desired_by_id)
+    derived_projection_ids = {
+        object_id
+        for object_id, obj in current_context.items()
+        if is_prompt_payload_projection(obj)
+    }
     created_ids = set(desired_by_id) - set(current_context)
 
     if (
@@ -154,6 +160,7 @@ def plan_context_replace(
     drop_ids = set(expected_drop_ids)
     if len(drop_ids) != len(tuple(expected_drop_ids)):
         _fail("drop_id_duplicate", "expected_drop_ids contains a duplicate id")
+    removed_ids = omitted_ids - (derived_projection_ids - drop_ids)
     moves = _validate_string_mapping(expected_moves, name="expected_moves")
     if len(set(moves.values())) != len(moves):
         _fail("move_target_duplicate", "expected_moves contains a duplicate target")

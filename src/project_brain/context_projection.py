@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from project_brain.hash_utils import sha256_text as _sha256_text
 from project_brain.hash_utils import source_content_hash as _source_content_hash
 from project_brain.id_grammar import format_id
@@ -5,6 +7,14 @@ from project_brain.store import BrainStore
 
 GENERATED_HEADER = "GENERATED FROM PROJECT BRAIN - DO NOT EDIT"
 SCHEMA_VERSION = "0.1"
+
+
+def is_prompt_payload_projection(obj: Mapping[str, object]) -> bool:
+    """엔진이 관리하는 재사용 projection인지 반환한다."""
+    return (
+        obj.get("kind") == "ContextProjection"
+        and obj.get("format") == "prompt_payload"
+    )
 
 
 def _reviewed_terms_for_context(store: BrainStore, context: dict) -> list[dict]:

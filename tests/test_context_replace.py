@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import project_brain.transaction_receipt as transaction_receipt
 
+from project_brain.context_projection import build_reuse_projection
 from project_brain.context_replace import (
     ContextReplaceError,
     apply_context_replace_artifact,
@@ -144,6 +145,135 @@ def test_context_replace_does_not_force_old_and_new_counts_to_match(tmp_path):
     assert {item["object_id"] for item in result.manifest.deletes} == {
         drop["id"],
     }
+
+
+def test_context_replace_atomically_refreshes_existing_prompt_projection(tmp_path):
+    brain_root = tmp_path / "brain"
+    before = context()
+    _write_raw(brain_root, before)
+    projection = build_reuse_projection(
+        BrainStore.load(brain_root),
+        context_id=before["id"],
+        requirement_key="result-popup",
+        source_object_ids=[before["id"]],
+        reuse_payload="고정 재사용 브리핑",
+        title="결과 팝업 브리핑",
+        generated_by="test",
+    )
+    projection.update(
+        created_at=FIXED_TIME,
+        updated_at=FIXED_TIME,
+        generated_at=FIXED_TIME,
+    )
+    _write_raw(brain_root, projection)
+    desired = {**before, "title": "변경된 컨텍스트"}
+
+    request = _plan(
+        brain_root,
+        desired_objects=[desired],
+        expected_drop_ids=(),
+    )
+    artifact, result = _apply_artifact(brain_root, request)
+
+    store = BrainStore.load(brain_root)
+    refreshed = store.get(projection["id"])
+    assert result.action_count == 2
+    assert store.get(before["id"])["title"] == "변경된 컨텍스트"
+    assert refreshed["projection_hash"] == projection["projection_hash"]
+    assert refreshed["source_content_hash"] != projection["source_content_hash"]
+    assert {
+        row["object_id"]
+        for row in artifact.manifest["intent"]["preview"]["actions"]
+        if row["action"] == "update"
+    } == {before["id"], projection["id"]}
+
+
+def test_context_replace_keeps_explicit_prompt_projection_drop(tmp_path):
+    brain_root = tmp_path / "brain"
+    before = context()
+    _write_raw(brain_root, before)
+    projection = build_reuse_projection(
+        BrainStore.load(brain_root),
+        context_id=before["id"],
+        requirement_key="result-popup",
+        source_object_ids=[before["id"]],
+        reuse_payload="삭제할 재사용 브리핑",
+        title="삭제할 브리핑",
+        generated_by="test",
+    )
+    projection.update(
+        created_at=FIXED_TIME,
+        updated_at=FIXED_TIME,
+        generated_at=FIXED_TIME,
+    )
+    _write_raw(brain_root, projection)
+
+    request = _plan(
+        brain_root,
+        desired_objects=[before],
+        expected_drop_ids=(projection["id"],),
+    )
+    artifact, result = _apply_artifact(brain_root, request)
+
+    assert result.action_count == 1
+    assert BrainStore.load(brain_root).has(projection["id"]) is False
+    assert {
+        row["object_id"]
+        for row in artifact.manifest["intent"]["preview"]["actions"]
+        if row["action"] == "delete"
+    } == {projection["id"]}
+
+
+def test_context_replace_refreshes_nested_prompt_projections_in_dependency_order(
+    tmp_path,
+):
+    brain_root = tmp_path / "brain"
+    before = context()
+    _write_raw(brain_root, before)
+    inner = build_reuse_projection(
+        BrainStore.load(brain_root),
+        context_id=before["id"],
+        requirement_key="z-inner",
+        source_object_ids=[before["id"]],
+        reuse_payload="안쪽 브리핑",
+        title="안쪽 브리핑",
+        generated_by="test",
+    )
+    inner.update(
+        created_at=FIXED_TIME,
+        updated_at=FIXED_TIME,
+        generated_at=FIXED_TIME,
+    )
+    _write_raw(brain_root, inner)
+    outer = build_reuse_projection(
+        BrainStore.load(brain_root),
+        context_id=before["id"],
+        requirement_key="a-outer",
+        source_object_ids=[inner["id"]],
+        reuse_payload="바깥 브리핑",
+        title="바깥 브리핑",
+        generated_by="test",
+    )
+    outer.update(
+        created_at=FIXED_TIME,
+        updated_at=FIXED_TIME,
+        generated_at=FIXED_TIME,
+    )
+    _write_raw(brain_root, outer)
+
+    request = _plan(
+        brain_root,
+        desired_objects=[{**before, "title": "변경된 컨텍스트"}],
+        expected_drop_ids=(),
+    )
+    artifact, result = _apply_artifact(brain_root, request)
+
+    assert result.action_count == 3
+    assert {
+        row["object_id"]
+        for row in artifact.manifest["intent"]["preview"]["actions"]
+        if row["action"] == "update"
+    } == {before["id"], inner["id"], outer["id"]}
 
 
 def test_context_replace_keeps_unchanged_external_unknown_grammar_bound(tmp_path):

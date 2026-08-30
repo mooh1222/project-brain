@@ -29,6 +29,7 @@ from project_brain.corpus_io import (
     record_no_change_receipt,
     recover_unfinished_transaction_unlocked,
 )
+from project_brain.context_projection import is_prompt_payload_projection
 from project_brain.coverage import (
     BuildArtifactBinding,
     CoverageBinding,
@@ -45,9 +46,9 @@ from project_brain.display_contract import (
     non_title_sha256,
     paired_code_locator_id,
 )
-from project_brain.hash_utils import stable_json
+from project_brain.hash_utils import source_content_hash, stable_json
 from project_brain.id_grammar import IdGrammarError, parse_id
-from project_brain.lint import LintProblem, lint_store_report
+from project_brain.lint import LintProblem, lint_store_report, projection_is_fresh
 from project_brain.objbase import now_kst
 from project_brain.reference_fields import iter_object_refs, rewrite_object_refs
 from project_brain.repo_context import RepoContext
@@ -359,6 +360,80 @@ class _BoundMutationState:
     rename_pairs: tuple[tuple[str, str], ...]
     before_fingerprint: str
     canonical_validation: _CanonicalRepairValidation
+    projection_refresh_order: tuple[str, ...]
+
+
+def _prompt_projection_source_ids(
+    projection: Mapping[str, object],
+) -> tuple[str, ...]:
+    raw_source_ids = projection.get("source_object_ids")
+    if (
+        not isinstance(raw_source_ids, list)
+        or not raw_source_ids
+        or not all(isinstance(source_id, str) for source_id in raw_source_ids)
+    ):
+        return ()
+    return tuple(raw_source_ids)
+
+
+def _dependent_prompt_projection_updates(
+    *,
+    existing_store: BrainStore,
+    planned_by_id: Mapping[str, dict],
+    delete_ids: Sequence[str],
+) -> tuple[dict, ...]:
+    """Refresh projections made stale by this mutation, not pre-existing debt."""
+    existing_by_id = {obj["id"]: obj for obj in existing_store.all()}
+    after_by_id = dict(existing_by_id)
+    for object_id in delete_ids:
+        after_by_id.pop(object_id, None)
+    after_by_id.update(planned_by_id)
+
+    source_ids_by_projection: dict[str, tuple[str, ...]] = {}
+    pending: dict[str, dict] = {}
+    for projection in existing_store.all():
+        if not is_prompt_payload_projection(projection):
+            continue
+        projection_id = str(projection["id"])
+        if projection_id in delete_ids or projection_id in planned_by_id:
+            continue
+        source_ids = _prompt_projection_source_ids(projection)
+        if (
+            not source_ids
+            or any(source_id not in after_by_id for source_id in source_ids)
+            or not projection_is_fresh(existing_store, projection)
+        ):
+            continue
+        source_ids_by_projection[projection_id] = source_ids
+        pending[projection_id] = projection
+
+    refreshed: list[dict] = []
+    while pending:
+        pending_ids = set(pending)
+        ready_ids = sorted(
+            projection_id
+            for projection_id in pending
+            if not (
+                set(source_ids_by_projection[projection_id]) & pending_ids
+            )
+        )
+        if not ready_ids:
+            break
+        for projection_id in ready_ids:
+            projection = pending.pop(projection_id)
+            source_ids = source_ids_by_projection[projection_id]
+            after_hash = source_content_hash(
+                after_by_id[source_id] for source_id in source_ids
+            )
+            if after_hash == projection.get("source_content_hash"):
+                continue
+            updated = dict(projection)
+            updated["source_content_hash"] = after_hash
+            for field_name in engine_owned_temporal_fields("ContextProjection"):
+                updated.pop(field_name, None)
+            refreshed.append(updated)
+            after_by_id[projection_id] = updated
+    return tuple(refreshed)
 
 
 class MutationService:
@@ -580,6 +655,7 @@ class MutationService:
         rename_pairs = state.rename_pairs
         before_fingerprint = state.before_fingerprint
         canonical_validation = state.canonical_validation
+        projection_refresh_order = state.projection_refresh_order
 
         has_action = bool(request.auxiliary_updates) or any(
             action.action is not ObjectActionKind.NO_CHANGE
@@ -653,7 +729,25 @@ class MutationService:
                 "timestamp_policy_missing",
             )
             return _failure(code, str(exc))
+        if projection_refresh_order:
+            assert event_time is not None
+            for obj in planned_inputs:
+                if obj.get("id") in projection_refresh_order:
+                    obj["generated_at"] = event_time
         planned_by_id = {obj["id"]: obj for obj in planned_inputs}
+        if projection_refresh_order:
+            final_after_by_id = dict(existing_by_id)
+            for object_id in delete_ids:
+                final_after_by_id.pop(object_id, None)
+            final_after_by_id.update(planned_by_id)
+            for projection_id in projection_refresh_order:
+                projection = planned_by_id[projection_id]
+                source_ids = _prompt_projection_source_ids(projection)
+                assert source_ids
+                projection["source_content_hash"] = source_content_hash(
+                    final_after_by_id[source_id] for source_id in source_ids
+                )
+                final_after_by_id[projection_id] = projection
 
         source_id_by_after_id = {
             action.object_id: action.source_id
@@ -1194,6 +1288,26 @@ class MutationService:
         planned_inputs = unstamped_inputs
         planned_by_id = {obj["id"]: obj for obj in planned_inputs}
 
+        projection_refresh_order: tuple[str, ...] = ()
+        if request.operation in {
+            MutationOperation.INGEST,
+            MutationOperation.CONTEXT_REPLACE,
+        }:
+            refreshed_projections = _dependent_prompt_projection_updates(
+                existing_store=existing_store,
+                planned_by_id=planned_by_id,
+                delete_ids=delete_ids,
+            )
+            planned_inputs.extend(refreshed_projections)
+            planned_by_id.update(
+                (projection["id"], projection)
+                for projection in refreshed_projections
+            )
+            projection_refresh_order = tuple(
+                str(projection["id"])
+                for projection in refreshed_projections
+            )
+
         if (
             request.operation is MutationOperation.DISPLAY_MIGRATION
             and tuple(planned_inputs) != display_expected_after
@@ -1342,6 +1456,7 @@ class MutationService:
             rename_pairs=rename_pairs,
             before_fingerprint=before_fingerprint,
             canonical_validation=canonical_validation,
+            projection_refresh_order=projection_refresh_order,
         )
 
         preserve_preview = request.operation in {

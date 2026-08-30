@@ -247,6 +247,12 @@ session marker, build 결과, plan manifest, index, cache도 객체 mutation으�
 | `display_migration` | `migration display apply` | Task 18 binding과 검증된 v3 manifest에 묶인 표시 필드 migration. 파생 index/stale 파일은 보존하며 일반 `migration id apply`는 이 manifest를 받을 수 없음 |
 | `canonical_repair` | `migration canonical-repair apply` | 분류·결정 원장과 결속한 canonical 복구 |
 
+`ingest`와 `context_replace`는 caller가 `ContextProjection` JSON을 직접 쓰는 것을 계속 거부한다.
+다만 기존에 fresh하던 `prompt_payload` projection의 source 의미가 그 mutation 때문에 바뀌면
+`MutationService`가 source hash와 `generated_at` 갱신을 같은 manifest·transaction에 파생 action으로
+추가한다. 이미 stale이던 projection과 source 삭제·ID 변경은 이 경로가 자동 수리하지 않으며 기존
+`projection refresh` 또는 별도 승인 migration 경계를 유지한다.
+
 `context-replace plan`은 `MutationService.plan()` 결과를 외부 manifest로 고정하고, apply는 그
 manifest를 직접 journaled transaction에 넘긴다. 각 `migration ... apply`는 live 상태에서 다시
 plan한 뒤 `MutationService.apply()`를 호출한다. 각 plan 단계는 manifest와 snapshot 같은 적용 전

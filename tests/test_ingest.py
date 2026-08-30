@@ -12,10 +12,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from project_brain.context_projection import build_reuse_projection
 from project_brain.ingest import IngestError, ingest as _product_ingest
-from project_brain.mutation import MutationService
+from project_brain.mutation import MutationOperation, MutationService
 from project_brain.objbase import base
 from project_brain.store import BrainStore
+from project_brain.transaction_receipt import receipt_from_result
 from tests.coverage_helpers import direct_coverage
 
 T = "2026-06-04T00:00:00Z"
@@ -452,6 +454,111 @@ class TestIngest(unittest.TestCase):
         store = BrainStore.load(self.root)
         self.assertTrue(store.has("mapping.neutral.key"))
         self.assertTrue(store.has("g.neutral.x"))
+
+    def test_ingest_atomically_refreshes_existing_prompt_projection(self):
+        mapping = candidate_mapping(
+            "mapping.neutral.key",
+            glossary_term_ids=[],
+        )
+        ingest(self.root, [context(), mapping])
+        projection = build_reuse_projection(
+            BrainStore.load(self.root),
+            context_id="context.neutral",
+            requirement_key="result-popup",
+            source_object_ids=[mapping["id"]],
+            reuse_payload="고정 재사용 브리핑",
+            title="결과 팝업 브리핑",
+            generated_by="test",
+        )
+        with mock.patch(
+            "project_brain.ingest._new_mutation_service",
+            return_value=MutationService(clock=lambda: T),
+        ):
+            ingest(
+                self.root,
+                [projection],
+                operation=MutationOperation.PROJECTION,
+                coverage=None,
+            )
+
+        before = BrainStore.load(self.root).get(projection["id"])
+        changed = dict(mapping)
+        changed["meaning"] = "변경된 의미"
+        with mock.patch(
+            "project_brain.ingest._new_mutation_service",
+            return_value=MutationService(clock=lambda: FIXED_TIME),
+        ):
+            result = ingest(self.root, [changed])
+
+        store = BrainStore.load(self.root)
+        refreshed = store.get(projection["id"])
+        self.assertEqual(store.get(mapping["id"])["meaning"], "변경된 의미")
+        self.assertEqual(
+            {row["object_id"] for row in result.manifest.updates},
+            {mapping["id"], projection["id"]},
+        )
+        receipt = receipt_from_result(result, committed=True)
+        self.assertEqual(
+            {row["id"] for row in receipt.changed_objects},
+            {mapping["id"], projection["id"]},
+        )
+        self.assertNotEqual(
+            refreshed["source_content_hash"],
+            before["source_content_hash"],
+        )
+        self.assertEqual(refreshed["projection_hash"], before["projection_hash"])
+        self.assertEqual(refreshed["created_at"], before["created_at"])
+        self.assertEqual(
+            (refreshed["updated_at"], refreshed["generated_at"]),
+            (FIXED_TIME, FIXED_TIME),
+        )
+
+    def test_ingest_refreshes_nested_prompt_projections_in_dependency_order(
+        self,
+    ):
+        mapping = candidate_mapping(
+            "mapping.neutral.key",
+            glossary_term_ids=[],
+        )
+        ingest(self.root, [context(), mapping])
+        inner = build_reuse_projection(
+            BrainStore.load(self.root),
+            context_id="context.neutral",
+            requirement_key="z-inner",
+            source_object_ids=[mapping["id"]],
+            reuse_payload="안쪽 브리핑",
+            title="안쪽 브리핑",
+            generated_by="test",
+        )
+        ingest(
+            self.root,
+            [inner],
+            operation=MutationOperation.PROJECTION,
+            coverage=None,
+        )
+        outer = build_reuse_projection(
+            BrainStore.load(self.root),
+            context_id="context.neutral",
+            requirement_key="a-outer",
+            source_object_ids=[inner["id"]],
+            reuse_payload="바깥 브리핑",
+            title="바깥 브리핑",
+            generated_by="test",
+        )
+        ingest(
+            self.root,
+            [outer],
+            operation=MutationOperation.PROJECTION,
+            coverage=None,
+        )
+
+        changed = {**mapping, "meaning": "변경된 의미"}
+        result = ingest(self.root, [changed])
+
+        self.assertEqual(
+            {row["object_id"] for row in result.manifest.updates},
+            {mapping["id"], inner["id"], outer["id"]},
+        )
 
     def _insight_bundle(self):
         # Insight source 객체(m.a·m.b)를 store에 동봉해 dangling을 피한다.
