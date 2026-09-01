@@ -459,7 +459,7 @@ class IngestSkillContractTest(unittest.TestCase):
         ingest_tools = (REFERENCES / "ingest-tools.md").read_text(encoding="utf-8")
 
         self.assertIn('project-brain search "<질문>"', query)
-        self.assertIn('project-brain query "<시간·이력 질문>"', query)
+        self.assertIn('project-brain query "<시간·이력·근거 질문>"', query)
         self.assertIn("project-brain show <object_id>", query)
         self.assertNotIn("search가 supersedes", query)
         self.assertIn("brain-ingest/references/update-rules.md", audit)

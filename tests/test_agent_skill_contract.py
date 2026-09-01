@@ -248,6 +248,25 @@ def test_query_skill_keeps_default_use_read_only():
         assert automatic_write not in query
 
 
+def test_query_skill_separates_general_recall_from_deterministic_facets():
+    query = _installed_skill("query")
+
+    for required in (
+        "일반 의미·코드 위치·개발 착수",
+        "핵심 객체",
+        "project-brain show <object_id>",
+        "`project-brain query`는 변경 이유·현재 상태·과거 시점·근거 사슬만",
+    ):
+        assert required in query
+
+    for removed_query_field in (
+        "additional_candidates",
+        "promotable_candidate_ids",
+        "candidate_locators",
+    ):
+        assert removed_query_field not in query
+
+
 def test_audit_skill_reports_read_only_diagnostics_before_opt_in_updates():
     audit = _installed_skill("audit")
 

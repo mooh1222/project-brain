@@ -27,12 +27,12 @@
 | L1 인사이트 그릇 | ✅ `Insight` kind (2026-06-15) | advisories 별도 통로·candidate 적재 거부(1차) |
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대·보수적 토큰 근사와 과대 유닛 분할 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
-| L3 라우터·회상 | ✅ 통합 | 정확 매칭 1순위 + 의미 보강 + unknown 일반 회상 + `cli search` + 명부 인식 앵커 게이트(럭키박스 거짓음성 수정, 2026-07-06) |
+| L3 라우터·회상 | ✅ 책임 분리 (#61, 2026-09-01) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 facet |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
 | 어휘 기준·지식 초안 | ✅ 대체 범위 완료 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬, #51 실제 BB2 로컬 전용 파일럿 완료 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
-| 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + query/show 노출 (2026-06-25) | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→query advisory |
+| 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + show 노출 | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→show advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
 | 공유 경계 | ✅ 엔진/데이터 2-레포 분리 (2026-06-11) | brain/ git 추적·색인만 로컬 |
 
@@ -88,6 +88,20 @@ replacement spec #47의 활성 결과는 네 개로 제한한다.
 
 ## 완료 단계
 
+### #61 일반 조회 search·show 통일과 query 결정론 facet 축소 — 완료 (2026-09-01)
+
+서브커맨드 없는 자유질의와 explicit `search`를 같은 public 회수 경로와 같은 fresh-index 실패
+계약으로 통일했다. 설치 조회 스킬은 일반 의미·코드 위치·개발 착수 질문에서 검색 결과의 핵심 객체를
+`show`로 열고, candidate를 쓰면 확인 필요 상태를 표시한 뒤 여러 객체를 조합한다.
+
+- explicit `query`는 변경 이유·현재 상태·과거 시점·근거 사슬만 BrainStore에서 결정론적으로
+  계산한다. 일반 의미·구현 위치·unknown recall은 객체 종류를 고르지 않고 `search → show`를 안내한다.
+- query의 index·embedder·recall·Insight·mapping stale·current-head 배관과 #59의 candidate spillover
+  응답 필드를 제거했다. mapping stale은 `show`, Insight advisory는 `search`가 소유한다.
+- 충돌·supersedes·current/as-of·인과관계·DecisionRecord·근거 사슬과 CurrentView source fact 유효성,
+  #59의 reviewed 대표어·동의어·별칭 matcher는 보존했다. ranking·채널·scope·index surface는 바꾸지 않았다.
+- 실코퍼스 쓰기·migration·index rebuild는 수행하지 않는 범위다.
+
 ### #51 실제 BB2 샐리 카누 지식 초안·어휘 감사 — 완료 (2026-08-28, BB2 로컬 전용)
 
 BB2 `docs/bb2-brain-object-model`에서 `sally-canoe-glossary-audit` 초안을 spec-v8과 live Event API·
@@ -97,7 +111,7 @@ Join API 위키로 만들고, 전체 GlossaryTerm 1,181개를 읽기 전용으�
 
 - 다른 새 세션이 과거 대화 없이 초안을 발견·설명하고 expected SHA로 갱신했다. stale SHA는
   기존 bytes를 바꾸지 않고 실패했고, 사용자는 실제 재개 비용이 줄었다고 확인했다.
-- BrainStore·raw·index fingerprint와 bytes·일반 query·graph·snapshot 대상은 생성·갱신 전후
+- BrainStore·raw·index fingerprint와 bytes·일반 조회·graph·snapshot 대상은 생성·갱신 전후
   같았다. 엔진 회귀와 실제 BB2 검증을 분리해 통과했다.
 - BB2 커밋은 `a045328448`, `2e5382c118`, `e66fefd731`이다. 기존 로컬 이력과 dirty 파일을
   보존하기 위해 원격 push는 하지 않았고 GitHub #51은 이 로컬 증거로 `COMPLETED` 처리했다.
@@ -113,7 +127,7 @@ config가 해석한 `brain/drafts/<ASCII-kebab-topic-id>.md`만 소유하는 `dr
   하나의 명확한 초안만 바로 재개하고 여러 후보는 본문을 읽기 전에 사용자 선택을 받는다.
 - session-ingest는 현재·과거 세션 재료 추출만 맡고, 미결 내용은 draft로, 확인된 내용은
   ingest로 넘긴다. 공통 어휘 기준은 ingest reference 한 파일을 조건부로 읽는다.
-- drafts는 BrainStore·raw·index·일반 query·graph·snapshot에서 제외되며 엔진은 Git
+- drafts는 BrainStore·raw·index·일반 조회·graph·snapshot에서 제외되며 엔진은 Git
   stage·commit을 실행하지 않는다. 정식화·close·자동 라우팅·history·receipt·시작 hook은
   범위 밖으로 유지했다.
 

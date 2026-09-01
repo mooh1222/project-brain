@@ -1,10 +1,8 @@
 """cli.py 서브커맨드 테스트 (Task 5).
 
 새 중립 합성 데이터(tempfile brain root + 인라인 객체 dict)만 사용한다 — 삭제된
-fixture(tests/fixtures/...)를 일절 참조하지 않고 자기완결. argparse 서브파서 전환이
-기존 query 경로(AC6 회상이 쓰는 경로)를 깨지 않는지(test_cli_query_path_unchanged),
-ingest 서브커맨드가 ingest()를 호출해 store에 적재하는지(test_cli_ingest_subcommand_writes)
-검증한다(spec §3.1 CLI subcommand)."""
+fixture(tests/fixtures/...)를 일절 참조하지 않고 자기완결. bare 자유질의와 explicit search의
+공개 동작, 네 facet query, ingest 서브커맨드가 store에 적재하는지를 검증한다."""
 
 import io
 import hashlib
@@ -148,19 +146,90 @@ class TestCli(unittest.TestCase):
         self.assertFalse(payload["ok"])
         return payload
 
-    def test_cli_query_path_unchanged(self):
-        # tempfile store에 새 중립 객체 적재(query 경로가 회수할 대상)
-        for obj in (manifest(), evidence_ref(), candidate_term()):
-            BrainStore.save_object(self.root, obj)
-        # 서브커맨드 없는 위치인자 query — 기존 query 경로 호환 유지(AC6)
-        argv = ["--brain-root", str(self.root), "용어가 무슨 뜻이야?"]
-        out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
-            rc = cli.main()
-        self.assertEqual(rc, 0)
-        answer = json.loads(out.getvalue())
-        # answer JSON이 나옴(QueryRouter.answer 결과 형태)
-        self.assertIn("intents", answer)
+    def test_bare_free_query_matches_explicit_search(self):
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from tests.test_search import glossary_term
+
+        BrainStore.save_object(
+            self.root,
+            glossary_term("g.lane", term="레인", definition="레인 영역 배치"),
+        )
+        db = self.input_dir / "index.db"
+        rebuild(self.root, db, embedder=StubEmbedder())
+        args = [
+            "레인 영역 배치",
+            "--db",
+            str(db),
+            "--brain-root",
+            str(self.root),
+            "--stub-embedder",
+        ]
+
+        payloads = []
+        for prefix in (["search"], []):
+            out = io.StringIO()
+            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
+                self.assertEqual(cli.main(), 0)
+            payloads.append(json.loads(out.getvalue()))
+
+        self.assertEqual(payloads[1], payloads[0])
+
+    def test_bare_free_query_matches_search_missing_index_failure(self):
+        args = [
+            "레인 영역 배치",
+            "--db",
+            str(self.input_dir / "missing.db"),
+            "--brain-root",
+            str(self.root),
+            "--stub-embedder",
+        ]
+
+        outcomes = []
+        for prefix in (["search"], []):
+            out = io.StringIO()
+            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
+                rc = cli.main()
+            outcomes.append((rc, json.loads(out.getvalue())))
+
+        self.assertEqual(outcomes[1], outcomes[0])
+        self.assertEqual(outcomes[1][0], 1)
+        self.assertFalse(outcomes[1][1]["ok"])
+
+    def test_bare_free_query_matches_search_stale_index_failure(self):
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from tests.test_search import glossary_term
+
+        BrainStore.save_object(
+            self.root,
+            glossary_term("g.lane", term="레인", definition="레인 영역 배치"),
+        )
+        db = self.input_dir / "index.db"
+        rebuild(self.root, db, embedder=StubEmbedder())
+        BrainStore.save_object(
+            self.root,
+            glossary_term("g.other", term="다른 레인", definition="색인 이후 변경"),
+        )
+        args = [
+            "레인 영역 배치",
+            "--db",
+            str(db),
+            "--brain-root",
+            str(self.root),
+            "--stub-embedder",
+        ]
+
+        outcomes = []
+        for prefix in (["search"], []):
+            out = io.StringIO()
+            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
+                rc = cli.main()
+            outcomes.append((rc, json.loads(out.getvalue())))
+
+        self.assertEqual(outcomes[1], outcomes[0])
+        self.assertEqual(outcomes[1][0], 1)
+        self.assertFalse(outcomes[1][1]["ok"])
 
     def test_cli_query_and_simple_confirmation_leave_corpus_index_cache_and_git_unchanged(self):
         from project_brain.embedder import StubEmbedder
@@ -200,9 +269,6 @@ class TestCli(unittest.TestCase):
                     "query",
                     "--brain-root",
                     str(self.root),
-                    "--db",
-                    str(db),
-                    "--stub-embedder",
                     question,
                 ],
             ), redirect_stdout(out):
@@ -219,165 +285,93 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         run_query.assert_called_once_with(["왜 바뀌었어?"])
 
-    def test_cli_query_with_db_enables_recall(self):
-        # 후속 c(2026-06-11): cli query에 --db·--stub-embedder 배선 — 색인을 주면
-        # 라우터 recall이 켜져 top-K로 좁힌다(전량 12 아님). --db 없는 기존 경로는
-        # test_cli_query_path_unchanged가 보장한다.
-        from project_brain.embedder import StubEmbedder
-        from project_brain.search_index import rebuild
-        from tests.test_search import code_locator
-        for i in range(12):
-            BrainStore.save_object(
-                self.root,
-                code_locator(f"code.{i:02d}", path=f"a/Lane{i}.cpp", symbol=f"makeLanes{i}"))
-        db = self.input_dir / "index.db"
-        rebuild(self.root, db, embedder=StubEmbedder())
-        argv = ["--brain-root", str(self.root), "--db", str(db),
-                "--stub-embedder", "makeLanes0 어디 구현?"]
-        unrelated = self.input_dir / "unrelated-project"
-        unrelated.mkdir()
-        (unrelated / ".project-brain.json").write_text("{invalid", encoding="utf-8")
+    def test_explicit_query_general_question_guides_to_search_then_show(self):
+        from tests.test_search import domain_mapping, glossary_term
+
+        for obj in (
+            glossary_term("g.lane", term="레인", definition="레인 영역 배치"),
+            domain_mapping(
+                "m.lane",
+                meaning="레인 영역 배치 의미",
+                glossary_term_ids=["g.lane"],
+            ),
+            glossary_term(
+                "g.candidate",
+                term="후보 레인",
+                definition="확인 전 레인 의미",
+                status="candidate",
+            ),
+        ):
+            BrainStore.save_object(self.root, obj)
+
         out = io.StringIO()
-        with mock.patch("project_brain.config.Path.cwd", return_value=unrelated), \
-             mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
-            rc = cli.main()
-        self.assertEqual(rc, 0)
+        with mock.patch(
+            "sys.argv",
+            ["cli", "query", "--brain-root", str(self.root), "레인은 무슨 뜻이야?"],
+        ), redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+
         answer = json.loads(out.getvalue())
-        loc = next(s for s in answer["sections"]
-                   if s["intent"] == "implementation_location")
-        self.assertGreaterEqual(len(loc["object_ids"]), 1)
-        self.assertLessEqual(len(loc["object_ids"]), 5)
+        self.assertEqual(answer["source_object_ids"], [])
+        self.assertTrue(all(not section["object_ids"] for section in answer["sections"]))
+        self.assertIn("project-brain search", json.dumps(answer, ensure_ascii=False))
+        self.assertIn("project-brain show", json.dumps(answer, ensure_ascii=False))
+        self.assertNotIn("promotable_candidate_ids", answer)
+        self.assertNotIn("additional_candidates", answer)
+        self.assertNotIn("advisories", answer)
 
-    def test_cli_query_uses_existing_config_db_by_default(self):
-        from project_brain.embedder import StubEmbedder
-        from project_brain.search_index import rebuild
-        from tests.test_search import code_locator
-
+    def test_explicit_query_does_not_read_index_for_deterministic_facet(self):
+        invalid_db = self.input_dir / "invalid.db"
+        invalid_db.write_text("not a sqlite database", encoding="utf-8")
         project = self.input_dir / "project"
-        # config가 프로젝트 바깥의 corpus/DB 절대경로를 가리켜도 같은 config를 써야 한다.
-        brain = self.root / "configured-brain"
-        db = self.root / "configured.db"
         project.mkdir()
         (project / ".project-brain.json").write_text(
-            json.dumps({"brain_root": str(brain), "db": str(db)}),
+            json.dumps({"brain_root": str(self.root), "db": str(invalid_db)}),
             encoding="utf-8",
         )
-        for i in range(12):
-            BrainStore.save_object(
-                brain,
-                code_locator(
-                    f"code.{i:02d}",
-                    path=f"a/Lane{i}.cpp",
-                    symbol=f"makeLanes{i}",
-                ),
-            )
-        rebuild(brain, db, embedder=StubEmbedder())
-
         out = io.StringIO()
         with mock.patch("project_brain.config.Path.cwd", return_value=project), \
-             mock.patch("sys.argv", [
-                 "cli", "--stub-embedder", "makeLanes0 어디 구현?",
-             ]), redirect_stdout(out):
+             mock.patch("sys.argv", ["cli", "query", "지금 상태는?"]), \
+             redirect_stdout(out):
             rc = cli.main()
+
         self.assertEqual(rc, 0)
         answer = json.loads(out.getvalue())
-        section = next(
-            s for s in answer["sections"]
-            if s["intent"] == "implementation_location"
-        )
-        self.assertGreaterEqual(len(section["object_ids"]), 1)
-        self.assertLessEqual(len(section["object_ids"]), 5)
-        self.assertNotIn("details_omitted_reason", section)
+        self.assertEqual(answer["intents"], ["current_status"])
 
-    def test_cli_query_surfaces_stale_advisory_from_cache(self):
-        # Step 2: .brain-local/stale-set.json이 있으면 query가 읽어 매핑에 stale_advisory 부착.
-        from project_brain.stale_check import write_stale_set
+    def test_explicit_query_evidence_does_not_add_general_recall_companions(self):
         from tests.test_search import domain_mapping, glossary_term
-        for obj in (glossary_term("g.boost", term="강화폭탄"),
-                    domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
-                                   glossary_term_ids=["g.boost"])):
-            BrainStore.save_object(self.root, obj)
-        write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t",
-            "stale_mapping_ids": ["mapping.neutral.boost"],
-            "detail": {
-                "mapping.neutral.boost": {
-                    "change_types": ["M"], "paths": ["a/X.cpp"]
-                }
-            }})
-        argv = ["--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]
-        out = io.StringIO()
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
-            rc = cli.main()
-        self.assertEqual(rc, 0)
-        answer = json.loads(out.getvalue())
-        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(
-            x for x in gm["mappings"]
-            if x["id"] == "mapping.neutral.boost"
-        )
-        self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
 
-    def test_cli_query_surfaces_unmerged_advisory_without_changing_status(self):
-        from project_brain.stale_check import write_stale_set
-        from tests.test_search import domain_mapping, glossary_term
-        for obj in (glossary_term("g.boost", term="강화폭탄"),
-                    domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
-                                   glossary_term_ids=["g.boost"])):
+        for obj in (
+            glossary_term("g.lane", term="레인", definition="레인 영역 배치"),
+            domain_mapping(
+                "m.lane",
+                meaning="레인 영역 배치 의미",
+                glossary_term_ids=["g.lane"],
+            ),
+        ):
             BrainStore.save_object(self.root, obj)
-        write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
-            "detail": {"mapping.neutral.boost": {
-                                   "code_changed": False, "unmerged_anchor": True,
-                                   "unmerged_reasons": ["not_ancestor"],
-                                   "locator_ids": ["code.neutral.work"],
-                                   "from_commits": ["WORK"],
-                                   "change_types": [], "paths": ["a/Work.cpp"]}}})
+
         out = io.StringIO()
-        with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
-             redirect_stdout(out):
+        with mock.patch(
+            "sys.argv",
+            [
+                "cli",
+                "query",
+                "--brain-root",
+                str(self.root),
+                "레인은 무슨 뜻이야? 근거는?",
+            ],
+        ), redirect_stdout(out):
             self.assertEqual(cli.main(), 0)
-        answer = json.loads(out.getvalue())
-        mapping = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")["mappings"][0]
-        self.assertFalse(mapping["stale_advisory"]["code_changed"])
-        self.assertTrue(mapping["stale_advisory"]["unmerged_anchor"])
-        self.assertIn(
-            "Code anchor is not reachable from the configured default branch; "
-            "check whether it is unmerged or history was rewritten.",
-            answer["warnings"],
-        )
-        self.assertEqual(
-            BrainStore.load(self.root).get("mapping.neutral.boost")["status"],
-            "reviewed",
-        )
 
-    def test_cli_query_surfaces_unverifiable_anchor_without_changing_status(self):
-        from project_brain.stale_check import write_stale_set
-        from tests.test_search import domain_mapping, glossary_term
-        for obj in (glossary_term("g.boost", term="강화폭탄"),
-                    domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
-                                   glossary_term_ids=["g.boost"])):
-            BrainStore.save_object(self.root, obj)
-        write_stale_set(self.root, {
-            "target_head": "T", "computed_at": "t", "stale_mapping_ids": [],
-            "detail": {"mapping.neutral.boost": {
-                                   "code_changed": False, "unmerged_anchor": True,
-                                   "unmerged_reasons": ["anchor_unverifiable"],
-                                   "locator_ids": ["code.neutral.unknown"],
-                                   "from_commits": ["UNKNOWN"],
-                                   "change_types": [], "paths": ["a/Work.cpp"]}}})
-        out = io.StringIO()
-        with mock.patch("sys.argv", ["cli", "--brain-root", str(self.root), "강화폭탄 무슨 뜻?"]), \
-             redirect_stdout(out):
-            self.assertEqual(cli.main(), 0)
         answer = json.loads(out.getvalue())
-        warning = next(w for w in answer["warnings"] if "could not be verified" in w)
-        self.assertNotIn("Verified", warning)
-        self.assertNotIn("unmerged", warning.lower())
+        self.assertEqual(answer["source_object_ids"], [])
         self.assertEqual(
-            BrainStore.load(self.root).get("mapping.neutral.boost")["status"],
-            "reviewed",
+            {section["intent"] for section in answer["sections"]},
+            {"evidence_provenance", "search_show"},
         )
+        self.assertTrue(all(not section["object_ids"] for section in answer["sections"]))
 
     def test_audit_stale_check_and_mark_checked_use_configured_default_branch(self):
         from project_brain.stale_check import MarkCheckedPlan
@@ -1328,26 +1322,6 @@ class TestCliPromote(unittest.TestCase):
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         self.assertEqual(rc, 1)
-
-    def test_promote_requery_moves_candidate_to_reviewed(self):
-        # spec §5.3 루프 폐쇄: 질의(후보) → promote → 재질의(검수). 리뷰 minor 반영.
-        from project_brain.router import QueryRouter
-        self._ingest()  # candidate g.x (term=갈고리, evidence 보유) + manifest + ref
-        before = QueryRouter(BrainStore.load(self.root)).answer("갈고리 용어 무슨 뜻?")
-        self.assertIn("g.neutral.x", before["promotable_candidate_ids"])
-        self.assertNotIn("g.neutral.x", before["source_object_ids"])
-        argv = [
-            "promote", "--brain-root", str(self.root),
-            "--ids", "g.neutral.x", "--reviewer", "user-confirmed",
-            "--reviewed-at", "2026-06-06T00:00:00Z",
-            *ENGINE_ARGS,
-        ]
-        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(), 0)
-        after = QueryRouter(BrainStore.load(self.root)).answer("갈고리 용어 무슨 뜻?")
-        # 승격 후: 후보에서 빠지고 검수 source로(reviewed GlossaryTerm은 glossary_objects 덤프로 노출)
-        self.assertNotIn("g.neutral.x", after["promotable_candidate_ids"])
-        self.assertIn("g.neutral.x", after["source_object_ids"])
 
     def test_promote_zero_evidence_rejected(self):
         # §6.4 활성 후: 근거 없는 candidate(candidate엔 §6.4 미적용 → 적재는 됨)를 승격하면

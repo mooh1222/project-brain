@@ -549,7 +549,8 @@ def test_drafts_are_outside_store_raw_index_query_and_graph_inputs(tmp_path):
     from project_brain.graph import find_isolated
     from project_brain.graph_viz import build_payload
     from project_brain.raw_chunks import iter_raw_sources
-    from project_brain.router import QueryRouter
+    from project_brain.embedder import StubEmbedder
+    from project_brain.search import eval_recall
     from project_brain.search_index import compute_corpus_fingerprint, rebuild
     from project_brain.store import BrainStore
 
@@ -568,12 +569,20 @@ def test_drafts_are_outside_store_raw_index_query_and_graph_inputs(tmp_path):
 
     after = BrainStore.load(brain_root)
     fingerprint_after = compute_corpus_fingerprint(after, brain_root)
+    db = brain_root / ".brain-local" / "index.db"
+    embedder = StubEmbedder()
     stats = rebuild(
         brain_root=brain_root,
-        db_path=brain_root / ".brain-local" / "index.db",
-        embedder=None,
+        db_path=db,
+        embedder=embedder,
     )
-    answer = QueryRouter(after).answer("이 값은 무엇인가")
+    answer = eval_recall(
+        "이 값은 무엇인가",
+        db_path=db,
+        embedder=embedder,
+        brain_root=brain_root,
+        store=after,
+    )
 
     assert after.all() == before.all() == []
     assert fingerprint_after == fingerprint_before

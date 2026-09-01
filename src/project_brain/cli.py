@@ -677,65 +677,22 @@ def _atomic_write_timestamp_details(path: Path, payload: bytes) -> None:
 
 
 def _run_query(argv) -> int:
-    # 최상위 파서는 query 폴백을 겸한다(서브커맨드는 main에서 수동 분기). --help에서
-    # 서브커맨드를 발견할 수 있게 epilog로 목록을 싣는다 — 상세는 각 명령 --help.
     parser = argparse.ArgumentParser(
-        epilog=(
-            "서브커맨드 (상세는 `project-brain <명령> --help`):\n"
-            "  적재·검수   build  ingest  promote  promote-auto  session  draft\n"
-            "  검색·색인   search  show  index  eval  projection\n"
-            "  그래프      graph (isolated · export)\n"
-            "  점검·진단   lint  doctor  bootstrap  stale-check  mark-checked\n"
-            "  설치        install\n"
-            "인자로 준 자유 텍스트는 질의(query)로 처리됩니다."
+        prog="cli query",
+        description=(
+            "변경 이유·현재 상태·과거 시점·근거 사슬을 결정론적으로 계산합니다. "
+            "일반 의미와 코드 위치는 search 후 show를 사용하세요."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
-    parser.add_argument("--current-head")
-    parser.add_argument("--db", help="색인 DB 경로 (기본: config에 있고 실제 존재하는 DB)")
-    parser.add_argument("--stub-embedder", action="store_true",
-                        help="실모델 대신 stub 임베더 사용(테스트·CI 결정론, §5)")
     parser.add_argument("query", nargs="?")
     args = parser.parse_args(argv)
 
-    cwd_config = (
-        None
-        if args.brain_root is not None and args.db is not None
-        else load_config()
-    )
     brain_root = resolve_brain_root(args.brain_root)
     store = BrainStore.load(brain_root)
     if not args.query:
         parser.error("query is required")
-    # embedder None이면 recall 층이 색인과 같은 팩토리(get_embedder)로 만든다.
-    embedder = get_embedder(stub=True) if args.stub_embedder else None
-    # stale-set 캐시(.brain-local/stale-set.json)가 있으면 매핑id→advisory로 주입.
-    # 파일 IO는 CLI 책임 — router는 dict만 소비(git·파일 모름). 없으면 {}(동작 불변).
-    from project_brain.stale_check import advisories_by_mapping, load_stale_set
-    stale_advisories = advisories_by_mapping(load_stale_set(brain_root))
-    configured = None
-    if args.db is None:
-        configured = (
-            cwd_config
-            if cwd_config is not None and cwd_config["brain_root"] == brain_root
-            else load_config(start=brain_root)
-        )
-        if configured is not None and configured["brain_root"] != brain_root:
-            configured = None
-    db_path = (
-        Path(args.db)
-        if args.db
-        else configured["db"]
-        if configured is not None and configured["db"].exists()
-        else None
-    )
-    router = QueryRouter(
-        store, current_head=args.current_head,
-        db_path=db_path,
-        embedder=embedder, brain_root=brain_root,
-        stale_advisories=stale_advisories,
-    )
+    router = QueryRouter(store)
     answer = router.answer(args.query)
     print(json.dumps(answer, ensure_ascii=False, indent=2))
     return 0
@@ -1666,7 +1623,7 @@ def _run_audit(argv) -> int:
     cache_group.add_argument(
         "--write-stale-cache",
         action="store_true",
-        help="stale 검사 결과를 query/show용 cache에 기록(명시적 갱신)",
+        help="stale 검사 결과를 show용 cache에 기록(명시적 갱신)",
     )
     cache_group.add_argument(
         "--no-stale-cache-write",
@@ -2145,7 +2102,7 @@ def _run_stale_check(argv) -> int:
     parser.add_argument("--no-fetch", action="store_true",
                         help="git fetch 생략(오프라인·테스트)")
     parser.add_argument("--write-cache", action="store_true",
-                        help="결과 stale-set을 .brain-local/stale-set.json에 떨궈 query/show가 읽게 함")
+                        help="결과 stale-set을 .brain-local/stale-set.json에 떨궈 show가 읽게 함")
     args = parser.parse_args(argv)
 
     from project_brain.stale_check import (
@@ -3260,10 +3217,33 @@ def _run_migration(argv) -> int:
         return 1
 
 
+def _run_top_level_help(argv) -> int:
+    parser = argparse.ArgumentParser(
+        prog="project-brain",
+        description=(
+            "서브커맨드 없는 자유질의는 search와 같은 의미 회수 경로를 사용합니다."
+        ),
+        epilog=(
+            "서브커맨드 (상세는 `project-brain <명령> --help`):\n"
+            "  적재·검수   build  ingest  promote  promote-auto  session  draft\n"
+            "  검색·색인   search  show  query  index  eval  projection\n"
+            "  그래프      graph (isolated · export)\n"
+            "  점검·진단   lint  doctor  bootstrap  stale-check  mark-checked\n"
+            "  설치        install"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("query", nargs="?")
+    parser.parse_args(argv)
+    return 0
+
+
 def main() -> int:
     argv = sys.argv[1:]
     try:
-        # 첫 인자가 서브커맨드면 해당 경로, 아니면 기존 query 경로 호환 유지(AC6)
+        if argv in (["--help"], ["-h"]):
+            return _run_top_level_help(argv)
+        # 첫 인자가 서브커맨드면 해당 경로, 아니면 일반 자유질의를 search로 처리한다.
         if argv and argv[0] == "build":
             return _run_build(argv[1:])
         if argv and argv[0] == "query":
@@ -3310,7 +3290,7 @@ def main() -> int:
             return _run_context_replace(argv[1:])
         if argv and argv[0] == "migration":
             return _run_migration(argv[1:])
-        return _run_query(argv)
+        return _run_search(argv)
     except (ConfigError, RepoVerificationError) as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),

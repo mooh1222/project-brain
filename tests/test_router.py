@@ -1,6 +1,4 @@
-"""router.answer 회귀 베이스라인 (B+C 작업 선행). 읽기 전용 불변(answer 전후 store
-불변) + 검수된 glossary 노출이라는 안정 동작을 고정한다. Task 1이 C(후보 노출)를
-이 파일에 확장한다 — 후보 미노출 동작은 Task 1이 뒤집으므로 베이스라인에 넣지 않는다."""
+"""QueryRouter의 변경 이유·현재·과거·근거 facet과 읽기 전용 계약 회귀."""
 
 import copy
 import unittest
@@ -76,73 +74,7 @@ class TestRestrictedForFailClosed(unittest.TestCase):
         self.assertTrue(QueryRouter(store)._restricted_for(obj))
 
 
-class TestCandidateExposure(unittest.TestCase):
-    def test_only_candidate_exposed_with_clarification(self):
-        # 후보만 매칭(매칭된 검수 매핑 없음) → 후보 노출 + needs_clarification=True.
-        # ★context()(reviewed DomainContext)를 일부러 둔다 — 실코퍼스에도 reviewed DomainContext가
-        #   상존해 source_ids가 안 비므로, (not source_ids)가 아니라 명시 clarification_needed로
-        #   §4.3이 작동함을 이 픽스처가 증명한다(리뷰 critical 반영).
-        store = store_of(context(glossary_term_ids=[]),
-                         candidate_term_inline("g.c", "갈고리"))
-        answer = QueryRouter(store).answer("갈고리 용어 무슨 뜻?")
-        gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        cand_ids = [c["id"] for c in gloss["candidate_terms"]]
-        self.assertIn("g.c", cand_ids)
-        self.assertEqual(gloss["candidate_terms"][0]["trust_label"], "확인 필요")
-        # 후보 정의가 실제로 노출됨(silent 제거)
-        self.assertEqual(gloss["candidate_terms"][0]["definition"], "후보 정의")
-        # 후보 전용 필드에 승격 후보 번호
-        self.assertIn("g.c", answer["promotable_candidate_ids"])
-        # 후보만 노출 → 검수된 source 없음 → needs_clarification
-        self.assertNotIn("g.c", answer["source_object_ids"])
-        self.assertTrue(answer["needs_clarification"])
-        # 답 전체 라벨은 candidate(severity 2) 이상
-        self.assertEqual(answer["status"], "candidate")
-        # 담담한 단서 한 줄
-        self.assertTrue(any("확인 필요한 후보 항목 포함" in w for w in answer["warnings"]))
-
-    def test_alias_matches_candidate(self):
-        store = store_of(context(glossary_term_ids=[]),
-                         candidate_term_inline("g.a", "카약 레이스", aliases=["미나의 카약"]))
-        answer = QueryRouter(store).answer("미나의 카약 용어 무슨 뜻?")
-        gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        self.assertIn("g.a", [c["id"] for c in gloss["candidate_terms"]])
-
-    def test_candidate_alias_does_not_gain_reviewed_mapping_access(self):
-        from tests.test_search import domain_mapping, glossary_term
-
-        term = glossary_term(
-            "g.canoe",
-            term="카누 레이스 후보",
-            aliases=["샐리의 카누 후보"],
-            status="candidate",
-        )
-        mapping = domain_mapping(
-            "m.canoe",
-            meaning="별도 검수된 카누 의미",
-            glossary_term_ids=["g.canoe"],
-        )
-        answer = QueryRouter(store_of(term, mapping)).answer("샐리의 카누 후보 무슨 뜻?")
-        section = next(
-            item for item in answer["sections"]
-            if item["intent"] == "glossary_meaning"
-        )
-
-        self.assertEqual(section["mappings"], [])
-        self.assertIn(term["id"], [item["id"] for item in section["candidate_terms"]])
-        self.assertTrue(answer["needs_clarification"])
-
-    def test_irrelevant_candidate_not_exposed(self):
-        # 질의에 안 나오는 term은 노출 안 함(노이즈 배제)
-        store = store_of(context(glossary_term_ids=[]),
-                         candidate_term_inline("g.c", "갈고리"),
-                         candidate_term_inline("g.z", "전혀다른용어"))
-        answer = QueryRouter(store).answer("갈고리 용어 무슨 뜻?")
-        gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        ids = [c["id"] for c in gloss["candidate_terms"]]
-        self.assertIn("g.c", ids)
-        self.assertNotIn("g.z", ids)
-
+class TestQueryFacetCandidateIsolation(unittest.TestCase):
     def test_candidate_not_fed_into_conflict_resolution(self):
         # glossary_meaning + current_status를 함께 유발하는 질의.
         # current_status 분기의 kept/conflicts에 candidate가 절대 안 섞여야 함(spec §4.2).
@@ -153,105 +85,6 @@ class TestCandidateExposure(unittest.TestCase):
         self.assertNotIn("g.c", current["object_ids"])
         for entry in current.get("conflicts", []):
             self.assertNotIn("g.c", entry["fact_ids"])
-
-
-class TestStaleAdvisory(unittest.TestCase):
-    """Step 2: CLI가 주입한 stale_advisories를 glossary_meaning 매핑에 부착(코드 변경 노출).
-    색인 불필요 — _matched_mappings가 reviewed 매핑을 glossary term 표면으로 매칭한다."""
-
-    def _store(self):
-        from tests.test_search import domain_mapping, glossary_term
-        return store_of(
-            glossary_term("g.boost", term="강화폭탄"),
-            domain_mapping("m.boost", meaning="강화폭탄 적재 의미",
-                           glossary_term_ids=["g.boost"]),
-        )
-
-    def test_stale_advisory_attached_to_mapping_when_in_stale_set(self):
-        adv = {
-            "mapping.neutral.boost": {
-                "code_changed": True,
-                "change_types": ["M"],
-                "paths": ["a/X.cpp"],
-                "target_head": "T",
-                "computed_at": "2026-06-25T15:00:00+09:00",
-            }
-        }
-        answer = QueryRouter(self._store(), stale_advisories=adv).answer("강화폭탄 무슨 뜻?")
-        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(
-            x for x in gm["mappings"]
-            if x["id"] == "mapping.neutral.boost"
-        )
-        self.assertEqual(m["stale_advisory"]["change_types"], ["M"])
-        # warning에 기준 시점(computed_at)이 들어가 펼치기 전에도 "언제 기준"인지 보인다(route 후속①).
-        self.assertTrue(any("코드 변경" in w and "2026-06-25T15:00:00+09:00" in w
-                            for w in answer["warnings"]))
-
-    def test_branch_scope_warning_is_separate_from_code_change_warning(self):
-        advisories = {
-            "mapping.neutral.boost": {
-                        "code_changed": False, "unmerged_anchor": True,
-                        "unmerged_reasons": ["not_ancestor"],
-                        "locator_ids": ["code.neutral.work"],
-                        "from_commits": ["WORK"], "paths": ["a/X.cpp"],
-                        "target_head": "T", "computed_at": "t"},
-        }
-        answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
-        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        self.assertTrue(gm["mappings"][0]["stale_advisory"]["unmerged_anchor"])
-        self.assertIn(
-            "Code anchor is not reachable from the configured default branch; "
-            "check whether it is unmerged or history was rewritten.",
-            answer["warnings"],
-        )
-        self.assertFalse(any("코드 변경 감지" in w for w in answer["warnings"]))
-
-    def test_anchor_unverifiable_warning_is_distinct_and_reason_order_is_stable(self):
-        advisories = {
-            "mapping.neutral.boost": {
-                        "code_changed": True, "unmerged_anchor": True,
-                        "unmerged_reasons": ["not_ancestor", "anchor_unverifiable"],
-                        "locator_ids": ["code.neutral.work"],
-                        "from_commits": ["WORK"],
-                        "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
-        }
-        answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
-        unreachable = (
-            "Code anchor is not reachable from the configured default branch; "
-            "check whether it is unmerged or history was rewritten."
-        )
-        unverifiable = (
-            "Code anchor reachability could not be verified against the configured default branch."
-        )
-        branch_warnings = [w for w in answer["warnings"] if w in {unreachable, unverifiable}]
-        self.assertEqual(branch_warnings, [unreachable, unverifiable])
-        self.assertEqual(branch_warnings.count(unreachable), 1)
-        self.assertEqual(branch_warnings.count(unverifiable), 1)
-        self.assertTrue(any("코드 변경 감지" in w for w in answer["warnings"]))
-
-    def test_anchor_unverifiable_warning_does_not_claim_verified_or_unmerged(self):
-        advisories = {
-            "mapping.neutral.boost": {
-                        "code_changed": False, "unmerged_anchor": True,
-                        "unmerged_reasons": ["anchor_unverifiable"],
-                        "locator_ids": ["code.neutral.unknown"],
-                        "from_commits": ["UNKNOWN"],
-                        "paths": ["a/X.cpp"], "target_head": "T", "computed_at": "t"},
-        }
-        answer = QueryRouter(self._store(), stale_advisories=advisories).answer("강화폭탄 무슨 뜻?")
-        warning = next(w for w in answer["warnings"] if "could not be verified" in w)
-        self.assertNotIn("Verified", warning)
-        self.assertNotIn("unmerged", warning.lower())
-
-    def test_no_stale_advisory_without_cache(self):
-        answer = QueryRouter(self._store()).answer("강화폭탄 무슨 뜻?")
-        gm = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        m = next(
-            x for x in gm["mappings"]
-            if x["id"] == "mapping.neutral.boost"
-        )
-        self.assertNotIn("stale_advisory", m)
 
 
 def decision_record_inline(did, *, affected_term_ids, summary="결정"):
@@ -445,6 +278,111 @@ class TestReviewedNameScope(unittest.TestCase):
         ))
 
 
+class TestDeterministicFacetPreservation(unittest.TestCase):
+    def test_current_status_uses_supersedes_winner_for_conflicting_facts(self):
+        old = temporal_fact_inline("fact.old", value=False, feature="canoe-race")
+        new = temporal_fact_inline("fact.new", value=True, feature="canoe-race")
+        new["supersedes"] = old["id"]
+
+        answer = QueryRouter(store_of(old, new)).answer("현재 규칙은?")
+        current = next(
+            section for section in answer["sections"]
+            if section["intent"] == "current_status"
+        )
+
+        self.assertEqual(current["object_ids"], [new["id"]])
+        self.assertEqual(current["conflicts"][0]["fact_ids"], [new["id"], old["id"]])
+        self.assertFalse(answer["needs_clarification"])
+
+    def test_current_status_warns_for_invalid_current_view_sources(self):
+        candidate = temporal_fact_inline(
+            "fact.candidate",
+            value=True,
+            feature="canoe-race",
+        )
+        candidate["status"] = "candidate"
+        closed = temporal_fact_inline(
+            "fact.closed",
+            value=False,
+            feature="canoe-race",
+        )
+        closed["valid_until"] = "2026-06-10T00:00:00Z"
+        view = {
+            "id": "view.current.canoe",
+            "kind": "CurrentView",
+            "status": "reviewed",
+            "source_fact_ids": ["fact.missing", candidate["id"], closed["id"]],
+        }
+
+        answer = QueryRouter(store_of(candidate, closed, view)).answer("현재 상태는?")
+        rendered = "\n".join(answer["warnings"])
+
+        self.assertIn("source fact fact.missing 부재", rendered)
+        self.assertIn("source fact fact.candidate 미검수", rendered)
+        self.assertIn("source fact fact.closed 닫힘(superseded)", rendered)
+
+    def test_evidence_facet_preserves_chain_and_raw_or_restricted_status(self):
+        fact = temporal_fact_inline("fact.evidence", value=True, feature="canoe-race")
+        fact["review_record_id"] = "review.fact.evidence"
+        fact["evidence_refs"] = ["evref.fact.evidence"]
+        review = {"id": "review.fact.evidence", "kind": "ReviewRecord"}
+        reference = {
+            "id": "evref.fact.evidence",
+            "kind": "EvidenceRef",
+            "evidence_manifest_id": "manifest.fact.evidence",
+        }
+
+        for redaction_status, missing_raw, expected_status in (
+            ("approved", True, "raw-unavailable"),
+            ("restricted", False, "restricted"),
+        ):
+            with self.subTest(expected_status=expected_status):
+                manifest = {
+                    "id": "manifest.fact.evidence",
+                    "kind": "EvidenceManifest",
+                    "redaction_status": redaction_status,
+                }
+                router = QueryRouter(
+                    store_of(fact, review, reference, manifest),
+                    missing_raw_manifest_ids=(
+                        {manifest["id"]} if missing_raw else set()
+                    ),
+                )
+                answer = router.answer("근거와 출처를 알려줘")
+                evidence = next(
+                    section for section in answer["sections"]
+                    if section["intent"] == "evidence_provenance"
+                )
+
+                self.assertEqual(
+                    evidence["object_ids"],
+                    [fact["id"], review["id"], reference["id"]],
+                )
+                self.assertEqual(answer["status"], expected_status)
+
+    def test_why_changed_keeps_inferred_causal_basis_without_derived_facts(self):
+        events = [
+            {
+                "id": f"ledger.event.{index}",
+                "kind": "EventLedgerRecord",
+                "status": "reviewed",
+                "happened_at": f"2026-06-0{index}T00:00:00Z",
+                "event_type": "qa_result" if index == 2 else "spec_revised",
+                "summary": f"변경 사건 {index}",
+            }
+            for index in (1, 2)
+        ]
+
+        answer = QueryRouter(store_of(*events)).answer("왜 바뀌었어?")
+        why = next(
+            section for section in answer["sections"]
+            if section["intent"] == "why_changed"
+        )
+
+        self.assertEqual(why["causal_basis"], "inferred")
+        self.assertEqual(why["events"][1]["role"], "supporting_context")
+
+
 class TestRouterReadOnly(unittest.TestCase):
     def test_answer_does_not_mutate_store(self):
         store = store_of(context(glossary_term_ids=["g.r"]),
@@ -452,689 +390,6 @@ class TestRouterReadOnly(unittest.TestCase):
         before = copy.deepcopy(store._objects)
         QueryRouter(store).answer("갈고리 용어 무슨 뜻?")
         self.assertEqual(store._objects, before)
-
-
-class TestGlossaryReviewedExposure(unittest.TestCase):
-    def test_reviewed_glossary_term_surfaces(self):
-        store = store_of(context(glossary_term_ids=["g.r"]),
-                         reviewed_term_with_evidence("g.r", "갈고리", evidence_refs=[]))
-        answer = QueryRouter(store).answer("갈고리 용어 무슨 뜻?")
-        self.assertIn("glossary_meaning", answer["intents"])
-        self.assertIn("g.r", answer["source_object_ids"])
-
-    def test_canonical_synonym_and_alias_recover_same_reviewed_mapping(self):
-        from tests.test_search import domain_mapping, glossary_term
-
-        term = glossary_term(
-            "g.canoe",
-            term="카누 레이스",
-            synonyms=["카누 경기"],
-            aliases=["샐리 카누"],
-        )
-        mapping = domain_mapping(
-            "m.canoe",
-            meaning="샐리가 참가하는 카누 경주의 검수된 의미",
-            glossary_term_ids=["g.canoe"],
-        )
-        store = store_of(term, mapping)
-
-        recovered = []
-        for name in (term["term"], term["synonyms"][0], term["aliases"][0]):
-            answer = QueryRouter(store).answer(f"{name} 무슨 뜻?")
-            section = next(
-                item for item in answer["sections"]
-                if item["intent"] == "glossary_meaning"
-            )
-            recovered.append((
-                [item["id"] for item in section["mappings"]],
-                [object_id for object_id in section["object_ids"] if object_id == term["id"]],
-            ))
-
-        self.assertEqual(
-            recovered,
-            [([mapping["id"]], [term["id"]])] * 3,
-        )
-
-
-# ── 슬라이스 5: 라우터 의미 회상 통합(§7) ──────────────────────────────────────
-import tempfile
-from pathlib import Path
-from unittest import mock
-
-from project_brain.embedder import StubEmbedder
-from project_brain.search_index import rebuild as index_rebuild
-from tests.test_search import (
-    code_locator,
-    domain_mapping,
-    glossary_term as st_glossary_term,
-)
-
-
-class TestRouterRecallTopK(unittest.TestCase):
-    """§7 전량 적재 → top-K 전이: 색인이 있으면 라우터가 recall 점수 top-K로 좁힌다
-    (06-05 "110개 무더기" 제거). 전부 stub embedder + tmp 색인."""
-
-    def setUp(self):
-        self._td = tempfile.TemporaryDirectory()
-        self.brain = Path(self._td.name) / "brain"
-        self.db = Path(self._td.name) / "index.db"
-        self.embedder = StubEmbedder()
-
-    def tearDown(self):
-        self._td.cleanup()
-
-    def _rebuild(self, objs):
-        for obj in objs:
-            BrainStore.save_object(self.brain, obj)
-        index_rebuild(self.brain, self.db, embedder=self.embedder)
-
-    def _router(self):
-        return QueryRouter(BrainStore.load(self.brain), db_path=self.db,
-                           embedder=self.embedder, brain_root=self.brain)
-
-    def test_implementation_location_uses_topk_not_all(self):
-        # CodeLocator 12개를 적재하고 어디 구현 질의 → recall top-K(≤5)로 좁혀져
-        # 전량(12개)이 아니라 일부만 source로 적재된다(전량 적재 사라짐).
-        objs = [code_locator(f"code.{i:02d}", path=f"a/Lane{i}.cpp", symbol=f"makeLanes{i}")
-                for i in range(12)]
-        self._rebuild(objs)
-        answer = self._router().answer("makeLanes0 어디 구현?")
-        loc_section = next(s for s in answer["sections"]
-                           if s["intent"] == "implementation_location")
-        # 회상 0건 회귀(게이트 전부 차단)가 공허하게 통과하지 않게 ≥1 단언(리뷰 반영).
-        self.assertGreaterEqual(len(loc_section["object_ids"]), 1)
-        self.assertLessEqual(len(loc_section["object_ids"]), 5)
-        # 무더기(12 전량)가 아니다.
-        self.assertLess(len(loc_section["object_ids"]), 12)
-
-    def test_reviewed_implementation_section_carries_path_symbol(self):
-        """검수완료 구현위치도 후보 채널과 같이 path·symbol을 동반한다.
-
-        bare id만 내면 `code.ctx.mapping-key--8` 같은 라벨로는 어느 위치인지 구분이 안 된다.
-        같은 함수 안의 candidate_locators(:257-262)는 이미 이 모양을 낸다."""
-        self._rebuild([code_locator("code.beam", path="a/Shooter.cpp",
-                                    symbol="GameBubbleShooterLayer::throwBeam")])
-        answer = self._router().answer("GameBubbleShooterLayer::throwBeam 어디 구현?")
-        loc_section = next(s for s in answer["sections"]
-                           if s["intent"] == "implementation_location")
-        # id는 문법 검증 도입 후 컨텍스트를 포함한다(code.<ctx>.<key>).
-        self.assertIn("code.neutral.beam", loc_section["object_ids"])
-        self.assertIn({"id": "code.neutral.beam", "path": "a/Shooter.cpp",
-                       "symbol": "GameBubbleShooterLayer::throwBeam"},
-                      loc_section["locators"])
-
-    def test_implementation_location_pinpoints_via_mapping_graph(self):
-        # §3.5·§8 주 경로: 매핑이 점수 상위로 적중하고, 그 매핑이 linked.code_locators로
-        # 동반한 CodeLocator가 implementation_location source로 핀포인트된다(심볼 직접
-        # 적중이 아니라 그래프 1-hop 경로). 매핑 텍스트가 질의와 닿게 구성.
-        self._rebuild([
-            domain_mapping("m.stage", meaning="스테이지 클리어 개수 최대값 모델",
-                           glossary_term_ids=["g.stage"],
-                           code_locator_ids=["code.stage"]),
-            st_glossary_term("g.stage", term="StageClearMax", definition="스테이지 클리어 개수"),
-            code_locator("code.stage", path="a/Model.hpp", symbol="m_nStageClearMax"),
-        ])
-        answer = self._router().answer("스테이지 클리어 개수 최대값 모델 어디 구현?")
-        loc_section = next(s for s in answer["sections"]
-                           if s["intent"] == "implementation_location")
-        # 매핑이 동반한 code.stage가 핀포인트로 들어온다(전량 적재 아님).
-        self.assertIn("code.neutral.stage", loc_section["object_ids"])
-        self.assertLessEqual(len(loc_section["object_ids"]), 5 + 1)
-
-    def test_candidate_linked_locator_not_in_source(self):
-        # 리뷰 반영(§7 채널 규약): reviewed 매핑이 candidate CodeLocator를 참조해도
-        # 확신 채널(source)에는 안 들어간다 — 폴백 경로(_reviewed_by_kind)와 동일.
-        cand_locator = code_locator("code.cand", path="a/Model.hpp",
-                                    symbol="m_nStageClearMax")
-        cand_locator["status"] = "candidate"
-        self._rebuild([
-            domain_mapping("m.stage", meaning="스테이지 클리어 개수 최대값 모델",
-                           glossary_term_ids=["g.stage"],
-                           code_locator_ids=["code.cand", "code.ok"]),
-            st_glossary_term("g.stage", term="StageClearMax",
-                             definition="스테이지 클리어 개수"),
-            cand_locator,
-            code_locator("code.ok", path="a/Model.cpp", symbol="setStageClearMax"),
-        ])
-        answer = self._router().answer("스테이지 클리어 개수 최대값 모델 어디 구현?")
-        loc_section = next(s for s in answer["sections"]
-                           if s["intent"] == "implementation_location")
-        self.assertIn("code.neutral.ok", loc_section["object_ids"])
-        self.assertNotIn("code.neutral.cand", loc_section["object_ids"])
-
-    def test_candidate_linked_locator_exposed_with_label(self):
-        # 후보 채널 노출(2026-06-11 사용자 결정): reviewed 매핑이 동반한 candidate
-        # CodeLocator는 침묵 드롭이 아니라 "확인 필요" 라벨로 노출한다 — C 정책
-        # (glossary candidate_terms)을 구현위치 섹션에도 적용. 확신 채널(object_ids)
-        # 불변은 위 테스트가 보장.
-        cand_locator = code_locator("code.cand", path="a/Model.hpp",
-                                    symbol="m_nStageClearMax")
-        cand_locator["status"] = "candidate"
-        self._rebuild([
-            domain_mapping("m.stage", meaning="스테이지 클리어 개수 최대값 모델",
-                           glossary_term_ids=["g.stage"],
-                           code_locator_ids=["code.cand", "code.ok"]),
-            st_glossary_term("g.stage", term="StageClearMax",
-                             definition="스테이지 클리어 개수"),
-            cand_locator,
-            code_locator("code.ok", path="a/Model.cpp", symbol="setStageClearMax"),
-        ])
-        answer = self._router().answer("스테이지 클리어 개수 최대값 모델 어디 구현?")
-        loc_section = next(s for s in answer["sections"]
-                           if s["intent"] == "implementation_location")
-        self.assertNotIn("code.neutral.cand", loc_section["object_ids"])
-        cand = next(c for c in loc_section["candidate_locators"]
-                    if c["id"] == "code.neutral.cand")
-        self.assertEqual(cand["trust_label"], "확인 필요")
-        self.assertEqual(cand["path"], "a/Model.hpp")
-        self.assertIn("code.neutral.cand", answer["promotable_candidate_ids"])
-
-    def test_candidate_direct_locator_hit_exposed(self):
-        # 후보 채널 직접 적중(candidate CodeLocator가 recall candidates에 뜸)도
-        # 같은 라벨로 노출 — reviewed가 하나도 없으면 확신 채널은 빈 채 유지.
-        objs = []
-        for i in range(3):
-            loc = code_locator(f"code.{i}", path=f"a/Lane{i}.cpp", symbol=f"makeLanes{i}")
-            loc["status"] = "candidate"
-            objs.append(loc)
-        self._rebuild(objs)
-        answer = self._router().answer("makeLanes0 어디 구현?")
-        loc_section = next(s for s in answer["sections"]
-                           if s["intent"] == "implementation_location")
-        self.assertEqual(loc_section["object_ids"], [])
-        ids = [c["id"] for c in loc_section["candidate_locators"]]
-        self.assertIn("code.neutral.0", ids)
-        self.assertEqual(
-            answer["promotable_candidate_ids"].count("code.neutral.0"),
-            1,
-        )
-        self.assertNotIn(
-            "code.neutral.0",
-            [item["id"] for item in answer["additional_candidates"]],
-        )
-        self.assertEqual(
-            sum(
-                "확인 필요한 후보 항목 포함" in warning
-                for warning in answer["warnings"]
-            ),
-            1,
-        )
-
-    def test_multiple_intent_candidate_details_share_one_warning(self):
-        locator = code_locator(
-            "code.race-model",
-            path="a/RaceModel.cpp",
-            symbol="RaceModel::build",
-        )
-        locator["status"] = "candidate"
-        self._rebuild([
-            st_glossary_term(
-                "g.race-model",
-                term="RaceModel",
-                definition="레이스 모델 후보",
-                status="candidate",
-            ),
-            locator,
-        ])
-
-        answer = self._router().answer(
-            "RaceModel 용어 무슨 뜻? RaceModel::build 어디 구현?"
-        )
-
-        self.assertIn("glossary_meaning", answer["intents"])
-        self.assertIn("implementation_location", answer["intents"])
-        glossary = next(
-            section for section in answer["sections"]
-            if section["intent"] == "glossary_meaning"
-        )
-        implementation = next(
-            section for section in answer["sections"]
-            if section["intent"] == "implementation_location"
-        )
-        self.assertIn(
-            "g.neutral.race-model",
-            [item["id"] for item in glossary["candidate_terms"]],
-        )
-        self.assertIn(
-            "code.neutral.race-model",
-            [item["id"] for item in implementation["candidate_locators"]],
-        )
-        self.assertIn(
-            "g.neutral.race-model",
-            answer["promotable_candidate_ids"],
-        )
-        self.assertIn(
-            "code.neutral.race-model",
-            answer["promotable_candidate_ids"],
-        )
-        self.assertEqual(answer["additional_candidates"], [])
-        self.assertEqual(
-            sum(
-                "확인 필요한 후보 항목 포함" in warning
-                for warning in answer["warnings"]
-            ),
-            1,
-        )
-
-    def test_glossary_meaning_uses_topk_not_all_reviewed(self):
-        # reviewed GlossaryTerm 12개 적재. 정확 매칭 매핑이 없는 질의에서도 glossary
-        # source가 전량(12)이 아니라 recall top-K(≤5)로 좁혀진다.
-        objs = [st_glossary_term(f"g.{i:02d}", term=f"용어{i}", definition=f"레인 정의 {i}")
-                for i in range(12)]
-        self._rebuild(objs)
-        answer = self._router().answer("용어0 무슨 뜻?")
-        gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        # 회상 0건 회귀가 공허하게 통과하지 않게 ≥1 단언(리뷰 반영).
-        self.assertGreaterEqual(len(gloss["object_ids"]), 1)
-        self.assertLessEqual(len(gloss["object_ids"]), 5)
-        self.assertLess(len(gloss["object_ids"]), 12)
-
-    def test_glossary_meaning_exposes_unconsumed_mapping_candidate(self):
-        # recall 게이트를 통과한 후보는 intent별 전용 수집기가 없어도 공통 후보
-        # 채널에서 보존한다. 후보는 source/확신 답과 clarification 판정을 바꾸지 않는다.
-        self._rebuild([
-            domain_mapping(
-                "m.next-level",
-                meaning="NextLevel 다음 레벨 선택 규칙",
-                status="candidate",
-            ),
-        ])
-
-        answer = self._router().answer("NextLevel은 무슨 뜻이야?")
-
-        candidate_id = "mapping.neutral.next-level"
-        self.assertIn("glossary_meaning", answer["intents"])
-        self.assertIn(candidate_id, answer["promotable_candidate_ids"])
-        self.assertNotIn(candidate_id, answer["source_object_ids"])
-        detail = next(
-            item for item in answer["additional_candidates"]
-            if item["id"] == candidate_id
-        )
-        self.assertEqual(detail["kind"], "DomainMapping")
-        self.assertIn("NextLevel 다음 레벨 선택 규칙", detail["surface"])
-        self.assertEqual(detail["trust_label"], "확인 필요")
-        self.assertEqual(answer["status"], "candidate")
-        self.assertTrue(answer["needs_clarification"])
-        self.assertTrue(any(
-            "확인 필요한 후보 항목 포함" in warning
-            for warning in answer["warnings"]
-        ))
-
-    def test_spillover_candidate_does_not_force_reviewed_answer_clarification(self):
-        self._rebuild([
-            st_glossary_term(
-                "g.next-level",
-                term="NextLevel",
-                definition="검수된 다음 레벨 용어",
-            ),
-            domain_mapping(
-                "m.next-level-candidate",
-                meaning="NextLevel 선택 규칙 후보",
-                status="candidate",
-            ),
-        ])
-
-        answer = self._router().answer("NextLevel은 무슨 뜻이야?")
-
-        self.assertIn("g.neutral.next-level", answer["source_object_ids"])
-        self.assertIn(
-            "mapping.neutral.next-level-candidate",
-            [item["id"] for item in answer["additional_candidates"]],
-        )
-        self.assertEqual(answer["status"], "candidate")
-        self.assertFalse(answer["needs_clarification"])
-
-    def test_why_changed_exposes_unconsumed_candidate(self):
-        # why_changed에는 DomainMapping 후보 전용 수집기가 없지만 recall을 통과한
-        # 후보를 잃지 않는다. 결정 이력의 reviewed source로 오인하지는 않는다.
-        self._rebuild([
-            domain_mapping(
-                "m.next-level",
-                meaning="NextLevel 다음 레벨 선택 규칙 변경",
-                status="candidate",
-            ),
-        ])
-
-        answer = self._router().answer("왜 NextLevel 선택 규칙이 바뀌었어?")
-
-        candidate_id = "mapping.neutral.next-level"
-        self.assertIn("why_changed", answer["intents"])
-        self.assertIn(candidate_id, answer["promotable_candidate_ids"])
-        self.assertNotIn(candidate_id, answer["source_object_ids"])
-        self.assertIn(
-            candidate_id,
-            [item["id"] for item in answer["additional_candidates"]],
-        )
-        self.assertTrue(answer["needs_clarification"])
-
-    def test_exact_alias_term_survives_recall_topk(self):
-        # 실제 BB2처럼 graph support가 있는 매핑들이 top-K를 차지해도, 질의에 정확히
-        # 맞은 reviewed GlossaryTerm은 연결 매핑과 함께 빠지지 않아야 한다.
-        objs = [
-            st_glossary_term(
-                "g.beam",
-                term="KAMEHAMEHA",
-                synonyms=["광선 발사"],
-                aliases=["광선발사"],
-            ),
-            domain_mapping(
-                "m.beam",
-                meaning="광선발사 스킬 등록 의미",
-                glossary_term_ids=["g.beam"],
-            ),
-        ]
-        for i in range(8):
-            objs.extend([
-                st_glossary_term(
-                    f"g.noise{i}",
-                    term=f"경쟁용어{i}",
-                    definition=f"광선발사 검색 경쟁 의미 {i}",
-                ),
-                domain_mapping(
-                    f"m.noise{i}",
-                    meaning=f"광선발사 검색 경쟁 의미 {i}",
-                    glossary_term_ids=[f"g.noise{i}"],
-                ),
-            ])
-        self._rebuild(objs)
-
-        answer = self._router().answer("광선발사 무슨 뜻?")
-        section = next(
-            item for item in answer["sections"]
-            if item["intent"] == "glossary_meaning"
-        )
-
-        self.assertEqual(
-            [item["id"] for item in section["mappings"]],
-            ["mapping.neutral.beam"],
-        )
-        self.assertIn("g.neutral.beam", section["object_ids"])
-
-    def test_evidence_provenance_combined_impl_uses_topk(self):
-        # 후속 a(P2 4번): evidence_provenance가 implementation_location과 결합되면
-        # CodeLocator 전량(_reviewed_by_kind)이 아니라 recall top-K 핀포인트의 출처
-        # 사슬만 defend한다(§6.6 정밀 규칙 + §7 top-K의 결합 경로 적용).
-        objs = [code_locator(f"code.{i:02d}", path=f"a/Lane{i}.cpp", symbol=f"makeLanes{i}")
-                for i in range(12)]
-        self._rebuild(objs)
-        answer = self._router().answer("makeLanes0 어디 구현? 근거는?")
-        ev = next(s for s in answer["sections"]
-                  if s["intent"] == "evidence_provenance")
-        loc_ids = [oid for oid in ev["object_ids"] if oid.startswith("code.")]
-        self.assertGreaterEqual(len(loc_ids), 1)
-        self.assertLessEqual(len(loc_ids), 6)  # top-K(5)+그래프 동반 ≤6, 전량 12 아님
-
-    def test_evidence_provenance_combined_glossary_uses_topk(self):
-        # 후속 a: glossary_meaning 결합도 DomainContext·GlossaryTerm 전량이 아니라
-        # recall top-K로 좁힌다.
-        objs = [st_glossary_term(f"g.{i:02d}", term=f"용어{i}", definition=f"레인 정의 {i}")
-                for i in range(12)]
-        self._rebuild(objs)
-        answer = self._router().answer("용어0 무슨 뜻? 근거는?")
-        ev = next(s for s in answer["sections"]
-                  if s["intent"] == "evidence_provenance")
-        term_ids = [oid for oid in ev["object_ids"] if oid.startswith("g.")]
-        self.assertGreaterEqual(len(term_ids), 1)
-        self.assertLess(len(term_ids), 12)
-
-    def test_router_recall_reuses_router_store(self):
-        # 후속 b(2026-06-11): 라우터는 생성 시 받은 self.store를 recall에 주입한다 —
-        # 질의마다 BrainStore.load로 코퍼스 재로드 없음(장수 인스턴스 성능,
-        # 06-10 슬라이스 5 리뷰 후속 관찰 (b) 해소).
-        objs = [code_locator(f"code.{i:02d}", path=f"a/Lane{i}.cpp", symbol=f"makeLanes{i}")
-                for i in range(3)]
-        self._rebuild(objs)
-        router = self._router()
-        with mock.patch.object(BrainStore, "load",
-                               side_effect=AssertionError("라우터 회상은 자기 store 재사용")):
-            answer = router.answer("makeLanes0 어디 구현?")
-        loc = next(s for s in answer["sections"]
-                   if s["intent"] == "implementation_location")
-        # 회상이 실제로 돌았는지(공허 통과 방지) 적중 ≥1 단언.
-        self.assertGreaterEqual(len(loc["object_ids"]), 1)
-
-    def test_exact_matched_mapping_not_duplicated(self):
-        # 요구사항 1: 정확 매칭이 잡은 매핑은 의미 확장에서 중복 적재 안 됨.
-        # 매핑이 용어 "레인"을 표면으로 가져 정확 매칭되면서, recall에도 잡힐 수 있다.
-        self._rebuild([
-            st_glossary_term("g.lane", term="레인", definition="레인 영역 배치"),
-            domain_mapping("m.lane", meaning="레인 영역 배치",
-                           glossary_term_ids=["g.lane"]),
-        ])
-        answer = self._router().answer("레인 무슨 뜻?")
-        gloss = next(s for s in answer["sections"] if s["intent"] == "glossary_meaning")
-        # m.lane은 정확 매칭(mappings)으로 한 번만 — object_ids에 중복 없음.
-        self.assertEqual(gloss["object_ids"].count("mapping.neutral.lane"), 1)
-
-
-class TestRouterRecallFallback(unittest.TestCase):
-    """§7 안전 폴백: db_path가 없거나 색인이 없으면 recall을 끄고 정확 매칭 경로만으로
-    동작한다 — 색인 없는 store로 도는 기존 동작 보존."""
-
-    def test_no_db_path_falls_back_to_full_load(self):
-        # db_path 미지정 → recall 비활성. reviewed GlossaryTerm 전량 적재(폴백) 유지.
-        store = store_of(context(glossary_term_ids=["g.r"]),
-                         reviewed_term_with_evidence("g.r", "갈고리", evidence_refs=[]))
-        answer = QueryRouter(store).answer("갈고리 용어 무슨 뜻?")
-        self.assertIn("g.r", answer["source_object_ids"])
-
-    def test_missing_db_file_falls_back(self):
-        # db_path는 줬지만 파일이 없으면(색인 미생성) recall 비활성 → 폴백.
-        store = store_of(context(glossary_term_ids=["g.r"]),
-                         reviewed_term_with_evidence("g.r", "갈고리", evidence_refs=[]))
-        router = QueryRouter(store, db_path=Path("/nonexistent/index.db"))
-        answer = router.answer("갈고리 용어 무슨 뜻?")
-        self.assertIn("g.r", answer["source_object_ids"])
-
-    def test_no_db_implementation_fallback_returns_only_aggregate(self):
-        store = store_of(*[
-            code_locator(
-                f"code.{i}",
-                path=f"private/Secret{i}.cpp",
-                symbol=f"Secret{i}::run",
-            )
-            for i in range(3)
-        ])
-        answer = QueryRouter(store).answer("Secret0 어디 구현?")
-        section = next(
-            s for s in answer["sections"]
-            if s["intent"] == "implementation_location"
-        )
-        self.assertEqual(
-            {
-                key: section[key]
-                for key in ("kind_counts", "object_ids", "details_omitted_reason")
-            },
-            {
-                "kind_counts": {"CodeLocator": 3},
-                "object_ids": [],
-                "details_omitted_reason": "no_db",
-            },
-        )
-        rendered = str(section)
-        self.assertNotIn("code.neutral.", rendered)
-        self.assertNotIn("private/Secret", rendered)
-        self.assertNotIn("Secret0::run", rendered)
-
-    def test_stale_db_implementation_fallback_returns_only_aggregate(self):
-        with tempfile.TemporaryDirectory() as td:
-            brain = Path(td) / "brain"
-            db = Path(td) / "index.db"
-            for i in range(3):
-                BrainStore.save_object(
-                    brain,
-                    code_locator(
-                        f"code.{i}",
-                        path=f"private/Secret{i}.cpp",
-                        symbol=f"Secret{i}::run",
-                    ),
-                )
-            index_rebuild(brain, db, embedder=StubEmbedder())
-            changed = BrainStore.load(brain).get("code.neutral.0")
-            changed["path"] = "private/Changed.cpp"
-            BrainStore.save_object(brain, changed)
-
-            answer = QueryRouter(
-                BrainStore.load(brain),
-                db_path=db,
-                embedder=StubEmbedder(),
-                brain_root=brain,
-            ).answer("Secret0 어디 구현?")
-            section = next(
-                s for s in answer["sections"]
-                if s["intent"] == "implementation_location"
-            )
-            self.assertEqual(
-                {
-                    key: section[key]
-                    for key in ("kind_counts", "object_ids", "details_omitted_reason")
-                },
-                {
-                    "kind_counts": {"CodeLocator": 3},
-                    "object_ids": [],
-                    "details_omitted_reason": "stale_db",
-                },
-            )
-            rendered = str(section)
-            self.assertNotIn("code.neutral.", rendered)
-            self.assertNotIn("private/", rendered)
-
-
-class TestRouterUnknownRecall(unittest.TestCase):
-    """§7 unknown 일반 회상: 맥락만 던진 질의를 의미 회상으로 답한다.
-    게이트 통과 reviewed=확신(source), candidate=후보(promotable + 확인필요)."""
-
-    def setUp(self):
-        self._td = tempfile.TemporaryDirectory()
-        self.brain = Path(self._td.name) / "brain"
-        self.db = Path(self._td.name) / "index.db"
-        self.embedder = StubEmbedder()
-
-    def tearDown(self):
-        self._td.cleanup()
-
-    def _rebuild(self, objs):
-        for obj in objs:
-            BrainStore.save_object(self.brain, obj)
-        index_rebuild(self.brain, self.db, embedder=self.embedder)
-
-    def _router(self):
-        return QueryRouter(BrainStore.load(self.brain), db_path=self.db,
-                           embedder=self.embedder, brain_root=self.brain)
-
-    def test_unknown_query_recalls_reviewed_as_source(self):
-        # intent 분류가 unknown(키워드 신호 없는 맥락 질의)인데, 색인이 있으면 의미
-        # 회상으로 reviewed 적중을 source로 답한다.
-        self._rebuild([
-            st_glossary_term("g.lane", term="레인 영역", definition="레인 영역 배치 좌표"),
-        ])
-        answer = self._router().answer("레인 영역 배치 좌표")
-        self.assertIn("unknown", answer["intents"])
-        self.assertIn("g.neutral.lane", answer["source_object_ids"])
-        self.assertFalse(answer["needs_clarification"])
-
-    def test_unknown_candidate_only_needs_clarification(self):
-        # candidate만 게이트 통과하면 후보 채널 노출(promotable) + needs_clarification.
-        self._rebuild([
-            st_glossary_term("g.cand", term="레인 영역", definition="레인 영역 배치 좌표",
-                             status="candidate"),
-        ])
-        answer = self._router().answer("레인 영역 배치 좌표")
-        self.assertIn("g.neutral.cand", answer["promotable_candidate_ids"])
-        self.assertNotIn("g.neutral.cand", answer["source_object_ids"])
-        self.assertTrue(answer["needs_clarification"])
-
-    def test_unknown_no_index_falls_back_to_no_match(self):
-        # 색인이 없으면 unknown은 기존 "No matching intent"로 폴백(빈 회상).
-        store = store_of(context(glossary_term_ids=[]))
-        answer = QueryRouter(store).answer("아무 맥락 텍스트")
-        unk = next(s for s in answer["sections"] if s["intent"] == "unknown")
-        self.assertEqual(unk["object_ids"], [])
-        self.assertEqual(unk["summary"], "No matching intent")
-
-    def test_unknown_anchorless_query_gated_to_clarification(self):
-        # ★게이트 needs_clarification★(§7): 흔한 토큰만 다수 문서에 심어 앵커 df를 상한
-        # 위로 올리고, 질의 핵심 엔티티는 코퍼스에 없다 → 게이트 차단 → needs_clarification.
-        from project_brain.search import _ANCHOR_DF_MAX
-        objs = [st_glossary_term(f"g.common{i}", term="보상", definition="흔한 보상 토큰")
-                for i in range(_ANCHOR_DF_MAX + 5)]
-        self._rebuild(objs)
-        answer = self._router().answer("없는엔티티 보상")
-        self.assertTrue(answer["needs_clarification"])
-        # 게이트 차단이라 reviewed source로 적재되지 않는다.
-        unk = next(s for s in answer["sections"] if s["intent"] == "unknown")
-        self.assertEqual(unk["object_ids"], [])
-
-
-class TestRouterAdvisories(unittest.TestCase):
-    """answer() 반환에 advisories 키(spec 2026-06-15 §4.6) — recall이 켜지면 reviewed
-    Insight를 가공해 노출(id/insight_type/surface/code_locators). 색인 없으면 빈 리스트."""
-
-    def setUp(self):
-        from tempfile import TemporaryDirectory
-        from project_brain.embedder import StubEmbedder
-        from project_brain.search_index import rebuild
-        from project_brain.objbase import base
-        self._td = TemporaryDirectory()
-        self.addCleanup(self._td.cleanup)
-        from pathlib import Path
-        self.brain = Path(self._td.name) / "brain"
-        self.db = Path(self._td.name) / "index.db"
-        self.embedder = StubEmbedder()
-        T = "2026-06-04T00:00:00Z"
-        objs = [
-            base({"id": "g.neutral.token", "kind": "GlossaryTerm", "status": "reviewed",
-                  "truth_role": "domain", "title": "Term", "context_id": "context.neutral",
-                  "term": "클리어 토큰", "definition": "스테이지 클리어 토큰 노출",
-                  "evidence_refs": ["evref.neutral.x"]},
-                 tags=["n"], created_at=T, updated_at=T),
-            base({"id": "code.neutral.gate", "kind": "CodeLocator", "status": "reviewed",
-                  "truth_role": "reference", "title": "Code", "context_id": "context.neutral",
-                  "repo": "demoapp", "path": "a/Enter.cpp", "symbol": "Enter::gate",
-                  "locator_source": "rg", "verified_at": T, "evidence_refs": []},
-                 tags=["n"], created_at=T, updated_at=T),
-            base({"id": "insight.neutral.gate", "kind": "Insight", "status": "reviewed",
-                  "truth_role": "synthesis", "title": "인사이트",
-                  "body": "클리어 토큰 노출 게이트가 두 팝업에 이중구현",
-                  "scope": "클리어 토큰", "insight_type": "cross-cutting-risk",
-                  "source_object_ids": ["g.neutral.token", "code.neutral.gate"],
-                  "code_locator_ids": ["code.neutral.gate"], "evidence_refs": []},
-                 tags=["n"], created_at=T, updated_at=T),
-        ]
-        for o in objs:
-            BrainStore.save_object(self.brain, o)
-        rebuild(self.brain, self.db, embedder=self.embedder)
-        self.store = BrainStore.load(self.brain)
-
-    def _router(self):
-        return QueryRouter(self.store, db_path=self.db, embedder=self.embedder,
-                           brain_root=self.brain)
-
-    def test_advisories_key_present_and_populated(self):
-        resp = self._router().answer("클리어 토큰 노출 게이트 이중구현")
-        self.assertIn("advisories", resp)
-        ids = {a["id"] for a in resp["advisories"]}
-        self.assertIn("insight.neutral.gate", ids)
-        adv = next(
-            a for a in resp["advisories"]
-            if a["id"] == "insight.neutral.gate"
-        )
-        self.assertEqual(adv["insight_type"], "cross-cutting-risk")
-        self.assertIn("이중구현", adv["surface"])
-        self.assertIn(
-            "code.neutral.gate",
-            {c["object_id"] for c in adv["code_locators"]},
-        )
-        # 가로지름(critic 검토 4): source_object_ids가 advisory에 직접 담긴다.
-        self.assertEqual(
-            set(adv["source_object_ids"]),
-            {"g.neutral.token", "code.neutral.gate"},
-        )
-
-    def test_advisories_empty_without_index(self):
-        # 색인 없는 라우터(db_path 미전달)는 recall 비활성 → advisories 빈 리스트.
-        resp = QueryRouter(self.store).answer("클리어 토큰 노출 게이트")
-        self.assertEqual(resp["advisories"], [])
 
 
 if __name__ == "__main__":

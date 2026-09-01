@@ -7,9 +7,10 @@
 
 ## 한눈에 보는 시스템
 
-Project Brain은 검수 상태와 근거가 붙은 프로젝트 지식을 객체로 쌓고, 에이전트가 `query`로
-필요한 객체를 회수해 사용자에게 답하도록 돕는 엔진이다. 사람이 JSON 파일을 직접 읽는 방식은
-기본 사용법이 아니다. `show`와 `graph export`는 점검과 탐색을 위한 보조 수단이다.
+Project Brain은 검수 상태와 근거가 붙은 프로젝트 지식을 객체로 쌓고, 에이전트가 일반 질문을
+`search`로 회수한 뒤 핵심 객체를 `show`로 읽어 사용자에게 답하도록 돕는 엔진이다. 사람이 JSON
+파일을 직접 읽는 방식은 기본 사용법이 아니다. `query`는 변경 이유·현재·과거·근거 사슬의 결정론
+계산, `graph export`는 점검과 탐색을 맡는다.
 
 ```mermaid
 flowchart LR
@@ -19,8 +20,11 @@ flowchart LR
     Engine --> Data[데이터 레포 brain]
     Data --> Objects[검수 객체와 raw]
     Objects --> Index[재생성 가능한 로컬 색인]
-    Objects --> Query[정확 객체 경로]
-    Index -. fresh일 때 보강 .-> Query
+    Index --> Search[일반 질문 search]
+    Objects --> Show[선택 객체 show]
+    Objects --> Query[네 결정론 query facet]
+    Search --> Agent
+    Show --> Agent
     Query --> Agent
     Agent --> User
 ```
@@ -79,11 +83,11 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
 
 ## 현재 경계에서 주의할 점
 
-- `query`는 정확 객체 경로를 먼저 쓰므로 fresh index가 없어도 안전 폴백이 가능하지만,
-  `search`는 fresh index가 필요하다.
-- 일부 query 경로는 연결된 EvidenceManifest의 `redaction_status`가 `approved`가 아니면 restricted
-  신뢰 라벨을 붙인다. 모든 의도와 `search`에 일괄 적용되는 장벽은 아니며, 현재 principal별 접근
-  제어를 집행한다는 뜻도 아니다. 정확한 적용·미적용 경계는 런타임 지도를 본다.
+- bare 자유질의와 explicit `search`는 같은 경로이며 fresh index가 없거나 stale이면 둘 다 실패한다.
+  `query`는 색인 없이 BrainStore만 읽지만 일반 회수를 대신하지 않고 네 결정론 facet만 계산한다.
+- mapping stale은 `show`, Insight advisory와 candidate/reviewed 일반 회수는 `search`가 소유한다.
+  일부 query 근거 경로의 restricted 라벨과 search의 채널 표시는 principal별 접근 제어를 집행한다는
+  뜻이 아니다. 정확한 적용·미적용 경계는 런타임 지도를 본다.
 - 저장 호환용 schema만 읽고 신규 쓰기 계약을 판단하지 않는다. mutation의 상태 전이,
   CodeLocator repo·SHA·symbol·quote 검증 같은 관문을 함께 봐야 한다.
 - 검수 객체 정본은 `objects/**` 한 디렉터리로 한정되지 않는다. `BrainStore.object_path()`가

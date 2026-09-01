@@ -14,17 +14,30 @@ Brain은 {{PROJECT}} 프로젝트 지식의 단일 저장소다(검수 상태·�
 **기본 조회는 읽기 전용**이며, 질문이나 "맞아" 같은 단순 확인만으로 객체·색인·stale cache를
 바꾸거나 Git 상태를 변경하지 않는다. 판단·답변은 검색 결과 위에서만 수행한다.
 
-## 1. 검색 먼저
+## 1. 일반 질문은 search → show
 
-도메인 질문을 받으면 직접 코드를 뒤지기 전에 먼저:
+**일반 의미·코드 위치·개발 착수** 질문을 받으면 직접 코드를 뒤지기 전에 먼저:
 
 ```bash
 project-brain search "<질문>"
 ```
 
-일반 현재 회수는 `search`, 시간·왜·언제·이전 값 질문은 라우터의 이력 경로를 쓰는
-`project-brain query "<시간·이력 질문>"`, 특정 객체 본문과 이웃은
-`project-brain show <object_id>`로 구분한다.
+`results`와 `candidates`에서 실제 답에 필요한 **핵심 객체**를 고른 뒤 각 객체를 연다:
+
+```bash
+project-brain show <object_id>
+```
+
+검색 surface만 보고 답을 끝내지 않는다. `show`의 객체 본문과 실존하는 1-hop 이웃을 읽어 여러
+종류의 객체를 조합한다. mapping stale 정보는 `show`의 `stale_advisory`를 기준으로 보고,
+CodeLocator의 실제 최신성은 path·symbol을 현재 checkout과 대조한다.
+
+`project-brain query`는 변경 이유·현재 상태·과거 시점·근거 사슬만 결정론적으로 계산한다.
+일반 의미·코드 위치·일반 recall에는 쓰지 않는다. 네 facet 질문은 다음처럼 실행한다:
+
+```bash
+project-brain query "<시간·이력·근거 질문>"
+```
 
 - 엔진과 색인은 루트 `.project-brain.json`이 가리키는 경로를 사용한다. 도구나 색인이 없으면
   조회 불가 상태와 필요한 복구 대상을 먼저 보고한다. 조회 흐름에서 설치나 색인 재생성을
@@ -55,14 +68,6 @@ project-brain search "<질문>"
 | `advisories` | 가로지르는 위험·교훈(검증됨, reviewed Insight) | 단정 답 아님 — 질의와 가로지르는 위험·교훈을 답에 **참고로 곁들임**(results 확신 답을 대체하지 않음). 답이 그 위험과 맞닿으면 함께 일러준다 |
 | `projection_reuse` | 재사용 후보(미검증, 이전 착수 브리핑) | 단정 답 아님 — **"재사용 후보(미검증)" 라벨 필수**. 확신은 정본 객체(results) 적중으로 확인 |
 | `needs_clarification: true` | 게이트 통과 reviewed source가 없거나 query가 충돌·범위 모호성을 감지 | 아래 4번 — "없다"가 답이거나 질문을 좁힌다 (raw 발췌만 있으면 발췌 인용+"검수된 답 없음" 명시) |
-
-`project-brain query`에서는 `source_object_ids`가 검수된 근거이고,
-`additional_candidates`는 의도별 섹션이 따로 소비하지 않은 recall 후보를
-`{id, kind, surface, trust_label}`로 보여 주는 공통 후보 채널이다. 이 후보 번호는
-`promotable_candidate_ids`에도 들어가지만 source나 확신 답으로 취급하지 않는다. 이미
-`candidate_terms`·`candidate_locators` 같은 전용 섹션에 나온 후보는
-`additional_candidates`에 중복되지 않는다. 후보가 보여도 reviewed source가 없으면
-`needs_clarification`은 그대로 true다.
 
 search는 superseded 객체나 supersedes 사슬을 확장하지 않는다. DomainMapping 변경 이유는 query가
 질의와 연결된 reviewed DecisionRecord를 회수할 때 답할 수 있다. TemporalFact의 이전 값은 reviewed

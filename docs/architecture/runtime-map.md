@@ -102,17 +102,16 @@ flowchart LR
     Objects --> Rebuild
     Rebuild --> Derived
 
-    Config --> Query[query]
+    Config --> Query[query: 변경 이유 · 현재 · 과거 · 근거]
+    Objects --> Query
     Query --> Intent[classify_query]
-    Intent --> Exact[정확 객체 경로]
-    Derived -. fresh일 때 선택적 recall .-> Recall[BM25 + vector + RRF + graph]
-    Recall --> Answer[검수 상태 · 경로별 redaction · stale 표시]
-    Exact --> Answer
-    Answer --> Agent
+    Intent --> Facets[결정론 facet 계산]
+    Facets --> Agent
 
-    Config --> Search[search]
+    Config --> Search[search · bare 자유질의]
     Derived --> Search
     Search --> Channels[results · candidates · raw_excerpts · advisories · projection_reuse]
+    Channels --> Agent
 
     Config --> Draft[draft create · list · show · update · lint]
     Draft --> DraftFiles[brain/drafts: Git 추적 비색인 Markdown]
@@ -161,7 +160,7 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `BrainStore.object_path()`가 정하는 모든 kind 디렉터리 | 정상 편집은 `MutationService`의 plan과 `corpus_io` transaction | 검수 상태가 붙은 구조화 지식 정본. `objects/**`뿐 아니라 `raw/manifests/**`, `indexes/context_projections/**`, `indexes/records/**`, `views/**`도 포함 | 원본·근거로 다시 적재할 수는 있지만 파생물로 취급하지 않음 |
 | `brain/raw/sources/**` | 소비 데이터 작업의 사람·설치된 적재 스킬. 엔진 CLI에는 직접 writer가 없음 | 검수 전 원문 정본. `raw/manifests/**`의 EvidenceManifest 객체와 다른 경계 | 원출처에서 다시 확보해야 하므로 index처럼 지우지 않음 |
 | `.brain-local/index.db*` | `index rebuild`, `bootstrap`, 적재 finalizer | 객체와 raw로부터 만든 로컬 파생 색인 | `project-brain index rebuild` |
-| `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | query/show가 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
+| `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | show가 mapping stale advisory로 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
 | `.brain-local/sessions/*.json` | `session complete` | transcript·batch manifest·finalization report·durable receipt에 결속한 처리 marker v2. 지식 객체가 아님 | 같은 valid v2 요청은 기존 bytes 보존 no-op. `session mark-processed`는 report 없이는 쓰지 않고 실패 |
 | `brain/drafts/*.md` | `draft create`, expected-SHA `draft update` | 여러 작업 구간에서 이어갈 주제별 Git 추적 초안. BrainStore·raw·index·query·graph·snapshot 입력이 아님 | 원본이므로 자동 재생성 대상 아님. list/show/lint는 읽기, update는 같은 디렉터리 원자 교체 |
 | `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
@@ -258,48 +257,14 @@ manifest를 직접 journaled transaction에 넘긴다. 각 `migration ... apply`
 plan한 뒤 `MutationService.apply()`를 호출한다. 각 plan 단계는 manifest와 snapshot 같은 적용 전
 artifact를 만들 뿐 객체를 확정 적용하지 않는다.
 
-## query와 search는 다르다
+## 일반 조회와 query의 책임 분리
 
-### query: 정확 경로가 중심이고 recall은 선택 사항
-
-`query`는 config로 `brain_root`를 찾고 `BrainStore`와 stale-set cache를 읽은 뒤
-`QueryRouter.answer()`를 호출한다. 라우터는 `classify_query()`로 의도를 분류하고, 종류별 정확
-객체 경로를 먼저 구성한다. DB가 존재하고 현재 코퍼스 지문과 맞을 때만 `eval_recall()` 결과로
-보강한다. DB가 없거나 stale이면 recall을 생략하고 정확 객체 경로와 보수적 폴백을 유지한다.
-
-fresh recall의 candidate는 intent별 전용 섹션이 먼저 소비한다. 어느 전용 경로도 소비하지 않은
-후보는 답의 `additional_candidates`에 `{id, kind, surface, trust_label}`로 한 번만 남고,
-`promotable_candidate_ids`와 전체 `status`에도 반영된다. 이 공통 후보는 reviewed
-`source_object_ids`에 들어가지 않으며 기존 `needs_clarification` 판정도 바꾸지 않는다. 반대로
-reviewed `results`는 공통으로 쏟지 않고 각 intent의 기존 정확 경로가 해석한다.
-
-따라서 **query는 fresh index가 없어도** 동작한다. 반면 recall에만 있는 CodeLocator 후보나
-일반 의미 회상 후보는 빠질 수 있다. 특히 구현 위치 의도는 locator 상세 대신 kind 집계와
-`details_omitted_reason`을 낼 수 있고, unknown 의도는 회상 결과가 없으면 확인이 필요해진다.
-출력의 생략 이유와 clarification 신호를 확인해야 한다.
-
-결과의 검수 상태는 `status.py`, 근거 가용성과 신뢰 표시는 `router.py`가 만든다. 다만
-**redaction_status 기반 restricted 라벨**은 모든 결과에 일괄 적용되지 않는다. `_restricted_for()`를
-호출하는 매핑·결정·CodeLocator·후보·일반 회상·근거 조회 같은 **일부 query 경로**에서, 존재하는
-EvidenceRef가 가리키는 존재하는 EvidenceManifest의 상태가 `approved`가 아니거나 필드가 빠졌을 때
-restricted가 된다. 끊긴 EvidenceRef/manifest는 이 함수가 건너뛰고 lint가 별도로 잡는다.
-
-반면 `why_changed`, `current_status`, `as_of_history`의 **EventLedgerRecord·TemporalFact**와 의미
-확장의 DomainContext·reviewed GlossaryTerm 경로는 현재 `restricted=False`를 직접 넘긴다.
-search의 다섯 채널도 일반 객체 수준 restricted 라벨을 만들지 않는다. 따라서 이 라벨은 일부 경로의
-신뢰 경고일 뿐 내용 차단 장벽이 아니다. QueryRouter는 principal을 받지 않으며
-**principal별 ACL을 집행하지 않는다**. audit CLI도 quote 접근 평가에 `principal=None`,
-`acl_evaluator=None`을 넘긴다.
-이 불완전한 redaction 적용 범위와 ACL 미집행은 문서로 숨기지 않는 `ENGINE_GAP`이며, 이번 지도
-작업에서 production 동작은 바꾸지 않는다.
-
-첫 인자가 위 기계 계약의 알려진 명령이 아니면 `cli.main()`은 기존 bare query로 처리한다.
-즉 `project-brain "질문"`과 `project-brain query "질문"` 경로를 모두 보존한다.
-
-### search: fresh index가 필수
+### search와 bare 자유질의: fresh index 기반 일반 회수
 
 `search`는 `search.eval_recall()`의 의미 회상과 게이트를 직접 노출한다. DB가 없거나 코퍼스
 지문이 달라 stale이면 rebuild 안내와 함께 실패한다. 즉 **search는 fresh index가 필요**하다.
+첫 인자가 알려진 명령이 아니면 `cli.main()`도 같은 `_run_search()`로 보낸다. 따라서
+`project-brain "질문"`과 `project-brain search "질문"`은 결과와 missing/stale index 실패 계약이 같다.
 search의 linked CodeLocator quote 접근은 현재 `principal=None`, `acl_evaluator=None`으로 평가돼
 판정 불가이며 quote를 내보내지 않는다. 하지만 이는 quote 필드의 보수적 미노출일 뿐 검색 객체 전체의
 redaction 또는 ACL 집행이 아니다.
@@ -313,8 +278,33 @@ redaction 또는 ACL 집행이 아니다.
 | `projection_reuse` | 이전에 조립한 candidate/reviewed 착수 브리핑 재사용 후보 |
 
 다섯 채널은 섞지 않고 각 hit의 기존 `status`와 채널 의미를 유지한다. `search`가 모든 hit에 별도
-redaction trust label을 계산하는 것은 아니다. `show <id>`는 색인을 거치지 않고 정확한 객체 본문과
-저장소에 실존하는 1-hop 이웃, 해당하면 stale advisory를 보여준다.
+redaction trust label을 계산하는 것은 아니다. 설치 조회 스킬은 일반 의미·코드 위치·개발 착수 질문에서
+관련 `results`와 `candidates`를 읽고 핵심 객체를 고른 뒤 `show <id>`로 본문과 이웃을 확인해 답을
+조합한다. candidate를 쓰면 확인 필요 상태를 표시하며 단순 확인을 승격 승인으로 확대하지 않는다.
+
+`show <id>`는 색인을 거치지 않고 정확한 객체 본문과 저장소에 실존하는 1-hop 이웃을 보여준다.
+선택한 객체가 mapping이면 stale-set cache의 advisory도 여기에 붙는다. 검색된 CodeLocator의 현재
+checkout 최신성은 설치 조회 스킬이 path·symbol을 실제 코드와 대조한다.
+
+### query: 네 결정론 facet만 계산
+
+`query`는 config로 `brain_root`를 찾고 `BrainStore`만 읽어 `QueryRouter.answer()`를 호출한다.
+색인 DB·임베더·recall·stale-set·현재 HEAD 입력이 없다. `classify_query()`가 고른 것 가운데 실제로
+계산하는 facet은 변경 이유(`why_changed`), 현재 상태(`current_status`), 과거 시점
+(`as_of_history`), 근거 사슬(`evidence_provenance`) 네 가지다. 일반 의미·구현 위치·unknown recall은
+어떤 객체 종류도 고르지 않고 `search` 후 `show`를 사용하라는 안내를 반환한다.
+
+변경 이유·현재·과거 facet은 reviewed 대표 어휘·동의어·별칭을 같은 matcher로 인식한다. 충돌 해결,
+supersedes 승자, current/as-of 선택, EventLedgerRecord 인과관계, DecisionRecord, 근거 접근 상태를
+그대로 계산한다. 현재 상태 facet은 CurrentView가 참조한 source fact의 부재·미검수·superseded도
+계속 경고한다. 근거 facet은 glossary나 구현 위치 intent를 이유로 companion source를 추가하지 않는다.
+
+query의 EventLedgerRecord·TemporalFact 경로는 현재 `restricted=False`를 직접 넘기고,
+DecisionRecord와 근거 사슬 일부만 `_restricted_for()`를 거친다. search의 다섯 채널도 일반 객체 수준
+restricted 라벨을 만들지 않는다. 따라서 이 라벨은 일부 경로의 신뢰 경고일 뿐 내용 차단 장벽이 아니다.
+QueryRouter는 principal을 받지 않으며 **principal별 ACL을 집행하지 않는다**. audit CLI도 quote 접근
+평가에 `principal=None`, `acl_evaluator=None`을 넘긴다. 이 불완전한 redaction 적용 범위와 ACL
+미집행은 문서로 숨기지 않는 `ENGINE_GAP`이다.
 
 ## 코퍼스 밖 쓰기와 복구 경계
 
@@ -372,7 +362,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 | 영역 | 최상위 명령 | 핵심 경계 |
 |---|---|---|
 | 조립·적재·검수 | `build`, `ingest`, `promote`, `promote-auto`, `mark-checked` | build 출력과 실제 mutation을 분리 |
-| 조회·회상 | `query`, `search`, `show` | query 폴백과 search fresh-index 요구를 분리 |
+| 조회·회상 | `query`, `search`, `show` | bare/search 일반 회수, show 본문·이웃·mapping stale, query 네 결정론 facet을 분리 |
 | 지식 초안 | `draft` | 정식 코퍼스 밖 Markdown의 create/list/show/update/lint만 소유 |
 | 색인·평가·projection | `index`, `eval`, `projection` | index는 파생물, projection write는 mutation |
 | 점검·감사 | `lint`, `audit`, `stale-check`, `graph` | 코퍼스 불변 점검과 별도 cache/export 쓰기를 구분 |

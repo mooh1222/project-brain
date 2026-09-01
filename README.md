@@ -71,14 +71,15 @@ installer의 파일 소유권 기준은 `.project-brain-manifest.json`이다.
 ## 주요 명령
 
 ```bash
-project-brain query "<질문>"             # 정확 객체 경로 + fresh일 때 선택적 의미 보강
+project-brain "<질문>"                   # 아래 search와 같은 5채널 의미 회상
 project-brain search "<질문>"            # fresh index 기반 5채널 의미 회상
+project-brain show <id>                  # 선택한 객체 본문 + 1-hop 이웃 + mapping stale 정보
+project-brain query "<질문>"             # 변경 이유·현재·과거·근거 사슬만 결정론 계산
 project-brain index rebuild              # 코퍼스에서 색인 전체 재구축 (파생물)
 project-brain ingest --objects-file f    # 객체 묶음 적재 (스키마+lint 원자적)
 project-brain promote --ids ...          # candidate → reviewed 승격 (검토 기록 동반)
 project-brain eval                       # 골든셋 회귀 (실모델)
 project-brain eval --check-ids           # 골든셋 기대 id 실존 가드 (모델 불필요)
-project-brain show <id>                  # 객체 본문 + 1-hop 이웃(종류·제목) 펼쳐보기
 project-brain draft list                 # 주제별 지식 초안 선택 metadata만 보기
 project-brain draft create <topic-id> --title ... --scope ...  # v1 초안 생성
 project-brain draft show <topic-id>      # 초안 본문 + 현재 SHA 보기
@@ -102,7 +103,7 @@ project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매
 `graph export`는 코퍼스는 안 바꾸지만 지정한 HTML을 쓰고, `doctor --download`는 모델 cache를
 채운다. `mark-checked`는 stale 해소를 위해 CodeLocator를 실제로 갱신하는 mutation이다.
 `stale-check`은 미머지 앵커를 변경과 별개로 `unmerged_anchors`에 라벨하며, cache는
-`query`/`show`가 `stale_advisory`로 읽는다. 전체 명령과 산출물 경계는
+`show`가 `stale_advisory`로 읽는다. 전체 명령과 산출물 경계는
 [런타임 지도](docs/architecture/runtime-map.md)에 있다.
 
 **코드 앵커 SHA 원칙:** 한번 만들어진 커밋 SHA는 머지해도 바뀌지 않는다. fast-forward와
@@ -114,7 +115,7 @@ project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매
 전체 명령 목록은 `project-brain --help`, 각 명령 상세는 `project-brain <명령> --help`로 본다.
 
 `brain/drafts/<topic-id>.md`는 여러 작업 구간에서 이어갈 Git 추적 Markdown이다. 정식 Brain
-객체·raw 원문·일반 query 근거·색인·graph·snapshot 입력이 아니므로 초안 변경만으로 index를
+객체·raw 원문·일반 search 근거·색인·graph·snapshot 입력이 아니므로 초안 변경만으로 index를
 재구축하지 않는다. `draft update`는 `show`가 반환한 SHA가 같을 때만 같은 디렉터리에서 원자
 교체하며, 엔진은 Git stage·commit을 실행하지 않는다.
 

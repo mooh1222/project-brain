@@ -156,14 +156,12 @@ boolean은 RRF 절대 점수 바닥 + (**명부 매칭** OR **표면 앵커**)�
 없다고 답한다"의 구현부다. 잘 적재된 엔티티는 토큰이 흔해져 `anchor_df`가 상한을 넘어도 명부
 표면형으로 통과한다(럭키박스 거짓음성 해소). reviewed 게이트 통과가 0건이면 `needs_clarification`을 켠다.
 
-`QueryRouter.answer()`는 이 채널을 질문 전체의 단일 종류로 다시 축소하지 않는다. 각 intent가
-자기 정확 응답 경로를 구성한 뒤, 아직 소비되지 않은 `candidates`를 공통
-`additional_candidates`와 `promotable_candidate_ids`에 한 번만 보존한다. 후보는
-`source_object_ids`나 기존 clarification 판정에 들어가지 않는다. `results`는 이 공통
-spillover 대상이 아니며 기존 intent별 reviewed 해석을 유지한다. 또한 변경 결정과 시간 사실의
-scope는 같은 reviewed GlossaryTerm 이름 matcher를 써서 `term`·`synonyms`·`aliases`를 동등하게
-인식하고, 더 긴 이름 안에 포함된 짧은 이름은 제외한다. 이 동작은 fresh recall이 있을 때만 후보를
-보강하며 색인 표면이나 DB 형식은 바꾸지 않는다.
+`eval_recall()`의 다섯 채널은 explicit `search`와 서브커맨드 없는 자유질의가 그대로 노출한다.
+reviewed와 candidate는 각각 `results`와 `candidates`에 남아 관련성과 검수 상태가 섞이지 않는다.
+일반 질문을 처리하는 설치 조회 스킬은 이 결과에서 핵심 객체를 고르고 `show`로 본문과 1-hop 이웃을
+확인한다. `QueryRouter.answer()`는 이 recall을 소비하지 않으며 변경 이유·현재·과거·근거 사슬만
+BrainStore에서 결정론적으로 계산한다. 이 분리는 ranking·score floor·채널 top-K·scope 추론·색인
+표면과 DB 형식을 바꾸지 않는다.
 
 ## 5. 확인 범위·한계
 

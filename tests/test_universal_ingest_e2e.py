@@ -33,7 +33,9 @@ from project_brain.lint import lint_store
 from project_brain.objbase import base
 from project_brain.promote import promote
 from project_brain.repo_context import RepoContext
-from project_brain.router import QueryRouter
+from project_brain.embedder import StubEmbedder
+from project_brain.search import eval_recall
+from project_brain.search_index import rebuild as index_rebuild
 from project_brain.store import BrainStore
 
 T = "2026-06-04T00:00:00Z"
@@ -693,22 +695,23 @@ class MinaKayakEndToEndTest(unittest.TestCase):
         store = BrainStore.load(self.root)
         self.assertEqual(lint_store(store), [])
 
-    def test_e2e_cli_recall(self):
-        """AC6: 새로 적재한 store가 스스로 미나 표면어를 회상한다.
-        쿨타임 표면어로 질의 → reviewed mapping.cooltime이 source_object_ids에.
-
-        ★명명 주의(§7)★: 여기서 "recall"은 옛 키워드 라우터(QueryRouter.answer의
-        정확 부분문자열 매칭)를 가리킨다 — 슬라이스 3+의 의미 회상 search.recall()과는
-        다른 경로다. 이 테스트는 색인 없는 store로 도므로 라우터의 정확 매칭 경로만
-        탄다(의미 회상 게이트는 search 모듈 테스트·cli eval 몫). 동작은 슬라이스 5
-        라우터 통합 후에도 불변(정확 매칭 1순위 보존)."""
+    def test_e2e_search_recall(self):
+        """AC6: 새로 적재한 reviewed mapping을 정본 search 경로가 회상한다."""
         self._reingest_full()
         store = BrainStore.load(self.root)
-        answer = QueryRouter(store).answer("쿨타임이 무슨 뜻이야?")
-        self.assertIn("glossary_meaning", answer["intents"])
+        db = self.root / ".brain-local" / "index.db"
+        embedder = StubEmbedder()
+        index_rebuild(self.root, db, embedder=embedder)
+        answer = eval_recall(
+            "쿨타임이 무슨 뜻이야?",
+            db_path=db,
+            embedder=embedder,
+            brain_root=self.root,
+            store=store,
+        )
         self.assertIn(
             "mapping.mina-kayak.cooltime-repeat",
-            answer["source_object_ids"],
+            {hit["object_id"] for hit in answer["results"]},
         )
         self.assertFalse(answer["needs_clarification"])
 
