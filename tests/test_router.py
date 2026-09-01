@@ -276,6 +276,30 @@ def decision_record_inline(did, *, affected_term_ids, summary="결정"):
     )
 
 
+def temporal_fact_inline(fid, *, value, feature):
+    from project_brain.objbase import base
+
+    return base(
+        {
+            "id": fid,
+            "kind": "TemporalFact",
+            "status": "reviewed",
+            "truth_role": "fact",
+            "title": f"{feature} 현재 규칙",
+            "subject": "race.level",
+            "predicate": "enabled",
+            "value": value,
+            "scope": {"feature": feature},
+            "valid_from": "2026-06-09T00:00:00Z",
+            "derived_from_event_id": "ledger.neutral.change",
+            "confidence": "high",
+        },
+        tags=["neutral"],
+        created_at="2026-06-09T00:00:00Z",
+        updated_at="2026-06-09T00:00:00Z",
+    )
+
+
 class TestWhyChangedDecisions(unittest.TestCase):
     def test_decision_surfaces_for_matched_term(self):
         # "왜 X 추가됐어?" → why_changed. DecisionRecord가 매칭된 용어를
@@ -303,6 +327,122 @@ class TestWhyChangedDecisions(unittest.TestCase):
         )
         answer = QueryRouter(store).answer("왜 NpcNo 추가됐어?")
         self.assertNotIn("d.other", answer["source_object_ids"])
+
+    def test_reviewed_synonym_and_alias_surface_the_same_decision(self):
+        from tests.test_search import glossary_term
+
+        term = glossary_term(
+            "g.canoe",
+            term="카누 레이스",
+            synonyms=["카누 경기"],
+            aliases=["샐리 카누"],
+        )
+        decision = decision_record_inline(
+            "d.canoe",
+            affected_term_ids=[term["id"]],
+            summary="카누 규칙 변경",
+        )
+        store = store_of(term, decision)
+
+        for name in ("카누 경기", "샐리 카누"):
+            with self.subTest(name=name):
+                answer = QueryRouter(store).answer(f"왜 {name} 규칙이 바뀌었어?")
+                self.assertIn(decision["id"], answer["source_object_ids"])
+                section = next(
+                    item for item in answer["sections"]
+                    if item["intent"] == "why_changed"
+                )
+                self.assertIn(decision["id"], section["object_ids"])
+
+
+class TestReviewedNameScope(unittest.TestCase):
+    def _term(self):
+        from tests.test_search import glossary_term
+
+        term = glossary_term(
+            "g.canoe",
+            term="카누 레이스",
+            synonyms=["카누 경기"],
+            aliases=["샐리 카누"],
+        )
+        term["scope_hint"] = {"feature": "canoe-race"}
+        return term
+
+    def _facts(self):
+        return (
+            temporal_fact_inline(
+                "fact.canoe",
+                value=True,
+                feature="canoe-race",
+            ),
+            temporal_fact_inline(
+                "fact.other",
+                value=False,
+                feature="other-race",
+            ),
+        )
+
+    def test_synonym_and_alias_apply_the_same_scope_hint(self):
+        term = self._term()
+        canoe, other = self._facts()
+        store = store_of(term, canoe, other)
+
+        for name in ("카누 경기", "샐리 카누"):
+            with self.subTest(name=name):
+                answer = QueryRouter(store).answer(f"{name} 현재 규칙 알려줘")
+                section = next(
+                    item for item in answer["sections"]
+                    if item["intent"] == "current_status"
+                )
+                self.assertEqual(section["object_ids"], [canoe["id"]])
+                self.assertEqual(section["conflicts"], [])
+                self.assertNotIn(other["id"], answer["source_object_ids"])
+                self.assertTrue(any(
+                    "scope 추론" in warning
+                    for warning in answer["warnings"]
+                ))
+
+    def test_synonym_and_alias_apply_the_same_as_of_scope_hint(self):
+        term = self._term()
+        canoe, other = self._facts()
+        store = store_of(term, canoe, other)
+
+        for name in ("카누 경기", "샐리 카누"):
+            with self.subTest(name=name):
+                answer = QueryRouter(store).answer(f"{name} 당시 규칙 알려줘")
+                section = next(
+                    item for item in answer["sections"]
+                    if item["intent"] == "as_of_history"
+                )
+                self.assertEqual(section["object_ids"], [canoe["id"]])
+                self.assertNotIn(other["id"], answer["source_object_ids"])
+                self.assertTrue(any(
+                    "scope 추론" in warning
+                    for warning in answer["warnings"]
+                ))
+
+    def test_long_alias_does_not_apply_nested_short_term_scope(self):
+        from tests.test_search import glossary_term
+
+        long_term = self._term()
+        short_term = glossary_term("g.short", term="카누")
+        short_term["scope_hint"] = {"feature": "other-race"}
+        canoe, other = self._facts()
+
+        answer = QueryRouter(
+            store_of(long_term, short_term, canoe, other)
+        ).answer("샐리 카누 현재 규칙 알려줘")
+        section = next(
+            item for item in answer["sections"]
+            if item["intent"] == "current_status"
+        )
+
+        self.assertEqual(section["object_ids"], [canoe["id"]])
+        self.assertNotIn(other["id"], answer["source_object_ids"])
+        self.assertFalse(any(
+            "feature=other-race" in warning
+            for warning in answer["warnings"]
+        ))
 
 
 class TestRouterReadOnly(unittest.TestCase):
@@ -504,6 +644,77 @@ class TestRouterRecallTopK(unittest.TestCase):
         self.assertEqual(loc_section["object_ids"], [])
         ids = [c["id"] for c in loc_section["candidate_locators"]]
         self.assertIn("code.neutral.0", ids)
+        self.assertEqual(
+            answer["promotable_candidate_ids"].count("code.neutral.0"),
+            1,
+        )
+        self.assertNotIn(
+            "code.neutral.0",
+            [item["id"] for item in answer["additional_candidates"]],
+        )
+        self.assertEqual(
+            sum(
+                "확인 필요한 후보 항목 포함" in warning
+                for warning in answer["warnings"]
+            ),
+            1,
+        )
+
+    def test_multiple_intent_candidate_details_share_one_warning(self):
+        locator = code_locator(
+            "code.race-model",
+            path="a/RaceModel.cpp",
+            symbol="RaceModel::build",
+        )
+        locator["status"] = "candidate"
+        self._rebuild([
+            st_glossary_term(
+                "g.race-model",
+                term="RaceModel",
+                definition="레이스 모델 후보",
+                status="candidate",
+            ),
+            locator,
+        ])
+
+        answer = self._router().answer(
+            "RaceModel 용어 무슨 뜻? RaceModel::build 어디 구현?"
+        )
+
+        self.assertIn("glossary_meaning", answer["intents"])
+        self.assertIn("implementation_location", answer["intents"])
+        glossary = next(
+            section for section in answer["sections"]
+            if section["intent"] == "glossary_meaning"
+        )
+        implementation = next(
+            section for section in answer["sections"]
+            if section["intent"] == "implementation_location"
+        )
+        self.assertIn(
+            "g.neutral.race-model",
+            [item["id"] for item in glossary["candidate_terms"]],
+        )
+        self.assertIn(
+            "code.neutral.race-model",
+            [item["id"] for item in implementation["candidate_locators"]],
+        )
+        self.assertIn(
+            "g.neutral.race-model",
+            answer["promotable_candidate_ids"],
+        )
+        self.assertIn(
+            "code.neutral.race-model",
+            answer["promotable_candidate_ids"],
+        )
+        self.assertEqual(answer["additional_candidates"], [])
+        self.assertEqual(
+            sum(
+                "확인 필요한 후보 항목 포함" in warning
+                for warning in answer["warnings"]
+            ),
+            1,
+        )
 
     def test_glossary_meaning_uses_topk_not_all_reviewed(self):
         # reviewed GlossaryTerm 12개 적재. 정확 매칭 매핑이 없는 질의에서도 glossary
@@ -517,6 +728,84 @@ class TestRouterRecallTopK(unittest.TestCase):
         self.assertGreaterEqual(len(gloss["object_ids"]), 1)
         self.assertLessEqual(len(gloss["object_ids"]), 5)
         self.assertLess(len(gloss["object_ids"]), 12)
+
+    def test_glossary_meaning_exposes_unconsumed_mapping_candidate(self):
+        # recall 게이트를 통과한 후보는 intent별 전용 수집기가 없어도 공통 후보
+        # 채널에서 보존한다. 후보는 source/확신 답과 clarification 판정을 바꾸지 않는다.
+        self._rebuild([
+            domain_mapping(
+                "m.next-level",
+                meaning="NextLevel 다음 레벨 선택 규칙",
+                status="candidate",
+            ),
+        ])
+
+        answer = self._router().answer("NextLevel은 무슨 뜻이야?")
+
+        candidate_id = "mapping.neutral.next-level"
+        self.assertIn("glossary_meaning", answer["intents"])
+        self.assertIn(candidate_id, answer["promotable_candidate_ids"])
+        self.assertNotIn(candidate_id, answer["source_object_ids"])
+        detail = next(
+            item for item in answer["additional_candidates"]
+            if item["id"] == candidate_id
+        )
+        self.assertEqual(detail["kind"], "DomainMapping")
+        self.assertIn("NextLevel 다음 레벨 선택 규칙", detail["surface"])
+        self.assertEqual(detail["trust_label"], "확인 필요")
+        self.assertEqual(answer["status"], "candidate")
+        self.assertTrue(answer["needs_clarification"])
+        self.assertTrue(any(
+            "확인 필요한 후보 항목 포함" in warning
+            for warning in answer["warnings"]
+        ))
+
+    def test_spillover_candidate_does_not_force_reviewed_answer_clarification(self):
+        self._rebuild([
+            st_glossary_term(
+                "g.next-level",
+                term="NextLevel",
+                definition="검수된 다음 레벨 용어",
+            ),
+            domain_mapping(
+                "m.next-level-candidate",
+                meaning="NextLevel 선택 규칙 후보",
+                status="candidate",
+            ),
+        ])
+
+        answer = self._router().answer("NextLevel은 무슨 뜻이야?")
+
+        self.assertIn("g.neutral.next-level", answer["source_object_ids"])
+        self.assertIn(
+            "mapping.neutral.next-level-candidate",
+            [item["id"] for item in answer["additional_candidates"]],
+        )
+        self.assertEqual(answer["status"], "candidate")
+        self.assertFalse(answer["needs_clarification"])
+
+    def test_why_changed_exposes_unconsumed_candidate(self):
+        # why_changed에는 DomainMapping 후보 전용 수집기가 없지만 recall을 통과한
+        # 후보를 잃지 않는다. 결정 이력의 reviewed source로 오인하지는 않는다.
+        self._rebuild([
+            domain_mapping(
+                "m.next-level",
+                meaning="NextLevel 다음 레벨 선택 규칙 변경",
+                status="candidate",
+            ),
+        ])
+
+        answer = self._router().answer("왜 NextLevel 선택 규칙이 바뀌었어?")
+
+        candidate_id = "mapping.neutral.next-level"
+        self.assertIn("why_changed", answer["intents"])
+        self.assertIn(candidate_id, answer["promotable_candidate_ids"])
+        self.assertNotIn(candidate_id, answer["source_object_ids"])
+        self.assertIn(
+            candidate_id,
+            [item["id"] for item in answer["additional_candidates"]],
+        )
+        self.assertTrue(answer["needs_clarification"])
 
     def test_exact_alias_term_survives_recall_topk(self):
         # 실제 BB2처럼 graph support가 있는 매핑들이 top-K를 차지해도, 질의에 정확히

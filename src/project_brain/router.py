@@ -101,7 +101,27 @@ class QueryRouter:
         sections: list[dict] = []
         claim_statuses: list[str] = []
         warnings: list[str] = []
+        additional_candidates: list[dict] = []
         clarification_needed = False
+
+        def append_recalled_candidate(hit: dict, details: list[dict]) -> str | None:
+            oid = hit["object_id"]
+            if not self.store.has(oid):
+                return None
+            obj = self.store.get(oid)
+            promotable_ids.append(oid)
+            claim_statuses.append(claim_status(
+                obj,
+                raw_available=self._raw_available_for(obj),
+                restricted=self._restricted_for(obj),
+            ))
+            details.append({
+                "id": oid,
+                "kind": obj.get("kind"),
+                "surface": hit.get("surface", ""),
+                "trust_label": "확인 필요",
+            })
+            return oid
 
         # §4 rule 3: 회피 용어가 canonical로 보정된 경우 warnings에 공시
         if classified.normalized.avoided_terms:
@@ -172,7 +192,7 @@ class QueryRouter:
                 # reviewed 결정을 surface한다. 매처로 좁히므로 전량 반환이 아니다(질의 무관 결정 제외).
                 # EventLedger가 0개여도 동작 — "왜 바뀌었나"의 결정 모델을 스펙대로 읽는다.
                 matched_decision_anchors = (
-                    {t["id"] for t in self._matched_glossary_terms(canonical)}
+                    {t["id"] for t in self._matched_reviewed_name_terms(canonical)}
                     | {t["id"] for t in self._matched_candidate_terms(canonical)}
                     | {m["id"] for m in self._matched_mappings(canonical)}
                 )
@@ -277,8 +297,6 @@ class QueryRouter:
                         "symbol": locator.get("symbol"),
                         "trust_label": "확인 필요",
                     })
-                if candidate_locator_details:
-                    warnings.append("확인 필요한 후보 항목 포함 — 사용 시점에 확정(promote) 가능")
                 section = {
                     "intent": intent,
                     "object_ids": [locator["id"] for locator in locators],
@@ -342,7 +360,6 @@ class QueryRouter:
                         "trust_label": "확인 필요",
                     })
                 if candidate_details:
-                    warnings.append("확인 필요한 후보 항목 포함 — 사용 시점에 확정(promote) 가능")
                     # spec §4.3: 후보만 노출되고 매칭된 검수 답(matched_mappings)이 없으면 사람 확인 유도.
                     # (not source_ids)에 기대지 않는다 — reviewed DomainContext가 매칭 무관하게
                     # source_ids에 무조건 들어가(router.py:191-195) 실코퍼스에서도 source_ids는 안 빈다.
@@ -441,22 +458,7 @@ class QueryRouter:
                             obj, raw_available=self._raw_available_for(obj),
                             restricted=self._restricted_for(obj)))
                     for hit in recalled["candidates"]:
-                        oid = hit["object_id"]
-                        if not self.store.has(oid):
-                            continue
-                        obj = self.store.get(oid)
-                        promotable_ids.append(oid)
-                        claim_statuses.append(claim_status(
-                            obj, raw_available=self._raw_available_for(obj),
-                            restricted=self._restricted_for(obj)))
-                        candidate_details.append({
-                            "id": oid,
-                            "kind": obj.get("kind"),
-                            "surface": hit.get("surface", ""),
-                            "trust_label": "확인 필요",
-                        })
-                    if candidate_details:
-                        warnings.append("확인 필요한 후보 항목 포함 — 사용 시점에 확정(promote) 가능")
+                        append_recalled_candidate(hit, candidate_details)
                     # "no evidence → 없다"(§7): 게이트 통과 reviewed 0건이면 확신 답 없음.
                     # source_ids로 흘러가 최종 needs_clarification 식이 처리하지만, 후보만
                     # 있고 reviewed가 없는 경우(source_ids 안 참)도 확인 유도를 명시한다.
@@ -469,6 +471,25 @@ class QueryRouter:
                         "summary": "Semantic recall (reviewed prioritized)"
                                    if object_ids else "Semantic recall",
                     })
+
+        # intent별 응답 수집기가 소비하지 않은 recall 후보도 공통 후보 채널에
+        # 보존한다. 검수 source나 clarification 판정에는 넣지 않는다.
+        recalled = self._recall(canonical)
+        consumed_candidate_ids = set(promotable_ids)
+        if recalled is not None:
+            for hit in recalled["candidates"]:
+                oid = hit["object_id"]
+                if oid in consumed_candidate_ids:
+                    continue
+                recorded_oid = append_recalled_candidate(
+                    hit,
+                    additional_candidates,
+                )
+                if recorded_oid is not None:
+                    consumed_candidate_ids.add(recorded_oid)
+        candidate_warning = "확인 필요한 후보 항목 포함 — 사용 시점에 확정(promote) 가능"
+        if promotable_ids and candidate_warning not in warnings:
+            warnings.append(candidate_warning)
 
         # advisories(spec 2026-06-15 §4.6): reviewed Insight를 별도 통로로 곁들인다.
         # recall이 켜졌을 때만(색인 있음) 채워지고, 없으면 빈 리스트. needs_clarification에는
@@ -500,6 +521,7 @@ class QueryRouter:
             "promotable_candidate_ids": sorted(set(promotable_ids)),
             "source_object_ids": sorted(set(source_ids)),
             "sections": sections,
+            "additional_candidates": additional_candidates,
             "advisories": advisories,
             "warnings": warnings,
             "needs_clarification": (not source_ids) or clarification_needed,
@@ -649,29 +671,12 @@ class QueryRouter:
     _SCOPE_DIMENSIONS = ("release", "feature", "surface", "platform", "module")
     _SCOPE_HINT_DIMENSIONS = ("feature", "surface")
 
-    def _matched_glossary_terms(self, query: str) -> list[dict]:
-        matched = [
-            term for term in self._reviewed_by_kind("GlossaryTerm")
-            if term.get("term") and term["term"] in query
-        ]
-        result = []
-        for term in matched:
-            text = term["term"]
-            # 더 긴 매칭 term에 부분문자열로 포함되는 짧은 term은 드롭 (예: "팝업" ⊂ "입장팝업")
-            contained = any(
-                other is not term and len(other["term"]) > len(text) and text in other["term"]
-                for other in matched
-            )
-            if not contained:
-                result.append(term)
-        return result
-
     def _matched_reviewed_name_terms(self, query: str) -> list[dict]:
         """대표어·동의어·별칭이 query에 등장한 reviewed GlossaryTerm을 찾는다.
 
-        scope 추론용 _matched_glossary_terms는 그대로 두고 glossary_meaning 응답에만
-        사용한다. 한 질의에서 여러 표면이 맞으면 각 어휘의 가장 긴 표면을 기준으로,
-        더 긴 다른 어휘 표면에 포함되는 짧은 매칭은 기존 우선순위처럼 제외한다.
+        glossary 응답·변경 결정·scope 추론이 공유한다. 한 질의에서 여러 표면이
+        맞으면 각 어휘의 가장 긴 표면을 기준으로, 더 긴 다른 어휘 표면에 포함되는
+        짧은 매칭은 제외한다.
         """
         matched: list[tuple[dict, str]] = []
         for term in self._reviewed_by_kind("GlossaryTerm"):
@@ -728,7 +733,7 @@ class QueryRouter:
         """glossary 용어 유래 scope 추론이 실제로 다른 팩트를 걸러냈을 때만 경고를 반환한다."""
         messages: list[str] = []
         all_facts = self._reviewed_by_kind("TemporalFact")
-        for term in self._matched_glossary_terms(query):
+        for term in self._matched_reviewed_name_terms(query):
             hint = term.get("scope_hint", {})
             for dim in self._SCOPE_HINT_DIMENSIONS:
                 value = hint.get(dim)
@@ -748,7 +753,7 @@ class QueryRouter:
                 value = scope.get(dim)
                 if value and value in tokens:
                     filters.setdefault(dim, set()).add(value)
-        for term in self._matched_glossary_terms(query):
+        for term in self._matched_reviewed_name_terms(query):
             hint = term.get("scope_hint", {})
             for dim in self._SCOPE_HINT_DIMENSIONS:
                 value = hint.get(dim)

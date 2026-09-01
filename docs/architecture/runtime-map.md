@@ -267,8 +267,14 @@ artifact를 만들 뿐 객체를 확정 적용하지 않는다.
 객체 경로를 먼저 구성한다. DB가 존재하고 현재 코퍼스 지문과 맞을 때만 `eval_recall()` 결과로
 보강한다. DB가 없거나 stale이면 recall을 생략하고 정확 객체 경로와 보수적 폴백을 유지한다.
 
+fresh recall의 candidate는 intent별 전용 섹션이 먼저 소비한다. 어느 전용 경로도 소비하지 않은
+후보는 답의 `additional_candidates`에 `{id, kind, surface, trust_label}`로 한 번만 남고,
+`promotable_candidate_ids`와 전체 `status`에도 반영된다. 이 공통 후보는 reviewed
+`source_object_ids`에 들어가지 않으며 기존 `needs_clarification` 판정도 바꾸지 않는다. 반대로
+reviewed `results`는 공통으로 쏟지 않고 각 intent의 기존 정확 경로가 해석한다.
+
 따라서 **query는 fresh index가 없어도** 동작한다. 반면 recall에만 있는 CodeLocator 후보나
-일반 의미 회상은 빠질 수 있다. 특히 구현 위치 의도는 locator 상세 대신 kind 집계와
+일반 의미 회상 후보는 빠질 수 있다. 특히 구현 위치 의도는 locator 상세 대신 kind 집계와
 `details_omitted_reason`을 낼 수 있고, unknown 의도는 회상 결과가 없으면 확인이 필요해진다.
 출력의 생략 이유와 clarification 신호를 확인해야 한다.
 

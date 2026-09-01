@@ -54,7 +54,15 @@ project-brain search "<질문>"
 | `raw_excerpts` | 원문 발췌(미검수, 기획서 청크) | 단정 답이 아니라 **발췌 자료**로 취급 — "기획서 원문에 이런 서술이 있다"로 인용. 객체화 안 된 기획 배경·의도 질문은 이 채널이 답 |
 | `advisories` | 가로지르는 위험·교훈(검증됨, reviewed Insight) | 단정 답 아님 — 질의와 가로지르는 위험·교훈을 답에 **참고로 곁들임**(results 확신 답을 대체하지 않음). 답이 그 위험과 맞닿으면 함께 일러준다 |
 | `projection_reuse` | 재사용 후보(미검증, 이전 착수 브리핑) | 단정 답 아님 — **"재사용 후보(미검증)" 라벨 필수**. 확신은 정본 객체(results) 적중으로 확인 |
-| `needs_clarification: true` | 게이트 통과 reviewed 0건 | 아래 4번 — "없다"가 답이거나 질문을 좁힌다 (raw 발췌만 있으면 발췌 인용+"검수된 답 없음" 명시) |
+| `needs_clarification: true` | 게이트 통과 reviewed source가 없거나 query가 충돌·범위 모호성을 감지 | 아래 4번 — "없다"가 답이거나 질문을 좁힌다 (raw 발췌만 있으면 발췌 인용+"검수된 답 없음" 명시) |
+
+`project-brain query`에서는 `source_object_ids`가 검수된 근거이고,
+`additional_candidates`는 의도별 섹션이 따로 소비하지 않은 recall 후보를
+`{id, kind, surface, trust_label}`로 보여 주는 공통 후보 채널이다. 이 후보 번호는
+`promotable_candidate_ids`에도 들어가지만 source나 확신 답으로 취급하지 않는다. 이미
+`candidate_terms`·`candidate_locators` 같은 전용 섹션에 나온 후보는
+`additional_candidates`에 중복되지 않는다. 후보가 보여도 reviewed source가 없으면
+`needs_clarification`은 그대로 true다.
 
 search는 superseded 객체나 supersedes 사슬을 확장하지 않는다. DomainMapping 변경 이유는 query가
 질의와 연결된 reviewed DecisionRecord를 회수할 때 답할 수 있다. TemporalFact의 이전 값은 reviewed
