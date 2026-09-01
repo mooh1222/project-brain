@@ -105,8 +105,8 @@ flowchart LR
     Config --> Query[query: 변경 이유 · 현재 · 과거 · 근거 조회 축]
     Objects --> Query
     Query --> Intent[classify_query]
-    Intent --> Facets[결정론 조회 축 계산]
-    Facets --> Agent
+    Intent --> QueryAxes[결정론 조회 축 계산]
+    QueryAxes --> Agent
 
     Config --> Search[search · bare 자유질의]
     Derived --> Search

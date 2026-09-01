@@ -2,7 +2,7 @@
 
 새 중립 합성 데이터(tempfile brain root + 인라인 객체 dict)만 사용한다 — 삭제된
 fixture(tests/fixtures/...)를 일절 참조하지 않고 자기완결. bare 자유질의와 explicit search의
-공개 동작, 네 facet query, ingest 서브커맨드가 store에 적재하는지를 검증한다."""
+공개 동작, 네 조회 축 query, ingest 서브커맨드가 store에 적재하는지를 검증한다."""
 
 import io
 import hashlib
@@ -315,7 +315,7 @@ class TestCli(unittest.TestCase):
         self.assertNotIn("additional_candidates", answer)
         self.assertNotIn("advisories", answer)
 
-    def test_explicit_query_does_not_read_index_for_deterministic_facet(self):
+    def test_explicit_query_does_not_read_index_for_deterministic_axis(self):
         invalid_db = self.input_dir / "invalid.db"
         invalid_db.write_text("not a sqlite database", encoding="utf-8")
         project = self.input_dir / "project"

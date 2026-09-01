@@ -1,4 +1,4 @@
-"""QueryRouter의 변경 이유·현재·과거·근거 facet과 읽기 전용 계약 회귀."""
+"""QueryRouter의 변경 이유·현재·과거·근거 조회 축과 읽기 전용 계약 회귀."""
 
 import copy
 import unittest
@@ -74,7 +74,7 @@ class TestRestrictedForFailClosed(unittest.TestCase):
         self.assertTrue(QueryRouter(store)._restricted_for(obj))
 
 
-class TestQueryFacetCandidateIsolation(unittest.TestCase):
+class TestQueryAxisCandidateIsolation(unittest.TestCase):
     def test_candidate_not_fed_into_conflict_resolution(self):
         # glossary_meaning + current_status를 함께 유발하는 질의.
         # current_status 분기의 kept/conflicts에 candidate가 절대 안 섞여야 함(spec §4.2).
@@ -278,7 +278,7 @@ class TestReviewedNameScope(unittest.TestCase):
         ))
 
 
-class TestDeterministicFacetPreservation(unittest.TestCase):
+class TestDeterministicQueryAxisPreservation(unittest.TestCase):
     def test_current_status_uses_supersedes_winner_for_conflicting_facts(self):
         old = temporal_fact_inline("fact.old", value=False, feature="canoe-race")
         new = temporal_fact_inline("fact.new", value=True, feature="canoe-race")
@@ -321,7 +321,7 @@ class TestDeterministicFacetPreservation(unittest.TestCase):
         self.assertIn("source fact fact.candidate 미검수", rendered)
         self.assertIn("source fact fact.closed 닫힘(superseded)", rendered)
 
-    def test_evidence_facet_preserves_chain_and_raw_or_restricted_status(self):
+    def test_evidence_axis_preserves_chain_and_raw_or_restricted_status(self):
         fact = temporal_fact_inline("fact.evidence", value=True, feature="canoe-race")
         fact["review_record_id"] = "review.fact.evidence"
         fact["evidence_refs"] = ["evref.fact.evidence"]

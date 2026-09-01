@@ -7,7 +7,7 @@ from project_brain.store import BrainStore
 from project_brain.surface import glossary_name_surfaces
 
 _SCOPE_TOKEN_RE = re.compile(r"[0-9A-Za-z._-]+")
-_DETERMINISTIC_FACETS = {
+_DETERMINISTIC_QUERY_AXES = {
     "why_changed",
     "current_status",
     "as_of_history",
@@ -62,21 +62,21 @@ class QueryRouter:
         classified = classify_query(query, avoid_map)
         # 라우팅·매칭은 정규화된 canonical로 한다 (시작팝업→입장팝업 등 도메인 용어 보정 반영). 원본 query는 출력 echo에만 사용.
         canonical = classified.normalized.canonical_query
-        facet_intents = [
+        query_axis_intents = [
             intent
             for intent in classified.intents
-            if intent in _DETERMINISTIC_FACETS
+            if intent in _DETERMINISTIC_QUERY_AXES
         ]
         search_show_intents = [
             intent
             for intent in classified.intents
-            if intent not in _DETERMINISTIC_FACETS
+            if intent not in _DETERMINISTIC_QUERY_AXES
         ]
         warnings: list[str] = []
         if classified.normalized.avoided_terms:
             corrected = ", ".join(sorted(set(classified.normalized.avoided_terms)))
             warnings.append(f"용어 보정 적용: {corrected} → canonical 질의로 라우팅")
-        if not facet_intents:
+        if not query_axis_intents:
             warnings.append(
                 "일반 의미·구현 위치 질문은 search 결과에서 핵심 객체를 고른 뒤 show로 확인하세요."
             )
@@ -97,7 +97,7 @@ class QueryRouter:
         claim_statuses: list[str] = []
         clarification_needed = False
 
-        for intent in facet_intents:
+        for intent in query_axis_intents:
             if intent == "why_changed":
                 # §6.2: 변경 이력은 단일 event가 아니라 happened_at 순 복수 event다.
                 # G4: spec_revised(기획 원문)/spec_clarified(슬랙)를 event_type 인라인으로 분리.
@@ -231,7 +231,7 @@ class QueryRouter:
                 # 정밀 규칙(§6.6): 함께 분류된 의도가 가리키는 source object의 출처 사슬만 defend.
                 # 각 의도 collector를 재사용해 재수집하므로 루프 순서와 무관하다.
                 # 단독 evidence(다른 의도 없음)는 scope 매칭 사실로 fallback(기존 동작 보존).
-                intents_present = set(facet_intents)
+                intents_present = set(query_axis_intents)
                 sources: list[dict] = []
                 if "why_changed" in intents_present:
                     sources.extend(self._reviewed_by_kind("EventLedgerRecord"))
@@ -348,7 +348,7 @@ class QueryRouter:
 
     def _matched_mappings(self, query: str) -> list[dict]:
         """query에 등장하는 용어 텍스트로 reviewed DomainMapping을 찾는다.
-        변경 이유 facet에서 DecisionRecord의 affected mapping anchor를 찾는 용도다.
+        변경 이유 조회 축에서 DecisionRecord의 affected mapping anchor를 찾는 용도다.
         참조하는 GlossaryTerm이 candidate면 term/synonym만, reviewed면 aliases까지 이름
         표면으로 쓰며 mapping 자체는 query 일반 의미 답에 노출하지 않는다."""
         result = []
