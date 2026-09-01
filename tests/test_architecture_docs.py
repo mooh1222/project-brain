@@ -150,7 +150,7 @@ def test_runtime_map_states_non_corpus_write_boundaries():
         "bare 자유질의",
         "search는 fresh index가 필요",
         "색인 DB·임베더·recall·stale-set·현재 HEAD 입력이 없다",
-        "네 결정론 facet",
+        "네 결정론 조회 축",
         "DecisionRecord와 근거 사슬 일부만 `_restricted_for()`",
         "EventLedgerRecord·TemporalFact",
         "search의 다섯 채널",

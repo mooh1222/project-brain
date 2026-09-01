@@ -146,6 +146,15 @@ class TestCli(unittest.TestCase):
         self.assertFalse(payload["ok"])
         return payload
 
+    def _run_bare_and_explicit_search(self, args):
+        outcomes = []
+        for prefix in (["search"], []):
+            out = io.StringIO()
+            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
+                rc = cli.main()
+            outcomes.append((rc, json.loads(out.getvalue())))
+        return outcomes
+
     def test_bare_free_query_matches_explicit_search(self):
         from project_brain.embedder import StubEmbedder
         from project_brain.search_index import rebuild
@@ -166,14 +175,10 @@ class TestCli(unittest.TestCase):
             "--stub-embedder",
         ]
 
-        payloads = []
-        for prefix in (["search"], []):
-            out = io.StringIO()
-            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
-                self.assertEqual(cli.main(), 0)
-            payloads.append(json.loads(out.getvalue()))
+        outcomes = self._run_bare_and_explicit_search(args)
 
-        self.assertEqual(payloads[1], payloads[0])
+        self.assertEqual([outcome[0] for outcome in outcomes], [0, 0])
+        self.assertEqual(outcomes[1][1], outcomes[0][1])
 
     def test_bare_free_query_matches_search_missing_index_failure(self):
         args = [
@@ -185,12 +190,7 @@ class TestCli(unittest.TestCase):
             "--stub-embedder",
         ]
 
-        outcomes = []
-        for prefix in (["search"], []):
-            out = io.StringIO()
-            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
-                rc = cli.main()
-            outcomes.append((rc, json.loads(out.getvalue())))
+        outcomes = self._run_bare_and_explicit_search(args)
 
         self.assertEqual(outcomes[1], outcomes[0])
         self.assertEqual(outcomes[1][0], 1)
@@ -220,12 +220,7 @@ class TestCli(unittest.TestCase):
             "--stub-embedder",
         ]
 
-        outcomes = []
-        for prefix in (["search"], []):
-            out = io.StringIO()
-            with mock.patch("sys.argv", ["cli", *prefix, *args]), redirect_stdout(out):
-                rc = cli.main()
-            outcomes.append((rc, json.loads(out.getvalue())))
+        outcomes = self._run_bare_and_explicit_search(args)
 
         self.assertEqual(outcomes[1], outcomes[0])
         self.assertEqual(outcomes[1][0], 1)

@@ -27,7 +27,7 @@
 | L1 인사이트 그릇 | ✅ `Insight` kind (2026-06-15) | advisories 별도 통로·candidate 적재 거부(1차) |
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대·보수적 토큰 근사와 과대 유닛 분할 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
-| L3 라우터·회상 | ✅ 책임 분리 (#61, 2026-09-01) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 facet |
+| L3 라우터·회상 | ✅ 책임 분리 (#61, 2026-09-01) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 조회 축 |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
 | 어휘 기준·지식 초안 | ✅ 대체 범위 완료 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬, #51 실제 BB2 로컬 전용 파일럿 완료 |
@@ -88,13 +88,13 @@ replacement spec #47의 활성 결과는 네 개로 제한한다.
 
 ## 완료 단계
 
-### #61 일반 조회 search·show 통일과 query 결정론 facet 축소 — 완료 (2026-09-01)
+### #61 일반 조회 search·show 통일과 query 결정론 조회 축 축소 — 완료 (2026-09-01)
 
 서브커맨드 없는 자유질의와 explicit `search`를 같은 public 회수 경로와 같은 fresh-index 실패
 계약으로 통일했다. 설치 조회 스킬은 일반 의미·코드 위치·개발 착수 질문에서 검색 결과의 핵심 객체를
 `show`로 열고, candidate를 쓰면 확인 필요 상태를 표시한 뒤 여러 객체를 조합한다.
 
-- explicit `query`는 변경 이유·현재 상태·과거 시점·근거 사슬만 BrainStore에서 결정론적으로
+- explicit `query`는 변경 이유·현재 상태·과거 시점·근거 사슬의 조회 축만 BrainStore에서 결정론적으로
   계산한다. 일반 의미·구현 위치·unknown recall은 객체 종류를 고르지 않고 `search → show`를 안내한다.
 - query의 index·embedder·recall·Insight·mapping stale·current-head 배관과 #59의 candidate spillover
   응답 필드를 제거했다. mapping stale은 `show`, Insight advisory는 `search`가 소유한다.

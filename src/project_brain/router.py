@@ -35,6 +35,18 @@ def _conflicting_fact_groups(facts: list[dict]) -> list[list[dict]]:
     return result
 
 
+def _search_show_guidance_section(query: str) -> dict:
+    return {
+        "intent": "search_show",
+        "object_ids": [],
+        "summary": "General recall is handled by search, then show",
+        "guidance": [
+            f'project-brain search "{query}"',
+            "project-brain show <object_id>",
+        ],
+    }
+
+
 class QueryRouter:
     def __init__(
         self,
@@ -55,7 +67,7 @@ class QueryRouter:
             for intent in classified.intents
             if intent in _DETERMINISTIC_FACETS
         ]
-        unsupported_intents = [
+        search_show_intents = [
             intent
             for intent in classified.intents
             if intent not in _DETERMINISTIC_FACETS
@@ -75,15 +87,7 @@ class QueryRouter:
                 "status": "raw-only",
                 "candidate_object_ids": [],
                 "source_object_ids": [],
-                "sections": [{
-                    "intent": "search_show",
-                    "object_ids": [],
-                    "summary": "General recall is handled by search, then show",
-                    "guidance": [
-                        f'project-brain search "{canonical}"',
-                        "project-brain show <object_id>",
-                    ],
-                }],
+                "sections": [_search_show_guidance_section(canonical)],
                 "warnings": warnings,
                 "needs_clarification": True,
             }
@@ -254,16 +258,8 @@ class QueryRouter:
                 source_ids.extend(section_ids)
                 sections.append({"intent": intent, "object_ids": section_ids, "summary": "Evidence provenance"})
 
-        if unsupported_intents:
-            sections.append({
-                "intent": "search_show",
-                "object_ids": [],
-                "summary": "General recall is handled by search, then show",
-                "guidance": [
-                    f'project-brain search "{canonical}"',
-                    "project-brain show <object_id>",
-                ],
-            })
+        if search_show_intents:
+            sections.append(_search_show_guidance_section(canonical))
             warnings.append(
                 "일반 의미·구현 위치 부분은 query가 계산하지 않습니다. search 결과에서 핵심 객체를 고른 뒤 show로 확인하세요."
             )

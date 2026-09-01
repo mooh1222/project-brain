@@ -22,7 +22,7 @@ flowchart LR
     Objects --> Index[재생성 가능한 로컬 색인]
     Index --> Search[일반 질문 search]
     Objects --> Show[선택 객체 show]
-    Objects --> Query[네 결정론 query facet]
+    Objects --> Query[네 결정론 query 조회 축]
     Search --> Agent
     Show --> Agent
     Query --> Agent
@@ -84,7 +84,7 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
 ## 현재 경계에서 주의할 점
 
 - bare 자유질의와 explicit `search`는 같은 경로이며 fresh index가 없거나 stale이면 둘 다 실패한다.
-  `query`는 색인 없이 BrainStore만 읽지만 일반 회수를 대신하지 않고 네 결정론 facet만 계산한다.
+  `query`는 색인 없이 BrainStore만 읽지만 일반 회수를 대신하지 않고 네 결정론 조회 축만 계산한다.
 - mapping stale은 `show`, Insight advisory와 candidate/reviewed 일반 회수는 `search`가 소유한다.
   일부 query 근거 경로의 restricted 라벨과 search의 채널 표시는 principal별 접근 제어를 집행한다는
   뜻이 아니다. 정확한 적용·미적용 경계는 런타임 지도를 본다.

@@ -102,10 +102,10 @@ flowchart LR
     Objects --> Rebuild
     Rebuild --> Derived
 
-    Config --> Query[query: 변경 이유 · 현재 · 과거 · 근거]
+    Config --> Query[query: 변경 이유 · 현재 · 과거 · 근거 조회 축]
     Objects --> Query
     Query --> Intent[classify_query]
-    Intent --> Facets[결정론 facet 계산]
+    Intent --> Facets[결정론 조회 축 계산]
     Facets --> Agent
 
     Config --> Search[search · bare 자유질의]
@@ -286,18 +286,18 @@ redaction trust label을 계산하는 것은 아니다. 설치 조회 스킬은 
 선택한 객체가 mapping이면 stale-set cache의 advisory도 여기에 붙는다. 검색된 CodeLocator의 현재
 checkout 최신성은 설치 조회 스킬이 path·symbol을 실제 코드와 대조한다.
 
-### query: 네 결정론 facet만 계산
+### query: 네 결정론 조회 축만 계산
 
 `query`는 config로 `brain_root`를 찾고 `BrainStore`만 읽어 `QueryRouter.answer()`를 호출한다.
 색인 DB·임베더·recall·stale-set·현재 HEAD 입력이 없다. `classify_query()`가 고른 것 가운데 실제로
-계산하는 facet은 변경 이유(`why_changed`), 현재 상태(`current_status`), 과거 시점
+계산하는 조회 축은 변경 이유(`why_changed`), 현재 상태(`current_status`), 과거 시점
 (`as_of_history`), 근거 사슬(`evidence_provenance`) 네 가지다. 일반 의미·구현 위치·unknown recall은
 어떤 객체 종류도 고르지 않고 `search` 후 `show`를 사용하라는 안내를 반환한다.
 
-변경 이유·현재·과거 facet은 reviewed 대표 어휘·동의어·별칭을 같은 matcher로 인식한다. 충돌 해결,
+변경 이유·현재·과거 조회 축은 reviewed 대표 어휘·동의어·별칭을 같은 matcher로 인식한다. 충돌 해결,
 supersedes 승자, current/as-of 선택, EventLedgerRecord 인과관계, DecisionRecord, 근거 접근 상태를
-그대로 계산한다. 현재 상태 facet은 CurrentView가 참조한 source fact의 부재·미검수·superseded도
-계속 경고한다. 근거 facet은 glossary나 구현 위치 intent를 이유로 companion source를 추가하지 않는다.
+그대로 계산한다. 현재 상태 조회 축은 CurrentView가 참조한 source fact의 부재·미검수·superseded도
+계속 경고한다. 근거 조회 축은 glossary나 구현 위치 intent를 이유로 companion source를 추가하지 않는다.
 
 query의 EventLedgerRecord·TemporalFact 경로는 현재 `restricted=False`를 직접 넘기고,
 DecisionRecord와 근거 사슬 일부만 `_restricted_for()`를 거친다. search의 다섯 채널도 일반 객체 수준
@@ -362,7 +362,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 | 영역 | 최상위 명령 | 핵심 경계 |
 |---|---|---|
 | 조립·적재·검수 | `build`, `ingest`, `promote`, `promote-auto`, `mark-checked` | build 출력과 실제 mutation을 분리 |
-| 조회·회상 | `query`, `search`, `show` | bare/search 일반 회수, show 본문·이웃·mapping stale, query 네 결정론 facet을 분리 |
+| 조회·회상 | `query`, `search`, `show` | bare/search 일반 회수, show 본문·이웃·mapping stale, query 네 결정론 조회 축을 분리 |
 | 지식 초안 | `draft` | 정식 코퍼스 밖 Markdown의 create/list/show/update/lint만 소유 |
 | 색인·평가·projection | `index`, `eval`, `projection` | index는 파생물, projection write는 mutation |
 | 점검·감사 | `lint`, `audit`, `stale-check`, `graph` | 코퍼스 불변 점검과 별도 cache/export 쓰기를 구분 |

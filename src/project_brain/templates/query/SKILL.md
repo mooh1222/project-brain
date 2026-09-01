@@ -33,7 +33,7 @@ project-brain show <object_id>
 CodeLocator의 실제 최신성은 path·symbol을 현재 checkout과 대조한다.
 
 `project-brain query`는 변경 이유·현재 상태·과거 시점·근거 사슬만 결정론적으로 계산한다.
-일반 의미·코드 위치·일반 recall에는 쓰지 않는다. 네 facet 질문은 다음처럼 실행한다:
+일반 의미·코드 위치·일반 recall에는 쓰지 않는다. 네 조회 축 질문은 다음처럼 실행한다:
 
 ```bash
 project-brain query "<시간·이력·근거 질문>"
