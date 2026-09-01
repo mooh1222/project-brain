@@ -248,7 +248,7 @@ def test_query_skill_keeps_default_use_read_only():
         assert automatic_write not in query
 
 
-def test_query_skill_separates_general_recall_from_deterministic_facets():
+def test_query_skill_separates_general_recall_from_deterministic_query_axes():
     query = _installed_skill("query")
 
     for required in (
