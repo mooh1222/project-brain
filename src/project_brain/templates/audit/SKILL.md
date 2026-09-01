@@ -28,7 +28,7 @@ project-brain audit 2>/dev/null | jq
 성공으로 바꾸지 않는다. `not_ancestor`는 아직 기본 브랜치에 합쳐지지 않은 앵커를 알리는
 경고이며, 그 자체로 실패나 상태 강등 사유가 아니다.
 
-사용자가 최신 원격 기준 검사와 query/show용 stale advisory 갱신을 명시적으로 요청한 경우에만
+사용자가 최신 원격 기준 검사와 show에서 읽는 stale advisory 갱신을 명시적으로 요청한 경우에만
 다음 쓰기 실행을 사용한다.
 
 ```bash

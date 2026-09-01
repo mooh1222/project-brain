@@ -290,6 +290,8 @@ class InstallTest(unittest.TestCase):
         self.assertIn("stale.target_head", audit)
         self.assertIn("trunk", audit)
         self.assertNotIn("{{DEFAULT_BRANCH}}", audit)
+        self.assertIn("show에서 읽는 stale advisory", audit)
+        self.assertNotIn("query/show용 stale advisory", audit)
         self.assertIn("session-snapshot filtering은 Project Brain install 범위 밖", ingest_tools)
 
     def test_glossary_criterion_installs_once_is_idempotent_and_preserves_user_edit(self):
