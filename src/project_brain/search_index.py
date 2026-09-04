@@ -31,7 +31,13 @@ from project_brain.lint import projection_is_fresh
 from project_brain.raw_chunks import RAW_KIND, RAW_STATUS, iter_raw_sources
 from project_brain.store import BrainStore
 from project_brain.surface import EXTRACTOR_VERSION, content_hash, extract_surface
-from project_brain.tokenize_ko import active_backend, tokenize
+from project_brain.tokenize_ko import (
+    TOKENIZER_RULES_VERSION,
+    active_backend,
+    parse_tokenizer_signature,
+    tokenize,
+    tokenizer_signature,
+)
 
 
 class StaleIndexError(RuntimeError):
@@ -116,6 +122,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         f"CREATE VIRTUAL TABLE documents_vec USING vec0(embedding FLOAT[{EMBED_DIM}])"
     )
     # meta: 단일 행. embed_model은 embedder 주입 시 모델명, 없으면 빈 값.
+    # tokenizer는 "<백엔드 이름>@<규칙 버전>"(tokenizer_signature) — 컬럼 구성은 그대로고
+    # 값 형태만 넓혔다. 규칙 버전 표기가 없는 옛 값은 버전 1로 읽는다(§6 불일치 가드).
     # corpus_fingerprint(v4): 색인 대상 전체(객체 표면 + raw 청크) sha256 — §7 신선도 가드.
     conn.execute(
         "CREATE TABLE meta ("
@@ -249,6 +257,9 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
             # (None일 수 있음)를 raw 순회에 흘리면 안 된다.
             store = BrainStore.load(brain_root)
             tokenizer = active_backend()
+            # meta에는 이름과 규칙 버전을 함께 적는다 — 이름만으로는 같은 백엔드의
+            # 규칙 변경(같은 이름, 다른 토큰)을 감지할 수 없다(§6).
+            tokenizer_meta = tokenizer_signature()
             embed_model = embedder.model_name if embedder is not None else ""
 
             conn = _connect(temp_path)
@@ -331,7 +342,8 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                 conn.execute(
                     "INSERT INTO meta (schema_version, embed_model, tokenizer, "
                     "extractor_version, corpus_fingerprint) VALUES (?, ?, ?, ?, ?)",
-                    (SCHEMA_VERSION, embed_model, tokenizer, EXTRACTOR_VERSION, fingerprint),
+                    (SCHEMA_VERSION, embed_model, tokenizer_meta, EXTRACTOR_VERSION,
+                     fingerprint),
                 )
                 conn.commit()
             finally:
@@ -361,6 +373,7 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
         "total_objects": total,
         "skipped": total - object_indexed,
         "raw_chunks": raw_chunks,
+        # 통계·CLI 출력은 지금까지처럼 백엔드 이름만 낸다(meta에는 규칙 버전이 함께 들어간다).
         "tokenizer": tokenizer,
         "embed_model": embed_model,
         "db": str(db_path),
@@ -468,6 +481,30 @@ def _guard_schema_version(meta_row) -> None:
         )
 
 
+def _guard_tokenizer(meta_row) -> None:
+    """§6 색인↔쿼리 토크나이저 대칭 — 백엔드 이름이나 규칙 버전이 다르면 거부한다.
+
+    색인과 질의가 다른 토큰화를 하면 BM25 매칭이 조용히 어긋난다. 경고만 달고
+    검색을 계속하면 잘못된 회수 결과가 정상처럼 보이므로, 스키마 버전·코퍼스 지문
+    가드와 같은 철학으로 시끄럽게 거부하고 해결책(rebuild)을 안내한다.
+
+    규칙 버전 표기가 없는 옛 meta는 규칙 버전 1로 읽는다(parse_tokenizer_signature)
+    — 규칙 버전 도입 자체로는 기존 색인이 거부되지 않는다. tokenizer 값이 아예 없는
+    구버전 meta는 스키마 버전 가드가 이미 앞에서 거부한다.
+    """
+    if meta_row is None or meta_row["tokenizer"] is None:
+        return
+    indexed_name, indexed_rules = parse_tokenizer_signature(meta_row["tokenizer"])
+    query_name = active_backend()
+    if indexed_name == query_name and indexed_rules == TOKENIZER_RULES_VERSION:
+        return
+    raise StaleIndexError(
+        f"tokenizer 불일치: 색인={indexed_name}@{indexed_rules} "
+        f"쿼리={query_name}@{TOKENIZER_RULES_VERSION} — 색인과 쿼리의 토큰화가 달라 "
+        "BM25 매칭이 어긋난다. `cli index rebuild`로 재구축 필요(§6)."
+    )
+
+
 # BM25 표준 계수(scoped 재계산 — Okapi 표준값. FTS5 bm25() 기본값과 동일 계열).
 _BM25_K1 = 1.2
 _BM25_B = 0.75
@@ -535,13 +572,7 @@ def search_bm25_scoped(db_path, query: str, scope: str, top_n: int = 50) -> dict
     try:
         meta_row = _read_meta(conn)
         _guard_schema_version(meta_row)
-        indexed_tokenizer = meta_row["tokenizer"] if meta_row else None
-        query_tokenizer = active_backend()
-        if indexed_tokenizer is not None and indexed_tokenizer != query_tokenizer:
-            warnings.append(
-                f"tokenizer 비대칭: 색인={indexed_tokenizer} 쿼리={query_tokenizer} "
-                "— 색인과 쿼리 토크나이저가 달라 형태소 매칭 품질이 떨어질 수 있음(§6)"
-            )
+        _guard_tokenizer(meta_row)
         if not tokens:
             return {"results": [], "warnings": warnings}
         # RAW·ContextProjection 제외(2026-06-17) — raw 청크는 별도 발췌 레인,
@@ -576,8 +607,8 @@ def search_bm25(db_path, query: str, top_n: int = 50) -> dict:
     오름차순 정렬, 동률은 object_id 정렬로 결정론(§3.4).
 
     반환: {results: [{object_id, kind, status, context_id, score}], warnings: [...]}.
-    색인 meta의 tokenizer와 쿼리 시점 active_backend()가 다르면 비대칭 경고를
-    warnings에 담는다(§6 비대칭 가드).
+    색인 meta의 tokenizer(이름@규칙 버전)가 쿼리 시점과 다르면 StaleIndexError로
+    거부한다(§6 불일치 가드 — 경고 후 계속하지 않는다).
     """
     db_path = Path(db_path)
     tokens = tokenize(query)
@@ -587,13 +618,7 @@ def search_bm25(db_path, query: str, top_n: int = 50) -> dict:
     try:
         meta_row = _read_meta(conn)
         _guard_schema_version(meta_row)
-        indexed_tokenizer = meta_row["tokenizer"] if meta_row else None
-        query_tokenizer = active_backend()
-        if indexed_tokenizer is not None and indexed_tokenizer != query_tokenizer:
-            warnings.append(
-                f"tokenizer 비대칭: 색인={indexed_tokenizer} 쿼리={query_tokenizer} "
-                "— 색인과 쿼리 토크나이저가 달라 형태소 매칭 품질이 떨어질 수 있음(§6)"
-            )
+        _guard_tokenizer(meta_row)
 
         if not tokens:
             return {"results": [], "warnings": warnings}

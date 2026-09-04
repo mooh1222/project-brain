@@ -10,10 +10,22 @@
 2. 한국어 형태소 폴백 사다리 = mecab-ko(1순위) → kiwipiepy(2순위, import 시도만)
    → 정규식(한글 연속, 최후). 백엔드는 모듈 로드 시 1회 결정·캐시한다.
 
-active_backend()로 현재 백엔드를 노출해 색인 meta 기록·비대칭 경고에 쓴다(§4·§6).
+active_backend()로 현재 백엔드를 노출하고, tokenizer_signature()가 백엔드 이름과
+규칙 버전을 묶어 색인 meta 기록·색인↔쿼리 불일치 거부에 쓴다(§4·§6).
 """
 
 import re
+
+# 토큰 산출 규칙의 버전. ★백엔드 이름이 같아도 규칙이 바뀌면 옛 색인의 토큰과 새 질의의
+# 토큰이 조용히 어긋난다★ — 규칙(분리 방식·보존 토큰 종류 등)을 바꿀 때 올린다.
+# 올리면 기존 색인은 검색 진입에서 StaleIndexError로 거부되고 rebuild가 필요해진다.
+# ★버전 1은 현재 규칙에 이름을 붙인 것일 뿐 tokenize()의 출력을 바꾸지 않는다★ — 그래서
+# 이 상수 도입만으로는 change map "한국어 tokenizer" 행의 실모델 rebuild가 필요 없다.
+# 규칙 자체를 바꾸며 이 값을 올릴 때 그 rebuild 조건이 발동한다.
+TOKENIZER_RULES_VERSION = 1
+
+# meta에 적는 정체성 문자열의 구분자. 이름에는 쓰이지 않는 문자여야 한다.
+_SIGNATURE_SEP = "@"
 
 # 형태소 백엔드별로 한글 연속 덩어리를 분리하는 함수. 모듈 로드 시 1회 결정·캐시.
 _BACKEND_NAME: str | None = None
@@ -117,11 +129,36 @@ def _ensure_default_backend() -> None:
 def active_backend() -> str:
     """현재 활성 한국어 형태소 백엔드 이름 ("mecab-ko" | "kiwipiepy" | "regex").
 
-    색인 meta 기록·비대칭 경고용(스펙 §4·§6).
+    색인 meta 기록·색인↔쿼리 불일치 판정용(스펙 §4·§6).
     """
     _ensure_default_backend()
     assert _BACKEND_NAME is not None
     return _BACKEND_NAME
+
+
+def tokenizer_signature() -> str:
+    """색인 meta에 적는 현재 토크나이저 정체성 — "<백엔드 이름>@<규칙 버전>".
+
+    이름만으로는 규칙 변경(같은 백엔드, 다른 토큰)을 감지할 수 없어 규칙 버전을
+    함께 담는다. 색인 스키마는 그대로 두고 기존 tokenizer 컬럼의 값 형태만 넓힌다.
+    """
+    return f"{active_backend()}{_SIGNATURE_SEP}{TOKENIZER_RULES_VERSION}"
+
+
+def parse_tokenizer_signature(value: str) -> tuple[str, int]:
+    """meta에 저장된 토크나이저 값을 (백엔드 이름, 규칙 버전)으로 읽는다.
+
+    ★규칙 버전 표기가 없는 값은 규칙 버전 1로 읽는다★ — 규칙 버전을 도입하기 전에
+    만들어진 색인(이름만 기록)이 현재 규칙(버전 1)에서 그대로 통과해야 하기 때문이다.
+    정수가 아닌 꼬리표는 해석하지 않고 값 전체를 이름으로 본다(불일치로 거부됨).
+    """
+    name, sep, version = value.rpartition(_SIGNATURE_SEP)
+    if not sep:
+        return value, 1
+    try:
+        return name, int(version)
+    except ValueError:
+        return value, 1
 
 
 def _korean_splitter_for(backend: str | None):

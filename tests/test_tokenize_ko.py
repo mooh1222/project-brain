@@ -9,7 +9,13 @@
 
 import unittest
 
-from project_brain.tokenize_ko import active_backend, tokenize
+from project_brain.tokenize_ko import (
+    TOKENIZER_RULES_VERSION,
+    active_backend,
+    parse_tokenizer_signature,
+    tokenize,
+    tokenizer_signature,
+)
 
 
 class SymbolSplitTest(unittest.TestCase):
@@ -104,6 +110,39 @@ class IndexQuerySymmetryTest(unittest.TestCase):
 class ActiveBackendTest(unittest.TestCase):
     def test_active_backend_is_known_value(self):
         self.assertIn(active_backend(), {"mecab-ko", "kiwipiepy", "regex"})
+
+
+class TokenizerSignatureTest(unittest.TestCase):
+    """색인 meta에 적는 토크나이저 정체성 문자열의 왕복 계약 (#75).
+
+    색인 쪽이 signature를 적고 검색 쪽이 parse해 (이름, 규칙 버전)으로 비교한다 —
+    두 함수가 어긋나면 색인↔쿼리 불일치 가드가 잘못 판정한다.
+    """
+
+    def test_signature_is_backend_name_and_rules_version(self):
+        self.assertEqual(
+            tokenizer_signature(),
+            f"{active_backend()}@{TOKENIZER_RULES_VERSION}",
+        )
+
+    def test_signature_round_trips_through_parse(self):
+        self.assertEqual(
+            parse_tokenizer_signature(tokenizer_signature()),
+            (active_backend(), TOKENIZER_RULES_VERSION),
+        )
+
+    def test_value_without_rules_version_reads_as_version_1(self):
+        # 규칙 버전을 도입하기 전 색인은 이름만 적었다 — 버전 1로 읽어야 통과한다.
+        self.assertEqual(parse_tokenizer_signature("mecab-ko"), ("mecab-ko", 1))
+
+    def test_explicit_rules_version_is_read_as_int(self):
+        self.assertEqual(parse_tokenizer_signature("kiwipiepy@2"), ("kiwipiepy", 2))
+
+    def test_non_integer_tail_is_not_read_as_a_version(self):
+        # 손으로 망가뜨린 meta는 예외로 터지지 않고 값 전체를 이름으로 본다 —
+        # 현재 백엔드와 같을 수 없으므로 호출부에서 불일치로 거부된다.
+        self.assertEqual(parse_tokenizer_signature("regex@알수없음"),
+                         ("regex@알수없음", 1))
 
 
 @unittest.skipUnless(

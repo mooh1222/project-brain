@@ -36,6 +36,7 @@ from project_brain.search import (
 )
 from project_brain.search_index import rebuild, search_bm25_scoped
 from project_brain.store import BrainStore
+from project_brain.tokenize_ko import active_backend
 
 T = "2026-06-04T00:00:00Z"
 
@@ -1797,6 +1798,40 @@ class IndexFreshnessGuardTest(unittest.TestCase):
             results = recall("용어", db_path=db, brain_root=brain_root,
                              embedder=StubEmbedder())
             self.assertIsInstance(results, list)  # 신선하면 기존 동작 그대로
+
+    def _set_meta_tokenizer(self, db, value):
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("UPDATE meta SET tokenizer = ?", (value,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_recall_raises_on_tokenizer_mismatch(self):
+        # #75: 코퍼스는 그대로여도 색인 토크나이저가 다르면 검색 진입에서 거부한다 —
+        # 지문 stale과 같은 오류·같은 안내(rebuild)로 처리한다.
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            db = brain_root / "idx.db"
+            self._seed_and_build(brain_root, db)
+            self._set_meta_tokenizer(db, "다른토크나이저@1")
+
+            with self.assertRaises(RuntimeError) as ctx:
+                recall("용어", db_path=db, brain_root=brain_root,
+                       embedder=StubEmbedder())
+            self.assertIn("rebuild", str(ctx.exception))
+
+    def test_recall_passes_on_meta_without_rules_version(self):
+        # #75: 규칙 버전 표기가 없던 시절의 색인은 규칙 버전 1로 읽혀 그대로 통과한다.
+        with TemporaryDirectory() as td:
+            brain_root = Path(td)
+            db = brain_root / "idx.db"
+            self._seed_and_build(brain_root, db)
+            self._set_meta_tokenizer(db, active_backend())
+
+            results = recall("용어", db_path=db, brain_root=brain_root,
+                             embedder=StubEmbedder())
+            self.assertIsInstance(results, list)
 
 
 class ScopedBm25WiringTest(unittest.TestCase):

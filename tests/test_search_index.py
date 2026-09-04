@@ -31,6 +31,7 @@ from project_brain.search_index import (
 from project_brain.store import BrainStore
 from project_brain.surface import EXTRACTOR_VERSION
 from project_brain import tokenize_ko
+from project_brain.tokenize_ko import TOKENIZER_RULES_VERSION
 
 T = "2026-06-04T00:00:00Z"
 
@@ -423,7 +424,9 @@ class RebuildTest(unittest.TestCase):
             conn.close()
         self.assertEqual(row[0], SCHEMA_VERSION)
         self.assertEqual(row[1], "")  # embedder=None(FTS 전용 rebuild)이라 빈 값
-        self.assertEqual(row[2], tokenize_ko.active_backend())
+        # tokenizer는 백엔드 이름과 규칙 버전을 함께 담는다(#75) — 스키마 버전은 불변.
+        self.assertEqual(
+            row[2], f"{tokenize_ko.active_backend()}@{TOKENIZER_RULES_VERSION}")
         self.assertEqual(row[3], EXTRACTOR_VERSION)
         # v4: corpus_fingerprint가 64자리 sha256 hex로 기록됨(§7 신선도 가드).
         self.assertIsNotNone(row[4])
@@ -608,34 +611,40 @@ class MetaGuardTest(unittest.TestCase):
         self.assertTrue(any("embed_model 비대칭" in w for w in out["warnings"]))
 
 
-class RegexFallbackTest(unittest.TestCase):
-    """정규식 폴백 강제 환경 시뮬레이션 — mecab 있는 환경에서도 결정론으로 돈다.
+class _ForcedRegexBackend:
+    """모듈 전역 백엔드를 'regex'로 고정하는 setUp 헬퍼 (스펙 §6 폴백 경로 가드).
 
-    rebuild/search_bm25는 tokenize(backend=None)를 쓰므로 모듈 전역 백엔드를
-    'regex'로 고정해 폴백 경로를 검증한다.
+    rebuild/search_bm25는 tokenize(backend=None)를 쓰므로 백엔드 주입이 불가능하다.
+    복원은 addCleanup으로 — setUp이 뒤에서 실패해도(rebuild 등) tearDown과 달리 반드시
+    실행돼 전역 백엔드가 다른 테스트로 누수되지 않는다(리뷰 반영).
     """
+
+    def force_regex_backend(self):
+        saved_name = tokenize_ko._BACKEND_NAME
+        saved_split = tokenize_ko._KOREAN_SPLITTER
+
+        def restore():
+            tokenize_ko._BACKEND_NAME = saved_name
+            tokenize_ko._KOREAN_SPLITTER = saved_split
+
+        self.addCleanup(restore)
+        tokenize_ko._BACKEND_NAME = "regex"
+        tokenize_ko._KOREAN_SPLITTER = tokenize_ko._regex_splitter
+
+
+class RegexFallbackTest(_ForcedRegexBackend, unittest.TestCase):
+    """정규식 폴백 강제 환경 시뮬레이션 — mecab 있는 환경에서도 결정론으로 돈다."""
 
     def setUp(self):
         self._td = TemporaryDirectory()
         self.brain = Path(self._td.name) / "brain"
         self.db = Path(self._td.name) / "index.db"
-        # 모듈 캐시 백엔드를 regex로 강제(스펙 §6 폴백 경로 가드).
-        # 복원은 addCleanup으로 — setUp이 뒤에서 실패해도(rebuild 등) tearDown과
-        # 달리 반드시 실행돼 전역 백엔드가 다른 테스트로 누수되지 않는다(리뷰 반영).
-        self._saved_name = tokenize_ko._BACKEND_NAME
-        self._saved_split = tokenize_ko._KOREAN_SPLITTER
-        tokenize_ko._BACKEND_NAME = "regex"
-        tokenize_ko._KOREAN_SPLITTER = tokenize_ko._regex_splitter
-        self.addCleanup(self._restore_backend)
+        self.force_regex_backend()
         build_store_dir(self.brain, [
             glossary_term("g.race", term="레이스", definition="카약 경주"),
             code_locator("code.new", path="a/b/C.cpp", symbol="onClickNewRace"),
         ])
         rebuild(self.brain, self.db)
-
-    def _restore_backend(self):
-        tokenize_ko._BACKEND_NAME = self._saved_name
-        tokenize_ko._KOREAN_SPLITTER = self._saved_split
 
     def tearDown(self):
         self._td.cleanup()
@@ -646,7 +655,7 @@ class RegexFallbackTest(unittest.TestCase):
             tok = conn.execute("SELECT tokenizer FROM meta").fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(tok, "regex")
+        self.assertEqual(tok, f"regex@{TOKENIZER_RULES_VERSION}")
 
     def test_korean_query_hits_under_regex(self):
         # regex 폴백은 한글 연속 통째 토큰 — "레이스"(통째)는 매칭됨
@@ -661,28 +670,63 @@ class RegexFallbackTest(unittest.TestCase):
         self.assertIn("code.neutral.new", ids)
 
 
-class TokenizerMismatchWarningTest(unittest.TestCase):
+class TokenizerMismatchGuardTest(_ForcedRegexBackend, unittest.TestCase):
+    """§6 색인↔쿼리 토크나이저 불일치는 stale 색인과 같은 방식으로 거부한다(#75).
+
+    백엔드 이름이 같아도 규칙이 바뀌면 색인 토큰과 질의 토큰이 조용히 어긋나므로,
+    meta에 이름과 규칙 버전을 함께 적고 둘 중 하나라도 다르면 StaleIndexError.
+    정규식 폴백을 강제해 백엔드 설치 여부와 무관한 결정론으로 돈다.
+    """
+
     def setUp(self):
         self._td = TemporaryDirectory()
         self.brain = Path(self._td.name) / "brain"
         self.db = Path(self._td.name) / "index.db"
+        self.force_regex_backend()
         build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
         rebuild(self.brain, self.db)
 
     def tearDown(self):
         self._td.cleanup()
 
-    def test_mismatch_emits_warning(self):
-        # 색인 meta tokenizer를 다른 값으로 바꿔 비대칭 경고 발동을 확인(§6 가드)
+    def _set_meta_tokenizer(self, value):
         conn = sqlite3.connect(str(self.db))
         try:
-            conn.execute("UPDATE meta SET tokenizer = 'fake-tokenizer'")
+            conn.execute("UPDATE meta SET tokenizer = ?", (value,))
             conn.commit()
         finally:
             conn.close()
+
+    def test_backend_name_mismatch_is_stale_index_error(self):
+        self._set_meta_tokenizer("fake-tokenizer@1")
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
+
+    def test_rules_version_mismatch_is_stale_index_error(self):
+        # 백엔드 이름은 같고 규칙 버전만 다른 색인 — #79가 규칙을 올릴 때의 상황.
+        self._set_meta_tokenizer(f"regex@{TOKENIZER_RULES_VERSION + 1}")
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
+
+    def test_legacy_meta_without_rules_version_passes_as_version_1(self):
+        # 규칙 버전 표기가 없던 시절의 meta(이름만) — 현재 규칙(버전 1)에서 통과한다.
+        self._set_meta_tokenizer("regex")
         out = search_bm25(self.db, "레이스")
-        self.assertTrue(out["warnings"])
-        self.assertTrue(any("비대칭" in w for w in out["warnings"]))
+        self.assertIn("g.neutral.race", {r["object_id"] for r in out["results"]})
+
+    def test_unreadable_rules_version_is_stale_index_error_not_crash(self):
+        # meta는 손으로 고칠 수 있는 텍스트다 — 망가진 꼬리표는 ValueError로 터지지 않고
+        # 다른 불일치와 같은 rebuild 안내로 나와야 한다.
+        self._set_meta_tokenizer("regex@알수없음")
+        with self.assertRaises(StaleIndexError):
+            search_bm25(self.db, "레이스")
+
+    def test_scoped_lane_guards_tokenizer_too(self):
+        self._set_meta_tokenizer("fake-tokenizer@1")
+        with self.assertRaises(StaleIndexError):
+            search_bm25_scoped(self.db, "레이스", "context.neutral")
 
 
 class SchemaVersionTest(unittest.TestCase):
