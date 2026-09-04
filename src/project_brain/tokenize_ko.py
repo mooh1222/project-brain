@@ -7,129 +7,137 @@
 토큰화 두 축:
 1. 영문 심볼 분리 = 한국어와 동등한 1급. camelCase / snake_case·대문자 약어 /
    `::` / 경로 구분자(/, .)를 쪼개고, ★원형 토큰도 함께 보존★한다.
-2. 한국어 형태소 폴백 사다리 = mecab-ko(1순위) → kiwipiepy(2순위, import 시도만)
-   → 정규식(한글 연속, 최후). 백엔드는 모듈 로드 시 1회 결정·캐시한다.
+2. 한국어 형태소 = ★kiwipiepy 단일 백엔드★(#79). 형태소 조각에 더해 같은 어절 안에서
+   연속한 명사 조각을 이어 붙인 결합형 토큰도 보존한다 — 심볼에서 camelCase 조각과
+   원형을 같이 남기는 것과 같은 규칙이다. 폴백 사다리는 없다: 설치 환경마다 다른
+   토큰이 나오면 색인↔쿼리가 조용히 어긋나므로, 없으면 폴백이 아니라 오류다.
+   정규식 분리는 backend="regex" 명시 주입(테스트) 전용으로만 남는다.
 
 active_backend()로 현재 백엔드를 노출하고, tokenizer_signature()가 백엔드 이름과
 규칙 버전을 묶어 색인 meta 기록·색인↔쿼리 불일치 거부에 쓴다(§4·§6).
 """
 
 import re
+from itertools import groupby
 
 # 토큰 산출 규칙의 버전. ★백엔드 이름이 같아도 규칙이 바뀌면 옛 색인의 토큰과 새 질의의
 # 토큰이 조용히 어긋난다★ — 규칙(분리 방식·보존 토큰 종류 등)을 바꿀 때 올린다.
 # 올리면 기존 색인은 검색 진입에서 StaleIndexError로 거부되고 rebuild가 필요해진다.
-# ★버전 1은 현재 규칙에 이름을 붙인 것일 뿐 tokenize()의 출력을 바꾸지 않는다★ — 그래서
-# 이 상수 도입만으로는 change map "한국어 tokenizer" 행의 실모델 rebuild가 필요 없다.
-# 규칙 자체를 바꾸며 이 값을 올릴 때 그 rebuild 조건이 발동한다.
-TOKENIZER_RULES_VERSION = 1
+# 버전 1 = 형태소 표면만. 버전 2 = 어절 안 명사 결합형 토큰 추가(#79) — 실제로 산출
+# 토큰이 늘어난 규칙 변경이라 change map "한국어 tokenizer" 행의 실모델 rebuild가 발동한다.
+TOKENIZER_RULES_VERSION = 2
 
 # meta에 적는 정체성 문자열의 구분자. 이름에는 쓰이지 않는 문자여야 한다.
 _SIGNATURE_SEP = "@"
 
-# 형태소 백엔드별로 한글 연속 덩어리를 분리하는 함수. 모듈 로드 시 1회 결정·캐시.
+# 유일한 한국어 형태소 백엔드 이름. 정규식은 테스트 주입 전용이라 기본이 될 수 없다.
+_KIWI_BACKEND = "kiwipiepy"
+_REGEX_BACKEND = "regex"
+
+# 활성 백엔드 이름과 분리 함수. import 시가 아니라 첫 사용 때 1회 결정·캐시한다
+# (Kiwi 로드가 ~0.5초라 import만으로 물리지 않게).
 _BACKEND_NAME: str | None = None
 _KOREAN_SPLITTER = None
+# backend="kiwipiepy" 명시 주입과 기본 경로가 같은 Kiwi 인스턴스를 쓰도록 따로 캐시한다.
+_KIWI_SPLITTER = None
 
-# mecab-ko 사전·설정 경로 후보. brew 경로를 1순위로 자동 탐지한다(스펙 §6 환경 실측).
-_MECAB_RC_CANDIDATES = ("/opt/homebrew/etc/mecabrc", "/usr/local/etc/mecabrc")
-_MECAB_DIC_CANDIDATES = (
-    "/opt/homebrew/lib/mecab/dic/mecab-ko-dic",
-    "/usr/local/lib/mecab/dic/mecab-ko-dic",
-)
+# 결합형을 만들 수 있는 kiwi 품사 태그 — 명사류만(spec #72에서 프로토타입으로 확정).
+# NNG 일반명사 / NNP 고유명사 / NNB 의존명사 / XR 어근 / SL 외국어 / SN 숫자.
+# 조사·어미·동사 조각은 여기 없으므로 결합에 섞이지 않는다.
+_COMPOUND_TAGS = frozenset({"NNG", "NNP", "NNB", "XR", "SL", "SN"})
 
-# 한글 연속을 잡는 정규식 (정규식 폴백·한글 토큰 필터 공통).
+# 한글 연속을 잡는 정규식 (정규식 분리·한글 토큰 필터 공통).
 _HANGUL_RUN = re.compile(r"[가-힣]+")
 # camelCase 경계: 소문자→대문자, 또는 약어 끝 대문자→대문자+소문자(HTTPServer→HTTP, Server).
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
-def _build_mecab_splitter():
-    """mecab-ko Tagger를 사전 경로 후보로 탐지해 한글 분리 함수를 만든다.
+def _eojeol_surfaces(tokens) -> list[str]:
+    """한 어절의 형태소 토큰들 → 조각 표면들 + 그 어절의 명사 결합형들 (#79).
 
-    경로 명시 없이는 RuntimeError가 나므로(스펙 §6 환경 실측) -r mecabrc -d 사전
-    인자를 붙여 호출한다. 실패하면 None을 반환해 다음 폴백으로 넘어간다.
+    ★조각을 지우지 않고 결합형을 더한다★ — "인게임"으로 물어도 "게임"으로 물어도
+    같은 문서가 잡혀야 하기 때문이다. 연속한 명사류 조각이 2개 이상일 때만 이어 붙이고,
+    조사·어미·동사 조각이나 한글 없는 조각이 나오면 연속이 끊긴다. 결합형은 그 어절의
+    조각들 뒤에 붙인다(spec #72 프로토타입 출력 순서).
     """
-    import os
+    surfaces: list[str] = []
+    compounds: list[str] = []
+    run: list[str] = []
 
+    for token in tokens:
+        form = token.form
+        if not form:
+            continue
+        surfaces.append(form)
+        if token.tag in _COMPOUND_TAGS and _HANGUL_RUN.search(form):
+            run.append(form)
+            continue
+        if len(run) > 1:
+            compounds.append("".join(run))
+        run = []
+
+    if len(run) > 1:
+        compounds.append("".join(run))
+    return surfaces + compounds
+
+
+def _build_kiwi_splitter():
+    """kiwipiepy Kiwi를 1회 로드해 어절 단위 분리 함수를 만든다 (#79 단일 백엔드).
+
+    기본 옵션만 쓴다 — 사용자 사전·오타 교정은 켜지 않는다(spec #72 Out of Scope).
+    설치돼 있지 않으면 조용히 폴백하지 않고 오류로 알린다: 사람마다 다른 토큰이 나오면
+    색인과 질의가 어긋나 잘못된 회수 결과가 정상처럼 보인다.
+    """
     try:
-        import MeCab  # type: ignore
-    except Exception:
-        return None
+        from kiwipiepy import Kiwi  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "한국어 토크나이저 백엔드 kiwipiepy를 import할 수 없다 — 폴백은 없다"
+            "(§6 색인↔쿼리 대칭). `uv sync` 또는 "
+            "`uv tool install -e . --force`로 고정 버전을 설치한다."
+        ) from exc
 
-    rc = next((p for p in _MECAB_RC_CANDIDATES if os.path.exists(p)), None)
-    dic = next((p for p in _MECAB_DIC_CANDIDATES if os.path.exists(p)), None)
-    if rc is None or dic is None:
-        return None
-
-    try:
-        tagger = MeCab.Tagger(f"-r {rc} -d {dic}")
-        # 로드 직후 1회 파싱으로 실제 동작 확인(경로 연결 실패는 여기서 드러남).
-        tagger.parse("확인")
-    except Exception:
-        return None
+    kiwi = Kiwi()
 
     def split(text: str) -> list[str]:
-        # mecab 출력은 "표면\t품질,..." 줄들 + 마지막 EOS. 표면(surface)만 취한다.
         # ★전체 문맥을 한 번에 넘긴다★ — "미나의"만 떼서 주면 동사 읽기로 오분석되지만
         # "미나의 카약 ..." 전체를 주면 인명+조사로 바르게 쪼갠다(형태소 중의성, 실측).
+        # 어절 경계는 (문장 번호, 어절 번호)다 — word_position은 문장마다 0부터 다시
+        # 시작하므로 문장 번호를 함께 묶지 않으면 문장 경계에서 어절이 합쳐진다.
         tokens: list[str] = []
-        for line in tagger.parse(text).splitlines():
-            if line == "EOS" or not line:
-                continue
-            surface = line.split("\t", 1)[0]
-            if surface:
-                tokens.append(surface)
+        for _, group in groupby(
+            kiwi.tokenize(text), key=lambda t: (t.sent_position, t.word_position)
+        ):
+            tokens.extend(_eojeol_surfaces(list(group)))
         return tokens
 
     return split
 
 
-def _build_kiwi_splitter():
-    """kiwipiepy 백엔드. 설치돼 있으면 형태소 표면을 분리한다(import 시도만)."""
-    try:
-        from kiwipiepy import Kiwi  # type: ignore
-    except Exception:
-        return None
-
-    try:
-        kiwi = Kiwi()
-        kiwi.tokenize("확인")
-    except Exception:
-        return None
-
-    def split(text: str) -> list[str]:
-        return [t.form for t in kiwi.tokenize(text) if t.form]
-
-    return split
+def _kiwi_splitter():
+    """Kiwi 분리 함수의 모듈 캐시 — 인스턴스를 1회만 로드한다."""
+    global _KIWI_SPLITTER
+    if _KIWI_SPLITTER is None:
+        _KIWI_SPLITTER = _build_kiwi_splitter()
+    return _KIWI_SPLITTER
 
 
 def _regex_splitter(text: str) -> list[str]:
-    """최후 폴백: 형태소 분리 없이 한글 연속 덩어리들을 그대로 토큰으로 둔다."""
+    """테스트 주입 전용: 형태소 분리 없이 한글 연속 덩어리들을 그대로 토큰으로 둔다."""
     return _HANGUL_RUN.findall(text)
-
-
-def _resolve_backend() -> tuple[str, object]:
-    """폴백 사다리로 백엔드를 1회 결정한다 (mecab-ko → kiwipiepy → regex)."""
-    splitter = _build_mecab_splitter()
-    if splitter is not None:
-        return "mecab-ko", splitter
-    splitter = _build_kiwi_splitter()
-    if splitter is not None:
-        return "kiwipiepy", splitter
-    return "regex", _regex_splitter
 
 
 def _ensure_default_backend() -> None:
     global _BACKEND_NAME, _KOREAN_SPLITTER
     if _BACKEND_NAME is None:
-        _BACKEND_NAME, _KOREAN_SPLITTER = _resolve_backend()
+        _BACKEND_NAME, _KOREAN_SPLITTER = _KIWI_BACKEND, _kiwi_splitter()
 
 
 def active_backend() -> str:
-    """현재 활성 한국어 형태소 백엔드 이름 ("mecab-ko" | "kiwipiepy" | "regex").
+    """현재 활성 한국어 형태소 백엔드 이름 — 정상 경로에서는 항상 "kiwipiepy".
 
-    색인 meta 기록·색인↔쿼리 불일치 판정용(스펙 §4·§6).
+    색인 meta 기록·색인↔쿼리 불일치 판정용(스펙 §4·§6). 테스트가 모듈 전역을
+    "regex"로 바꿔치기하는 주입 경로가 있어 값은 전역을 그대로 읽는다.
     """
     _ensure_default_backend()
     assert _BACKEND_NAME is not None
@@ -149,7 +157,8 @@ def parse_tokenizer_signature(value: str) -> tuple[str, int]:
     """meta에 저장된 토크나이저 값을 (백엔드 이름, 규칙 버전)으로 읽는다.
 
     ★규칙 버전 표기가 없는 값은 규칙 버전 1로 읽는다★ — 규칙 버전을 도입하기 전에
-    만들어진 색인(이름만 기록)이 현재 규칙(버전 1)에서 그대로 통과해야 하기 때문이다.
+    만들어진 색인(이름만 기록)은 버전 1 규칙으로 만들어진 것이기 때문이다. 현재 규칙은
+    2(#79 결합형 토큰)라 그런 색인은 호출부에서 불일치로 거부되고 rebuild가 필요하다.
     정수가 아닌 꼬리표는 해석하지 않고 값 전체를 이름으로 본다(불일치로 거부됨).
     """
     name, sep, version = value.rpartition(_SIGNATURE_SEP)
@@ -164,17 +173,16 @@ def parse_tokenizer_signature(value: str) -> tuple[str, int]:
 def _korean_splitter_for(backend: str | None):
     """backend 인자가 주어지면 그 백엔드 분리 함수를, 없으면 캐시된 기본값을 쓴다.
 
-    테스트가 정규식 폴백 경로를 mecab 있는 환경에서도 강제하기 위한 주입 지점(§10).
+    테스트가 형태소 분리 없는 경로를 kiwipiepy 있는 환경에서도 강제하기 위한
+    주입 지점(§10).
     """
     if backend is None:
         _ensure_default_backend()
         return _KOREAN_SPLITTER
-    if backend == "regex":
+    if backend == _REGEX_BACKEND:
         return _regex_splitter
-    if backend == "mecab-ko":
-        return _build_mecab_splitter() or _regex_splitter
-    if backend == "kiwipiepy":
-        return _build_kiwi_splitter() or _regex_splitter
+    if backend == _KIWI_BACKEND:
+        return _kiwi_splitter()
     raise ValueError(f"알 수 없는 backend: {backend}")
 
 
@@ -214,12 +222,12 @@ def _split_symbol(segment: str) -> list[str]:
 def tokenize(text: str, backend: str | None = None) -> list[str]:
     """텍스트를 검색 토큰 리스트로 분리한다 (색인·쿼리 공유 단일 함수, 스펙 §6).
 
-    한글은 형태소 백엔드(또는 강제 backend)로, 영문 심볼은 심볼 규칙으로 분리한다.
+    한글은 kiwipiepy(또는 강제 backend)로, 영문 심볼은 심볼 규칙으로 분리한다.
     한국어 백엔드에는 ★전체 텍스트를 한 번에★ 넘겨 형태소 중의성을 문맥으로 해소한다.
     모든 토큰은 소문자로 정규화(대소문자 무관 매칭). 등장 순서를 보존하되 중복 제거.
 
-    backend: None이면 캐시된 기본 백엔드. "regex"/"mecab-ko"/"kiwipiepy"로 강제 주입
-    가능(테스트용).
+    backend: None이면 캐시된 기본 백엔드(kiwipiepy). "regex"는 테스트가 형태소 분리
+    없는 경로를 강제할 때만 쓴다.
     """
     if not text:
         return []

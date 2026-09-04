@@ -4,7 +4,7 @@ spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 합성 객체(test_surface.py 헬퍼 패턴)를 tmp brain root에 BrainStore.save_object로
 적재 → rebuild → search_bm25로 한국어/심볼 질의 적중·결정론·멱등·색인 제외를
-검증한다. 정규식 폴백을 강제해 mecab 없는 환경에서도 결정론으로 돈다.
+검증한다. 정규식 분리를 강제해 형태소 백엔드와 무관한 결정론으로 돈다.
 (실코퍼스 행 수 가드는 데이터 레포 쪽 CLI 가드로 옮겨졌다 — 2-레포 분리.)
 """
 
@@ -612,7 +612,7 @@ class MetaGuardTest(unittest.TestCase):
 
 
 class _ForcedRegexBackend:
-    """모듈 전역 백엔드를 'regex'로 고정하는 setUp 헬퍼 (스펙 §6 폴백 경로 가드).
+    """모듈 전역 백엔드를 'regex'로 고정하는 setUp 헬퍼 (스펙 §6 주입 경로 가드).
 
     rebuild/search_bm25는 tokenize(backend=None)를 쓰므로 백엔드 주입이 불가능하다.
     복원은 addCleanup으로 — setUp이 뒤에서 실패해도(rebuild 등) tearDown과 달리 반드시
@@ -632,8 +632,8 @@ class _ForcedRegexBackend:
         tokenize_ko._KOREAN_SPLITTER = tokenize_ko._regex_splitter
 
 
-class RegexFallbackTest(_ForcedRegexBackend, unittest.TestCase):
-    """정규식 폴백 강제 환경 시뮬레이션 — mecab 있는 환경에서도 결정론으로 돈다."""
+class RegexInjectionTest(_ForcedRegexBackend, unittest.TestCase):
+    """정규식 분리 강제 — 형태소 백엔드와 무관하게 결정론으로 돈다."""
 
     def setUp(self):
         self._td = TemporaryDirectory()
@@ -658,13 +658,13 @@ class RegexFallbackTest(_ForcedRegexBackend, unittest.TestCase):
         self.assertEqual(tok, f"regex@{TOKENIZER_RULES_VERSION}")
 
     def test_korean_query_hits_under_regex(self):
-        # regex 폴백은 한글 연속 통째 토큰 — "레이스"(통째)는 매칭됨
+        # regex 분리는 한글 연속 통째 토큰 — "레이스"(통째)는 매칭됨
         out = search_bm25(self.db, "레이스")
         ids = {r["object_id"] for r in out["results"]}
         self.assertIn("g.neutral.race", ids)
 
     def test_symbol_query_hits_under_regex(self):
-        # 심볼 분리는 백엔드 무관 결정론이라 regex 폴백에서도 동일하게 적중
+        # 심볼 분리는 백엔드 무관 결정론이라 regex 주입에서도 동일하게 적중
         out = search_bm25(self.db, "onClickNewRace")
         ids = {r["object_id"] for r in out["results"]}
         self.assertIn("code.neutral.new", ids)
@@ -710,11 +710,13 @@ class TokenizerMismatchGuardTest(_ForcedRegexBackend, unittest.TestCase):
             search_bm25(self.db, "레이스")
         self.assertIn("rebuild", str(ctx.exception))
 
-    def test_legacy_meta_without_rules_version_passes_as_version_1(self):
-        # 규칙 버전 표기가 없던 시절의 meta(이름만) — 현재 규칙(버전 1)에서 통과한다.
+    def test_legacy_meta_without_rules_version_is_stale_at_version_2(self):
+        # 규칙 버전 표기가 없던 시절의 meta(이름만)는 버전 1로 읽힌다 — 현재 규칙이
+        # 2(#79 결합형 토큰)라 이름이 같아도 거부된다.
         self._set_meta_tokenizer("regex")
-        out = search_bm25(self.db, "레이스")
-        self.assertIn("g.neutral.race", {r["object_id"] for r in out["results"]})
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
 
     def test_unreadable_rules_version_is_stale_index_error_not_crash(self):
         # meta는 손으로 고칠 수 있는 텍스트다 — 망가진 꼬리표는 ValueError로 터지지 않고
@@ -727,6 +729,43 @@ class TokenizerMismatchGuardTest(_ForcedRegexBackend, unittest.TestCase):
         self._set_meta_tokenizer("fake-tokenizer@1")
         with self.assertRaises(StaleIndexError):
             search_bm25_scoped(self.db, "레이스", "context.neutral")
+
+
+class PreviousRulesVersionIndexTest(unittest.TestCase):
+    """#79 이전 규칙(버전 1)으로 만든 색인은 기본 백엔드에서도 거부된다.
+
+    백엔드 이름은 kiwipiepy 그대로인데 결합형 토큰이 늘어 색인 토큰과 질의 토큰이
+    어긋나는 상황 — 이름만 보는 가드로는 못 잡는 경우라 규칙 버전으로 거부한다.
+    기본 백엔드(주입 없음)를 그대로 쓴다: 이름이 같아야 규칙 버전만으로 갈린다.
+    """
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        build_store_dir(self.brain, [glossary_term("g.race", term="레이스")])
+        rebuild(self.brain, self.db)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _set_meta_tokenizer(self, value):
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute("UPDATE meta SET tokenizer = ?", (value,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_index_built_under_rules_version_1_is_stale(self):
+        self._set_meta_tokenizer("kiwipiepy@1")
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
+
+    def test_current_index_passes_the_guard(self):
+        out = search_bm25(self.db, "레이스")
+        self.assertIn("g.neutral.race", {r["object_id"] for r in out["results"]})
 
 
 class SchemaVersionTest(unittest.TestCase):
@@ -1033,7 +1072,7 @@ class CorpusFingerprintTest(unittest.TestCase):
         # rebuild는 표면이 비-None이어도 토큰화가 []인 행은 색인하지 않는다(두 번째
         # 필터). 지문도 같은 필터여야 한다 — 안 그러면 색인엔 없는 객체의 변경이
         # 지문만 바꿔 Task 5 가드가 멀쩡한 색인을 낡았다고 오판한다(거짓 양성).
-        # 한자 표면은 mecab-ko·정규식 폴백 양쪽에서 빈 토큰(실측 2026-06-11).
+        # 한자 표면은 형태소 백엔드·정규식 분리 양쪽에서 빈 토큰(실측 2026-06-11).
         from project_brain.search_index import compute_corpus_fingerprint
         with TemporaryDirectory() as td:
             brain_root = Path(td)
@@ -1252,10 +1291,13 @@ class ScopedBm25SearchTest(unittest.TestCase):
         self.db = Path(self._td.name) / "index.db"
         # context.a: 질의 "알림 클리어" 기준 a 내부 df가 알림=2(d1·d3)·클리어=1(d2)
         # → scoped에선 희소한 "클리어"를 가진 d2가 d1보다 항상 위.
+        # d3의 뒷말은 "안내"가 아니라 "문구"다 — kiwi는 "알림 안내"의 앞말을 동사
+        # 어간 "알리"로 읽어 d1과 토큰이 겹치지 않는다(#79 실측). df 전제를 만드는
+        # 것이 이 fixture의 목적이라 겹치는 표면을 고른다.
         self.base_objs = [
             glossary_term("g.d1", term="알림 팝업", context_id="context.a"),
             glossary_term("g.d2", term="클리어 팝업", context_id="context.a"),
-            glossary_term("g.d3", term="알림 안내", context_id="context.a"),
+            glossary_term("g.d3", term="알림 문구", context_id="context.a"),
         ]
         # scope 밖(context.b) 어휘 중첩 — 전역 df(클리어)를 1→5로 역전시킨다.
         self.noise_objs = [

@@ -62,7 +62,7 @@ issue 분류·상태 전이는 Matt triage 기본 라벨을 사용한다.
 ## 개발 루프
 
 ```bash
-uv sync --extra mecab
+uv sync
 .venv/bin/python -m pytest -q
 .venv/bin/python -m unittest discover \
   -s src/project_brain/templates/ingest/scripts -p 'test_*.py'
@@ -70,11 +70,13 @@ uv sync --extra mecab
 
 - 첫 테스트는 엔진 합성 회귀, 두 번째는 설치되는 ingest runtime의 unittest다. 둘 다
   통과해야 엔진 변경이 완료다.
-- 글로벌 도구는 이 클론의 **편집 설치**다(`uv tool install -e . --with mecab-python3`)
-  — 여기서 코드를 고치면 `project-brain` 명령에 즉시 반영된다. 재설치 불필요.
-  단 pyproject 의존성이 바뀌면 `uv tool install -e . --with mecab-python3 --force`.
+- 글로벌 도구는 이 클론의 **편집 설치**다(`uv tool install -e .`) — 여기서 코드를
+  고치면 `project-brain` 명령에 즉시 반영된다. 재설치 불필요.
+  단 pyproject 의존성이 바뀌면 `uv tool install -e . --force`.
+  ★#79로 의존성이 바뀌었다★ — kiwipiepy 단일 백엔드로 고정하고 mecab extra를 없앴으므로
+  이 변경을 받은 뒤에는 `uv tool install -e . --force`를 한 번 돌려야 한다.
 - TDD: red 테스트 먼저, 그다음 구현. 결정론 유지 — 테스트에서 실모델 금지
-  (StubEmbedder / `PROJECT_BRAIN_EMBEDDER=stub`), 토큰화는 정규식 폴백 강제 패턴 참고.
+  (StubEmbedder / `PROJECT_BRAIN_EMBEDDER=stub`), 토큰화는 정규식 주입 강제 패턴 참고.
 
 ## 엔진 수정 후 실코퍼스 회귀 (변경별)
 

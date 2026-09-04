@@ -1760,17 +1760,19 @@ class IndexFreshnessGuardTest(unittest.TestCase):
                        embedder=StubEmbedder())
             self.assertIn("rebuild", str(ctx.exception))
 
-    def test_recall_passes_on_meta_without_rules_version(self):
-        # #75: 규칙 버전 표기가 없던 시절의 색인은 규칙 버전 1로 읽혀 그대로 통과한다.
+    def test_recall_raises_on_meta_without_rules_version(self):
+        # #75가 규칙 버전 없는 색인을 버전 1로 읽고, #79가 현재 규칙을 2로 올렸다 —
+        # 백엔드 이름이 같아도 규칙이 달라 rebuild 안내로 거부돼야 한다.
         with TemporaryDirectory() as td:
             brain_root = Path(td)
             db = brain_root / "idx.db"
             self._seed_and_build(brain_root, db)
             self._set_meta_tokenizer(db, active_backend())
 
-            results = recall("용어", db_path=db, brain_root=brain_root,
-                             embedder=StubEmbedder())
-            self.assertIsInstance(results, list)
+            with self.assertRaises(RuntimeError) as ctx:
+                recall("용어", db_path=db, brain_root=brain_root,
+                       embedder=StubEmbedder())
+            self.assertIn("rebuild", str(ctx.exception))
 
 
 class ScopedBm25WiringTest(unittest.TestCase):

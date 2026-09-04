@@ -7,14 +7,13 @@ dependencies = [
     "numpy",
     "sqlite-vec",
     "sentence-transformers",
-    "kiwipiepy",
+    # 한국어 토크나이저 단일 백엔드(#79). ★버전을 고정한다★ — 올리면 토큰이 바뀌어
+    # 기존 색인이 규칙 가드에 걸리므로 업그레이드는 의식적인 결정이어야 한다.
+    "kiwipiepy==0.23.2",
+    "kiwipiepy_model==0.23.0",
     "tree-sitter>=0.25,<0.26",
     "tree-sitter-cpp==0.23.4",
 ]
-
-[project.optional-dependencies]
-# mecab-python3는 시스템 mecab-ko 사전 설치를 전제한다(없으면 kiwipiepy 폴백).
-mecab = ["mecab-python3"]
 
 [project.scripts]
 project-brain = "project_brain.cli:main"

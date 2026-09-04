@@ -34,8 +34,9 @@ uv tool install -e ./project-brain
 
 - 임베딩 모델(bge-m3)은 첫 색인 때 자동 다운로드된다. 미리 받으려면
   `project-brain doctor --download`.
-- 한국어 형태소: kiwipiepy가 기본 동봉. mecab-ko를 쓰려면 시스템 설치
-  (`brew install mecab-ko mecab-ko-dic`) 후 `uv tool install -e <클론> --with mecab-python3`.
+- 한국어 형태소: kiwipiepy 단일 백엔드이며 버전이 고정돼 있다(별도 시스템 설치 불필요).
+  다른 형태소 분석기로 갈아끼우는 경로는 없다 — 환경마다 토큰이 달라지면 색인과 질의가
+  어긋나기 때문이다.
 
 ## 프로젝트에 붙이기
 
@@ -147,7 +148,7 @@ raw 보관은 개정본의 `spec-v<N>.md`와 이전 자료의 정리된 원본 b
 ## 개발
 
 ```bash
-uv sync --extra mecab
+uv sync
 .venv/bin/python -m pytest -q
 .venv/bin/python -m unittest discover \
   -s src/project_brain/templates/ingest/scripts -p 'test_*.py'

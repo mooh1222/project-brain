@@ -488,9 +488,10 @@ def _guard_tokenizer(meta_row) -> None:
     검색을 계속하면 잘못된 회수 결과가 정상처럼 보이므로, 스키마 버전·코퍼스 지문
     가드와 같은 철학으로 시끄럽게 거부하고 해결책(rebuild)을 안내한다.
 
-    규칙 버전 표기가 없는 옛 meta는 규칙 버전 1로 읽는다(parse_tokenizer_signature)
-    — 규칙 버전 도입 자체로는 기존 색인이 거부되지 않는다. tokenizer 값이 아예 없는
-    구버전 meta는 스키마 버전 가드가 이미 앞에서 거부한다.
+    규칙 버전 표기가 없는 옛 meta는 규칙 버전 1로 읽는다(parse_tokenizer_signature).
+    현재 규칙은 2(#79 결합형 토큰)라 그런 색인은 백엔드 이름이 같아도 거부된다 —
+    rebuild가 필요하다. tokenizer 값이 아예 없는 구버전 meta는 스키마 버전 가드가
+    이미 앞에서 거부한다.
     """
     if meta_row is None or meta_row["tokenizer"] is None:
         return

@@ -1,7 +1,7 @@
 """doctor — 의존성·백엔드·프로젝트 상태 진단 (hwi_PKM doctor 패턴).
 
-required: 엔진이 돌기 위한 환경(파이썬·필수 패키지·FTS5·sqlite-vec).
-optional: 품질·프로젝트 상태(mecab·임베딩 모델 캐시·config·코퍼스·색인·골든셋)
+required: 엔진이 돌기 위한 환경(파이썬·필수 패키지·FTS5·sqlite-vec·한국어 토크나이저).
+optional: 품질·프로젝트 상태(임베딩 모델 캐시·config·코퍼스·색인·골든셋)
           — 글로벌 설치 직후(프로젝트 밖)에는 실패가 정상이라 rc에 안 들어간다.
 
 --download(diagnose(download=True))는 실모델을 한 번 로드해 캐시를 채운다.
@@ -56,11 +56,12 @@ def _sqlite_vec_check():
 
 
 def _tokenizer_check():
-    from project_brain.tokenize_ko import active_backend
+    from project_brain.tokenize_ko import active_backend, tokenizer_signature
 
+    # #79: 한국어 백엔드는 kiwipiepy 하나다. 폴백이 없어 없으면 여기서 예외가 나고,
+    # _check가 그것을 실패로 기록한다. 규칙 버전까지 보고해 색인 meta와 대조할 수 있게 한다.
     backend = active_backend()
-    # 정규식 폴백으로도 동작은 하지만 한국어 품질이 떨어진다 — 백엔드 이름을 그대로 보고.
-    return backend in ("mecab-ko", "kiwipiepy"), f"활성 백엔드: {backend}"
+    return backend == "kiwipiepy", f"활성 백엔드: {tokenizer_signature()}"
 
 
 def _model_cache_check(download: bool):
@@ -129,7 +130,7 @@ def diagnose(start=None, *, download: bool = False) -> dict:
                _import_check("sentence_transformers")),
         _check("fts5", "required", _fts5_check),
         _check("sqlite-vec", "required", _sqlite_vec_check),
-        _check("tokenizer-ko", "optional", _tokenizer_check),
+        _check("tokenizer-ko", "required", _tokenizer_check),
         _check("embed-model", "optional", _model_cache_check(download)),
     ]
     checks.extend(_project_checks(start))
