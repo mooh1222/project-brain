@@ -128,12 +128,13 @@ class TokenizerSignatureTest(unittest.TestCase):
             f"{active_backend()}@{TOKENIZER_RULES_VERSION}",
         )
 
-    def test_rules_version_is_3_after_digit_compounds_and_nominal_surfaces(self):
-        # #79가 결합형 토큰을 추가해 토큰 산출 규칙이 바뀌었다 — 옛 색인은 거부돼야 한다.
-        self.assertEqual(TOKENIZER_RULES_VERSION, 3)
+    def test_rules_version_is_4_after_suffix_compounds(self):
+        # #79 결합형(2) → 숫자·외국어 결합·명사형 표면(3) → 명사+파생 접미사 결합(#82, 4).
+        # 규칙이 바뀔 때마다 올라가야 옛 색인이 거부된다.
+        self.assertEqual(TOKENIZER_RULES_VERSION, 4)
 
-    def test_current_signature_is_kiwipiepy_at_3(self):
-        self.assertEqual(tokenizer_signature(), "kiwipiepy@3")
+    def test_current_signature_is_kiwipiepy_at_4(self):
+        self.assertEqual(tokenizer_signature(), "kiwipiepy@4")
 
     def test_signature_round_trips_through_parse(self):
         self.assertEqual(
@@ -260,6 +261,24 @@ class CompoundNounTokenTest(unittest.TestCase):
         self.assertEqual([t for t in toks if "new" in t], ["7new", "3.7new"])
         toks = tokenize("v8 기획서")
         self.assertEqual(toks, ["기획서", "v8"])
+
+    def test_noun_plus_derivational_suffix_forms_a_compound(self):
+        # 규칙 버전 4(#82): 명사류 연속 뒤에 바로 붙은 파생 접미사(XSN)는 같은 덩어리다.
+        # kiwi는 "시간제"를 시간(NNG)+제(XSN)로 읽어 규칙 3까지는 "시간제" 토큰이 없었다.
+        # 조각(시간·제)은 그대로 남고 어절 표면이 결합형으로 더해진다.
+        self.assertEqual(tokenize("시간제 아이템"), ["시간", "제", "시간제", "아이템"])
+        self.assertEqual(tokenize("스테이지별 보상"), ["스테이지", "별", "스테이지별", "보상"])
+        self.assertEqual(tokenize("이벤트용 아이템"), ["이벤트", "용", "이벤트용", "아이템"])
+
+    def test_suffix_inside_one_eojeol_keeps_joining_following_nouns(self):
+        # 한 어절 "시간제아이템"은 접미사 뒤 명사까지 한 덩어리로 이어진다 — 어절 안 결합형은
+        # 어절 하나에 하나만 만든다는 규칙 2의 출력 모양을 유지한다.
+        self.assertEqual(tokenize("시간제아이템"), ["시간", "제", "아이템", "시간제아이템"])
+
+    def test_suffix_without_a_preceding_noun_fragment_does_not_start_a_compound(self):
+        # 접미사는 연속을 시작하지 못한다 — 대명사(NP) 뒤의 "들"은 앞에 명사류 조각이 없어
+        # 결합형이 생기지 않는다. 조각은 그대로다.
+        self.assertEqual(tokenize("우리들 보상"), ["우리", "들", "보상"])
 
     def test_same_input_twice_is_identical(self):
         text = "인게임에서 럭키박스 아이템 사용하면"

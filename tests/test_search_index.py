@@ -769,6 +769,13 @@ class PreviousRulesVersionIndexTest(unittest.TestCase):
             search_bm25(self.db, "레이스")
         self.assertIn("rebuild", str(ctx.exception))
 
+    def test_index_built_under_rules_version_3_is_stale(self):
+        # 규칙 버전 4(#82)가 명사+파생 접미사 결합형을 더했다 — 3으로 만든 색인은 rebuild 대상.
+        self._set_meta_tokenizer("kiwipiepy@3")
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
+
     def test_current_index_passes_the_guard(self):
         out = search_bm25(self.db, "레이스")
         self.assertIn("g.neutral.race", {r["object_id"] for r in out["results"]})
