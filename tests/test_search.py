@@ -580,13 +580,26 @@ class RecallScopeOptionTest(unittest.TestCase):
         self.assertEqual(pinned["scope"],
                          {"context_id": "context.clear-token", "origin": "explicit"})
 
-        released = eval_recall("카약 레이스 보상 기준", auto_scope=False, **kwargs)
-        self.assertEqual(released["scope"], {"context_id": None, "origin": "none"})
+    def test_disabled_inference_is_reported_apart_from_failed_inference(self):
+        # ★필터 없음의 두 이유를 가른다★ — 호출자가 껐으면 "disabled", 추론이 돌았는데
+        # 컨텍스트를 단일 특정 못 했으면 "none". context_id는 둘 다 None이라 이 값이
+        # 아니면 에이전트가 다음 수(좁힐지, 질의를 바꿀지)를 고를 수 없다.
+        kwargs = dict(db_path=self.db, embedder=self.embedder, brain_root=self.brain)
 
-        # 추론이 컨텍스트를 특정하지 못한 질의도 origin="none"이다 — 해제와 같은 값이며
-        # 둘을 origin으로 가르지 않는다(하드 필터가 없다는 사실만 신고).
+        # 같은 질의(추론하면 kayak-race로 좁혀지는)를 껐을 때 → disabled.
+        released = eval_recall("카약 레이스 보상 기준", auto_scope=False, **kwargs)
+        self.assertEqual(released["scope"], {"context_id": None, "origin": "disabled"})
+
+        # 기능명이 없어 추론이 특정 못 하는 질의 → none.
         unmatched = eval_recall("보상 기준이 뭐야", **kwargs)
         self.assertEqual(unmatched["scope"], {"context_id": None, "origin": "none"})
+
+        # 두 갈래를 같은 값으로 뭉개지 않는다(회귀 가드).
+        self.assertNotEqual(released["scope"]["origin"], unmatched["scope"]["origin"])
+
+        # 추론이 못 좁힌 질의를 명시로 껐을 때도 disabled다 — 이유는 호출자 쪽이다.
+        both = eval_recall("보상 기준이 뭐야", auto_scope=False, **kwargs)
+        self.assertEqual(both["scope"], {"context_id": None, "origin": "disabled"})
 
     def test_explicit_scope_is_the_scope_actually_applied(self):
         # 신고값과 적용값의 배관 가드: 신고된 context_id 밖 적중이 결과에 없어야 한다.

@@ -112,8 +112,11 @@ project-brain search "<질문>" --context-id <id>   # 그 DomainContext로만 �
 project-brain search "<질문>" --all-contexts      # 자동 추론 없이 전체 회수
 ```
 
-- 무엇이 걸렸는지는 출력의 `scope`가 알려준다 — `origin`이 `inferred`면 자동 추론,
-  `explicit`이면 내가 지정한 것, `none`이면 하드 필터 없음이다.
+- 무엇이 걸렸는지는 출력의 `scope`가 알려준다. `origin`은 네 값이다 —
+  `inferred`(자동 추론이 좁혔다), `explicit`(내가 지정했다),
+  `disabled`(내가 `--all-contexts`로 껐다), `none`(추론했으나 컨텍스트를 못 좁혔다).
+  뒤 둘은 필터가 없다는 결과는 같지만 이유가 다르다. `none`이면 질의에 기능명이
+  빠졌거나 여러 기능을 함께 물은 것이니, 좁히고 싶으면 `--context-id`로 지정한다.
 - 다른 기능 객체가 섞여 보이면 `--context-id`로 그 컨텍스트만 남긴다. 넣는 값은 적중
   원소의 `context_id`이며, 코퍼스에 없는 id를 주면 조용한 0건이 아니라 오류로 끝난다.
 - 자동 추론 때문에 답이 빠진 것 같으면 `--all-contexts`로 다시 검색해 비교한다

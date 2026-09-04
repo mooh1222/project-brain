@@ -761,10 +761,14 @@ def _matched_query_tokens_by_id(db_path, object_ids, tokens) -> dict[str, list[s
     return matched
 
 
-# 회수 응답이 신고하는 scope 적용 출처(#73 origin + #74 명시 지정).
-#   "explicit" — 호출자가 scope를 직접 지정
-#   "inferred" — 질의 표면에서 자동 추론이 컨텍스트를 단일 특정
-#   "none"     — 하드 필터 없음(추론이 특정 못 했거나 auto_scope=False로 껐거나)
+# 회수 응답이 신고하는 scope 적용 출처(#73 origin + #74 명시 지정·해제).
+#   "explicit" — 호출자가 scope를 직접 지정 (context_id = 그 값)
+#   "inferred" — 질의 표면에서 자동 추론이 컨텍스트를 단일 특정 (context_id = 추론값)
+#   "disabled" — 호출자가 추론을 껐다(auto_scope=False) (context_id = None)
+#   "none"     — 추론했으나 단일 특정 실패 (context_id = None)
+# ★"disabled"와 "none"을 가른다★(#74): 하드 필터가 없다는 결과는 같지만 이유가 다르다.
+# 에이전트는 "내가 끈 것"과 "엔진이 컨텍스트를 못 좁힌 것"을 응답만 보고 구분해야
+# 다음 수(다시 좁힐지, 질의를 바꿀지)를 고른다 — 사실 보고이지 판정이 아니다(ADR 0008).
 def _resolve_scope(query, scope, auto_scope, store):
     """(적용할 scope, 신고할 origin)을 한 자리에서 정한다.
 
@@ -774,7 +778,7 @@ def _resolve_scope(query, scope, auto_scope, store):
     if scope is not None:
         return scope, "explicit"
     if not auto_scope:
-        return None, "none"
+        return None, "disabled"
     inferred = infer_scope(query, store)
     return inferred, ("inferred" if inferred is not None else "none")
 
@@ -801,11 +805,11 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     않는다(등재 어휘가 걸리면 GlossaryTerm 객체 자체가 results에 오른다).
       query_tokens       — [{token, object_df, raw_df}] 질의 토큰 분해와 토큰별 문서 빈도.
                             tokenize 순서·중복 제거 그대로(길이 필터 없음).
-      scope              — {context_id, origin} 적용된 scope. 호출자가 지정했으면
-                            origin="explicit", 질의 표면에서 자동 추론했으면 "inferred",
-                            하드 필터가 없으면 context_id=None·origin="none"
-                            (추론이 단일 특정에 실패했거나 auto_scope=False로 껐거나 —
-                            둘을 origin으로 가르지 않는다).
+      scope              — {context_id, origin} 적용된 scope. origin은 네 값이다 —
+                            "explicit"(호출자 지정), "inferred"(질의 표면에서 자동 추론),
+                            "disabled"(auto_scope=False로 추론을 껐다),
+                            "none"(추론했으나 단일 특정 실패). 뒤 둘은 context_id=None
+                            으로 결과가 같지만 이유가 달라 값을 가른다(_resolve_scope).
       matched_query_tokens — 채널 적중마다 동반. 질의 토큰 중 그 적중의 색인 본문에
                             실제로 있는 것만(raw 발췌 포함).
 
@@ -815,8 +819,8 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     store는 recall로 그대로 넘긴다(후속 b — 주면 brain_root 재로드 생략).
 
     scope/auto_scope는 _resolve_scope를 거쳐 recall로 넘어간다(#74) — 지정하면 그
-    context로만 회수하고, auto_scope=False면 추론 없이 전체를 회수한다. 모르는 id는
-    UnknownScopeError.
+    context로만 회수하고, auto_scope=False면 추론 없이 전체를 회수한다(origin은 각각
+    "explicit"·"disabled"). 모르는 id는 UnknownScopeError.
     channel_top_k는 채널별 상한이며 기본값은 EVAL_CHANNEL_TOP_K(=5)다 — 하네스는
     recall_fn(query) 한 인자로만 부르므로 측정 단위가 이 기본값으로 고정되고, 표시
     상한을 넓히는 쪽(CLI)이 명시로 넘긴다. 상한은 자르기만 하므로 recall 레인 절단

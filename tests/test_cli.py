@@ -1893,7 +1893,14 @@ class TestCliSearch(unittest.TestCase):
 
         rc, released = self._search("카약 레이스 보상 기준", "--all-contexts")
         self.assertEqual(rc, 0)
-        self.assertEqual(released["scope"], {"context_id": None, "origin": "none"})
+        self.assertEqual(released["scope"],
+                         {"context_id": None, "origin": "disabled"})
+
+        # 옵션을 안 줬는데 추론이 컨텍스트를 못 좁힌 경우는 "none" — 껐을 때와 다른 값
+        # 이어야 에이전트가 "내가 껐다"와 "엔진이 못 좁혔다"를 응답만 보고 가른다.
+        rc, unmatched = self._search("보상 기준이 뭐야")
+        self.assertEqual(rc, 0)
+        self.assertEqual(unmatched["scope"], {"context_id": None, "origin": "none"})
 
     def test_search_unknown_context_id_reports_json_error_without_traceback(self):
         # 없는 context id는 조용한 0건이 아니라 rc 1 + 해결 단서가 담긴 JSON 오류다.

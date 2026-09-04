@@ -1380,7 +1380,8 @@ def _run_search(argv) -> int:
     scope는 기본이 질의 표면 자동 추론(infer_scope)이다 — `--context-id`로 특정
     DomainContext를 지정하거나 `--all-contexts`로 추론을 끄고 전체를 회수한다(#74).
     어느 쪽이든 실제로 적용된 값이 응답의 `scope` 사실로 나간다
-    (origin: explicit/inferred/none). 코퍼스가 모르는 id는 search.UnknownScopeError를
+    (origin: explicit/inferred/disabled/none — 뒤 둘은 필터가 없다는 점은 같고
+    "내가 껐다"와 "추론이 못 좁혔다"로 이유가 갈린다). 코퍼스가 모르는 id는 search.UnknownScopeError를
     타고 누락 색인과 같은 모양의 JSON 오류로 끝난다. `--top-k`는 채널별 표시 상한이며
     CLI 기본은 SEARCH_CHANNEL_TOP_K(=10)로, 평가 하네스의 측정 단위 5와는 별개다.
     """

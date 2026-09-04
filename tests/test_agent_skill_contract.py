@@ -293,6 +293,11 @@ def test_query_skill_documents_scope_and_display_limit_options():
         # scope 사실을 읽는 법과, scope가 거르지 않는 채널을 함께 안내한다.
         "origin",
         "advisories",
+        # 필터 없음의 두 이유를 가르는 값이 문서에 다 나와야 한다.
+        "`disabled`",
+        "`none`",
+        "`inferred`",
+        "`explicit`",
     ):
         assert required in query
 
