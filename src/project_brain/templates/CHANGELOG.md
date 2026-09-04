@@ -10,6 +10,14 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-09-04 — 조회 스킬에 scope·표시 상한 옵션 안내
+
+`search`에 `--context-id <id>`·`--all-contexts`·`--top-k`가 생겨(#74) query의 scope 절을
+세 옵션 사용 안내로 다시 썼다. 자동 추론은 그대로이고, 어긋날 때 지정·해제하는 절차,
+적용 결과를 `scope` 사실로 읽는 법, scope가 `advisories`를 거르지 않는다는 점, 표시
+상한이 회수 절단(객체 30건·보조 채널 10건)을 넘지 못한다는 한계를 함께 적었다.
+서브커맨드 없는 자유질의도 같은 옵션·같은 출력임을 명시한다.
+
 ## 2026-08-28 — 공통 어휘 판정 기준과 세 적재 경로 연결
 
 실제 프로젝트 이름과 단순 코드 토큰을 구분하는 단일 기준을 ingest의

@@ -1351,35 +1351,77 @@ _SEARCH_TRUST_LABELS = {
 }
 
 
+def _positive_int(value: str) -> int:
+    """1 이상 정수만 받는 argparse type — `--top-k`가 쓴다.
+
+    0·음수를 그대로 두면 채널 슬라이스가 조용히 전부 비우거나 뒤를 잘라내
+    "결과가 없다"로 오독된다. 파싱 단계에서 시끄럽게 막는다.
+    """
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"정수가 아니다: {value}") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"1 이상이어야 한다: {value}")
+    return parsed
+
+
 def _run_search(argv) -> int:
     """의미 회상 명령 (스펙 §7) — 어시스턴트가 직접 쓰는 회상 진입점.
 
-    `search "<query>" [--db <path>] [--brain-root <path>] [--stub-embedder]` —
+    `search "<query>" [--db <path>] [--brain-root <path>] [--stub-embedder]
+     [--context-id <id> | --all-contexts] [--top-k <n>]` —
     recall 결과(search.eval_recall)를 검수 상태(reviewed/candidate)·linked(코드 위치)와
     함께 JSON으로 낸다. 채널은 status·kind로만 갈리며 엔진 판정 플래그는 싣지 않는다
     (ADR 0008 — 답변 판정은 에이전트 몫). 회수 사실(query_tokens·scope·적중별
     matched_query_tokens, #73)도 회수 응답 그대로 실린다. 색인 DB가 없으면 명확한
     에러로 끝낸다(`cli index rebuild` 먼저).
+
+    scope는 기본이 질의 표면 자동 추론(infer_scope)이다 — `--context-id`로 특정
+    DomainContext를 지정하거나 `--all-contexts`로 추론을 끄고 전체를 회수한다(#74).
+    어느 쪽이든 실제로 적용된 값이 응답의 `scope` 사실로 나간다
+    (origin: explicit/inferred/none). 코퍼스가 모르는 id는 search.UnknownScopeError를
+    타고 누락 색인과 같은 모양의 JSON 오류로 끝난다. `--top-k`는 채널별 표시 상한이며
+    CLI 기본은 SEARCH_CHANNEL_TOP_K(=10)로, 평가 하네스의 측정 단위 5와는 별개다.
     """
+    from project_brain.search import (
+        SEARCH_CHANNEL_TOP_K,
+        UnknownScopeError,
+        eval_recall,
+    )
+    from project_brain.search_index import StaleIndexError
+
     parser = argparse.ArgumentParser(prog="cli search")
     parser.add_argument("query")
     parser.add_argument("--db", help="색인 DB 경로 (기본: config)")
     parser.add_argument("--brain-root", help="brain root (그래프 1-hop store, 기본: config)")
     parser.add_argument("--stub-embedder", action="store_true",
                         help="실모델 대신 stub 임베더 사용(테스트·CI 결정론, §5)")
+    scope_options = parser.add_mutually_exclusive_group()
+    scope_options.add_argument(
+        "--context-id",
+        help="이 DomainContext id로만 회수 — 적중 원소의 context_id 값 "
+             "(기본: 질의 표면에서 자동 추론)")
+    scope_options.add_argument(
+        "--all-contexts", action="store_true",
+        help="scope 자동 추론을 끄고 전체 코퍼스에서 회수")
+    parser.add_argument(
+        "--top-k", type=_positive_int, default=SEARCH_CHANNEL_TOP_K,
+        help=f"채널별 표시 상한 (기본: {SEARCH_CHANNEL_TOP_K})")
     args = parser.parse_args(argv)
-
-    from project_brain.search import eval_recall
-    from project_brain.search_index import StaleIndexError
 
     embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
     try:
         resp = eval_recall(
-            args.query, db_path=args.db, embedder=embedder, brain_root=args.brain_root
+            args.query, db_path=args.db, embedder=embedder,
+            brain_root=args.brain_root,
+            scope=args.context_id, auto_scope=not args.all_contexts,
+            channel_top_k=args.top_k,
         )
-    # rebuild가 해결책인 오류(누락 색인·stale 색인 가드)만 정상 JSON 안내로 —
-    # 환경 장애(sqlite-vec 미설치·모델 로드 실패 등 RuntimeError)는 그대로 드러낸다.
-    except (FileNotFoundError, StaleIndexError) as exc:
+    # 호출자가 고칠 수 있는 오류(누락·stale 색인 → rebuild, 없는 scope id → 실제
+    # context_id)만 정상 JSON 안내로 — 환경 장애(sqlite-vec 미설치·모델 로드 실패 등
+    # RuntimeError)는 그대로 드러낸다.
+    except (FileNotFoundError, StaleIndexError, UnknownScopeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
     # ★회수 응답을 키 하드코딩 없이 그대로 통과시킨다★(#73) — 손으로 옮겨 적던 목록은

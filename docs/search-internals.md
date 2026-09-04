@@ -151,7 +151,13 @@ SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_ind
 5. **scope(범위) 좁히기**: 질의가 기능명을 단일 특정하면(`infer_scope`, `search.py:272`)
    그 `DomainContext`로 하드 필터를 건다. scope가 확정되면 객체 레인 BM25는
    `search_bm25_scoped`로 바뀐다 — 후보 집합 안에서 df를 다시 계산해 scope 밖 문서가 scope
-   안 순위를 흔들지 못하게 한다(`search.py:393-394`).
+   안 순위를 흔들지 못하게 한다(`search.py:393-394`). 호출자는 이 추론을 덮어쓸 수 있다
+   (#74): `search --context-id <id>`는 그 컨텍스트로 고정하고, `--all-contexts`는 추론
+   없이 전체를 회수한다. 세 갈래(`explicit`/`inferred`/`none`)를 `_resolve_scope`가 한
+   자리에서 정해 `recall`에 넘기고 같은 값을 응답의 `scope` 사실로 신고하므로, 신고값과
+   실제로 걸린 필터가 갈라지지 않는다. 코퍼스가 모르는 id는 `UnknownScopeError`로
+   거부한다 — 조용한 전 채널 0건이 오타와 미적재를 섞지 않게. 채널별 노출 개수도 호출
+   인자다(`eval_recall(channel_top_k=)`, 하네스 기본 5 / CLI `--top-k` 기본 10).
 
 ### 회수 계약 — 엔진은 회수하고 에이전트가 답변을 판정한다
 

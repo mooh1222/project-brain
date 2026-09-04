@@ -280,3 +280,22 @@ def test_audit_skill_reports_read_only_diagnostics_before_opt_in_updates():
         "명시적인 수정 요청",
     ):
         assert required in audit
+
+
+def test_query_skill_documents_scope_and_display_limit_options():
+    query = _installed_skill("query")
+
+    for required in (
+        "--context-id <id>",
+        "--all-contexts",
+        "--top-k",
+        "기본 10",
+        # scope 사실을 읽는 법과, scope가 거르지 않는 채널을 함께 안내한다.
+        "origin",
+        "advisories",
+    ):
+        assert required in query
+
+    # 다른 서브커맨드의 --scope(promote 승격 단위, draft 범위 서술)와 섞이지 않게
+    # 조회 스킬은 그 이름을 쓰지 않는다.
+    assert "search \"<질문>\" --scope" not in query

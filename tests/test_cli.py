@@ -180,6 +180,42 @@ class TestCli(unittest.TestCase):
         self.assertEqual([outcome[0] for outcome in outcomes], [0, 0])
         self.assertEqual(outcomes[1][1], outcomes[0][1])
 
+    def test_bare_free_query_matches_explicit_search_with_recall_options(self):
+        # 새 옵션(#74)도 bare 자유질의와 explicit search가 같은 파서·같은 출력이어야 한다.
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search_index import rebuild
+        from tests.test_search import glossary_term, scoped_context
+
+        for obj in (
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
+            scoped_context("context.b", display_name="클리어 토큰",
+                           title="클리어 토큰 도메인", context_key="clear-token"),
+            glossary_term("g.in", term="보상", context_id="context.kayak-race"),
+            glossary_term("g.out", term="보상", context_id="context.clear-token"),
+        ):
+            BrainStore.save_object(self.root, obj)
+        db = self.input_dir / "index.db"
+        rebuild(self.root, db, embedder=StubEmbedder())
+        common = [
+            "--db", str(db), "--brain-root", str(self.root), "--stub-embedder",
+        ]
+
+        for option_tail in (
+            ["--all-contexts", "--top-k", "3"],
+            ["--context-id", "context.clear-token"],
+        ):
+            outcomes = self._run_bare_and_explicit_search(
+                ["카약 레이스 보상 기준", *common, *option_tail])
+            self.assertEqual([outcome[0] for outcome in outcomes], [0, 0])
+            self.assertEqual(outcomes[1][1], outcomes[0][1])
+
+        # 실패 경로(없는 context id)도 같은 rc·같은 JSON으로 끝난다.
+        outcomes = self._run_bare_and_explicit_search(
+            ["카약 레이스 보상 기준", *common, "--context-id", "context.nope"])
+        self.assertEqual([outcome[0] for outcome in outcomes], [1, 1])
+        self.assertEqual(outcomes[1][1], outcomes[0][1])
+
     def test_bare_free_query_matches_search_missing_index_failure(self):
         args = [
             "레인 영역 배치",
@@ -1796,13 +1832,124 @@ class TestCliSearch(unittest.TestCase):
             BrainStore.save_object(self.brain, obj)
         rebuild(self.brain, self.db, embedder=StubEmbedder())
 
-    def _search(self, query):
+    def _search(self, query, *extra):
         argv = ["search", query, "--db", str(self.db),
-                "--brain-root", str(self.brain), "--stub-embedder"]
+                "--brain-root", str(self.brain), "--stub-embedder", *extra]
         out = io.StringIO()
         with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
             rc = cli.main()
         return rc, json.loads(out.getvalue())
+
+    def _two_context_index(self):
+        from tests.test_search import glossary_term, scoped_context
+        self._build_index([
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
+            scoped_context("context.b", display_name="클리어 토큰",
+                           title="클리어 토큰 도메인", context_key="clear-token"),
+            glossary_term("g.in", term="보상", context_id="context.kayak-race"),
+            glossary_term("g.out", term="보상", context_id="context.clear-token"),
+        ])
+
+    def test_search_context_id_option_pins_recall_to_one_context(self):
+        # --context-id는 자동 추론을 무시하고 그 DomainContext로만 회수한다(#74).
+        self._two_context_index()
+        rc, payload = self._search("카약 레이스 보상 기준",
+                                   "--context-id", "context.clear-token")
+        self.assertEqual(rc, 0)
+        ids = {h["object_id"] for h in payload["results"]}
+        self.assertIn("g.clear-token.out", ids)
+        self.assertNotIn("g.kayak-race.in", ids)
+
+    def test_search_all_contexts_option_disables_auto_inference(self):
+        # 옵션 없는 같은 질의는 자동 추론으로 한 컨텍스트에 묶이고, --all-contexts는 푼다.
+        self._two_context_index()
+        rc, inferred = self._search("카약 레이스 보상 기준")
+        self.assertEqual(rc, 0)
+        inferred_ids = {h["object_id"] for h in inferred["results"]}
+        self.assertNotIn("g.clear-token.out", inferred_ids)
+
+        rc, loosened = self._search("카약 레이스 보상 기준", "--all-contexts")
+        self.assertEqual(rc, 0)
+        loosened_ids = {h["object_id"] for h in loosened["results"]}
+        self.assertIn("g.kayak-race.in", loosened_ids)
+        self.assertIn("g.clear-token.out", loosened_ids)
+
+    def test_search_options_are_reported_in_the_scope_fact(self):
+        # 옵션으로 정한 scope가 #73의 scope 사실에 그대로 실린다 — 에이전트가 무엇이
+        # 걸렸는지 응답만 보고 안다.
+        self._two_context_index()
+
+        rc, inferred = self._search("카약 레이스 보상 기준")
+        self.assertEqual(rc, 0)
+        self.assertEqual(inferred["scope"],
+                         {"context_id": "context.kayak-race", "origin": "inferred"})
+
+        rc, pinned = self._search("카약 레이스 보상 기준",
+                                  "--context-id", "context.clear-token")
+        self.assertEqual(rc, 0)
+        self.assertEqual(pinned["scope"],
+                         {"context_id": "context.clear-token", "origin": "explicit"})
+
+        rc, released = self._search("카약 레이스 보상 기준", "--all-contexts")
+        self.assertEqual(rc, 0)
+        self.assertEqual(released["scope"], {"context_id": None, "origin": "none"})
+
+    def test_search_unknown_context_id_reports_json_error_without_traceback(self):
+        # 없는 context id는 조용한 0건이 아니라 rc 1 + 해결 단서가 담긴 JSON 오류다.
+        self._two_context_index()
+        rc, payload = self._search("보상 기준", "--context-id", "context.nope")
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("context.nope", payload["error"])
+        self.assertIn("context.kayak-race", payload["error"])
+
+    def test_search_context_id_and_all_contexts_cannot_be_combined(self):
+        # "이 컨텍스트로만" + "추론하지 마라"는 서로 모순이라 파싱 단계에서 막는다.
+        # 거부 문구는 argparse 소유(로케일 의존)라 단언하지 않고, 각각 단독으로는
+        # 통과하는데 함께 주면 usage 오류로 끝난다는 동작만 잠근다.
+        self._two_context_index()
+        for alone in (["--context-id", "context.kayak-race"], ["--all-contexts"]):
+            rc, _ = self._search("보상 기준", *alone)
+            self.assertEqual(rc, 0)
+
+        argv = ["search", "보상 기준",
+                "--context-id", "context.kayak-race", "--all-contexts"]
+        err = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), \
+             redirect_stdout(io.StringIO()), redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main()
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--all-contexts", err.getvalue())
+
+    def test_search_top_k_option_changes_channel_display_limit(self):
+        # 표시 상한 기본은 10이고 옵션으로 바꾼다(#74). 회수·순위는 그대로.
+        from tests.test_search import glossary_term
+        self._build_index([
+            glossary_term(f"g.r{i}", term="레이스", definition="카약 경주")
+            for i in range(12)
+        ])
+        rc, default_payload = self._search("레이스 카약 경주")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(default_payload["results"]), 10)
+
+        rc, narrowed = self._search("레이스 카약 경주", "--top-k", "3")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(narrowed["results"]), 3)
+        self.assertEqual([h["object_id"] for h in narrowed["results"]],
+                         [h["object_id"] for h in default_payload["results"]][:3])
+
+    def test_search_top_k_rejects_non_positive_values(self):
+        # 음수는 슬라이스로 조용히 뒤를 잘라내므로 파싱 단계에서 막는다.
+        for bad, expected in (("0", "1 이상"), ("-1", "1 이상"), ("다섯", "정수")):
+            argv = ["search", "레이스", "--top-k", bad]
+            err = io.StringIO()
+            with mock.patch("sys.argv", ["cli"] + argv), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    cli.main()
+            self.assertIn(expected, err.getvalue())
 
     def test_search_returns_results_with_status_and_linked(self):
         from tests.test_search import code_locator, domain_mapping, glossary_term

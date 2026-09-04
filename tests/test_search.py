@@ -23,12 +23,14 @@ from project_brain.search import (
     _document_frequency,
     _graph_signals_by_id,
     _rerank_by_support,
+    EVAL_CHANNEL_TOP_K,
     eval_recall,
     infer_scope,
     recall,
     rrf_fuse,
+    UnknownScopeError,
 )
-from project_brain.search_index import rebuild, search_bm25_scoped
+from project_brain.search_index import StaleIndexError, rebuild, search_bm25_scoped
 from project_brain.store import BrainStore
 from project_brain.tokenize_ko import active_backend
 
@@ -493,6 +495,130 @@ class InferScopeTest(unittest.TestCase):
         self.assertNotIn("g.kayak-race.in", ids)
 
 
+class RecallScopeOptionTest(unittest.TestCase):
+    """회수 진입점의 scope 지정·해제 인자(#74).
+
+    기본(scope=None, auto_scope=True)은 기존 자동 추론 그대로다. auto_scope=False는
+    추론을 건너뛰고 전체 코퍼스를 회수하며, scope를 명시하면 추론과 무관하게 그
+    컨텍스트만 회수한다. 명시한 scope가 코퍼스의 DomainContext id가 아니면 조용한
+    0건 대신 UnknownScopeError로 거부한다(오타와 미적재를 구분 못 하는 침묵 방지).
+    """
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+        build_store_dir(self.brain, [
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
+            scoped_context("context.b", display_name="클리어 토큰",
+                           title="클리어 토큰 도메인", context_key="clear-token"),
+            glossary_term("g.in", term="보상", context_id="context.kayak-race"),
+            glossary_term("g.out", term="보상", context_id="context.clear-token"),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+
+    def _recall_ids(self, **kwargs):
+        hits = recall("카약 레이스 보상 기준", db_path=self.db,
+                      embedder=self.embedder, brain_root=self.brain, **kwargs)
+        return {h["object_id"] for h in hits}
+
+    def test_auto_scope_disabled_recalls_every_context(self):
+        # 기본은 질의 표면이 context.kayak-race를 단일 특정해 하드 필터가 걸린다.
+        self.assertNotIn("g.clear-token.out", self._recall_ids())
+        loosened = self._recall_ids(auto_scope=False)
+        self.assertIn("g.kayak-race.in", loosened)
+        self.assertIn("g.clear-token.out", loosened)
+
+    def test_explicit_scope_applies_even_when_auto_scope_is_off(self):
+        # 해제는 "추론하지 마라"이지 "필터하지 마라"가 아니다 — 명시 scope는 그대로 걸린다.
+        pinned = self._recall_ids(scope="context.clear-token", auto_scope=False)
+        self.assertIn("g.clear-token.out", pinned)
+        self.assertNotIn("g.kayak-race.in", pinned)
+
+    def test_unknown_scope_id_is_rejected_and_names_known_contexts(self):
+        with self.assertRaises(UnknownScopeError) as ctx:
+            self._recall_ids(scope="context.nope")
+        message = str(ctx.exception)
+        self.assertIn("context.nope", message)
+        self.assertIn("context.kayak-race", message)
+
+    def test_non_context_object_id_is_not_a_valid_scope(self):
+        # DomainContext가 아닌 객체 id는 어떤 적중의 context_id와도 같지 않아 조용히
+        # 0건이 된다 — 그 침묵을 오류로 바꾼다.
+        with self.assertRaises(UnknownScopeError):
+            self._recall_ids(scope="g.kayak-race.in")
+
+    def test_eval_recall_passes_scope_options_to_recall(self):
+        loosened = eval_recall("카약 레이스 보상 기준", db_path=self.db,
+                               embedder=self.embedder, brain_root=self.brain,
+                               auto_scope=False)
+        loosened_ids = {h["object_id"] for h in loosened["results"]}
+        self.assertIn("g.kayak-race.in", loosened_ids)
+        self.assertIn("g.clear-token.out", loosened_ids)
+
+        pinned = eval_recall("카약 레이스 보상 기준", db_path=self.db,
+                             embedder=self.embedder, brain_root=self.brain,
+                             scope="context.clear-token")
+        pinned_ids = {h["object_id"] for h in pinned["results"]}
+        self.assertIn("g.clear-token.out", pinned_ids)
+        self.assertNotIn("g.kayak-race.in", pinned_ids)
+
+    def test_eval_recall_reports_how_the_applied_scope_was_decided(self):
+        # #73의 scope 사실은 "실제로 걸린 하드 필터"를 신고한다 — #74의 지정·해제도
+        # 같은 자리(_resolve_scope)를 지나므로 신고값과 적용값이 갈라지지 않는다.
+        kwargs = dict(db_path=self.db, embedder=self.embedder, brain_root=self.brain)
+
+        inferred = eval_recall("카약 레이스 보상 기준", **kwargs)
+        self.assertEqual(inferred["scope"],
+                         {"context_id": "context.kayak-race", "origin": "inferred"})
+
+        pinned = eval_recall("카약 레이스 보상 기준",
+                             scope="context.clear-token", **kwargs)
+        self.assertEqual(pinned["scope"],
+                         {"context_id": "context.clear-token", "origin": "explicit"})
+
+        released = eval_recall("카약 레이스 보상 기준", auto_scope=False, **kwargs)
+        self.assertEqual(released["scope"], {"context_id": None, "origin": "none"})
+
+        # 추론이 컨텍스트를 특정하지 못한 질의도 origin="none"이다 — 해제와 같은 값이며
+        # 둘을 origin으로 가르지 않는다(하드 필터가 없다는 사실만 신고).
+        unmatched = eval_recall("보상 기준이 뭐야", **kwargs)
+        self.assertEqual(unmatched["scope"], {"context_id": None, "origin": "none"})
+
+    def test_explicit_scope_is_the_scope_actually_applied(self):
+        # 신고값과 적용값의 배관 가드: 신고된 context_id 밖 적중이 결과에 없어야 한다.
+        pinned = eval_recall("카약 레이스 보상 기준", scope="context.clear-token",
+                             db_path=self.db, embedder=self.embedder,
+                             brain_root=self.brain)
+        reported = pinned["scope"]["context_id"]
+        for channel in ("results", "candidates"):
+            for hit in pinned[channel]:
+                if hit.get("context_id") is not None:
+                    self.assertEqual(hit["context_id"], reported)
+
+    def test_scope_guard_rejects_stale_schema_before_querying_documents(self):
+        # ★색인 쿼리 전 스키마 버전 가드★(§4 규약, 2026-06-11 실사고) — 구버전 DDL은
+        # 컬럼이 없어 SELECT가 원시 OperationalError로 터진다. scope 실존 가드도 다른
+        # 색인 쿼리와 같은 순서를 지켜 rebuild 안내로 거부해야 한다.
+        with sqlite3.connect(str(self.db)) as conn:
+            conn.execute("UPDATE meta SET schema_version = 3")
+            # v3에는 scope 후처리용 context_id 열이 없다 — 없는 열을 재현한다.
+            conn.execute(
+                "ALTER TABLE documents RENAME COLUMN context_id TO context_id_v3")
+        with self.assertRaises(StaleIndexError) as ctx:
+            self._recall_ids(scope="context.kayak-race")
+        self.assertIn("rebuild", str(ctx.exception))
+
+    def test_eval_recall_rejects_unknown_scope(self):
+        with self.assertRaises(UnknownScopeError):
+            eval_recall("카약 레이스 보상 기준", db_path=self.db,
+                        embedder=self.embedder, brain_root=self.brain,
+                        scope="context.nope")
+
+
 class EvalRecallChannelTest(unittest.TestCase):
     """eval_recall() — reviewed→results / candidate→candidates 채널 분리(§7)."""
 
@@ -545,6 +671,34 @@ class EvalRecallChannelTest(unittest.TestCase):
                            brain_root=brain)
         self.assertLessEqual(len(resp["results"]), 5)
         self.assertLessEqual(len(resp["candidates"]), 5)
+
+    def test_channel_top_k_argument_overrides_the_eval_measuring_unit(self):
+        # 표시 상한은 호출 인자다(#74). ★기본값은 EVAL_CHANNEL_TOP_K(=5)로 둔다★ —
+        # 평가 하네스(eval_harness.evaluate)는 recall_fn(query) 한 인자로만 부르므로
+        # 이 기본값이 곧 하네스의 측정 단위이고, CLI만 자기 기본값을 넘긴다.
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        brain = Path(td.name) / "brain"
+        db = Path(td.name) / "index.db"
+        build_store_dir(brain, [
+            glossary_term(f"g.r{i}", term="레이스", definition="카약 경주")
+            for i in range(7)
+        ])
+        rebuild(brain, db, embedder=self.embedder)
+        kwargs = dict(db_path=db, embedder=self.embedder, brain_root=brain)
+
+        self.assertEqual(
+            len(eval_recall("레이스 카약 경주", **kwargs)["results"]),
+            EVAL_CHANNEL_TOP_K,
+        )
+        self.assertEqual(
+            len(eval_recall("레이스 카약 경주", channel_top_k=7, **kwargs)["results"]),
+            7,
+        )
+        self.assertEqual(
+            len(eval_recall("레이스 카약 경주", channel_top_k=2, **kwargs)["results"]),
+            2,
+        )
 
     def test_candidate_only_corpus_leaves_results_empty(self):
         # reviewed 적중이 없으면 results는 비고 candidates만 찬다 — 판정 플래그 없음.

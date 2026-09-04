@@ -51,6 +51,16 @@ from project_brain.store import BrainStore
 from project_brain.surface import extract_surface
 from project_brain.tokenize_ko import tokenize
 
+
+class UnknownScopeError(ValueError):
+    """명시한 scope를 코퍼스가 모른다(#74).
+
+    scope 필터는 적중의 context_id 일치이므로, 없는 id를 주면 전 채널이 조용히 0건이
+    된다 — 오타와 "정말 없다"가 구분되지 않는다. 색인 누락·stale과 같은 철학으로
+    시끄럽게 거부하고 실제 id를 안내한다.
+    """
+
+
 # 기본 brain root·색인 DB는 프로젝트 config(.project-brain.json)에서 해석한다(§4) —
 # recall이 그래프 1-hop을 따라가려면 store가 필요하다.
 
@@ -76,8 +86,15 @@ RRF_K = 60
 CHANNEL_TOP_N = 50
 FUSED_TOP_N = 30
 
-# eval_recall이 채널별로 노출하는 상한(§8 평가 — top-5 적중 측정 단위).
+# eval_recall이 채널별로 노출하는 기본 상한(§8 평가 — top-5 적중 측정 단위).
+# ★기본값을 바꾸지 않는다★: 평가 하네스(eval_harness.evaluate)는 recall_fn(query)를
+# 인자 하나로만 부르므로 이 기본값이 곧 하네스의 측정 단위다.
 EVAL_CHANNEL_TOP_K = 5
+# CLI `search`가 채널별로 표시하는 기본 상한(#74) — 사람·에이전트가 읽는 회수 출력은
+# 평가 측정 단위보다 넓게 본다. CLI만 이 값을 channel_top_k로 넘기고, 하네스는 위 기본값
+# 그대로다. 회수 자체의 절단(객체 레인 FUSED_TOP_N, raw·Insight·projection 레인
+# RAW_FUSED_TOP_N)을 넘겨 보여줄 수는 없다 — 표시 상한은 자르기만 한다.
+SEARCH_CHANNEL_TOP_K = 10
 
 # ── raw 별도 레인(§2.2 raw 본문 색인, 2026-06-11) ──────────────────────────
 # raw 청크는 같은 색인 테이블에 있지만 recall에서는 ★객체 레인과 분리★한다 —
@@ -332,8 +349,68 @@ def _guard_index_freshness(db_path, store, brain_root) -> None:
         )
 
 
+# scope 오류 메시지에 나열하는 context id 최대 개수(그 이상은 총 개수만).
+_SCOPE_SUGGESTION_LIMIT = 10
+
+
+def _known_scopes(db_path, store) -> set[str]:
+    """코퍼스가 아는 context 집합 = 색인 행의 context_id ∪ 적재된 DomainContext id.
+
+    앞쪽이 scope 하드 필터가 실제로 대조하는 값이다(객체·raw·projection 행의
+    documents.context_id — Insight 레인은 "가로지르는" 객체라 scope 필터를 안 받는다)
+    — raw 원문만 있고 객체가 아직 없는 컨텍스트도 포함된다. 뒤쪽은 적재만 되고 아직
+    소속 행이 없는 빈 컨텍스트를 오타로 몰지 않기 위한 것이다(그 경우의 정직한 답은
+    오류가 아니라 0건).
+
+    ★documents를 읽기 전에 스키마 버전을 먼저 가드한다★(§4 규약) — 구버전 DDL은
+    컬럼이 없어 SELECT가 원시 OperationalError로 터진다(2026-06-11 실사고와 같은
+    모양). 다른 색인 쿼리(search_bm25·search_vector)와 같은 순서다.
+
+    토크나이저 가드(§6, _guard_tokenizer)는 여기서 부르지 않는다 — 이 SELECT는
+    토큰화를 쓰지 않는 열 대조라 불일치가 결과를 왜곡하지 않고, 실제로 토큰을 쓰는
+    BM25 레인이 바로 뒤에서 거부한다. 오타 난 id를 준 호출자에게는 방금 입력한 값에
+    대한 오류를 먼저 돌려주는 편이 낫다.
+    """
+    from project_brain.search_index import _guard_schema_version, _read_meta
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _guard_schema_version(_read_meta(conn))
+        rows = conn.execute(
+            "SELECT DISTINCT context_id FROM documents WHERE context_id IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
+    known = {r[0] for r in rows if r[0]}
+    known.update(ctx["id"] for ctx in store.by_kind("DomainContext"))
+    return known
+
+
+def _guard_scope_exists(scope, db_path, store) -> None:
+    """명시 scope가 코퍼스가 아는 context인지 확인한다 — 아니면 UnknownScopeError."""
+    known = _known_scopes(db_path, store)
+    if scope in known:
+        return
+    if known:
+        ordered = sorted(known)
+        shown = ", ".join(ordered[:_SCOPE_SUGGESTION_LIMIT])
+        if len(ordered) > _SCOPE_SUGGESTION_LIMIT:
+            # ★표본임을 문구로 드러낸다★ — 사전순 앞 10개가 찾던 것을 포함한다는
+            # 보장이 없으므로 "이게 전부"로 읽히면 오히려 잘못된 결론을 부른다.
+            hint = (f"코퍼스의 context id {len(ordered)}개 중 사전순 앞 "
+                    f"{_SCOPE_SUGGESTION_LIMIT}개: {shown} — 찾는 것이 없으면 "
+                    f"검색 결과 적중의 context_id를 본다")
+        else:
+            hint = f"코퍼스의 context id: {shown}"
+    else:
+        hint = "코퍼스에 context가 하나도 없다"
+    raise UnknownScopeError(
+        f"scope로 지정한 context가 코퍼스에 없다: {scope} — {hint}"
+    )
+
+
 def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
-           store=None) -> list[dict]:
+           store=None, auto_scope=True) -> list[dict]:
     """BM25 + 벡터를 RRF로 융합해 §3 결과 계약 리스트를 돌려준다(슬라이스 3·4).
 
     BM25 top50(search_bm25) + 벡터 top50(search_vector) → RRF 융합(k=60) → top30 →
@@ -346,12 +423,17 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
            절단 전에 거르므로 scope 밖 적중이 자리를 차지하지 않는다.
            ★scope가 확정되면 객체 레인 BM25는 search_bm25_scoped(후보 집합 내
            df 재계산)로 바뀐다 — scope 밖 적재 면역(§3.2 scoped 레인, 2026-06-12).★
-           ★None이면 질의 표면에서 자동 추론한다(infer_scope, P2 3번) — 질의가
-           기능명을 단일 특정하면 그 컨텍스트로 하드 필터, 아니면 전체 검색.★
+           ★None이고 auto_scope면 질의 표면에서 자동 추론한다(infer_scope, P2 3번) —
+           질의가 기능명을 단일 특정하면 그 컨텍스트로 하드 필터, 아니면 전체 검색.★
+           명시한 id를 코퍼스가 모르면 UnknownScopeError(#74) — 조용한 전 채널
+           0건으로 오타와 미적재가 섞이지 않게(_known_scopes).
     db_path: None이면 config(.project-brain.json)의 db.
     embedder: None이면 search_vector가 get_embedder()로 색인과 같은 팩토리에서 만든다.
     brain_root: None이면 config의 brain_root. 그래프 1-hop을 따라가려면 store가
                 필요하다 — ★recall 호출당 1회만 로드★(과업 2번). surface 원문 승급에도 쓴다.
+    auto_scope: False면 scope 자동 추론을 건너뛴다(#74 scope 해제) — scope=None과
+                함께 주면 하드 필터 없이 전체 코퍼스를 회수한다. scope를 명시하면
+                애초에 추론하지 않으므로 이 인자와 무관하게 그 컨텍스트만 회수한다.
     store: 이미 로드한 BrainStore를 주면 brain_root 로드를 건너뛴다(후속 b — 장수
            라우터가 질의마다 코퍼스를 다시 읽지 않게 self.store 재사용). brain_root와
            같은 코퍼스여야 한다(호출자 책임). brain_root는 store 주입 여부와 무관하게
@@ -373,7 +455,9 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     # superseded 객체를 옛 status로 회상하는 침묵 오답을 만든다 — 스키마 버전
     # 가드와 같은 철학으로 시끄럽게 거부하고 해결책(rebuild)을 안내한다.
     _guard_index_freshness(db_path, store, resolved_root)
-    if scope is None:
+    if scope is not None:
+        _guard_scope_exists(scope, db_path, store)
+    elif auto_scope:
         scope = infer_scope(query, store)
 
     # raw 별도 레인(§2.2): 채널 검색을 과대 적재한 뒤 kind로 갈라 객체 레인은 기존
@@ -677,20 +761,39 @@ def _matched_query_tokens_by_id(db_path, object_ids, tokens) -> dict[str, list[s
     return matched
 
 
+# 회수 응답이 신고하는 scope 적용 출처(#73 origin + #74 명시 지정).
+#   "explicit" — 호출자가 scope를 직접 지정
+#   "inferred" — 질의 표면에서 자동 추론이 컨텍스트를 단일 특정
+#   "none"     — 하드 필터 없음(추론이 특정 못 했거나 auto_scope=False로 껐거나)
+def _resolve_scope(query, scope, auto_scope, store):
+    """(적용할 scope, 신고할 origin)을 한 자리에서 정한다.
+
+    ★한 자리★인 것이 계약이다 — 응답에 신고하는 값과 recall에 넘겨 실제로 걸리는
+    하드 필터가 갈라지지 않는다(#73 배관 보장).
+    """
+    if scope is not None:
+        return scope, "explicit"
+    if not auto_scope:
+        return None, "none"
+    inferred = infer_scope(query, store)
+    return inferred, ("inferred" if inferred is not None else "none")
+
+
 def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
-                store=None) -> dict:
+                store=None, scope=None, auto_scope=True,
+                channel_top_k=EVAL_CHANNEL_TOP_K) -> dict:
     """평가 하네스 진입점 — recall을 검수 상태·객체 종류만으로 채널로 가른다(#77).
 
     ADR 0008: 엔진은 회수만 하고 답변 판정은 에이전트가 한다. 회수한 객체를 엔진
     판정으로 숨기는 층은 없다 — 채널 배치는 status·kind로만 결정된다.
 
     반환(§7 산출식 + §2.2 raw 채널):
-      results            — reviewed 적중 top-5 (Insight·ContextProjection 제외)
-      candidates         — candidate 적중 top-5 (Insight·ContextProjection 제외)
-      raw_excerpts       — raw 청크 적중 top-5 ("원문 발췌(미검수)")
-      advisories         — reviewed Insight 적중 top-5 (가로지르는 위험/교훈 — 곁들임 채널.
+      results            — reviewed 적중 top-k (Insight·ContextProjection 제외)
+      candidates         — candidate 적중 top-k (Insight·ContextProjection 제외)
+      raw_excerpts       — raw 청크 적중 top-k ("원문 발췌(미검수)")
+      advisories         — reviewed Insight 적중 top-k (가로지르는 위험/교훈 — 곁들임 채널.
                             candidate Insight는 1차 미노출)
-      projection_reuse   — ContextProjection 적중 top-5 (이전 착수 브리핑 재사용 채널 —
+      projection_reuse   — ContextProjection 적중 top-k (이전 착수 브리핑 재사용 채널 —
                             status 무관 한 통로. results/candidates에는 안 섞인다)
 
     회수 사실(#73, ADR 0008 — 엔진은 회수만 하고 답변 판정은 에이전트가 한다). 아래
@@ -698,8 +801,11 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     않는다(등재 어휘가 걸리면 GlossaryTerm 객체 자체가 results에 오른다).
       query_tokens       — [{token, object_df, raw_df}] 질의 토큰 분해와 토큰별 문서 빈도.
                             tokenize 순서·중복 제거 그대로(길이 필터 없음).
-      scope              — {context_id, origin} 적용된 scope. 없으면 context_id=None,
-                            origin="none"; 질의 표면에서 자동 추론했으면 origin="inferred".
+      scope              — {context_id, origin} 적용된 scope. 호출자가 지정했으면
+                            origin="explicit", 질의 표면에서 자동 추론했으면 "inferred",
+                            하드 필터가 없으면 context_id=None·origin="none"
+                            (추론이 단일 특정에 실패했거나 auto_scope=False로 껐거나 —
+                            둘을 origin으로 가르지 않는다).
       matched_query_tokens — 채널 적중마다 동반. 질의 토큰 중 그 적중의 색인 본문에
                             실제로 있는 것만(raw 발췌 포함).
 
@@ -707,6 +813,14 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     에러를 던진다 — 하네스(evaluate)가 per-scenario 실패로 기록한다. brain_root는
     recall에 그대로 넘겨 그래프 1-hop store를 로드한다(None이면 config의 brain_root).
     store는 recall로 그대로 넘긴다(후속 b — 주면 brain_root 재로드 생략).
+
+    scope/auto_scope는 _resolve_scope를 거쳐 recall로 넘어간다(#74) — 지정하면 그
+    context로만 회수하고, auto_scope=False면 추론 없이 전체를 회수한다. 모르는 id는
+    UnknownScopeError.
+    channel_top_k는 채널별 상한이며 기본값은 EVAL_CHANNEL_TOP_K(=5)다 — 하네스는
+    recall_fn(query) 한 인자로만 부르므로 측정 단위가 이 기본값으로 고정되고, 표시
+    상한을 넓히는 쪽(CLI)이 명시로 넘긴다. 상한은 자르기만 하므로 recall 레인 절단
+    (FUSED_TOP_N·RAW_FUSED_TOP_N)보다 많이 보여줄 수는 없다.
     """
     db_path = resolve_db_path(db_path)
     if not db_path.exists():
@@ -719,11 +833,11 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
         store = BrainStore.load(resolved_root)
 
     # scope는 여기서 한 번 풀어 recall에 넘긴다 — 응답에 신고하는 값과 실제로 적용된
-    # 하드 필터가 같은 값임을 배관으로 보장하기 위해서다(#73). recall(scope=None)의
-    # 자동 추론과 결과가 같다(같은 query·store).
-    scope = infer_scope(query, store)
+    # 하드 필터가 같은 값임을 배관으로 보장하기 위해서다(#73). 세 갈래를 여기서 다
+    # 정하고 recall에는 auto_scope=False로 넘겨(#74) recall이 다시 추론하지 않게 한다.
+    scope, scope_origin = _resolve_scope(query, scope, auto_scope, store)
     hits = recall(query, scope=scope, db_path=db_path, embedder=embedder,
-                  brain_root=resolved_root, store=store)
+                  brain_root=resolved_root, store=store, auto_scope=False)
     # 회수 사실(#73): 질의 토큰 분해·토큰별 df·적중별 겹친 질의 토큰. 채널을 가르기
     # ★전에★ 적중에 붙여 다섯 채널이 같은 사실을 그대로 들고 나가게 한다.
     query_tokens = compute_query_token_facts(query, db_path)
@@ -734,22 +848,22 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     results = [h for h in hits
                if h.get("status") == "reviewed"
                and h.get("kind") != INSIGHT_KIND
-               and h.get("kind") != PROJECTION_KIND][:EVAL_CHANNEL_TOP_K]
+               and h.get("kind") != PROJECTION_KIND][:channel_top_k]
     candidates = [h for h in hits
                   if h.get("status") == "candidate"
                   and h.get("kind") != INSIGHT_KIND
-                  and h.get("kind") != PROJECTION_KIND][:EVAL_CHANNEL_TOP_K]
+                  and h.get("kind") != PROJECTION_KIND][:channel_top_k]
     raw_excerpts = [h for h in hits
-                    if h.get("status") == RAW_STATUS][:EVAL_CHANNEL_TOP_K]
+                    if h.get("status") == RAW_STATUS][:channel_top_k]
     # advisories(§4.6 C1): reviewed Insight를 별도 통로로 — "가로지르는" 곁들임이라
     # results에 섞지 않는다. candidate Insight는 1차 미노출(미룸 §7).
     advisories = [h for h in hits
                   if h.get("kind") == INSIGHT_KIND
-                  and h.get("status") == "reviewed"][:EVAL_CHANNEL_TOP_K]
+                  and h.get("status") == "reviewed"][:channel_top_k]
     # projection_reuse(spec 2026-06-17 Task A5): ContextProjection을 별도 통로로 —
     # candidate·reviewed status 무관 한 채널로(results/candidates에는 위에서 제외).
     projection_reuse = [h for h in hits
-                        if h.get("kind") == PROJECTION_KIND][:EVAL_CHANNEL_TOP_K]
+                        if h.get("kind") == PROJECTION_KIND][:channel_top_k]
     return {
         "results": results,
         "candidates": candidates,
@@ -757,6 +871,5 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
         "advisories": advisories,
         "projection_reuse": projection_reuse,
         "query_tokens": query_tokens,
-        "scope": {"context_id": scope,
-                  "origin": "inferred" if scope is not None else "none"},
+        "scope": {"context_id": scope, "origin": scope_origin},
     }
