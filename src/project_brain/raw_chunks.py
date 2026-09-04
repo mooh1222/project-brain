@@ -19,7 +19,7 @@ from pathlib import Path
 CHUNK_TARGET_TOKENS = 500
 CHUNK_OVERLAP_RATIO = 0.15
 
-# §2.2 행 메타 상수 — 색인·recall·게이트가 raw 행을 식별하는 단일 출처.
+# §2.2 행 메타 상수 — 색인·recall·채널 배치가 raw 행을 식별하는 단일 출처.
 RAW_KIND = "raw_chunk"
 RAW_STATUS = "raw"
 

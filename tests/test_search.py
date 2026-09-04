@@ -5,7 +5,7 @@ spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 전부 stub embedder + tmp 색인으로 결정론 검증한다(과업 명세 — 실모델 테스트 없음.
 실코퍼스·실모델 측정은 cli eval/슬라이스 3.5 몫). RRF 수식은 손계산 기대값으로
 검증하고, 양채널/단채널 융합·top30 절단·matched_via 표기·결정론·scope 필터·
-채널 분리·needs_clarification을 본다.
+검수 상태와 객체 종류만으로 갈리는 채널 배치를 본다(ADR 0008 — 답변 게이트 폐지).
 """
 
 import sqlite3
@@ -19,16 +19,10 @@ from project_brain.embedder import StubEmbedder
 from project_brain.id_grammar import format_id, parse_id
 from project_brain.objbase import base
 from project_brain.search import (
-    _ABS_SCORE_FLOOR_CANDIDATE,
-    _ABS_SCORE_FLOOR_REVIEWED,
-    _ANCHOR_DF_MAX,
     _GRAPH_SUPPORT_CAP,
-    _REGISTRY_MIN_SURFACE_LEN,
     _document_frequency,
-    _gate_pass,
     _graph_signals_by_id,
     _rerank_by_support,
-    compute_query_signals,
     eval_recall,
     infer_scope,
     recall,
@@ -521,7 +515,7 @@ class EvalRecallChannelTest(unittest.TestCase):
         resp = eval_recall("레이스 보상", db_path=self.db, embedder=self.embedder,
                            brain_root=self.brain)
         self.assertEqual(set(resp.keys()),
-                         {"results", "candidates", "raw_excerpts", "needs_clarification",
+                         {"results", "candidates", "raw_excerpts",
                           "advisories", "projection_reuse",
                           # 회수 사실(#73) — 채널과 나란히 응답 최상위에 실린다.
                           "query_tokens", "scope"})
@@ -552,8 +546,8 @@ class EvalRecallChannelTest(unittest.TestCase):
         self.assertLessEqual(len(resp["results"]), 5)
         self.assertLessEqual(len(resp["candidates"]), 5)
 
-    def test_needs_clarification_when_no_results(self):
-        # reviewed 적중이 없으면(candidate만) needs_clarification=True.
+    def test_candidate_only_corpus_leaves_results_empty(self):
+        # reviewed 적중이 없으면 results는 비고 candidates만 찬다 — 판정 플래그 없음.
         td = TemporaryDirectory()
         self.addCleanup(td.cleanup)
         brain = Path(td.name) / "brain"
@@ -564,14 +558,15 @@ class EvalRecallChannelTest(unittest.TestCase):
         rebuild(brain, db, embedder=self.embedder)
         resp = eval_recall("레이스 카약", db_path=db, embedder=self.embedder, brain_root=brain)
         self.assertEqual(resp["results"], [])
-        self.assertTrue(resp["needs_clarification"])
+        self.assertIn("g.neutral.only", {h["object_id"] for h in resp["candidates"]})
+        self.assertNotIn("needs_clarification", resp)
 
-    def test_no_results_no_candidates_clarifies(self):
+    def test_reviewed_hit_fills_results(self):
         resp = eval_recall("레이스", db_path=self.db, embedder=self.embedder,
                            brain_root=self.brain)
-        # g.race(reviewed) 적중 → results 채워짐 → needs_clarification=False.
+        # g.race(reviewed) 적중 → results 채워짐. 응답에 판정 플래그는 없다.
         self.assertTrue(resp["results"])
-        self.assertFalse(resp["needs_clarification"])
+        self.assertNotIn("needs_clarification", resp)
 
     def test_missing_db_raises_clear_error(self):
         missing = Path(self._td.name) / "nonexistent.db"
@@ -1025,202 +1020,27 @@ class GraphRerankTest(unittest.TestCase):
             )
 
 
-class GatePureFunctionTest(unittest.TestCase):
-    """다신호 답변 게이트 순수 함수(_gate_pass) — 합성 신호 손계산 픽스처(§7·§8).
+class EvalRecallStatusKindChannelTest(unittest.TestCase):
+    """eval_recall 채널 배치는 ★검수 상태와 객체 종류★만으로 갈린다(ADR 0008, #77).
 
-    임베더·DB 불필요(순수 함수). 통과/차단·채널 분리·앵커 우선 신호를 검증한다.
-    캡 패턴(_GRAPH_SUPPORT_CAP)을 따라 계수 값 단언으로 침묵 드리프트를 막는다.
-    """
-
-    def _signals(self, *, top_score=0.02, second=0.01, anchor_df=5, registry_match=False):
-        # margin은 _gate_pass boolean에 안 들어가지만 신호 dict 형태를 맞춰 둔다.
-        return {"top_score": top_score, "margin": round(top_score - second, 6),
-                "anchor_df": anchor_df, "registry_match": registry_match}
-
-    def test_calibration_constants_pinned(self):
-        # §8 "계수는 코드 상수+테스트로 고정". 실모델 cli eval 캘리브레이션 값
-        # (2026-06-10 골든셋 s1~s5): 앵커 df 상한 30(s2=17·s5=52 사이 폭 중앙,
-        # 코퍼스 302문서 ≈10%) / 점수 바닥 reviewed 0.005·candidate 0.001(관대).
-        # 바꾸려면 실모델 cli eval 재측정 후 이 단언을 같이 갱신할 것.
-        self.assertEqual(_ANCHOR_DF_MAX, 30)
-        self.assertEqual(_ABS_SCORE_FLOOR_REVIEWED, 0.005)
-        self.assertEqual(_ABS_SCORE_FLOOR_CANDIDATE, 0.001)
-        # candidate 바닥이 reviewed보다 관대(낮음)해야 채널 분리가 성립(§7).
-        self.assertLess(_ABS_SCORE_FLOOR_CANDIDATE, _ABS_SCORE_FLOOR_REVIEWED)
-        # 명부 길이 문턱은 lint 최소 길이와 일치해야 오매칭/규칙 불일치가 안 생긴다.
-        from project_brain.schema import _SYNONYM_MIN_LEN
-        self.assertEqual(_REGISTRY_MIN_SURFACE_LEN, 3)
-        self.assertEqual(_SYNONYM_MIN_LEN, _REGISTRY_MIN_SURFACE_LEN)
-
-    def test_passes_when_anchored_and_above_floor(self):
-        # 앵커 df가 상한 안(희소 토큰 present) + 점수가 바닥 위 → 통과(s1~s4 형태).
-        sig = self._signals(anchor_df=5)
-        self.assertTrue(_gate_pass(0.02, sig, channel="reviewed"))
-        self.assertTrue(_gate_pass(0.02, sig, channel="candidate"))
-
-    def test_blocks_when_anchor_absent(self):
-        # ★s5 형태★: present 내용 토큰이 흔하기만 함(앵커 df 52 > 30) → 점수가
-        # confident여도 차단. 표면 앵커(iii)가 우선 신호.
-        sig = self._signals(top_score=0.0275, anchor_df=52)
-        self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))
-        self.assertFalse(_gate_pass(0.0275, sig, channel="candidate"))
-
-    def test_blocks_when_no_present_content_token(self):
-        # present 내용 토큰이 하나도 없으면(anchor_df None) 차단 — 코퍼스에 닿는
-        # 표면 토큰 자체가 없는 질의.
-        sig = self._signals(anchor_df=None)
-        self.assertFalse(_gate_pass(0.03, sig, channel="reviewed"))
-
-    def test_anchor_at_boundary_passes(self):
-        # 경계값 = 상한이면 통과(<= 규칙). 31이면 차단.
-        self.assertTrue(_gate_pass(0.02, self._signals(anchor_df=_ANCHOR_DF_MAX),
-                                   channel="reviewed"))
-        self.assertFalse(_gate_pass(0.02, self._signals(anchor_df=_ANCHOR_DF_MAX + 1),
-                                    channel="reviewed"))
-
-    def test_channel_separation_at_floor(self):
-        # 채널 분리(§7): reviewed 바닥과 candidate 바닥 사이의 약한 점수는 candidate만
-        # 통과한다 — "후보 노출 기회 보존" + reviewed 거짓 양성 가드 동시 충족.
-        between = (_ABS_SCORE_FLOOR_CANDIDATE + _ABS_SCORE_FLOOR_REVIEWED) / 2
-        sig = self._signals(top_score=between, second=0.0, anchor_df=5)
-        self.assertFalse(_gate_pass(between, sig, channel="reviewed"))
-        self.assertTrue(_gate_pass(between, sig, channel="candidate"))
-
-    def test_below_candidate_floor_blocks_both(self):
-        # candidate 바닥보다도 낮은 degenerate 점수는 두 채널 다 차단.
-        sig = self._signals(top_score=0.0005, second=0.0, anchor_df=5)
-        self.assertFalse(_gate_pass(0.0005, sig, channel="candidate"))
-        self.assertFalse(_gate_pass(0.0005, sig, channel="reviewed"))
-
-    def test_large_margin_does_not_force_pass(self):
-        # ★margin은 boolean 규칙에 안 쓴다★(§7): s5처럼 margin이 커도(lone spike)
-        # 앵커가 없으면 차단된다 — "margin 크면 confident"의 역작동을 막는 설계.
-        sig = self._signals(top_score=0.0275, second=0.0156, anchor_df=52)
-        self.assertGreater(sig["margin"], 0.01)  # 큰 margin이지만
-        self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))  # 그래도 차단
-
-    def test_registry_match_opens_despite_high_anchor_df(self):
-        # ★확정설계 핵심(OR 보강)★: anchor_df가 상한을 넘어 원래 차단될 신호라도
-        # registry_match=True면 열린다. 단조 완화 — 새로 열리는 유일한 경로.
-        sig = self._signals(top_score=0.02, anchor_df=52, registry_match=True)
-        self.assertTrue(_gate_pass(0.02, sig, channel="reviewed"))
-        self.assertTrue(_gate_pass(0.02, sig, channel="candidate"))
-
-    def test_registry_match_still_requires_floor(self):
-        # registry_match=True라도 절대 점수 바닥 미만이면 차단(보강은 앵커만 우회, 바닥은 유지).
-        sig = self._signals(top_score=0.0001, second=0.0, anchor_df=52, registry_match=True)
-        self.assertFalse(_gate_pass(0.0001, sig, channel="reviewed"))
-
-    def test_no_registry_match_preserves_s5_block(self):
-        # ★s5 가드 보존★: registry_match=False + anchor_df>상한 → 여전히 차단.
-        sig = self._signals(top_score=0.0275, anchor_df=52, registry_match=False)
-        self.assertFalse(_gate_pass(0.0275, sig, channel="reviewed"))
-
-
-class ComputeQuerySignalsTest(unittest.TestCase):
-    """compute_query_signals — top_score(i)/margin(ii)/anchor_df(iii) 질의 레벨 계산.
-
-    anchor_df는 색인 DB의 document frequency 조회라 stub 색인(tmp)으로 결정론 검증한다.
+    답변 게이트를 폐지했으므로 질의 어휘가 흔하든 명부에 없든 회수된 검수 객체는
+    results로 나온다 — 그것이 답인지는 에이전트가 회수 결과와 사실을 보고 판정한다.
+    토큰 분해가 형태소 백엔드 설치 여부에 흔들리지 않게 ★정규식 폴백을 강제★한다
+    (색인·질의가 같은 tokenize를 쓰므로 rebuild 전에 고정해야 한다).
     """
 
     def setUp(self):
-        self._td = TemporaryDirectory()
-        self.brain = Path(self._td.name) / "brain"
-        self.db = Path(self._td.name) / "index.db"
-        self.embedder = StubEmbedder()
-        # '레이스'를 5개 문서에 심고, '보상'을 1개에만 → df로 희소/흔함 갈림.
-        objs = [glossary_term(f"g.race{i}", term="레이스", definition="카약 경주 진행")
-                for i in range(5)]
-        objs.append(glossary_term("g.reward", term="보상", definition="레이스 종료 보상"))
-        build_store_dir(self.brain, objs)
-        rebuild(self.brain, self.db, embedder=self.embedder)
-
-    def tearDown(self):
-        self._td.cleanup()
-
-    def test_signal_keys(self):
-        hits = recall("레이스", db_path=self.db, embedder=self.embedder, brain_root=self.brain)
-        sig = compute_query_signals("레이스", hits, self.db)
-        self.assertEqual(set(sig.keys()), {"top_score", "margin", "anchor_df", "registry_match"})
-
-    def test_top_score_and_margin_from_hits(self):
-        hits = recall("레이스 보상", db_path=self.db, embedder=self.embedder,
-                      brain_root=self.brain)
-        sig = compute_query_signals("레이스 보상", hits, self.db)
-        self.assertEqual(sig["top_score"], hits[0]["score"])
-        expected_margin = round(hits[0]["score"] - hits[1]["score"], 6)
-        self.assertEqual(sig["margin"], expected_margin)
-
-    def test_anchor_df_is_min_present_content_token_df(self):
-        # '레이스'(6 문서: 5 race + 1 reward 정의에 등장)·'보상'(1 문서). 앵커 = 최소 df.
-        # 정확한 df는 토큰화·표면에 달렸지만 '보상'이 '레이스'보다 희소해야 한다.
-        hits = recall("레이스 보상", db_path=self.db, embedder=self.embedder,
-                      brain_root=self.brain)
-        sig = compute_query_signals("레이스 보상", hits, self.db)
-        self.assertIsNotNone(sig["anchor_df"])
-        self.assertGreaterEqual(sig["anchor_df"], 1)
-        # 앵커는 가장 희소한 present 토큰이므로 '보상' df(1)와 같아야 한다.
-        self.assertEqual(sig["anchor_df"], 1)
-
-    def test_anchor_df_none_when_no_present_content_token(self):
-        # 코퍼스에 없는 토큰만(길이 2자+) → present 0 → anchor_df None.
-        hits = recall("크리스마스", db_path=self.db, embedder=self.embedder,
-                      brain_root=self.brain)
-        sig = compute_query_signals("크리스마스", hits, self.db)
-        self.assertIsNone(sig["anchor_df"])
-
-    def test_single_token_query_margin_equals_top(self):
-        # 결과가 1건이면 2등이 없어 margin = top_score(0과의 차).
-        td = TemporaryDirectory()
-        self.addCleanup(td.cleanup)
-        brain = Path(td.name) / "brain"
-        db = Path(td.name) / "index.db"
-        build_store_dir(brain, [glossary_term("g.one", term="유일토큰", definition="유일")])
-        rebuild(brain, db, embedder=self.embedder)
-        hits = recall("유일토큰", db_path=db, embedder=self.embedder, brain_root=brain)
-        # stub 벡터가 여러 행을 돌려줄 수 있으니 1건 단언 대신 margin 정의만 본다.
-        sig = compute_query_signals("유일토큰", hits, db)
-        if len(hits) == 1:
-            self.assertEqual(sig["margin"], round(hits[0]["score"], 6))
-
-    def test_registry_match_true_when_surface_in_query(self):
-        class _FakeStore:
-            def by_kind(self, kind):
-                return ([{"term": "PopupLuckyBoxInfo", "synonyms": ["럭키박스"], "aliases": []}]
-                        if kind == "GlossaryTerm" else [])
-        sig = compute_query_signals("럭키박스 API 쓰나", [], self.db, store=_FakeStore())
-        self.assertTrue(sig["registry_match"])
-
-    def test_registry_match_false_when_no_surface(self):
-        class _FakeStore:
-            def by_kind(self, kind):
-                return ([{"term": "PopupLuckyBoxInfo", "synonyms": ["럭키박스"], "aliases": []}]
-                        if kind == "GlossaryTerm" else [])
-        sig = compute_query_signals("크리스마스 이벤트 보상", [], self.db, store=_FakeStore())
-        self.assertFalse(sig["registry_match"])
-
-    def test_registry_ignores_short_surfaces(self):
-        class _FakeStore:
-            def by_kind(self, kind):
-                return ([{"term": "NL", "synonyms": [], "aliases": []}]
-                        if kind == "GlossaryTerm" else [])
-        sig = compute_query_signals("NL 값 알려줘", [], self.db, store=_FakeStore())
-        self.assertFalse(sig["registry_match"])
-
-    def test_registry_match_absent_when_no_store(self):
-        sig = compute_query_signals("레이스", [], self.db)
-        self.assertFalse(sig["registry_match"])
-        self.assertIn("registry_match", sig)
-
-
-class EvalRecallGateAppliedTest(unittest.TestCase):
-    """eval_recall 게이트 적용판(§7·§8) — 게이트가 채널 산출과 needs_clarification을
-    좌우하는지 stub 색인으로 검증한다(실모델 측정은 cli eval 보고 몫).
-    """
-
-    def setUp(self):
+        self._saved_name = tokenize_ko._BACKEND_NAME
+        self._saved_split = tokenize_ko._KOREAN_SPLITTER
+        tokenize_ko._BACKEND_NAME = "regex"
+        tokenize_ko._KOREAN_SPLITTER = tokenize_ko._regex_splitter
+        self.addCleanup(self._restore_backend)
         self._td = TemporaryDirectory()
         self.embedder = StubEmbedder()
+
+    def _restore_backend(self):
+        tokenize_ko._BACKEND_NAME = self._saved_name
+        tokenize_ko._KOREAN_SPLITTER = self._saved_split
 
     def tearDown(self):
         self._td.cleanup()
@@ -1232,75 +1052,39 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
         rebuild(brain, db, embedder=self.embedder)
         return brain, db
 
-    def test_anchored_query_passes_gate_to_results(self):
-        # 희소 토큰 present(앵커 있음) → reviewed 적중이 게이트를 통과해 results로.
-        brain, db = self._build([
-            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
-        ])
-        resp = eval_recall("레이스", db_path=db, embedder=self.embedder, brain_root=brain)
-        self.assertIn(
-            "g.neutral.race",
-            {h["object_id"] for h in resp["results"]},
-        )
-        self.assertFalse(resp["needs_clarification"])
-
-    def test_anchorless_query_gates_all_channels(self):
-        # ★s5 형태의 단위 재현★: 흔한 토큰만 다수 문서에 심어 앵커 df를 상한 위로
-        # 올린다(코퍼스에 없는 핵심 엔티티는 매칭 0). reviewed·candidate 둘 다 게이트
-        # 차단 → needs_clarification=True. _ANCHOR_DF_MAX+5개 문서로 df를 확실히 넘긴다.
-        n = _ANCHOR_DF_MAX + 5
+    def test_common_token_query_still_returns_reviewed_results(self):
+        # 옛 게이트가 막던 형태의 재현: 질의의 유일한 희소 엔티티가 코퍼스에 없고
+        # ('없는엔티티') 남는 토큰('보상')은 35개 문서에 흔하다. 명부 표면형도 질의에
+        # 없다. 게이트 시절엔 전 채널 0건이었지만, 이제 reviewed·candidate 적중이
+        # 그대로 채널에 오른다.
         objs = [glossary_term(f"g.common{i}", term="보상", definition="흔한 보상 토큰")
-                for i in range(n)]
-        # candidate도 같은 흔한 토큰만 → 게이트 차단 대상.
+                for i in range(35)]
         objs += [glossary_term(f"g.cand{i}", term="보상", definition="흔한 보상 토큰",
                                status="candidate") for i in range(3)]
         brain, db = self._build(objs)
-        # 질의의 유일한 희소 엔티티는 코퍼스에 없고('없는엔티티'), 남는 토큰은 흔함('보상').
         resp = eval_recall("없는엔티티 보상", db_path=db, embedder=self.embedder,
                            brain_root=brain)
-        self.assertEqual(resp["results"], [])
-        self.assertEqual(resp["candidates"], [])
-        self.assertTrue(resp["needs_clarification"])
+        self.assertTrue(resp["results"])
+        self.assertTrue(all(h["status"] == "reviewed" for h in resp["results"]))
+        self.assertTrue(resp["candidates"])
+        self.assertTrue(all(h["status"] == "candidate" for h in resp["candidates"]))
+        # 부재 엔티티는 숨기는 대신 사실로 신고한다 — 판정은 에이전트 몫(#73).
+        facts = {f["token"]: f for f in resp["query_tokens"]}
+        self.assertEqual(facts["없는엔티티"]["object_df"], 0)
 
-    def test_registry_match_opens_query_that_anchor_would_block(self):
-        # ★end-to-end 판별★: 같은 코퍼스에서 두 질의가 둘 다 anchor_df>상한(앵커만으론 차단)인데,
-        # 명부 표면형('럭키박스')을 포함한 질의만 registry_match로 열리고, 명부에 없는 흔한 토큰만인
-        # 질의는 s5처럼 차단된다 → registry_match가 eval_recall 경로에서 결정적 요인임을 증명(배관+게이트 합성).
-        # 흔한 토큰 2종(len 3+)을 정의에 심어 df를 상한 위로: '럭키박스'(타깃 synonym으로 명부 표면형이 됨)
-        # + '흔한보상어휘'(명부 어디에도 없음).
-        n = _ANCHOR_DF_MAX + 5
-        common = [glossary_term(f"g.common{i}", term=f"공용용어{i}",
-                                definition="럭키박스 흔한보상어휘 관련 설명")
-                  for i in range(n)]
-        target = glossary_term("g.lb", term="럭키박스구성품",
-                               definition="럭키박스 구성품 표시", synonyms=["럭키박스"])
-        brain, db = self._build(common + [target])
-        store = BrainStore.load(brain)
-
-        # 배관 검증: eval_recall이 store를 compute_query_signals에 kwarg로 전달한다.
-        with mock.patch("project_brain.search.compute_query_signals",
-                        wraps=compute_query_signals) as spy:
-            opened = eval_recall("럭키박스", db_path=db,
-                                 embedder=self.embedder, brain_root=brain)
-        self.assertIsNotNone(spy.call_args.kwargs.get("store"),
-                             "eval_recall이 store를 compute_query_signals에 전달해야 한다")
-
-        # 명부 표면형 질의: anchor_df가 상한을 넘어 앵커만으론 차단인데 registry_match로 열린다.
-        sig = compute_query_signals("럭키박스", [], db, store=store)
-        self.assertGreater(sig["anchor_df"], _ANCHOR_DF_MAX)  # 앵커만이면 차단 신호
-        self.assertTrue(sig["registry_match"])
-        self.assertGreater(len(opened["results"]), 0)
-        self.assertFalse(opened["needs_clarification"])
-
-        # 대조: 같은 코퍼스·같은 高 anchor_df지만 명부에 없는 흔한 토큰만인 질의 → 차단 유지(s5 가드).
-        blocked = eval_recall("흔한보상어휘", db_path=db,
-                              embedder=self.embedder, brain_root=brain)
-        self.assertEqual(blocked["results"], [])
-        self.assertTrue(blocked["needs_clarification"])
+    def test_no_glossary_registry_in_corpus_still_fills_results(self):
+        # 코퍼스에 GlossaryTerm이 하나도 없어도 회수된 reviewed 객체는 results에
+        # 오른다 — 채널 배치가 어휘 명부를 전혀 참조하지 않는다는 가드.
+        brain, db = self._build([
+            domain_mapping("mapping.flow", meaning="아이템 사용 처리 흐름"),
+        ])
+        resp = eval_recall("아이템 사용하면 어떤 흐름으로 처리돼", db_path=db,
+                           embedder=self.embedder, brain_root=brain)
+        self.assertIn("mapping.neutral.flow",
+                      {h["object_id"] for h in resp["results"]})
 
     def test_candidate_channel_survives_when_reviewed_empty(self):
-        # 앵커 있는 질의 + candidate만 적중 → results 빈, candidates 채워짐,
-        # needs_clarification=True(reviewed 게이트 통과 0 — §7 산출식).
+        # candidate만 적중 → results 빈, candidates 채워짐(§7 채널 분리 유지).
         brain, db = self._build([
             glossary_term("g.only", term="레인", definition="레인 영역 배치",
                           status="candidate"),
@@ -1312,7 +1096,6 @@ class EvalRecallGateAppliedTest(unittest.TestCase):
             "g.neutral.only",
             {h["object_id"] for h in resp["candidates"]},
         )
-        self.assertTrue(resp["needs_clarification"])
 
 
 class RawLaneTest(unittest.TestCase):
@@ -1366,16 +1149,18 @@ class RawLaneTest(unittest.TestCase):
         object_ids = [h["object_id"] for h in hits if h["kind"] != "raw_chunk"]
         self.assertIn("g.neutral.race", object_ids)
 
-    def test_signals_anchor_df_excludes_raw_rows(self):
-        # 앵커 df 상한(30)은 객체 코퍼스 분포로 보정된 값(§8) — raw 청크가 분포를
-        # 흔들면 안 된다. 같은 토큰의 raw 문서 40개가 있어도 anchor_df는 객체 df(1).
+    def test_object_df_excludes_raw_rows(self):
+        # 회수 사실의 객체 df(#73)는 raw 청크를 세지 않는다 — "객체로는 없지만
+        # 기획서에는 있다"를 raw df와 갈라 보고하려면 두 수가 분리돼야 한다.
+        # 같은 토큰의 raw 문서 40개가 있어도 객체 df는 1이다.
         big = "\n\n".join(f"# 섹션 {i}\n레이스 서술 {i}." for i in range(40))
         self._write_raw("foo-ctx", "spec", big)
         self._build([glossary_term("g.race", term="레이스", definition="카약 경주")])
-        hits = recall("레이스", db_path=self.db, embedder=self.embedder,
-                      brain_root=self.brain)
-        signals = compute_query_signals("레이스", hits, self.db)
-        self.assertEqual(signals["anchor_df"], 1)
+        conn = sqlite3.connect(str(self.db))
+        try:
+            self.assertEqual(_document_frequency(conn, "레이스"), 1)
+        finally:
+            conn.close()
 
     def test_eval_recall_raw_excerpts_channel(self):
         self._write_raw("foo-ctx", "spec",
@@ -1391,19 +1176,17 @@ class RawLaneTest(unittest.TestCase):
         self.assertFalse([h for h in resp["results"] if h["kind"] == "raw_chunk"])
         self.assertFalse([h for h in resp["candidates"] if h["kind"] == "raw_chunk"])
 
-    def test_raw_channel_not_blocked_by_anchor(self):
-        # ★설계 고정(2026-06-11)★: raw 발췌 레인은 앵커 게이트 미적용 — 앵커는 단정 답
-        # 채널용으로 보정된 가드이고, raw 레인의 존재 이유가 "객체화 안 된 기획서 서술
-        # 회수"라 객체 코퍼스 앵커로 막으면 본말전도. 객체 표면에 없는 어휘 질의여도
-        # raw 발췌는 나온다(reviewed/candidate는 앵커 부재로 차단 — "없다" 보존).
+    def test_raw_lane_returns_excerpts_for_vocabulary_absent_from_objects(self):
+        # ★설계 고정(2026-06-11)★: raw 레인의 존재 이유는 "객체화 안 된 기획서 서술
+        # 회수"다. 객체 표면에 없는 어휘로 물어도 raw 발췌는 그대로 나온다.
         self._write_raw("foo-ctx", "spec",
                         "# 연출 기획\n버블 발사 연출은 무지개색 궤적으로 표현한다.\n")
         self._build([glossary_term("g.x", term="레이스", definition="카약 경주")])
         resp = eval_recall("버블 발사 연출 무지개색 궤적", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
-        self.assertEqual(resp["results"], [])
-        self.assertTrue(resp["needs_clarification"])
-        self.assertTrue(resp["raw_excerpts"])
+        raw_ids = [h["object_id"] for h in resp["raw_excerpts"]]
+        self.assertTrue(raw_ids)
+        self.assertTrue(all(i.startswith("raw.foo-ctx.") for i in raw_ids))
 
     def test_no_raw_dir_keeps_empty_channel(self):
         self._build([glossary_term("g.race", term="레이스", definition="카약 경주")])
@@ -1500,18 +1283,19 @@ class InsightLaneTest(unittest.TestCase):
         locs = {c["object_id"] for c in ins_hit["linked"]["code_locators"]}
         self.assertIn("code.neutral.enter", locs)
 
-    def test_signals_anchor_df_excludes_insight_rows(self):
-        # 앵커 df 상한(30)은 객체 코퍼스 분포로 보정된 값(§8) — Insight 행이 분포를
-        # 흔들면 안 된다(C2 게이트층 누수). 같은 토큰의 Insight 40개가 있어도
-        # anchor_df는 객체 df(1)로 유지(_document_frequency가 Insight 제외).
+    def test_object_df_excludes_insight_rows(self):
+        # 회수 사실의 객체 df(#73)는 Insight 행을 세지 않는다 — Insight는 자유 텍스트
+        # 곁들임 채널이라 객체 코퍼스 분포에 섞이면 안 된다. 같은 토큰의 Insight
+        # 40개가 있어도 객체 df는 1로 유지된다.
         objs = [glossary_term("g.race", term="레이스", definition="카약 경주")]
         objs += [insight(f"insight.{i}", body=f"레이스 위험 서술 {i}") for i in range(40)]
         build_store_dir(self.brain, objs)
         rebuild(self.brain, self.db, embedder=self.embedder)
-        hits = recall("레이스", db_path=self.db, embedder=self.embedder,
-                      brain_root=self.brain)
-        signals = compute_query_signals("레이스", hits, self.db)
-        self.assertEqual(signals["anchor_df"], 1)
+        conn = sqlite3.connect(str(self.db))
+        try:
+            self.assertEqual(_document_frequency(conn, "레이스"), 1)
+        finally:
+            conn.close()
 
 
 def projection(pid, *, context_id, title, reuse_payload, source_object_ids=None,
@@ -1590,10 +1374,10 @@ class ProjectionLaneTest(unittest.TestCase):
         self.assertEqual(proj_hit["linked"]["code_locators"], [])
         self.assertEqual(proj_hit["graph_support"], 0)
 
-    def test_projection_excluded_from_anchor_df(self):
-        # projection 본문에만 있는 희귀 토큰의 df가 0(존재 안 함)으로 잡힌다 —
-        # projection 행 미집계. raw/Insight df 제외와 동형(앵커 df는 객체 코퍼스
-        # 분포로 보정된 값이라 projection 자유 텍스트가 분포를 흔들면 안 됨).
+    def test_projection_excluded_from_object_df(self):
+        # projection 본문에만 있는 희귀 토큰의 객체 df가 0(존재 안 함)으로 잡힌다 —
+        # projection 행 미집계. raw/Insight df 제외와 동형(projection은 정본 객체를
+        # 재서술한 본문이라 객체 df에 섞이면 정본 회수를 잠식한다).
         # "reuseprobexyz"는 토크나이저가 쪼개지 않는 단일 보존 토큰이고 projection
         # reuse_payload에만 있다 — 제외 안 되면 df=1로 새므로 제외를 직접 검증한다.
         src = domain_mapping("mapping.mina-kayak.race-end-result-achieve",
@@ -1618,8 +1402,7 @@ class ProjectionLaneTest(unittest.TestCase):
 
 class EvalRecallProjectionReuseTest(unittest.TestCase):
     """eval_recall projection_reuse 채널(spec 2026-06-17 Task A5) — ContextProjection은
-    status 무관 results/candidates에 안 섞이고 projection_reuse로만 나온다. 게이트는
-    raw 채널(바닥만, 앵커 미적용)이라 어휘 드리프트 요구를 막지 않는다. 전부 stub
+    status 무관 results/candidates에 안 섞이고 projection_reuse로만 나온다. 전부 stub
     embedder."""
 
     def setUp(self):
@@ -1693,7 +1476,6 @@ class EvalRecallAdvisoriesTest(unittest.TestCase):
         self._td.cleanup()
 
     def test_reviewed_insight_goes_to_advisories_not_results(self):
-        # g.token(reviewed 객체)이 질의 토큰 "클리어 토큰"을 제공해 anchor가 잡히고,
         # reviewed Insight는 advisories로, results/candidates엔 안 섞인다.
         build_store_dir(self.brain, [
             glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
@@ -1713,7 +1495,6 @@ class EvalRecallAdvisoriesTest(unittest.TestCase):
     def test_candidate_insight_not_exposed_first_cut(self):
         # candidate Insight는 validate가 적재를 막으므로(Task 1) save_object를 우회해
         # 직접 파일로 써 store에 넣고, 검색층이 방어적으로 안 띄움을 확인(이중 안전망).
-        # g.token이 anchor를 제공해도 candidate Insight는 어느 채널에도 안 뜬다.
         import json
         build_store_dir(self.brain, [
             glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
@@ -1730,7 +1511,7 @@ class EvalRecallAdvisoriesTest(unittest.TestCase):
         self.assertFalse([h for h in resp["candidates"] if h["kind"] == "Insight"])
 
     def test_advisories_capped_at_five(self):
-        # g.token이 anchor("클리어 토큰") 제공. reviewed Insight 7개 → advisories top-5.
+        # reviewed Insight 7개 → advisories top-5.
         objs = [glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰")]
         objs += [insight(f"insight.{i}", body="클리어 토큰 노출 게이트 이중구현 위험")
                  for i in range(7)]
@@ -1738,12 +1519,12 @@ class EvalRecallAdvisoriesTest(unittest.TestCase):
         rebuild(self.brain, self.db, embedder=self.embedder)
         resp = eval_recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
-        self.assertTrue(resp["advisories"])           # anchor 잡혀 advisory 나옴
+        self.assertTrue(resp["advisories"])
         self.assertLessEqual(len(resp["advisories"]), 5)
 
-    def test_advisories_do_not_affect_needs_clarification(self):
-        # advisories는 곁들임 — reviewed 객체 답(results)이 0이면 advisory가 있어도
-        # needs_clarification=True. candidate term g.cand가 anchor만 제공(results 아님).
+    def test_candidate_object_does_not_pull_insight_into_results(self):
+        # advisories는 곁들임 채널 — reviewed 객체 답(results)이 0이어도 Insight가
+        # results/candidates로 새지 않는다(채널은 status·kind로만 갈린다).
         build_store_dir(self.brain, [
             glossary_term("g.cand", term="클리어 토큰", definition="스테이지 클리어 토큰",
                           status="candidate"),
@@ -1752,19 +1533,10 @@ class EvalRecallAdvisoriesTest(unittest.TestCase):
         rebuild(self.brain, self.db, embedder=self.embedder)
         resp = eval_recall("클리어 토큰 노출 게이트 이중구현", db_path=self.db,
                            embedder=self.embedder, brain_root=self.brain)
-        self.assertTrue(resp["advisories"])      # reviewed Insight + anchor → 곁들임
-        self.assertEqual(resp["results"], [])    # reviewed 객체 답 없음(g.cand는 candidate)
-        self.assertTrue(resp["needs_clarification"])
-
-
-class RawGatePassTest(unittest.TestCase):
-    def test_raw_channel_uses_candidate_floor_and_skips_anchor(self):
-        # raw 채널 게이트 = 바닥(candidate 수준)만. 앵커 None/초과여도 통과한다.
-        sig = {"top_score": 0.02, "margin": 0.02, "anchor_df": None}
-        self.assertTrue(_gate_pass(0.02, sig, channel="raw"))
-        self.assertFalse(_gate_pass(_ABS_SCORE_FLOOR_CANDIDATE / 2, sig, channel="raw"))
-        sig_over = {"top_score": 0.02, "margin": 0.02, "anchor_df": _ANCHOR_DF_MAX + 1}
-        self.assertTrue(_gate_pass(0.02, sig_over, channel="raw"))
+        self.assertIn("insight.neutral.gate",
+                      {h["object_id"] for h in resp["advisories"]})
+        self.assertEqual(resp["results"], [])
+        self.assertFalse([h for h in resp["candidates"] if h["kind"] == "Insight"])
 
 
 class IndexFreshnessGuardTest(unittest.TestCase):

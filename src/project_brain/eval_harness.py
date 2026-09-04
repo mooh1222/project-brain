@@ -1,19 +1,19 @@
 """검색층 평가 하네스 (스펙 §8, 구현 슬라이스 1).
 
 시나리오 파일(eval_scenarios.json)의 질의→기대 기준을 recall 응답에 대조한다.
-측정값: 채널별 top-5 적중, 그래프 동반, 반환 개수 상한, 부재 토큰 보고, 게이트
-("없다" 유지), (참고) 쿼리 지연. 실 코퍼스+실 모델 측정(슬라이스 3.5/6)도 이
-하네스를 그대로 쓴다.
+측정값: 채널별 top-5 적중, 그래프 동반, 반환 개수 상한, 부재 토큰 보고,
+(참고) 쿼리 지연. 실 코퍼스+실 모델 측정(슬라이스 3.5/6)도 이 하네스를 그대로 쓴다.
 
-recall 응답 계약 — search.eval_recall이 내는 현행 형태(채널 5개 + #73 회수 사실):
+recall 응답 계약 — search.eval_recall이 내는 현행 형태(채널 5개 + #73 회수 사실).
+채널은 ★검수 상태와 객체 종류로만★ 갈리고 엔진 판정 플래그는 없다(ADR 0008 —
+엔진은 회수만 하고 답변 판정은 에이전트가 한다):
 
     {
-      "results": [...],             # reviewed source 채널 top-5 (Insight·projection 제외)
-      "candidates": [...],          # candidate 후보 채널 top-5 (§7 채널 분리)
+      "results": [...],             # reviewed 객체 채널 top-5 (Insight·projection 제외)
+      "candidates": [...],          # candidate 객체 채널 top-5 (§7 채널 분리)
       "raw_excerpts": [...],        # raw 청크 top-5 (§2.2 원문 발췌 — 미검수)
       "advisories": [...],          # reviewed Insight top-5 (§4.6 곁들임 채널)
       "projection_reuse": [...],    # ContextProjection top-5 (재사용 레인, status 무관)
-      "needs_clarification": bool,  # 게이트 통과 0건 → True ("no evidence → 없다" 보존)
       "query_tokens": [...],        # [{token, object_df, raw_df}] 질의 토큰 분해와 df 사실
       "scope": {...},               # {context_id, origin} 적용된 scope
     }
@@ -36,7 +36,6 @@ ASSERTION_KEYS = {
     "any_channel_top5_any",  # results/candidates 어느 채널이든 top-5에 ≥1 적중
     "linked_any_groups",   # results top-5의 그래프 동반에서 그룹별 ≥1 적중
     "max_results",         # results 반환 개수 상한 (무더기 반환 가드)
-    "no_answer",           # 게이트 작동: needs_clarification=True + results 0건
     "raw_top5_prefix_any",  # raw_excerpts top-5에 프리픽스 일치 id ≥1 (§2.2 raw 채널 —
                             # 청크 id는 청커 산출이라 정확 id 대신 프리픽스로 판정)
     "advisories_top5_any",  # advisories(reviewed Insight) top-5에 ≥1 적중 (§4.6)
@@ -91,8 +90,8 @@ def expected_object_ids(scenarios) -> set[str]:
 
 
 def empty_recall(query) -> dict:
-    """검색층 미구현 시의 stub — 빈 응답이므로 게이트 시나리오만 통과한다(의도된 빨간 베이스라인)."""
-    return {"results": [], "candidates": [], "needs_clarification": True}
+    """검색층 미구현 시의 stub — 전 채널이 비어 적중 판정이 전부 실패한다(의도된 빨간 베이스라인)."""
+    return {"results": [], "candidates": []}
 
 
 def load_recall_fn():
@@ -218,14 +217,6 @@ def evaluate(recall_fn, scenarios) -> dict:
                 "passed": bool(matched),
                 "matched": matched,
                 "query_tokens": token_facts,
-            }
-
-        if expect.get("no_answer"):
-            gated = bool(response.get("needs_clarification")) and not results
-            checks["no_answer"] = {
-                "passed": gated,
-                "needs_clarification": bool(response.get("needs_clarification")),
-                "returned": len(results),
             }
 
         scenario_reports.append({

@@ -537,11 +537,6 @@ def _validate_eval_payload(payload: object) -> dict:
                 "eval_invalid",
                 f"{pointer}/expect/max_results must be a positive integer",
             )
-        if "no_answer" in expect and expect["no_answer"] is not True:
-            _fail(
-                "eval_invalid",
-                f"{pointer}/expect/no_answer must be true",
-            )
     return payload
 
 

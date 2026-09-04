@@ -1355,11 +1355,11 @@ def _run_search(argv) -> int:
     """의미 회상 명령 (스펙 §7) — 어시스턴트가 직접 쓰는 회상 진입점.
 
     `search "<query>" [--db <path>] [--brain-root <path>] [--stub-embedder]` —
-    recall + 다신호 게이트(search.eval_recall)를 태운 결과를 검수 상태(reviewed/
-    candidate)·linked(코드 위치)와 함께 JSON으로 낸다. needs_clarification은 게이트
-    통과 reviewed 0건일 때 True("no evidence → 없다" §7). 회수 사실(query_tokens·
-    scope·적중별 matched_query_tokens, #73)도 회수 응답 그대로 실린다. 색인 DB가 없으면
-    명확한 에러로 끝낸다(`cli index rebuild` 먼저).
+    recall 결과(search.eval_recall)를 검수 상태(reviewed/candidate)·linked(코드 위치)와
+    함께 JSON으로 낸다. 채널은 status·kind로만 갈리며 엔진 판정 플래그는 싣지 않는다
+    (ADR 0008 — 답변 판정은 에이전트 몫). 회수 사실(query_tokens·scope·적중별
+    matched_query_tokens, #73)도 회수 응답 그대로 실린다. 색인 DB가 없으면 명확한
+    에러로 끝낸다(`cli index rebuild` 먼저).
     """
     parser = argparse.ArgumentParser(prog="cli search")
     parser.add_argument("query")

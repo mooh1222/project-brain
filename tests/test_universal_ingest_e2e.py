@@ -713,7 +713,7 @@ class MinaKayakEndToEndTest(unittest.TestCase):
             "mapping.mina-kayak.cooltime-repeat",
             {hit["object_id"] for hit in answer["results"]},
         )
-        self.assertFalse(answer["needs_clarification"])
+        self.assertNotIn("needs_clarification", answer)
 
 
 if __name__ == "__main__":

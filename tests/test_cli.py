@@ -1817,7 +1817,8 @@ class TestCliSearch(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn("results", payload)
         self.assertIn("candidates", payload)
-        self.assertIn("needs_clarification", payload)
+        # 답변 게이트 폐지(#77) — 응답에 엔진 판정 플래그가 없다.
+        self.assertNotIn("needs_clarification", payload)
         # reviewed 적중에 검수상태·linked(코드 위치)가 동반된다.
         ids = {h["object_id"] for h in payload["results"]}
         self.assertIn("mapping.neutral.lane", ids)
@@ -1851,9 +1852,9 @@ class TestCliSearch(unittest.TestCase):
         self.assertEqual(rc, 0)
         cand_ids = {h["object_id"] for h in payload["candidates"]}
         self.assertIn("g.neutral.cand", cand_ids)
-        # reviewed 게이트 통과 0건 → needs_clarification.
+        # reviewed 적중이 없으면 results는 빈 채로 나간다(판정 플래그 없음).
         self.assertEqual(payload["results"], [])
-        self.assertTrue(payload["needs_clarification"])
+        self.assertNotIn("needs_clarification", payload)
 
     def test_search_raw_excerpts_channel(self):
         # raw 원문 청크가 "원문 발췌(미검수)" 라벨 채널로 나온다(§2.2, 2026-06-11).

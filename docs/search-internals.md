@@ -129,48 +129,67 @@ SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_ind
 
 ## 4. 검색 융합 (`search.py`)
 
-색인 두 레인이 검색에서 만난다. 본체는 `recall()`이다(`search.py:334`).
+색인 두 레인이 검색에서 만난다. 본체는 `recall()`이다(`search.py:335`).
 
 1. **두 채널을 각각 검색**: BM25 키워드(`search_bm25`)와 벡터 KNN(`search_vector`)을 각각
-   `CHANNEL_TOP_N=50`개 받는다(`search.py:71`).
+   `CHANNEL_TOP_N=50`개 받는다(`search.py:76`).
 2. **RRF로 융합**: 점수가 아니라 **순위**만 써서 `score = Σ 1/(60+rank)`로 합친다
-   (`RRF_K=60`, `rrf_fuse`, `search.py:68,136-153`). 융합 후 `FUSED_TOP_N=30`으로 자른다.
+   (`RRF_K=60`, `rrf_fuse`, `search.py:73,117-134`). 융합 후 `FUSED_TOP_N=30`으로 자른다.
    두 채널은 점수 척도가 달라서(BM25는 작을수록 좋고 벡터 거리도 작을수록 좋음) 순위 기반
    융합이 안전하다. rank는 1부터 센다(표준 RRF — 1등이 1/61).
 3. **그래프 1-hop + 상호지지 재정렬**: top 30 안에서 객체들이 서로의 참조 필드(코드 위치·
    용어·결정·매핑)로 연결됐는지 본다. **"내 엣지가 적중집합 안 다른 적중을 가리킨
    수"(아웃바운드 도달, `graph_support`)**를 상한 `_GRAPH_SUPPORT_CAP=2`로 자른 값을 1순위
-   정렬 키로 써서 재정렬한다(`_rerank_by_support`, `search.py:109,226-241`). RRF 점수에
+   정렬 키로 써서 재정렬한다(`_rerank_by_support`, `search.py:114,227-242`). RRF 점수에
    상수를 더하지 않고 순서만 바꾸는 게 원칙이다. 상한을 두는 이유는 엣지 100개 넘는 허브
    객체가 그래프 신호만으로 위로 굳어지는 걸 막기 위해서다. 양방향 `graph_hits`는 표시·진단
-   전용이고 재정렬에는 안 쓴다(`search.py:195-223`).
+   전용이고 재정렬에는 안 쓴다(`search.py:196-224`).
 4. **레인 분리**: raw 청크·`Insight`·`ContextProjection`은 객체 레인과 **따로 융합**해
-   뒤에 붙인다(`_OBJECT_LANE_EXCLUDED`, `search.py:95,378-404`). 자유 텍스트 덩어리가 객체
+   뒤에 붙인다(`_OBJECT_LANE_EXCLUDED`, `search.py:100,379-405`). 자유 텍스트 덩어리가 객체
    자리를 잠식해 그래프 재정렬을 약화시키던 회귀를 막으려는 것이다. raw·projection은
    `surface_text`가 원문을 운반하고 그래프·surface 승급이 없다.
-5. **scope(범위) 좁히기**: 질의가 기능명을 단일 특정하면(`infer_scope`, `search.py:271`)
+5. **scope(범위) 좁히기**: 질의가 기능명을 단일 특정하면(`infer_scope`, `search.py:272`)
    그 `DomainContext`로 하드 필터를 건다. scope가 확정되면 객체 레인 BM25는
    `search_bm25_scoped`로 바뀐다 — 후보 집합 안에서 df를 다시 계산해 scope 밖 문서가 scope
-   안 순위를 흔들지 못하게 한다(`search.py:392-393`).
+   안 순위를 흔들지 못하게 한다(`search.py:393-394`).
 
-`eval_recall`(`search.py:707`)은 평가·CLI 진입점으로, `recall` 결과를 **다신호 답변
-게이트**(`_gate_pass`, `search.py:671`)에 통과시켜 채널로 가른다 — reviewed `results` /
-candidate `candidates` / `raw_excerpts` / `advisories`(Insight) / `projection_reuse`. 게이트
-boolean은 RRF 절대 점수 바닥 + (**명부 매칭** OR **표면 앵커**)다. **명부 매칭**(`registry_match`)은
-질의에 GlossaryTerm term/synonyms/aliases 표면형(3자+)이 통째 부분문자열로 등장하면 참 —
-`compute_query_signals`가 store로 계산한다. **표면 앵커**(`anchor_df`, 질의에서 가장 희소한
-토큰의 문서 빈도, `_ANCHOR_DF_MAX=30`)는 명부 매칭이 없을 때의 폴백 신호다. 1·2등 점수 차
-(`margin`)는 신호에 동반되나 boolean에는 안 쓴다. 예컨대 '크리스마스'(코퍼스 빈도 0, 명부 미등재)
-처럼 핵심 엔티티가 없으면 명부도 앵커도 실패해 게이트가 막아 거짓양성을 거른다 — "근거 없으면
-없다고 답한다"의 구현부다. 잘 적재된 엔티티는 토큰이 흔해져 `anchor_df`가 상한을 넘어도 명부
-표면형으로 통과한다(럭키박스 거짓음성 해소). reviewed 게이트 통과가 0건이면 `needs_clarification`을 켠다.
+### 회수 계약 — 엔진은 회수하고 에이전트가 답변을 판정한다
 
-`eval_recall()`의 다섯 채널은 explicit `search`와 서브커맨드 없는 자유질의가 그대로 노출한다.
-reviewed와 candidate는 각각 `results`와 `candidates`에 남아 관련성과 검수 상태가 섞이지 않는다.
-일반 질문을 처리하는 설치 조회 스킬은 이 결과에서 핵심 객체를 고르고 `show`로 본문과 1-hop 이웃을
-확인한다. `QueryRouter.answer()`는 이 recall을 소비하지 않으며 변경 이유·현재·과거·근거 사슬만
-BrainStore에서 결정론적으로 계산한다. 이 분리는 ranking·score floor·채널 top-K·scope 추론·색인
-표면과 DB 형식을 바꾸지 않는다.
+`eval_recall`(`search.py:680`)이 평가·CLI 진입점이다. `recall` 결과를 **검수 상태(status)와
+객체 종류(kind)만으로** 다섯 채널로 가른다 — reviewed 객체는 `results`, candidate 객체는
+`candidates`, raw 청크는 `raw_excerpts`, reviewed `Insight`는 `advisories`(가로지르는 위험·교훈
+곁들임), `ContextProjection`은 `projection_reuse`(status 무관 한 통로)다. 채널마다 top-5
+(`EVAL_CHANNEL_TOP_K`, `search.py:80`). **회수한 객체를 엔진 판정으로 숨기는 층은 없다.**
+
+2026-06-10의 다신호 답변 게이트(RRF 절대 점수 바닥 + 명부 매칭 OR 앵커 df 상한)와
+`needs_clarification` 플래그는 폐지했다(#77). 엔진은 LLM이 아니라 "이 객체가 이 질문의 답인가"를
+판단할 수 없고, 어휘 일치는 답 존재의 근거가 아니다. 게이트는 질의 단위 전부-아니면-전무
+스위치로 작동해 총칭 질문의 검수 객체를 통째로 숨겼고, 잘 적재된 개념일수록 토큰이 흔해져 더
+막혔다. 결정 기록은 [ADR 0008](adr/0008-engine-recalls-agent-judges-answers.md)에 있다.
+
+판정을 뺀 자리에는 **결정론 사실**이 들어간다(#73). 어떤 값도 boolean 판정이 아니다.
+
+- `query_tokens` — 질의 토큰 분해와 토큰별 `object_df`·`raw_df`
+  (`compute_query_token_facts`, `search.py:628`). `object_df`는 raw 청크·`Insight`·
+  `ContextProjection`을 뺀 색인 문서 수(`_document_frequency`, `search.py:597`), `raw_df`는
+  raw 청크 수(`_raw_document_frequency`, `search.py:614`)다. 둘을 갈라야 "객체로는 회수되지
+  않았지만 기획서 원문에는 있다"와 "어디에도 없다"가 구분된다. 토큰 순서·중복 제거는
+  `tokenize()` 출력 그대로라(길이 필터 없음) 형태소 쪼개짐 때문에 부재가 오탐일 수 있음을
+  에이전트가 직접 본다.
+- 적중마다 `matched_query_tokens` — 질의 토큰 중 그 적중의 색인 본문(`tokenized_text`)에
+  실제로 있는 것만(`_matched_query_tokens_by_id`, `search.py:653`). raw 발췌에도 붙는다.
+- `scope` — `{context_id, origin}`. 자동 추론이면 `origin="inferred"`, 없으면 `"none"`이다.
+  신고하는 값과 실제로 적용된 하드 필터가 같은 값이도록 `eval_recall`이 scope를 한 번 풀어
+  `recall`에 넘긴다.
+
+`eval_recall()`의 다섯 채널과 사실 필드는 explicit `search`와 서브커맨드 없는 자유질의가
+키 하드코딩 없이 그대로 노출한다(`cli.py`의 `_run_search`가 응답을 통과시키고 신뢰 라벨만
+덧입힌다). reviewed와 candidate는 각각 `results`와 `candidates`에 남아 관련성과 검수 상태가
+섞이지 않는다. 일반 질문을 처리하는 설치 조회 스킬은 이 결과에서 핵심 객체를 고르고 `show`로
+본문과 1-hop 이웃을 확인한 뒤 답할지 없다고 할지를 판정한다. `QueryRouter.answer()`는 이
+recall을 소비하지 않으며 변경 이유·현재·과거·근거 사슬만 BrainStore에서 결정론적으로
+계산한다(`query` 라우터의 `needs_clarification`은 결정론 충돌·모호성 신고라 이름만 같은 별개
+필드다). 이 분리는 ranking·채널 top-K·scope 추론·색인 표면과 DB 형식을 바꾸지 않는다.
 
 ## 5. 확인 범위·한계
 
@@ -187,6 +206,6 @@ BrainStore에서 결정론적으로 계산한다. 이 분리는 ranking·score f
 - **bge-m3 내부 동작**: sentence-transformers `encode`의 내부 토큰화·길이 자르기는 외부
   라이브러리 영역이다.
 
-상수 캘리브레이션 값(`RRF_K`, `_GRAPH_SUPPORT_CAP`, `_ANCHOR_DF_MAX`, 점수 바닥)의 근거와
-실측 이력은 `search.py` 주석과 `docs/specs/2026-06-10-bb2-brain-search-layer-design.md`
-(설계 시점 히스토리)에 있다.
+상수 캘리브레이션 값(`RRF_K`, `_GRAPH_SUPPORT_CAP`)의 근거와 실측 이력은 `search.py`
+주석과 `docs/specs/2026-06-10-bb2-brain-search-layer-design.md`(설계 시점 히스토리)에 있다.
+그 설계가 함께 고정했던 앵커 df 상한과 채널별 점수 바닥은 #77에서 폐지돼 코드에 없다.

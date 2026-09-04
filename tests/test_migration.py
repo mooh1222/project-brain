@@ -930,7 +930,7 @@ def test_canonical_payload_reference_ordinals_are_deterministic_and_distinct():
             b'"top5_any":["code.Legacy"]}}]}\n'
         ),
         b'{"scenarios":[null]}\n',
-        b'{"scenarios":[{"id":"","query":"q","expect":{"no_answer":true}}]}\n',
+        b'{"scenarios":[{"id":"","query":"q","expect":{"top5_any":["code.Legacy"]}}]}\n',
         b'{"scenarios":[{"id":"s","query":"q"}]}\n',
         (
             b'{"scenarios":[{"id":"s","query":"q","expect":'
@@ -966,7 +966,7 @@ def test_canonical_payload_reference_ordinals_are_deterministic_and_distinct():
         ),
         (
             b'{"scenarios":[{"id":"s","query":"q","expect":'
-            b'{"no_answer":null}}]}\n'
+            b'{"no_answer":true}}]}\n'
         ),
         (
             b'{"scenarios":[{"id":"s","query":"q","expect":'
@@ -978,8 +978,8 @@ def test_canonical_payload_reference_ordinals_are_deterministic_and_distinct():
         ),
         (
             b'{"scenarios":['
-            b'{"id":"s","query":"q","expect":{"no_answer":true}},'
-            b'{"id":"s","query":"q2","expect":{"no_answer":true}}]}\n'
+            b'{"id":"s","query":"q","expect":{"top5_any":["code.Legacy"]}},'
+            b'{"id":"s","query":"q2","expect":{"top5_any":["code.Legacy"]}}]}\n'
         ),
     ],
 )

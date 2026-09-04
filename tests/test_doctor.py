@@ -48,7 +48,7 @@ class DiagnoseProjectTest(unittest.TestCase):
             BrainStore.save_object(root / "brain", context())
             (root / "brain" / "eval_scenarios.json").write_text(
                 json.dumps({"scenarios": [
-                    {"id": "s", "query": "q", "expect": {"no_answer": True}}
+                    {"id": "s", "query": "q", "expect": {"top5_any": ["m.x"]}}
                 ]}), encoding="utf-8")
             report = diagnose(start=root)
             by_name = {c["name"]: c for c in report["checks"]}

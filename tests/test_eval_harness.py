@@ -1,7 +1,7 @@
 """검색층 평가 하네스 테스트 (스펙 §8, 구현 슬라이스 1).
 
-하네스 자체의 판정 로직(top-5 적중·그래프 동반·반환 상한·게이트)을 가짜 recall
-응답으로 결정론 검증한다. 골든셋 파일(eval_scenarios.json) 자체의 무결성·기대
+하네스 자체의 판정 로직(top-5 적중·그래프 동반·반환 상한·채널별 적중)을 가짜
+recall 응답으로 결정론 검증한다. 골든셋 파일(eval_scenarios.json) 자체의 무결성·기대
 object_id 실존 가드는 데이터 레포 쪽 CLI 가드(`eval --check-ids`)로 옮겨졌다.
 
 실 모델 측정(슬라이스 3.5/6)은 cli eval이 담당 — 여기는 하네스 역학만."""
@@ -40,11 +40,10 @@ def hit(object_id, *, status="reviewed", linked=None):
     }
 
 
-def recall_of(results=None, candidates=None, needs_clarification=False):
+def recall_of(results=None, candidates=None):
     response = {
         "results": results or [],
         "candidates": candidates or [],
-        "needs_clarification": needs_clarification,
     }
     return lambda query: response
 
@@ -88,8 +87,17 @@ class TestLoadScenarios(unittest.TestCase):
 
     def test_rejects_duplicate_ids(self):
         path = self._write(
-            {"scenarios": [scenario("a", {"no_answer": True}), scenario("a", {"no_answer": True})]}
+            {"scenarios": [scenario("a", {"top5_any": ["m.x"]}),
+                           scenario("a", {"top5_any": ["m.x"]})]}
         )
+        with self.assertRaises(ScenarioError):
+            load_scenarios(path)
+
+    def test_rejects_retired_no_answer_key(self):
+        # 답변 게이트 폐지(#77, ADR 0008)로 no_answer 판정 키가 사라졌다 — 옛 골든셋이
+        # 그대로 로드돼 조용히 측정이 비는 일을 막으려면 미지 키로 거부돼야 한다.
+        self.assertNotIn("no_answer", ASSERTION_KEYS)
+        path = self._write({"scenarios": [scenario("a", {"no_answer": True})]})
         with self.assertRaises(ScenarioError):
             load_scenarios(path)
 
@@ -151,21 +159,11 @@ class TestEvaluate(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertFalse(report["scenarios"][0]["checks"]["max_results"]["passed"])
 
-    def test_no_answer_passes_only_when_gated_empty(self):
-        scenarios = [scenario("s", {"no_answer": True})]
-        self.assertTrue(evaluate(recall_of(needs_clarification=True), scenarios)["ok"])
-        # 결과가 실려 있으면 "없다" 보장이 깨진 것
-        self.assertFalse(
-            evaluate(recall_of(results=[hit("m.x")], needs_clarification=True), scenarios)["ok"]
-        )
-        self.assertFalse(evaluate(recall_of(needs_clarification=False), scenarios)["ok"])
-
     def test_raw_top5_prefix_any(self):
         # raw 채널 판정(§2.2): raw_excerpts top-5에 프리픽스 일치 id가 ≥1이면 통과.
         def fn(query):
             return {"results": [], "candidates": [],
-                    "raw_excerpts": [hit("raw.foo-ctx.spec#003", status="raw")],
-                    "needs_clarification": True}
+                    "raw_excerpts": [hit("raw.foo-ctx.spec#003", status="raw")]}
         ok = evaluate(fn, [scenario("s", {"raw_top5_prefix_any": ["raw.foo-ctx."]})])
         self.assertTrue(ok["scenarios"][0]["passed"])
         miss = evaluate(fn, [scenario("s", {"raw_top5_prefix_any": ["raw.other."]})])
@@ -175,16 +173,16 @@ class TestEvaluate(unittest.TestCase):
         def boom(query):
             raise RuntimeError("모델 로드 실패")
 
-        report = evaluate(boom, [scenario("s", {"no_answer": True})])
+        report = evaluate(boom, [scenario("s", {"top5_any": ["m.x"]})])
         self.assertFalse(report["ok"])
         self.assertIn("모델 로드 실패", report["scenarios"][0]["error"])
 
     def test_summary_counts_and_latency(self):
         scenarios = [
-            scenario("pass", {"no_answer": True}),
+            scenario("pass", {"top5_any": ["m.target"]}),
             scenario("fail", {"top5_any": ["m.absent"]}),
         ]
-        report = evaluate(recall_of(needs_clarification=True), scenarios)
+        report = evaluate(recall_of(results=[hit("m.target")]), scenarios)
         self.assertEqual(report["summary"], {"passed": 1, "failed": 1, "total": 2})
         for sc in report["scenarios"]:
             self.assertGreaterEqual(sc["latency_ms"], 0)
@@ -213,14 +211,14 @@ class TestCliEval(unittest.TestCase):
     def test_cli_eval_runs_with_injected_recall(self):
         # cli eval 실행 단언은 색인 DB 존재·실모델·실코퍼스 골든셋에 의존하면 안 된다.
         # load_recall_fn을 stub recall로 주입하고 합성 시나리오를 --scenarios로 줘
-        # 결정론으로 rc·리포트 형태를 검증한다. 빈 응답 stub이면 게이트(no_answer)
-        # 시나리오만 통과 → rc=1(부분 통과 측정).
+        # 결정론으로 rc·리포트 형태를 검증한다. 한 시나리오만 적중하는 stub이라
+        # 나머지 하나가 실패 → rc=1(부분 통과 측정).
         def stub_recall(query):
-            return {"results": [], "candidates": [], "needs_clarification": True}
+            return {"results": [hit("m.present")], "candidates": []}
 
         path = self._write_scenarios([
             scenario("hit", {"top5_any": ["m.target"]}),
-            scenario("gate", {"no_answer": True}),
+            scenario("present", {"top5_any": ["m.present"]}),
         ])
         out = io.StringIO()
         with mock.patch(
@@ -228,12 +226,12 @@ class TestCliEval(unittest.TestCase):
         ), mock.patch("sys.argv", ["cli", "eval", "--scenarios", path]), \
                 redirect_stdout(out):
             rc = cli.main()
-        self.assertEqual(rc, 1)  # gate만 통과 → 전체 ok=False
+        self.assertEqual(rc, 1)  # present만 통과 → 전체 ok=False
         report = json.loads(out.getvalue())
         self.assertTrue(report["implemented"])
         self.assertEqual(report["summary"], {"passed": 1, "failed": 1, "total": 2})
         by_id = {s["id"]: s for s in report["scenarios"]}
-        self.assertTrue(by_id["gate"]["passed"])
+        self.assertTrue(by_id["present"]["passed"])
         self.assertFalse(by_id["hit"]["passed"])
 
     def test_cli_eval_check_ids_reports_missing(self):
@@ -287,8 +285,7 @@ class TestAdvisoriesAssertion(unittest.TestCase):
                       "expect": {"advisories_top5_any": ["insight.gate"]}}]
         def fake_recall(q):
             return {"results": [], "candidates": [], "raw_excerpts": [],
-                    "advisories": [{"object_id": "insight.gate"}],
-                    "needs_clarification": True}
+                    "advisories": [{"object_id": "insight.gate"}]}
         report = evaluate(fake_recall, scenarios)
         self.assertTrue(report["ok"])
 
@@ -297,7 +294,7 @@ class TestAdvisoriesAssertion(unittest.TestCase):
                       "expect": {"advisories_top5_any": ["insight.gate"]}}]
         def fake_recall(q):
             return {"results": [], "candidates": [], "raw_excerpts": [],
-                    "advisories": [], "needs_clarification": True}
+                    "advisories": []}
         report = evaluate(fake_recall, scenarios)
         self.assertFalse(report["ok"])
 

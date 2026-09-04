@@ -19,16 +19,13 @@ RRF 순위·object_id로 깬다. ★RRF 점수에 임의 상수를 더하지 않
 객체(엣지 100+개)의 도달을 초점 매핑과 같은 상한으로 눌러 허브가 그래프 신호로 더
 굳어지는 것을 막는다(과업 3번). 실측: s1 목표 매핑 10등→top5, s2 9등→top5(§8).
 
-슬라이스 5(§7·§8 다신호 답변 게이트): `eval_recall(query)`는 recall 융합 결과를
-다신호 게이트에 통과시킨 뒤 검수 상태별 채널로 가른다. 게이트 신호 3개 —
-(i) RRF 절대 점수 (ii) 1등-2등 점수 차(margin) (iii) ★표면 앵커★(질의의 코퍼스
-존재 내용 토큰 중 가장 희소한 토큰의 document frequency). "존재하지 않는 엔티티"
-질의는 (iii)가 우선 신호 — 코퍼스에 흔한 토큰(보상·이벤트)만 매칭되고 희소한
-핵심 엔티티(크리스마스 — df 0)가 미매칭이면 표면 앵커가 없어 needs_clarification을
-켠다. 단일 임계가 아니라 다신호라서 시나리오 3(적중)과 5(거짓 양성 가드)를 동시에
-만족한다(§7·§8). 게이트는 순수 함수(_gate_pass)로 분리해 합성 입력 단위 테스트가
-가능하고, candidate/reviewed는 채널별로 임계를 나눈다(§7 채널 분리 — candidate는
-후보 채널이라 더 관대한 바닥).
+채널 배치(#77, ADR 0008): `eval_recall(query)`는 recall 융합 결과를 ★검수 상태와
+객체 종류만으로★ 다섯 채널로 가른다 — reviewed 객체는 results, candidate 객체는
+candidates, raw 청크는 raw_excerpts, reviewed Insight는 advisories, ContextProjection은
+projection_reuse. 회수한 검수 객체를 엔진이 숨기는 답변 게이트(어휘 명부 매칭 OR
+앵커 df 상한), 채널별 점수 바닥, needs_clarification 플래그는 폐지했다 — 엔진은
+LLM이 아니라 "이 객체가 이 질문의 답인가"를 판단할 수 없고, 어휘 일치는 답 존재의
+근거가 아니다. 그 판정은 아래 회수 사실을 보고 에이전트가 한다.
 
 회수 사실(#73, ADR 0008 "엔진은 회수만 하고 답변 판정은 에이전트가 한다"): `eval_recall`은
 채널과 함께 결정론 사실을 신고한다 — 질의 토큰 분해와 토큰별 객체 df·raw df
@@ -51,7 +48,7 @@ from project_brain.search_index import (
     search_vector,
 )
 from project_brain.store import BrainStore
-from project_brain.surface import extract_surface, glossary_name_surfaces
+from project_brain.surface import extract_surface
 from project_brain.tokenize_ko import tokenize
 
 # 기본 brain root·색인 DB는 프로젝트 config(.project-brain.json)에서 해석한다(§4) —
@@ -115,32 +112,6 @@ _SCORE_ROUND = 6
 # 자기 참조 코드/용어를 적중집합에서 되찾았다"는 신호가 잎 용어(아웃바운드 0)와 분리된다.
 # 계수 2는 캘리브레이션 실측값(s1 10등→top5, s2 9등→top5; 1~3 폭에서 안정 — §8).
 _GRAPH_SUPPORT_CAP = 2
-
-# ── 다신호 답변 게이트 계수(§7·§8 — 단일 임계 금지, 3신호) ──────────────────
-# 셋 다 실모델 cli eval 캘리브레이션 값(2026-06-10, 골든셋 s1~s5). 값 단언 테스트
-# (test_calibration_constants_pinned)가 침묵 드리프트를 막는다 — 바꾸려면 실모델
-# cli eval 재측정 후 단언을 같이 갱신할 것.
-
-# (iii) 표면 앵커 상한: 질의의 ★코퍼스 존재 내용 토큰★ 중 가장 희소한 토큰(앵커)의
-# document frequency가 이 값을 넘으면 = 흔한 토큰만 매칭되고 희소한 핵심 엔티티가
-# 미매칭 = 표면 앵커 부재 → 게이트. ★s5 거짓 양성 가드의 핵심★: '보상'(df 52)·
-# '이벤트'(df 68)는 흔해 의미 점수만으론 못 거르지만, 질의의 유일한 희소 토큰
-# '크리스마스'는 코퍼스 df 0이라 present 앵커의 최소 df가 52로 높다. 실측 앵커 df:
-# s1=1·s2=17·s3=6·s4=5(전부 ≤17, anchored) / s5=52(>30, gated). 18~51 전 구간에서
-# s1~s4 통과+s5 차단 동시 만족(프로브 실측) — 30은 그 폭의 중앙(코퍼스 302문서의
-# ≈10%, "10% 이상 문서에 든 토큰은 generic"이라는 해석. 한쪽 경계에 붙인 값이 아님).
-_ANCHOR_DF_MAX = 30
-
-_REGISTRY_MIN_SURFACE_LEN = 3  # 명부 표면형 매칭 최소 길이(2자 이하 오매칭 방지). schema._SYNONYM_MIN_LEN과 일치해야 함.
-
-# (i) 절대 점수 바닥(채널별). RRF 점수 스케일은 ~0.014~0.033(실측). 이 바닥은 s5
-# 게이트가 아니라(s5 top 점수 0.0275는 confident 수준이라 점수만으론 못 거름 — 그건
-# 앵커 신호 몫) ★degenerate한 약한 적중★을 막는 방어선이다. reviewed 골든셋 최저
-# 유지 대상은 s3 reviewed target 0.0278이므로 그보다 한참 낮게 둔다. candidate는 후보
-# 채널이라 더 관대(낮은 바닥) — "후보 노출 안 되면 승격 기회 영영 없음"(06-05)과
-# 거짓 양성 가드를 채널 분리로 동시 충족(§7). s3 candidate target 최저 0.0257 유지.
-_ABS_SCORE_FLOOR_REVIEWED = 0.005
-_ABS_SCORE_FLOOR_CANDIDATE = 0.001
 
 
 def rrf_fuse(rankings, k: int = RRF_K):
@@ -615,13 +586,6 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     return hits
 
 
-# ── 다신호 게이트(§7·§8) ────────────────────────────────────────────────────
-# 내용 토큰 휴리스틱: 길이 2자 이상 토큰만 앵커 후보로 본다(1글자 조사·어미·숫자
-# 제외). 정밀한 품사 태깅이 아니라 ★단순 규칙★(과설계 금지, 과업 1번) — 1글자
-# 문법 형태소가 앵커 df를 인위적으로 낮추는 것만 막으면 충분하다(s5 가드 목적).
-_ANCHOR_MIN_TOKEN_LEN = 2
-
-
 def _fts_token_expr(token: str) -> str:
     """FTS5 MATCH용 단일 토큰 인용식 — search_bm25와 같은 규칙(개별 "..." 인용, prefix 없음).
 
@@ -633,11 +597,11 @@ def _fts_token_expr(token: str) -> str:
 def _document_frequency(conn: sqlite3.Connection, token: str) -> int:
     """토큰 1개가 매칭되는 ★객체★ 색인 문서 수(document frequency). FTS5 MATCH로 센다.
 
-    ★raw 청크·Insight·ContextProjection 행은 제외★(2026-06-11·2026-06-15·2026-06-17) —
-    앵커 df 상한(_ANCHOR_DF_MAX=30)은 객체 코퍼스 분포로 보정된 값(§8)이라, 셋 다 자유
-    텍스트 다토큰이라 분포를 흔들면 보정이 깨진다(Insight가 31개 이상 쌓이면 공유 토큰 df가
-    상한을 넘겨 객체 게이트를 닫는 C2 누수). projection은 정본 객체를 재서술한 본문이라
-    앵커 df에 섞이면 정본 회수를 잠식한다.
+    ★raw 청크·Insight·ContextProjection 행은 제외★(2026-06-11·2026-06-15·2026-06-17).
+    이 값은 회수 사실의 object_df로 나가며(compute_query_token_facts), raw df와 갈라
+    "객체로는 회수되지 않았지만 기획서 원문에는 있다"를 말할 수 있게 하는 수다. 셋 다
+    자유 텍스트 다토큰이라 객체 분포에 섞이면 그 구분이 흐려진다 — Insight·projection은
+    정본 객체를 재서술·곁들이는 본문이고 raw는 애초에 짝이 되는 별도 수다.
     """
     return conn.execute(
         "SELECT COUNT(*) FROM documents_fts f "
@@ -713,109 +677,21 @@ def _matched_query_tokens_by_id(db_path, object_ids, tokens) -> dict[str, list[s
     return matched
 
 
-def _registry_surfaces(store) -> set[str]:
-    """게이트 명부 표면형 집합 — GlossaryTerm term+synonyms+aliases 중 strip 후
-    길이 _REGISTRY_MIN_SURFACE_LEN 이상만, 소문자화. 질의와 D1(부분문자열) 대조용."""
-    surfaces: set[str] = set()
-    for term in store.by_kind("GlossaryTerm"):
-        for value in glossary_name_surfaces(term):
-            surface = value.lower()
-            if len(surface) >= _REGISTRY_MIN_SURFACE_LEN:
-                surfaces.add(surface)
-    return surfaces
-
-
-def compute_query_signals(query: str, hits: list[dict], db_path, store=None) -> dict:
-    """질의·융합 결과에서 다신호 게이트 입력 3종을 1회 계산한다(§7·§8 — 질의 레벨).
-
-    - top_score   (i)   : 융합 top 적중의 RRF 절대 점수(없으면 0.0).
-    - margin      (ii)  : 1등-2등 점수 차(2등 없으면 top_score).
-    - anchor_df   (iii) : 질의의 ★코퍼스 존재 내용 토큰★(길이 2자+) 중 가장 희소한
-                          토큰의 document frequency. present 내용 토큰이 하나도 없으면
-                          None(앵커 부재) — '크리스마스'처럼 핵심 엔티티만 df 0인
-                          질의에서, 남는 present 토큰이 흔하면(df 큼) 앵커 df가 높아진다.
-
-    db_path는 anchor_df의 df 조회용 — recall이 이미 검증한 색인 DB를 그대로 받는다.
-    """
-    top_score = hits[0]["score"] if hits else 0.0
-    second = hits[1]["score"] if len(hits) > 1 else 0.0
-    margin = round(top_score - second, _SCORE_ROUND)
-
-    content_tokens = [t for t in tokenize(query) if len(t) >= _ANCHOR_MIN_TOKEN_LEN]
-    anchor_df = None
-    if content_tokens:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            present_dfs = [df for df in (_document_frequency(conn, t) for t in content_tokens)
-                           if df > 0]
-        finally:
-            conn.close()
-        if present_dfs:
-            anchor_df = min(present_dfs)
-
-    registry_match = False
-    if store is not None:
-        q = query.lower()
-        registry_match = any(surface in q for surface in _registry_surfaces(store))
-
-    return {"top_score": top_score, "margin": margin, "anchor_df": anchor_df,
-            "registry_match": registry_match}
-
-
-def _gate_pass(score: float, signals: dict, *, channel: str) -> bool:
-    """한 적중이 답변 게이트를 통과하는지 판정한다(§7·§8 다신호, ★순수 함수★).
-
-    채널별 다신호 규칙:
-    1. (i) 절대 점수 바닥 — channel에 따라 reviewed/candidate 바닥을 쓴다(채널 분리,
-       §7). candidate는 더 관대(낮은 바닥)해 후보 노출 기회를 보존한다.
-    2. (iii) 표면 앵커 — ★명부 매칭(registry_match)이 없을 때만★ anchor_df가
-       None이거나 _ANCHOR_DF_MAX를 넘으면 차단한다. 질의가 아는 엔티티 표면형을
-       통째로 포함하면(registry_match) anchor_df와 무관하게 연다(OR 보강, 단조 완화).
-       ★s5 거짓 양성 가드의 우선 신호★ — 의미 점수가 confident해도 질의 핵심
-       엔티티의 표면 앵커가 없고 명부 매칭도 없으면 "없다"로 간다.
-
-    (ii) margin은 signals에 동반돼 호출처·보고에 노출되지만 boolean 규칙에는 안 쓴다 —
-    s5는 오히려 margin이 ★크다★(lone spurious spike, 실측 0.0119)라 "margin 크면
-    confident"가 거꾸로 작동하기 때문이다. 단일 신호 과적합을 피하려 앵커(iii)+바닥(i)만
-    boolean에 쓰고 margin은 진단·보고 신호로 둔다(과업 1번 "가장 단순한 규칙").
-
-    ★raw 채널은 바닥만 적용, 앵커 미적용★(2026-06-11 설계 고정): 앵커는 단정 답
-    채널(reviewed/candidate)용으로 보정된 가드다. raw 레인의 존재 이유가 "객체화
-    안 된 기획서 서술 회수"(객체화 경계 규약)라 객체 코퍼스 앵커로 막으면 본말전도
-    이고, raw는 "원문 발췌(미검수)" 라벨이 붙는 발췌 자료라 부정확 노출의 해가 낮다.
-    """
-    floor = (_ABS_SCORE_FLOOR_CANDIDATE if channel in ("candidate", "raw")
-             else _ABS_SCORE_FLOOR_REVIEWED)
-    if score < floor:
-        return False
-    if channel == "raw":
-        return True
-    if signals.get("registry_match"):
-        return True
-    anchor_df = signals.get("anchor_df")
-    if anchor_df is None or anchor_df > _ANCHOR_DF_MAX:
-        return False
-    return True
-
-
 def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
                 store=None) -> dict:
-    """평가 하네스 진입점 — recall을 다신호 게이트에 통과시켜 채널로 가른다(§7·§8).
+    """평가 하네스 진입점 — recall을 검수 상태·객체 종류만으로 채널로 가른다(#77).
 
-    슬라이스 5(다신호 답변 게이트 적용판): recall 융합 결과에서 질의 레벨 신호 3종을
-    1회 계산(compute_query_signals)한 뒤 적중마다 _gate_pass로 채널별 게이트를 적용한다.
+    ADR 0008: 엔진은 회수만 하고 답변 판정은 에이전트가 한다. 회수한 객체를 엔진
+    판정으로 숨기는 층은 없다 — 채널 배치는 status·kind로만 결정된다.
 
     반환(§7 산출식 + §2.2 raw 채널):
-      results            — ★게이트 통과★ reviewed 적중 top-5 (확신 채널, Insight 제외)
-      candidates         — ★게이트 통과★ candidate 적중 top-5 (후보 채널 — 관대한 바닥, Insight 제외)
-      raw_excerpts       — raw 청크 적중 top-5 ("원문 발췌(미검수)" — 바닥만, 앵커 미적용)
+      results            — reviewed 적중 top-5 (Insight·ContextProjection 제외)
+      candidates         — candidate 적중 top-5 (Insight·ContextProjection 제외)
+      raw_excerpts       — raw 청크 적중 top-5 ("원문 발췌(미검수)")
       advisories         — reviewed Insight 적중 top-5 (가로지르는 위험/교훈 — 곁들임 채널.
-                            게이트는 reviewed 재사용 — 앵커 적용, 질의 토큰을 가진 객체가 있어야 뜸)
+                            candidate Insight는 1차 미노출)
       projection_reuse   — ContextProjection 적중 top-5 (이전 착수 브리핑 재사용 채널 —
-                            status 무관 한 통로, 게이트는 raw(바닥만, 앵커 미적용)라 어휘
-                            드리프트 요구를 막지 않는다. results/candidates에는 안 섞인다)
-      needs_clarification — reviewed 게이트 통과 0건 bool ("no evidence → 없다" 보존,
-                            raw 발췌·advisories·projection_reuse는 단정 답이 아니라 이 판정에 안 들어간다)
+                            status 무관 한 통로. results/candidates에는 안 섞인다)
 
     회수 사실(#73, ADR 0008 — 엔진은 회수만 하고 답변 판정은 에이전트가 한다). 아래
     필드는 전부 결정론 계산이며 어떤 값도 boolean 판정이 아니다. 명부 매칭 사실은 싣지
@@ -854,48 +730,32 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     matched = _matched_query_tokens_by_id(
         db_path, [h["object_id"] for h in hits], [f["token"] for f in query_tokens])
     hits = [{**h, "matched_query_tokens": matched.get(h["object_id"], [])} for h in hits]
-    signals = compute_query_signals(query, hits, db_path, store=store)
 
     results = [h for h in hits
                if h.get("status") == "reviewed"
                and h.get("kind") != INSIGHT_KIND
-               and h.get("kind") != PROJECTION_KIND
-               and _gate_pass(h["score"], signals, channel="reviewed")][:EVAL_CHANNEL_TOP_K]
+               and h.get("kind") != PROJECTION_KIND][:EVAL_CHANNEL_TOP_K]
     candidates = [h for h in hits
                   if h.get("status") == "candidate"
                   and h.get("kind") != INSIGHT_KIND
-                  and h.get("kind") != PROJECTION_KIND
-                  and _gate_pass(h["score"], signals, channel="candidate")][:EVAL_CHANNEL_TOP_K]
+                  and h.get("kind") != PROJECTION_KIND][:EVAL_CHANNEL_TOP_K]
     raw_excerpts = [h for h in hits
-                    if h.get("status") == RAW_STATUS
-                    and _gate_pass(h["score"], signals, channel="raw")][:EVAL_CHANNEL_TOP_K]
-    # advisories(§4.6 C1): reviewed Insight를 별도 통로로. 게이트는 reviewed 재사용
-    # (앵커 적용) — 질의 토큰을 가진 객체가 코퍼스에 있어야 곁들임이 뜬다. anchor_df는
-    # 객체(Insight·raw 제외) df라, Insight만 있는 코퍼스(객체 0)는 anchor=None으로
-    # 닫힌다(비현실적 경우 — 실코퍼스는 매핑·용어가 풍부). candidate Insight는 1차
-    # 미노출(미룸 §7). 단정 답이 아니라 needs_clarification(results 기반)에는 안
-    # 들어간다(raw_excerpts와 동일).
+                    if h.get("status") == RAW_STATUS][:EVAL_CHANNEL_TOP_K]
+    # advisories(§4.6 C1): reviewed Insight를 별도 통로로 — "가로지르는" 곁들임이라
+    # results에 섞지 않는다. candidate Insight는 1차 미노출(미룸 §7).
     advisories = [h for h in hits
                   if h.get("kind") == INSIGHT_KIND
-                  and h.get("status") == "reviewed"
-                  and _gate_pass(h["score"], signals, channel="reviewed")][:EVAL_CHANNEL_TOP_K]
+                  and h.get("status") == "reviewed"][:EVAL_CHANNEL_TOP_K]
     # projection_reuse(spec 2026-06-17 Task A5): ContextProjection을 별도 통로로 —
     # candidate·reviewed status 무관 한 채널로(results/candidates에는 위에서 제외).
-    # 게이트는 raw 채널(바닥만, 앵커 미적용)로 통일한다. projection에 앵커를 걸면
-    # 객체 코퍼스에 없는 어휘 드리프트 요구("경주"≠"레이스")가 막혀 재사용 레인의
-    # 존재 이유(어휘 달라도 의미로 재사용 회수)가 깎인다. 라벨이 "미검증/검증됨"이라
-    # 부정확 노출의 해는 낮다(raw 면제 논리와 동형). needs_clarification(results 기반)
-    # 에는 안 들어간다(단정 답이 아니라 재사용 후보).
     projection_reuse = [h for h in hits
-                        if h.get("kind") == PROJECTION_KIND
-                        and _gate_pass(h["score"], signals, channel="raw")][:EVAL_CHANNEL_TOP_K]
+                        if h.get("kind") == PROJECTION_KIND][:EVAL_CHANNEL_TOP_K]
     return {
         "results": results,
         "candidates": candidates,
         "raw_excerpts": raw_excerpts,
         "advisories": advisories,
         "projection_reuse": projection_reuse,
-        "needs_clarification": not results,
         "query_tokens": query_tokens,
         "scope": {"context_id": scope,
                   "origin": "inferred" if scope is not None else "none"},
