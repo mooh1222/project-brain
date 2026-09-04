@@ -1,21 +1,28 @@
 """검색층 평가 하네스 (스펙 §8, 구현 슬라이스 1).
 
-시나리오 파일(eval_scenarios.json)의 질의→기대 object_id 기준을 recall 응답에
-대조한다. 측정값: top-5 적중, 그래프 동반, 반환 개수 상한, 게이트("없다" 유지),
-(참고) 쿼리 지연. 실 코퍼스+실 모델 측정(슬라이스 3.5/6)도 이 하네스를 그대로 쓴다.
+시나리오 파일(eval_scenarios.json)의 질의→기대 기준을 recall 응답에 대조한다.
+측정값: 채널별 top-5 적중, 그래프 동반, 반환 개수 상한, 부재 토큰 보고, 게이트
+("없다" 유지), (참고) 쿼리 지연. 실 코퍼스+실 모델 측정(슬라이스 3.5/6)도 이
+하네스를 그대로 쓴다.
 
-recall 응답 계약 — §3 결과 계약 + §7 채널 분리를 평가 관점에서 합친 형태.
-슬라이스 3의 recall()(어댑터 경유)과 슬라이스 5의 라우터 통합이 이 형태를 채운다:
+recall 응답 계약 — search.eval_recall이 내는 현행 형태(채널 5개 + #73 회수 사실):
 
     {
-      "results": [...],            # reviewed source 채널 (게이트 통과분, top-K)
-      "candidates": [...],         # candidate 후보 채널 (§7 채널 분리 — 관대한 임계)
-      "needs_clarification": bool  # 게이트 통과 0건 → True ("no evidence → 없다" 보존)
+      "results": [...],             # reviewed source 채널 top-5 (Insight·projection 제외)
+      "candidates": [...],          # candidate 후보 채널 top-5 (§7 채널 분리)
+      "raw_excerpts": [...],        # raw 청크 top-5 (§2.2 원문 발췌 — 미검수)
+      "advisories": [...],          # reviewed Insight top-5 (§4.6 곁들임 채널)
+      "projection_reuse": [...],    # ContextProjection top-5 (재사용 레인, status 무관)
+      "needs_clarification": bool,  # 게이트 통과 0건 → True ("no evidence → 없다" 보존)
+      "query_tokens": [...],        # [{token, object_df, raw_df}] 질의 토큰 분해와 df 사실
+      "scope": {...},               # {context_id, origin} 적용된 scope
     }
 
-results/candidates 원소는 §3 계약 dict(object_id, kind, status, score, matched_via,
-surface, linked). 하네스는 object_id와 linked(code_locators/related_object_ids)만
-본다 — linked 원소는 id 문자열이든 객체 dict든 허용(§3 계약이 객체 동반을 허용).
+채널 원소는 §3 계약 dict(object_id, kind, status, score, matched_via, surface,
+linked, matched_query_tokens). 하네스는 object_id와 linked(code_locators/
+related_object_ids)만 본다 — linked 원소는 id 문자열이든 객체 dict든 허용(§3 계약이
+객체 동반을 허용). query_tokens는 부재 토큰 판정 키(#76)가 본다. 나머지 사실 필드는
+에이전트의 답변 판정용이라 하네스가 읽지 않는다(ADR 0008).
 """
 
 import json
@@ -35,6 +42,9 @@ ASSERTION_KEYS = {
     "advisories_top5_any",  # advisories(reviewed Insight) top-5에 ≥1 적중 (§4.6)
     "projection_reuse_top5_any",  # projection_reuse(ContextProjection 재사용) top-5에 ≥1 적중
                                   # (spec 2026-06-17 Task A5)
+    "query_tokens_object_df_zero_any",  # query_tokens 사실에서 기대 토큰 ≥1이 object_df 0으로
+                                        # 보고 (#76 — 부재 보고의 정확성. 값은 질의 토큰
+                                        # 문자열이지 object_id가 아니다)
 }
 
 
@@ -62,7 +72,12 @@ def load_scenarios(path) -> list[dict]:
 
 
 def expected_object_ids(scenarios) -> set[str]:
-    """시나리오가 참조하는 모든 기대 object_id — 실코퍼스 존재 가드 테스트가 사용."""
+    """시나리오가 참조하는 모든 기대 object_id — 실코퍼스 존재 가드 테스트가 사용.
+
+    id가 아닌 문자열 키(raw_top5_prefix_any의 청크 프리픽스,
+    query_tokens_object_df_zero_any의 질의 토큰)는 여기에 넣지 않는다 —
+    코퍼스 실존 가드(`eval --check-ids`)가 거짓 실패한다.
+    """
     ids: set[str] = set()
     for sc in scenarios:
         expect = sc["expect"]
@@ -188,6 +203,21 @@ def evaluate(recall_fn, scenarios) -> dict:
             matched = [oid for oid in expect["projection_reuse_top5_any"] if oid in proj_top5]
             checks["projection_reuse_top5_any"] = {
                 "passed": bool(matched), "matched": matched, "top5_projection_reuse": proj_top5,
+            }
+
+        if "query_tokens_object_df_zero_any" in expect:
+            # #76(spec #71, ADR 0008): 엔진은 "답이 없다"를 판정하지 않으므로 하네스가
+            # 재는 것은 회수 사실의 정확성이다 — 기대 토큰 ≥1이 응답 query_tokens에서
+            # object_df 0으로 보고되면 통과. 기대 토큰이 분해 목록에 아예 없으면
+            # (형태소 쪼개짐·표기 변형) "df 0으로 보고됐다"가 아니므로 실패다.
+            token_facts = response.get("query_tokens") or []
+            zero_df = [f.get("token") for f in token_facts if f.get("object_df") == 0]
+            matched = [t for t in expect["query_tokens_object_df_zero_any"]
+                       if t in zero_df]
+            checks["query_tokens_object_df_zero_any"] = {
+                "passed": bool(matched),
+                "matched": matched,
+                "query_tokens": token_facts,
             }
 
         if expect.get("no_answer"):

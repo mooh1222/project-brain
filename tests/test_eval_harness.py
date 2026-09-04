@@ -65,6 +65,16 @@ class TestExpectedObjectIds(unittest.TestCase):
         self.assertIn("m.x", ids)
         self.assertFalse(any(oid.startswith("raw.") for oid in ids))
 
+    def test_absent_tokens_excluded(self):
+        # query_tokens_object_df_zero_any의 값은 질의 토큰 문자열이지 객체 id가
+        # 아니다 — 코퍼스 실존 가드(`eval --check-ids`)에 새어 들어가면 거짓 실패한다.
+        scenarios = [
+            scenario("a", {"top5_any": ["m.x"]}),
+            scenario("b", {"query_tokens_object_df_zero_any": ["크리스마스"]}),
+        ]
+        ids = expected_object_ids(scenarios)
+        self.assertEqual(ids, {"m.x"})
+
 
 class TestLoadScenarios(unittest.TestCase):
     def _write(self, payload):
@@ -294,6 +304,69 @@ class TestAdvisoriesAssertion(unittest.TestCase):
     def test_advisories_key_is_known_assertion(self):
         # load_scenarios가 미지 키로 거부하지 않는다(ASSERTION_KEYS 등록 확인).
         self.assertIn("advisories_top5_any", ASSERTION_KEYS)
+
+
+class TestAbsentQueryTokenAssertion(unittest.TestCase):
+    """query_tokens_object_df_zero_any 판정 키(#76 — spec #71, ADR 0008).
+
+    엔진은 답이 없다고 판정하지 않고 회수 사실만 낸다. 하네스가 재는 것은 그 사실의
+    정확성 — 기대 토큰 중 ≥1이 응답 query_tokens에서 object_df 0으로 보고되는가다.
+    """
+
+    KEY = "query_tokens_object_df_zero_any"
+
+    def _recall(self, token_facts):
+        def fn(query):
+            return {"results": [], "candidates": [], "raw_excerpts": [],
+                    "advisories": [], "projection_reuse": [],
+                    "query_tokens": token_facts,
+                    "scope": {"context_id": None, "origin": "none"}}
+        return fn
+
+    def test_passes_when_expected_token_reported_object_df_zero(self):
+        # 객체로는 안 잡히고 raw에만 있는 토큰 — "객체 부재"가 정확히 보고된 경우.
+        fn = self._recall([
+            {"token": "출석", "object_df": 0, "raw_df": 10},
+            {"token": "이벤트", "object_df": 43, "raw_df": 7},
+        ])
+        report = evaluate(fn, [scenario("s", {self.KEY: ["출석"]})])
+        self.assertTrue(report["ok"])
+        check = report["scenarios"][0]["checks"][self.KEY]
+        self.assertTrue(check["passed"])
+        self.assertEqual(check["matched"], ["출석"])
+
+    def test_fails_when_expected_token_has_object_hits(self):
+        # 같은 토큰이 객체 df>0으로 보고되면 부재 보고가 틀린 것 → 실패.
+        fn = self._recall([{"token": "출석", "object_df": 3, "raw_df": 10}])
+        report = evaluate(fn, [scenario("s", {self.KEY: ["출석"]})])
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["scenarios"][0]["checks"][self.KEY]["passed"])
+
+    def test_fails_when_expected_token_not_reported_at_all(self):
+        # 형태소 쪼개짐으로 기대 토큰 자체가 분해 목록에 없으면 "df 0으로 보고됐다"가
+        # 아니다 — 조용히 통과시키면 골든셋이 오탐을 못 잡는다(ADR 0008).
+        fn = self._recall([
+            {"token": "인", "object_df": 116, "raw_df": 40},
+            {"token": "게임", "object_df": 88, "raw_df": 30},
+        ])
+        report = evaluate(fn, [scenario("s", {self.KEY: ["인게임"]})])
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["scenarios"][0]["checks"][self.KEY]["matched"], [])
+
+    def test_key_is_known_assertion(self):
+        # load_scenarios가 미지 키로 거부하지 않는다(ASSERTION_KEYS 등록 확인).
+        self.assertIn(self.KEY, ASSERTION_KEYS)
+
+    def test_load_scenarios_accepts_key(self):
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        self.addCleanup(Path(tmp.name).unlink)
+        json.dump({"scenarios": [scenario("s", {self.KEY: ["출석"]})]},
+                  tmp, ensure_ascii=False)
+        tmp.close()
+        loaded = load_scenarios(tmp.name)
+        self.assertEqual(loaded[0]["expect"][self.KEY], ["출석"])
 
 
 if __name__ == "__main__":
