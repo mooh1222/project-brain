@@ -55,13 +55,17 @@
 공유**한다 — 둘이 다른 방식으로 쪼개면 매칭이 어긋나기 때문이다.
 
 - **폴백 사다리**: `mecab-ko`(1순위) → `kiwipiepy`(2순위) → 정규식(최후) 순으로 설치된
-  것을 한 번 골라 고정한다(`tokenize_ko.py:100-114`). kiwipiepy가 기본 동봉이라 보통
+  것을 한 번 골라 고정한다(`tokenize_ko.py:109-123`). kiwipiepy가 기본 동봉이라 보통
   여기까지는 동작하고, 형태소 분석기가 전부 없으면 정규식이 한글 덩어리를 통째로
-  토큰화한다(형태소 분리 없음, `tokenize_ko.py:95`).
+  토큰화한다(형태소 분리 없음, `tokenize_ko.py:104-106`).
 - **영문/심볼**도 `camelCase`, `snake_case`, `::`, 경로 구분자 기준으로 쪼개고 원형도 같이
-  보존한다(`tokenize_ko.py:145-174`).
-- 현재 백엔드 이름은 `active_backend()`가 `'mecab-ko'|'kiwipiepy'|'regex'`로 돌려주고,
-  색인 meta 기록과 색인↔쿼리 비대칭 경고에 쓰인다(`tokenize_ko.py:117-124`).
+  보존한다(`tokenize_ko.py:184-209`).
+- 현재 백엔드 이름은 `active_backend()`가 `'mecab-ko'|'kiwipiepy'|'regex'`로 돌려준다.
+- **규칙 버전**: 백엔드 이름이 같아도 토큰 산출 규칙이 바뀌면 옛 색인과 새 질의가 조용히
+  어긋나므로, 규칙에 `TOKENIZER_RULES_VERSION`(현재 1)을 매긴다. `tokenizer_signature()`가
+  `'<백엔드>@<규칙 버전>'`을 만들어 색인 meta에 기록하고, 검색 진입에서 이 값이 다르면
+  경고가 아니라 `StaleIndexError`로 거부한다(§3 신선도 가드). 규칙 버전 표기가 없는 옛
+  meta는 규칙 버전 1로 읽어(`parse_tokenizer_signature`) 기존 색인이 그대로 통과한다.
 
 **중요한 비대칭**: 토큰화 결과는 BM25(키워드) 레인에만 쓰고, **임베딩은 토큰화 전 원문
 표면**을 그대로 넣는다. 둘은 입력이 다르다(§3 참조).
@@ -73,14 +77,15 @@
 함수는 코드에 없다 — `content_hash`는 `documents`에 저장만 될 뿐 색인 갱신 비교에 쓰는
 코드가 없다.
 
-SQLite DB 안에 테이블이 4개 만들어진다(`search_index.py:80-108`, `SCHEMA_VERSION=4`):
+SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_index.py:102-132`,
+`SCHEMA_VERSION=4`):
 
 | 테이블 | 역할 |
 |--------|------|
 | `documents` | 한 행 = 한 객체(또는 raw 청크). `tokenized_text`와 `surface_text`를 둘 다 보관 |
 | `documents_fts` | FTS5 가상 테이블(`tokenize='unicode61'`). BM25 키워드 검색용 |
 | `documents_vec` | sqlite-vec의 `vec0` 가상 테이블(`embedding FLOAT[1024]`). 벡터 저장 |
-| `meta` | 스키마 버전·임베딩 모델명·토크나이저·코퍼스 지문 한 줄 |
+| `meta` | 스키마 버전·임베딩 모델명·토크나이저(`이름@규칙 버전`)·코퍼스 지문 한 줄 |
 
 빌드할 때 **같은 텍스트를 두 갈래로** 넣는 게 핵심이다:
 
@@ -107,10 +112,14 @@ SQLite DB 안에 테이블이 4개 만들어진다(`search_index.py:80-108`, `SC
   raw 청크는 store에 없는 행이라 원문을 `surface_text`로 직접 운반한다(`kind=raw_chunk`,
   `status=raw`).
 - **신선도 가드**: 색인할 때 코퍼스 전체의 지문(해시)을 `meta.corpus_fingerprint`에
-  남기고(`compute_corpus_fingerprint`, `search_index.py:278-306`), 검색 시점에 현재 코퍼스
-  지문과 다르면 "색인이 낡았다"며 거부하고 `rebuild`를 안내한다(`search.py:315-331`). 낡은
+  남기고(`compute_corpus_fingerprint`, `search_index.py:427-455`), 검색 시점에 현재 코퍼스
+  지문과 다르면 "색인이 낡았다"며 거부하고 `rebuild`를 안내한다
+  (`_guard_index_freshness`, `search.py:338-354`). 낡은
   색인으로 옛 상태를 회상하는 조용한 오답을 막으려는 장치다. 스키마 버전이 코드와 다를
-  때도 `StaleIndexError`로 거부한다(`search_index.py:324-332`).
+  때도 `StaleIndexError`로 거부한다(`_guard_schema_version`). **토크나이저 가드**도 같은
+  자리에 있다 — `meta.tokenizer`의 백엔드 이름이나 규칙 버전이 질의 시점과 다르면
+  `StaleIndexError`로 거부한다(`_guard_tokenizer`, BM25 두 레인 진입). 예전처럼 경고만
+  달고 검색을 계속하지 않는다.
 - `DomainMapping` 표면은 자체 의미·경계뿐 아니라 reviewed 참조 `GlossaryTerm`의
   `term`·`synonyms`·`aliases`를 함께 받고, candidate 참조에서는 기존 `term`·`synonyms`만
   유지한다(`surface.py:59-68,84-101`). 별칭 위임을 추가한 추출기 버전은 4다
