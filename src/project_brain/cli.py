@@ -1338,14 +1338,28 @@ def _run_session(argv) -> int:
     return 0
 
 
+# search 채널별 신뢰 라벨 — 어시스턴트가 결과만 보고도 검수 수준을 놓치지 않게 항목마다
+# 박는다(§2.2 raw, §4.6 advisories, 2026-06-17 projection_reuse). 여기 없는 키는 회수
+# 응답 그대로 나간다.
+_SEARCH_TRUST_LABELS = {
+    "raw_excerpts": lambda hit: "원문 발췌(미검수)",
+    "advisories": lambda hit: "가로지르는 위험·교훈(검증됨)",
+    # projection_reuse는 채널이 candidate·reviewed 공통이고 라벨만 status로 가른다.
+    "projection_reuse": lambda hit: ("재사용 브리핑(검증됨)"
+                                     if hit.get("status") == "reviewed"
+                                     else "재사용 후보(미검증)"),
+}
+
+
 def _run_search(argv) -> int:
     """의미 회상 명령 (스펙 §7) — 어시스턴트가 직접 쓰는 회상 진입점.
 
     `search "<query>" [--db <path>] [--brain-root <path>] [--stub-embedder]` —
     recall + 다신호 게이트(search.eval_recall)를 태운 결과를 검수 상태(reviewed/
     candidate)·linked(코드 위치)와 함께 JSON으로 낸다. needs_clarification은 게이트
-    통과 reviewed 0건일 때 True("no evidence → 없다" §7). 색인 DB가 없으면 명확한
-    에러로 끝낸다(`cli index rebuild` 먼저).
+    통과 reviewed 0건일 때 True("no evidence → 없다" §7). 회수 사실(query_tokens·
+    scope·적중별 matched_query_tokens, #73)도 회수 응답 그대로 실린다. 색인 DB가 없으면
+    명확한 에러로 끝낸다(`cli index rebuild` 먼저).
     """
     parser = argparse.ArgumentParser(prog="cli search")
     parser.add_argument("query")
@@ -1368,31 +1382,14 @@ def _run_search(argv) -> int:
     except (FileNotFoundError, StaleIndexError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
-    # raw 채널(§2.2): 청크 발췌에 신뢰 라벨을 항목마다 박는다 — 어시스턴트가 결과만
-    # 보고도 "검수 안 된 원문 발췌"임을 놓치지 않게(candidate 채널 라벨 규약과 동형).
-    raw_excerpts = [{**h, "trust_label": "원문 발췌(미검수)"}
-                    for h in resp.get("raw_excerpts", [])]
-    # projection_reuse 채널(spec 2026-06-17 Task A5): 이전 착수 브리핑 재사용 후보를
-    # 신뢰 라벨과 함께 낸다 — 채널은 candidate·reviewed 공통이고 라벨만 status로 가른다
-    # (reviewed=검증된 브리핑, candidate=미검증 후보). raw_excerpts 라벨 규약과 동형.
-    projection_reuse = [
-        {**h, "trust_label": ("재사용 브리핑(검증됨)" if h.get("status") == "reviewed"
-                              else "재사용 후보(미검증)")}
-        for h in resp.get("projection_reuse", [])
-    ]
-    # advisories 채널(spec 2026-06-15 §4.6): reviewed Insight를 신뢰 라벨과 함께 낸다 —
-    # eval_recall이 이미 반환하나(search.py) 출력에서 빠져 있던 비대칭 누락 복구.
-    # projection_reuse/raw_excerpts 라벨 규약과 동형(검수된 통찰이라 "검증됨" 라벨).
-    advisories = [{**h, "trust_label": "가로지르는 위험·교훈(검증됨)"}
-                  for h in resp.get("advisories", [])]
-    print(json.dumps(
-        {"ok": True, "query": args.query,
-         "results": resp["results"], "candidates": resp["candidates"],
-         "raw_excerpts": raw_excerpts,
-         "advisories": advisories,
-         "projection_reuse": projection_reuse,
-         "needs_clarification": resp["needs_clarification"]},
-        ensure_ascii=False, indent=2))
+    # ★회수 응답을 키 하드코딩 없이 그대로 통과시킨다★(#73) — 손으로 옮겨 적던 목록은
+    # eval_recall에 키가 늘 때마다 조용히 빠지는 경로였다(2026-06-27 advisories 누락 사고).
+    # 신뢰 라벨만 해당 채널에 덧입힌다.
+    payload = {"ok": True, "query": args.query, **resp}
+    for channel, label_for in _SEARCH_TRUST_LABELS.items():
+        if channel in payload:
+            payload[channel] = [{**h, "trust_label": label_for(h)} for h in payload[channel]]
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 

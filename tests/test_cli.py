@@ -1894,6 +1894,59 @@ class TestCliSearch(unittest.TestCase):
         for h in payload["advisories"]:
             self.assertEqual(h["trust_label"], "가로지르는 위험·교훈(검증됨)")
 
+    # 신뢰 라벨을 덧붙이는 채널 — 그 외 키는 회수 응답 그대로 나와야 한다.
+    _LABELED_CHANNELS = {"raw_excerpts", "advisories", "projection_reuse"}
+
+    def test_search_passes_through_every_recall_key(self):
+        """CLI가 회수 응답 키를 손으로 옮겨 적다 새 필드를 흘리지 않게 강제한다(#73).
+
+        키 목록을 테스트에 적지 않고 eval_recall 응답에서 뽑아 대조한다 — 회수 진입점에
+        키가 늘면 이 테스트가 CLI 누락을 잡는다(2026-06-27 advisories 누락 사고 재발 방지).
+        """
+        from project_brain.embedder import StubEmbedder
+        from project_brain.search import eval_recall
+        from tests.test_search import glossary_term, insight
+
+        src = self.brain / "raw" / "sources" / "foo-ctx"
+        src.mkdir(parents=True)
+        (src / "spec.md").write_text(
+            "# 클리어 토큰\n클리어 토큰 노출 기획 서술.\n", encoding="utf-8")
+        self._build_index([
+            glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
+            insight("insight.gate", body="클리어 토큰 노출 게이트가 두 팝업에 이중구현"),
+        ])
+        query = "클리어 토큰 노출 게이트 이중구현"
+
+        rc, payload = self._search(query)
+        resp = eval_recall(query, db_path=self.db, embedder=StubEmbedder(),
+                           brain_root=self.brain)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(set(resp) - set(payload), set())
+        for key, value in resp.items():
+            if key in self._LABELED_CHANNELS:
+                # 라벨만 덧붙고 적중 순서·개수는 그대로다.
+                self.assertEqual([h["object_id"] for h in payload[key]],
+                                 [h["object_id"] for h in value])
+            else:
+                self.assertEqual(payload[key], value, key)
+
+    def test_search_reports_query_token_facts_and_scope(self):
+        # 회수 사실(#73)이 CLI JSON에 그대로 실린다 — 부재 토큰은 df 0으로 신고된다.
+        from tests.test_search import glossary_term
+        self._build_index([
+            glossary_term("g.token", term="클리어 토큰", definition="스테이지 클리어 토큰 노출"),
+        ])
+        rc, payload = self._search("클리어 토큰 크리스마스")
+        self.assertEqual(rc, 0)
+        facts = {f["token"]: f for f in payload["query_tokens"]}
+        self.assertEqual(facts["크리스마스"], {"token": "크리스마스",
+                                          "object_df": 0, "raw_df": 0})
+        self.assertGreater(facts["토큰"]["object_df"], 0)
+        self.assertEqual(payload["scope"], {"context_id": None, "origin": "none"})
+        for hit in payload["results"]:
+            self.assertNotIn("크리스마스", hit["matched_query_tokens"])
+
     def test_audit_bundles_lint_isolated_skips_stale(self):
         # audit(코퍼스 감사): lint(무결성) + graph isolated(고아)를 한 보고로 묶는다.
         # stale는 git 의존이라 --no-stale로 건너뛴다(결정론). 고아 candidate 용어는
