@@ -14,6 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+from project_brain import tokenize_ko
 from project_brain.embedder import StubEmbedder
 from project_brain.id_grammar import format_id, parse_id
 from project_brain.objbase import base
@@ -520,7 +521,9 @@ class EvalRecallChannelTest(unittest.TestCase):
                            brain_root=self.brain)
         self.assertEqual(set(resp.keys()),
                          {"results", "candidates", "raw_excerpts", "needs_clarification",
-                          "advisories", "projection_reuse"})
+                          "advisories", "projection_reuse",
+                          # 회수 사실(#73) — 채널과 나란히 응답 최상위에 실린다.
+                          "query_tokens", "scope"})
         result_ids = {h["object_id"] for h in resp["results"]}
         cand_ids = {h["object_id"] for h in resp["candidates"]}
         self.assertIn("g.neutral.race", result_ids)
@@ -574,6 +577,131 @@ class EvalRecallChannelTest(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             eval_recall("레이스", db_path=missing, embedder=self.embedder, brain_root=self.brain)
         self.assertIn("index rebuild", str(ctx.exception))
+
+
+class EvalRecallQueryFactsTest(unittest.TestCase):
+    """eval_recall 회수 사실(#73) — 질의 토큰 분해·토큰별 df·적중별 겹친 질의 토큰.
+
+    ADR 0008: 엔진은 회수만 하고 답변 판정은 에이전트가 한다. 여기 사실은 전부
+    결정론 계산이고 판정이 아니다 — 어떤 값도 boolean 판정이 아니다.
+    토큰 분해가 형태소 백엔드 설치 여부에 흔들리지 않게 ★정규식 폴백을 강제★한다
+    (색인·질의가 같은 tokenize를 쓰므로 rebuild 전에 고정해야 한다).
+    """
+
+    def setUp(self):
+        self._saved_name = tokenize_ko._BACKEND_NAME
+        self._saved_split = tokenize_ko._KOREAN_SPLITTER
+        tokenize_ko._BACKEND_NAME = "regex"
+        tokenize_ko._KOREAN_SPLITTER = tokenize_ko._regex_splitter
+        self.addCleanup(self._restore_backend)
+        self._td = TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+        src = self.brain / "raw" / "sources" / "foo-ctx"
+        src.mkdir(parents=True)
+        # 헤더 2개 = 청크 2개. 첫 청크에만 "레이스", 둘째 청크에만 "보상"이 있다.
+        (src / "spec.md").write_text(
+            "# 레이스 안내\n레이스 진행 안내 문구.\n\n# 지급 안내\n보상 지급 안내 문구.\n",
+            encoding="utf-8")
+        build_store_dir(self.brain, [
+            # "레이스"는 객체 2개(term + 다른 객체 definition)에, "보상"은 1개에만 있다.
+            glossary_term("g.race", term="레이스", definition="카약 경주 진행"),
+            glossary_term("g.reward", term="보상", definition="레이스 보상 지급 기준"),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+
+    def _restore_backend(self):
+        tokenize_ko._BACKEND_NAME = self._saved_name
+        tokenize_ko._KOREAN_SPLITTER = self._saved_split
+
+    def test_query_tokens_report_object_df_and_raw_df(self):
+        resp = eval_recall("레이스 보상 크리스마스", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        # 분해 결과는 tokenize 순서·중복 제거를 그대로 노출한다(길이 필터 없음).
+        self.assertEqual([f["token"] for f in resp["query_tokens"]],
+                         ["레이스", "보상", "크리스마스"])
+        facts = {f["token"]: f for f in resp["query_tokens"]}
+        self.assertEqual(facts["레이스"]["object_df"], 2)
+        self.assertEqual(facts["레이스"]["raw_df"], 1)
+        self.assertEqual(facts["보상"]["object_df"], 1)
+        self.assertEqual(facts["보상"]["raw_df"], 1)
+        # 부재 토큰: 객체에도 raw에도 없다 → 0/0(판정이 아니라 사실).
+        self.assertEqual(facts["크리스마스"]["object_df"], 0)
+        self.assertEqual(facts["크리스마스"]["raw_df"], 0)
+
+    def test_query_tokens_separate_object_absence_from_raw_presence(self):
+        # 객체 표면엔 없고 raw 청크에만 있는 토큰은 object_df 0 · raw_df>0으로 갈린다
+        # ("객체로는 없지만 기획서에는 있다" ≠ "어디에도 없다").
+        resp = eval_recall("문구", db_path=self.db, embedder=self.embedder,
+                           brain_root=self.brain)
+        facts = {f["token"]: f for f in resp["query_tokens"]}
+        self.assertEqual(facts["문구"]["object_df"], 0)
+        self.assertEqual(facts["문구"]["raw_df"], 2)
+
+    def test_empty_query_reports_no_tokens(self):
+        resp = eval_recall("!!!", db_path=self.db, embedder=self.embedder,
+                           brain_root=self.brain)
+        self.assertEqual(resp["query_tokens"], [])
+
+    def test_hits_report_query_tokens_present_in_indexed_text(self):
+        resp = eval_recall("레이스 보상 크리스마스", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        by_id = {h["object_id"]: h for h in resp["results"]}
+        # g.race 색인 본문 = "레이스 카약 경주 진행" → 질의 토큰 중 "레이스"만 겹친다.
+        self.assertEqual(by_id["g.neutral.race"]["matched_query_tokens"], ["레이스"])
+        # g.reward 색인 본문 = "보상 레이스 보상 지급 기준" → 질의 순서대로 둘 다.
+        self.assertEqual(by_id["g.neutral.reward"]["matched_query_tokens"],
+                         ["레이스", "보상"])
+        # 코퍼스에 없는 토큰은 어느 적중에도 나타나지 않는다.
+        for hit in resp["results"]:
+            self.assertNotIn("크리스마스", hit["matched_query_tokens"])
+
+    def test_raw_excerpt_hits_report_matched_query_tokens(self):
+        resp = eval_recall("레이스 보상 크리스마스", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        matched = {h["object_id"]: h["matched_query_tokens"]
+                   for h in resp["raw_excerpts"]}
+        self.assertEqual(matched["raw.foo-ctx.spec#000"], ["레이스"])
+        self.assertEqual(matched["raw.foo-ctx.spec#001"], ["보상"])
+
+
+class EvalRecallScopeFactTest(unittest.TestCase):
+    """eval_recall이 적용된 scope를 신고한다(#73) — context_id와 적용 출처.
+
+    출처는 boolean이 아니라 문자열이다(어떤 사실 필드도 boolean 판정이 아니다).
+    """
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.brain = Path(self._td.name) / "brain"
+        self.db = Path(self._td.name) / "index.db"
+        self.embedder = StubEmbedder()
+        build_store_dir(self.brain, [
+            scoped_context("context.a", display_name="카약 레이스 이벤트",
+                           title="카약 레이스 도메인", context_key="kayak-race"),
+            scoped_context("context.b", display_name="클리어 토큰",
+                           title="클리어 토큰 도메인", context_key="clear-token"),
+            glossary_term("g.in", term="보상", context_id="context.kayak-race"),
+            glossary_term("g.out", term="보상", context_id="context.clear-token"),
+        ])
+        rebuild(self.brain, self.db, embedder=self.embedder)
+
+    def test_reports_inferred_context_id(self):
+        resp = eval_recall("카약 레이스 보상 기준", db_path=self.db,
+                           embedder=self.embedder, brain_root=self.brain)
+        self.assertEqual(resp["scope"],
+                         {"context_id": "context.kayak-race", "origin": "inferred"})
+        # 신고한 scope가 실제로 적용된 하드 필터와 같다.
+        self.assertNotIn("g.clear-token.out",
+                         {h["object_id"] for h in resp["results"]})
+
+    def test_reports_absent_scope_without_boolean(self):
+        resp = eval_recall("보상 기준", db_path=self.db, embedder=self.embedder,
+                           brain_root=self.brain)
+        self.assertEqual(resp["scope"], {"context_id": None, "origin": "none"})
 
 
 class GraphOneHopTest(unittest.TestCase):

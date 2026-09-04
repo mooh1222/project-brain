@@ -29,6 +29,13 @@ RRF 순위·object_id로 깬다. ★RRF 점수에 임의 상수를 더하지 않
 만족한다(§7·§8). 게이트는 순수 함수(_gate_pass)로 분리해 합성 입력 단위 테스트가
 가능하고, candidate/reviewed는 채널별로 임계를 나눈다(§7 채널 분리 — candidate는
 후보 채널이라 더 관대한 바닥).
+
+회수 사실(#73, ADR 0008 "엔진은 회수만 하고 답변 판정은 에이전트가 한다"): `eval_recall`은
+채널과 함께 결정론 사실을 신고한다 — 질의 토큰 분해와 토큰별 객체 df·raw df
+(compute_query_token_facts), 적중별로 그 적중의 색인 본문에 실제로 있는 질의 토큰
+(matched_query_tokens), 적용된 scope(context_id + 적용 출처). 이 사실들은 판정이 아니라
+에이전트의 답변 판정 재료다 — 어떤 값도 boolean 판정이 아니고, 명부 매칭 사실은 싣지
+않는다(등재 어휘가 걸리면 GlossaryTerm 객체 자체가 results에 오른다).
 """
 
 import re
@@ -615,24 +622,95 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
 _ANCHOR_MIN_TOKEN_LEN = 2
 
 
-def _document_frequency(conn: sqlite3.Connection, token: str) -> int:
-    """토큰 1개가 매칭되는 색인 문서 수(document frequency). FTS5 MATCH로 센다.
+def _fts_token_expr(token: str) -> str:
+    """FTS5 MATCH용 단일 토큰 인용식 — search_bm25와 같은 규칙(개별 "..." 인용, prefix 없음).
 
-    search_bm25와 같은 토큰 인용 규칙(개별 "..." 인용, prefix 없음)을 쓴다 — 색인·쿼리
-    토큰화가 같은 tokenize()를 공유하므로 색인측 토큰과 그대로 대조된다(§6).
+    색인·쿼리 토큰화가 같은 tokenize()를 공유하므로 색인측 토큰과 그대로 대조된다(§6).
+    """
+    return '"' + token.replace('"', '""') + '"'
+
+
+def _document_frequency(conn: sqlite3.Connection, token: str) -> int:
+    """토큰 1개가 매칭되는 ★객체★ 색인 문서 수(document frequency). FTS5 MATCH로 센다.
+
     ★raw 청크·Insight·ContextProjection 행은 제외★(2026-06-11·2026-06-15·2026-06-17) —
     앵커 df 상한(_ANCHOR_DF_MAX=30)은 객체 코퍼스 분포로 보정된 값(§8)이라, 셋 다 자유
     텍스트 다토큰이라 분포를 흔들면 보정이 깨진다(Insight가 31개 이상 쌓이면 공유 토큰 df가
     상한을 넘겨 객체 게이트를 닫는 C2 누수). projection은 정본 객체를 재서술한 본문이라
     앵커 df에 섞이면 정본 회수를 잠식한다.
     """
-    expr = '"' + token.replace('"', '""') + '"'
     return conn.execute(
         "SELECT COUNT(*) FROM documents_fts f "
         "JOIN documents d ON d.object_id = f.object_id "
         "WHERE documents_fts MATCH ? AND d.kind NOT IN (?, ?, ?)",
-        (expr, RAW_KIND, INSIGHT_KIND, PROJECTION_KIND)
+        (_fts_token_expr(token), RAW_KIND, INSIGHT_KIND, PROJECTION_KIND)
     ).fetchone()[0]
+
+
+def _raw_document_frequency(conn: sqlite3.Connection, token: str) -> int:
+    """토큰 1개가 매칭되는 ★raw 청크★ 행 수. 객체 df(_document_frequency)의 짝이다.
+
+    둘을 함께 신고해야 "객체로는 회수되지 않았지만 기획서 원문에는 있다"를 "어디에도
+    없다"와 가를 수 있다(#73 회수 사실 — 판정이 아니라 확인 지시).
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM documents_fts f "
+        "JOIN documents d ON d.object_id = f.object_id "
+        "WHERE documents_fts MATCH ? AND d.kind = ?",
+        (_fts_token_expr(token), RAW_KIND)
+    ).fetchone()[0]
+
+
+def compute_query_token_facts(query: str, db_path) -> list[dict]:
+    """질의 토큰 분해와 토큰별 df 사실(#73 — 회수 사실, 판정 아님).
+
+    tokenize()가 낸 순서와 중복 제거를 ★그대로★ 노출한다(길이 필터 없음) — 형태소
+    쪼개짐("인게임"→"인"+"게임")이나 표기 변형 때문에 부재가 오탐일 수 있음을
+    에이전트가 직접 보고 판단해야 하기 때문이다(ADR 0008).
+
+    원소: {token, object_df, raw_df}. object_df는 raw 청크·Insight·ContextProjection을
+    제외한 색인 문서 수, raw_df는 raw 청크 수다. 어느 값도 boolean 판정이 아니다.
+    """
+    tokens = tokenize(query)
+    if not tokens:
+        return []
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return [
+            {"token": token,
+             "object_df": _document_frequency(conn, token),
+             "raw_df": _raw_document_frequency(conn, token)}
+            for token in tokens
+        ]
+    finally:
+        conn.close()
+
+
+def _matched_query_tokens_by_id(db_path, object_ids, tokens) -> dict[str, list[str]]:
+    """적중별로 ★그 적중의 색인 본문에 실제로 있는★ 질의 토큰만 추린다(#73).
+
+    documents.tokenized_text는 색인 시 tokenize() 출력을 공백으로 이은 것이라, 질의
+    토큰과 같은 규칙으로 나뉜 문자열이다 — 공백 분리 집합 대조가 곧 색인 본문 대조다
+    (§6 색인·쿼리 대칭). raw 청크 행도 같은 컬럼을 쓰므로 발췌 채널에도 그대로 적용된다.
+    반환 리스트는 질의 토큰 순서를 보존한다.
+    """
+    if not object_ids or not tokens:
+        return {}
+    placeholders = ",".join("?" * len(object_ids))
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            f"SELECT object_id, tokenized_text FROM documents "
+            f"WHERE object_id IN ({placeholders})",
+            list(object_ids),
+        ).fetchall()
+    finally:
+        conn.close()
+    matched: dict[str, list[str]] = {}
+    for object_id, tokenized_text in rows:
+        indexed = set((tokenized_text or "").split())
+        matched[object_id] = [t for t in tokens if t in indexed]
+    return matched
 
 
 def _registry_surfaces(store) -> set[str]:
@@ -739,6 +817,16 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
       needs_clarification — reviewed 게이트 통과 0건 bool ("no evidence → 없다" 보존,
                             raw 발췌·advisories·projection_reuse는 단정 답이 아니라 이 판정에 안 들어간다)
 
+    회수 사실(#73, ADR 0008 — 엔진은 회수만 하고 답변 판정은 에이전트가 한다). 아래
+    필드는 전부 결정론 계산이며 어떤 값도 boolean 판정이 아니다. 명부 매칭 사실은 싣지
+    않는다(등재 어휘가 걸리면 GlossaryTerm 객체 자체가 results에 오른다).
+      query_tokens       — [{token, object_df, raw_df}] 질의 토큰 분해와 토큰별 문서 빈도.
+                            tokenize 순서·중복 제거 그대로(길이 필터 없음).
+      scope              — {context_id, origin} 적용된 scope. 없으면 context_id=None,
+                            origin="none"; 질의 표면에서 자동 추론했으면 origin="inferred".
+      matched_query_tokens — 채널 적중마다 동반. 질의 토큰 중 그 적중의 색인 본문에
+                            실제로 있는 것만(raw 발췌 포함).
+
     db_path 미지정 시 config(.project-brain.json)의 db를 쓰며, 색인이 없으면 명확한
     에러를 던진다 — 하네스(evaluate)가 per-scenario 실패로 기록한다. brain_root는
     recall에 그대로 넘겨 그래프 1-hop store를 로드한다(None이면 config의 brain_root).
@@ -754,8 +842,18 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     if store is None:
         store = BrainStore.load(resolved_root)
 
-    hits = recall(query, db_path=db_path, embedder=embedder, brain_root=resolved_root,
-                  store=store)
+    # scope는 여기서 한 번 풀어 recall에 넘긴다 — 응답에 신고하는 값과 실제로 적용된
+    # 하드 필터가 같은 값임을 배관으로 보장하기 위해서다(#73). recall(scope=None)의
+    # 자동 추론과 결과가 같다(같은 query·store).
+    scope = infer_scope(query, store)
+    hits = recall(query, scope=scope, db_path=db_path, embedder=embedder,
+                  brain_root=resolved_root, store=store)
+    # 회수 사실(#73): 질의 토큰 분해·토큰별 df·적중별 겹친 질의 토큰. 채널을 가르기
+    # ★전에★ 적중에 붙여 다섯 채널이 같은 사실을 그대로 들고 나가게 한다.
+    query_tokens = compute_query_token_facts(query, db_path)
+    matched = _matched_query_tokens_by_id(
+        db_path, [h["object_id"] for h in hits], [f["token"] for f in query_tokens])
+    hits = [{**h, "matched_query_tokens": matched.get(h["object_id"], [])} for h in hits]
     signals = compute_query_signals(query, hits, db_path, store=store)
 
     results = [h for h in hits
@@ -798,4 +896,7 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
         "advisories": advisories,
         "projection_reuse": projection_reuse,
         "needs_clarification": not results,
+        "query_tokens": query_tokens,
+        "scope": {"context_id": scope,
+                  "origin": "inferred" if scope is not None else "none"},
     }
