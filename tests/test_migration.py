@@ -635,6 +635,7 @@ def test_id_plan_tokenizes_self_and_registered_refs_and_lists_every_pointer(
                 "top5_any": ["code.Legacy"],
                 "linked_any_groups": [["review.code.Legacy"]],
                 "raw_top5_prefix_any": ["code.Legacy"],
+                "query_tokens_object_df_zero_any": ["code.Legacy"],
             },
         }],
         "note": "code.Legacy outside registry stays unchanged",
@@ -698,6 +699,9 @@ def test_id_plan_tokenizes_self_and_registered_refs_and_lists_every_pointer(
         ["review.code.neutral.legacy"],
     ]
     assert scenario["expect"]["raw_top5_prefix_any"] == ["code.Legacy"]
+    # #76: 부재 토큰 판정 키의 값은 질의 토큰 문자열이라 id 재작성 대상이 아니다 —
+    # 옛 id와 글자가 같아도 그대로 둔다(raw 프리픽스와 같은 취급).
+    assert scenario["expect"]["query_tokens_object_df_zero_any"] == ["code.Legacy"]
     assert scenario["query"] == "query keeps code.Legacy literally"
     assert rewritten_eval["note"] == eval_before["note"]
 
@@ -967,6 +971,10 @@ def test_canonical_payload_reference_ordinals_are_deterministic_and_distinct():
         (
             b'{"scenarios":[{"id":"s","query":"q","expect":'
             b'{"raw_top5_prefix_any":[["raw."]]}}]}\n'
+        ),
+        (
+            b'{"scenarios":[{"id":"s","query":"q","expect":'
+            b'{"query_tokens_object_df_zero_any":[["token"]]}}]}\n'
         ),
         (
             b'{"scenarios":['

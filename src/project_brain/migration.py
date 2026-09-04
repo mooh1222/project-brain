@@ -58,7 +58,13 @@ _EVAL_ID_LIST_KEYS = frozenset({
     "advisories_top5_any",
     "projection_reuse_top5_any",
 })
-_EVAL_STRING_LIST_KEYS = _EVAL_ID_LIST_KEYS | {"raw_top5_prefix_any"}
+# id 리스트가 아닌 문자열 리스트 판정 키 — 형태만 검증하고 rename 재작성은 하지
+# 않는다. raw_top5_prefix_any는 청크 프리픽스,
+# query_tokens_object_df_zero_any(#76)는 질의 토큰이라 둘 다 object_id가 아니다.
+_EVAL_STRING_LIST_KEYS = _EVAL_ID_LIST_KEYS | {
+    "raw_top5_prefix_any",
+    "query_tokens_object_df_zero_any",
+}
 _MIGRATION_TAG = "__project_brain_migration_placeholder__"
 _INDEX_PATHS = (
     ".brain-local/index.db",
