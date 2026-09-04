@@ -1761,7 +1761,7 @@ class IndexFreshnessGuardTest(unittest.TestCase):
             self.assertIn("rebuild", str(ctx.exception))
 
     def test_recall_raises_on_meta_without_rules_version(self):
-        # #75가 규칙 버전 없는 색인을 버전 1로 읽고, #79가 현재 규칙을 2로 올렸다 —
+        # #75가 규칙 버전 없는 색인을 버전 1로 읽고, #79·규칙 버전 3이 현재 규칙을 올렸다 —
         # 백엔드 이름이 같아도 규칙이 달라 rebuild 안내로 거부돼야 한다.
         with TemporaryDirectory() as td:
             brain_root = Path(td)

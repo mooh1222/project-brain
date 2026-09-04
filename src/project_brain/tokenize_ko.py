@@ -8,8 +8,8 @@
 1. 영문 심볼 분리 = 한국어와 동등한 1급. camelCase / snake_case·대문자 약어 /
    `::` / 경로 구분자(/, .)를 쪼개고, ★원형 토큰도 함께 보존★한다.
 2. 한국어 형태소 = ★kiwipiepy 단일 백엔드★(#79). 형태소 조각에 더해 같은 어절 안에서
-   연속한 명사 조각을 이어 붙인 결합형 토큰도 보존한다 — 심볼에서 camelCase 조각과
-   원형을 같이 남기는 것과 같은 규칙이다. 폴백 사다리는 없다: 설치 환경마다 다른
+   연속한 명사류 조각을 이어 붙인 결합형 토큰과, 동사 어간+명사형 전성어미의 어절 표면
+   (알림·만들기)도 보존한다 — 심볼에서 camelCase 조각과 원형을 같이 남기는 것과 같은 규칙이다. 폴백 사다리는 없다: 설치 환경마다 다른
    토큰이 나오면 색인↔쿼리가 조용히 어긋나므로, 없으면 폴백이 아니라 오류다.
    정규식 분리는 backend="regex" 명시 주입(테스트) 전용으로만 남는다.
 
@@ -23,9 +23,11 @@ from itertools import groupby
 # 토큰 산출 규칙의 버전. ★백엔드 이름이 같아도 규칙이 바뀌면 옛 색인의 토큰과 새 질의의
 # 토큰이 조용히 어긋난다★ — 규칙(분리 방식·보존 토큰 종류 등)을 바꿀 때 올린다.
 # 올리면 기존 색인은 검색 진입에서 StaleIndexError로 거부되고 rebuild가 필요해진다.
-# 버전 1 = 형태소 표면만. 버전 2 = 어절 안 명사 결합형 토큰 추가(#79) — 실제로 산출
-# 토큰이 늘어난 규칙 변경이라 change map "한국어 tokenizer" 행의 실모델 rebuild가 발동한다.
-TOKENIZER_RULES_VERSION = 2
+# 버전 1 = 형태소 표면만. 버전 2 = 어절 안 명사 결합형 토큰 추가(#79). 버전 3 = 결합형에
+# 숫자(SN)·외국어(SL) 조각 허용(한글 조각 1개 이상, 소문자 정규화: 3단계·2차·ui버튼) + 동사
+# 어간과 명사형 전성어미(ETN)가 한 어절에서 이어지면 그 표면(알림·만들기·보여주기)도 보존.
+# 셋 다 산출 토큰이 늘어난 규칙 변경이라 change map "한국어 tokenizer" 행의 실모델 rebuild가 발동한다.
+TOKENIZER_RULES_VERSION = 3
 
 # meta에 적는 정체성 문자열의 구분자. 이름에는 쓰이지 않는 문자여야 한다.
 _SIGNATURE_SEP = "@"
@@ -41,12 +43,19 @@ _KOREAN_SPLITTER = None
 # backend="kiwipiepy" 명시 주입과 기본 경로가 같은 Kiwi 인스턴스를 쓰도록 따로 캐시한다.
 _KIWI_SPLITTER = None
 
-# 결합형을 만들 수 있는 kiwi 품사 태그 — 한글 명사류만(spec #72에서 프로토타입으로 확정).
-# NNG 일반명사 / NNP 고유명사 / NNB 의존명사 / XR 어근. 조사·어미·동사 조각은 여기 없으므로
-# 결합에 섞이지 않는다. 숫자(SN)·외국어(SL) 조각은 한글이 없어 결합 조건을 통과하지 못하므로
-# 태그 집합에 넣지 않는다 — "3단계"·"UI버튼"은 단계·3 / 버튼·ui로만 남고(영숫자는 심볼 경로가
-# 1급으로 처리), 이들을 결합형에 넣는 것은 규칙 버전을 올리는 별도 결정이다.
-_COMPOUND_TAGS = frozenset({"NNG", "NNP", "NNB", "XR"})
+# 결합형을 만들 수 있는 kiwi 품사 태그(spec #72 프로토타입 + 규칙 버전 3 확장).
+# NNG 일반명사 / NNP 고유명사 / NNB 의존명사 / XR 어근 / SN 숫자 / SL 외국어. 조사·어미·동사
+# 조각은 여기 없으므로 결합에 섞이지 않는다. 결합형은 한글 조각을 하나 이상 포함해야 한다 —
+# "3.7new"처럼 숫자·외국어만 이어진 어절은 심볼 경로가 1급으로 처리하므로 결합하지 않는다.
+_COMPOUND_TAGS = frozenset({"NNG", "NNP", "NNB", "XR", "SN", "SL"})
+
+# 명사형 전성어미(-ㅁ/-기). kiwi는 "알림"을 뒷말에 따라 명사(NNG)로도, 동사 어간+ETN(알리+ㅁ)으로도
+# 읽는다(문맥 의존 중의성, 실측). 색인과 질의가 다른 쪽으로 읽히면 같은 말이 어긋나므로, 어간부터
+# ETN까지 이어지는 어절 표면을 원문에서 잘라 토큰으로 함께 보존한다(규칙 버전 3).
+_NOMINAL_ENDING_TAG = "ETN"
+# ETN 앞에서 명사형 표면에 포함할 수 있는 연속 조각 — 동사·형용사 어간, 보조용언, 파생 접미사,
+# 선어말·연결 어미("보여주기" = 보이+어+주+기).
+_NOMINAL_RUN_TAGS = frozenset({"VV", "VA", "VX", "XSV", "XSA", "EP", "EC"})
 
 # 한글 연속을 잡는 정규식 (정규식 분리·한글 토큰 필터 공통).
 _HANGUL_RUN = re.compile(r"[가-힣]+")
@@ -54,33 +63,55 @@ _HANGUL_RUN = re.compile(r"[가-힣]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
-def _eojeol_surfaces(tokens) -> list[str]:
-    """한 어절의 형태소 토큰들 → 조각 표면들 + 그 어절의 명사 결합형들 (#79).
+def _eojeol_surfaces(tokens, text: str) -> list[str]:
+    """한 어절의 형태소 토큰들 → 조각 표면들 + 결합형들 + 명사형 표면들 (#79, 규칙 버전 3).
 
-    ★조각을 지우지 않고 결합형을 더한다★ — "인게임"으로 물어도 "게임"으로 물어도
-    같은 문서가 잡혀야 하기 때문이다. 연속한 명사류 조각이 2개 이상일 때만 이어 붙이고,
-    조사·어미·동사 조각이나 한글 없는 조각이 나오면 연속이 끊긴다. 결합형은 그 어절의
-    조각들 뒤에 붙인다(spec #72 프로토타입 출력 순서).
+    ★조각을 지우지 않고 표면을 더한다★ — "인게임"으로 물어도 "게임"으로 물어도 같은 문서가
+    잡혀야 하기 때문이다.
+    - 결합형: 연속한 명사류 조각(_COMPOUND_TAGS)이 2개 이상이고 그중 한글 조각이 하나 이상이면
+      이어 붙여 소문자로 추가한다(인게임·럭키박스·3단계·2차·ui버튼). 조사·어미·동사 조각이 나오면
+      연속이 끊긴다.
+    - 명사형 표면: 동사 어간(_NOMINAL_RUN_TAGS 연속) 뒤에 ETN이 오면 원문에서 그 구간을 잘라
+      추가한다(알림·만들기·보여주기). kiwi가 같은 말을 명사로 읽은 문서와 어간+ETN으로 읽은 질의가
+      같은 토큰을 공유하게 하기 위함이다.
+    추가 토큰은 그 어절의 조각들 뒤에 붙인다(spec #72 프로토타입 출력 순서).
     """
     surfaces: list[str] = []
-    compounds: list[str] = []
+    extras: list[str] = []
     run: list[str] = []
+    run_has_hangul = False
+
+    def flush_run() -> None:
+        nonlocal run, run_has_hangul
+        if len(run) > 1 and run_has_hangul:
+            extras.append("".join(run).lower())
+        run, run_has_hangul = [], False
 
     for token in tokens:
         form = token.form
         if not form:
             continue
         surfaces.append(form)
-        if token.tag in _COMPOUND_TAGS and _HANGUL_RUN.search(form):
+        if token.tag in _COMPOUND_TAGS:
             run.append(form)
-            continue
-        if len(run) > 1:
-            compounds.append("".join(run))
-        run = []
+            run_has_hangul = run_has_hangul or bool(_HANGUL_RUN.search(form))
+        else:
+            flush_run()
+    flush_run()
 
-    if len(run) > 1:
-        compounds.append("".join(run))
-    return surfaces + compounds
+    for index, token in enumerate(tokens):
+        if token.tag != _NOMINAL_ENDING_TAG:
+            continue
+        start = index
+        while start > 0 and tokens[start - 1].tag in _NOMINAL_RUN_TAGS:
+            start -= 1
+        if start == index:
+            continue  # 어간 없이 ETN만 있으면 표면을 만들지 않는다.
+        span = text[tokens[start].start : token.start + token.len]
+        if len(span) >= 2 and _HANGUL_RUN.search(span):
+            extras.append(span)
+
+    return surfaces + extras
 
 
 def _build_kiwi_splitter():
@@ -110,7 +141,7 @@ def _build_kiwi_splitter():
         for _, group in groupby(
             kiwi.tokenize(text), key=lambda t: (t.sent_position, t.word_position)
         ):
-            tokens.extend(_eojeol_surfaces(list(group)))
+            tokens.extend(_eojeol_surfaces(list(group), text))
         return tokens
 
     return split

@@ -710,7 +710,7 @@ class TokenizerMismatchGuardTest(_ForcedRegexBackend, unittest.TestCase):
             search_bm25(self.db, "레이스")
         self.assertIn("rebuild", str(ctx.exception))
 
-    def test_legacy_meta_without_rules_version_is_stale_at_version_2(self):
+    def test_legacy_meta_without_rules_version_is_stale_at_current_version(self):
         # 규칙 버전 표기가 없던 시절의 meta(이름만)는 버전 1로 읽힌다 — 현재 규칙이
         # 2(#79 결합형 토큰)라 이름이 같아도 거부된다.
         self._set_meta_tokenizer("regex")
@@ -759,6 +759,12 @@ class PreviousRulesVersionIndexTest(unittest.TestCase):
 
     def test_index_built_under_rules_version_1_is_stale(self):
         self._set_meta_tokenizer("kiwipiepy@1")
+        with self.assertRaises(StaleIndexError) as ctx:
+            search_bm25(self.db, "레이스")
+        self.assertIn("rebuild", str(ctx.exception))
+
+    def test_index_built_under_rules_version_2_is_stale(self):
+        self._set_meta_tokenizer("kiwipiepy@2")
         with self.assertRaises(StaleIndexError) as ctx:
             search_bm25(self.db, "레이스")
         self.assertIn("rebuild", str(ctx.exception))

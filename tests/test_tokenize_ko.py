@@ -128,12 +128,12 @@ class TokenizerSignatureTest(unittest.TestCase):
             f"{active_backend()}@{TOKENIZER_RULES_VERSION}",
         )
 
-    def test_rules_version_is_2_after_compound_tokens(self):
+    def test_rules_version_is_3_after_digit_compounds_and_nominal_surfaces(self):
         # #79가 결합형 토큰을 추가해 토큰 산출 규칙이 바뀌었다 — 옛 색인은 거부돼야 한다.
-        self.assertEqual(TOKENIZER_RULES_VERSION, 2)
+        self.assertEqual(TOKENIZER_RULES_VERSION, 3)
 
-    def test_current_signature_is_kiwipiepy_at_2(self):
-        self.assertEqual(tokenizer_signature(), "kiwipiepy@2")
+    def test_current_signature_is_kiwipiepy_at_3(self):
+        self.assertEqual(tokenizer_signature(), "kiwipiepy@3")
 
     def test_signature_round_trips_through_parse(self):
         self.assertEqual(
@@ -172,6 +172,34 @@ class KiwiMorphemeTest(unittest.TestCase):
         toks = tokenize("레이스 끝났는데 보상을 못 받았대")
         self.assertIn("보상", toks)
         self.assertIn("레이스", toks)
+
+
+class NominalSurfaceTokenTest(unittest.TestCase):
+    """규칙 버전 3 — 동사 어간+명사형 전성어미(ETN) 어절은 원문 표면도 토큰으로 보존한다.
+
+    kiwi는 "알림"을 뒷말에 따라 명사(NNG)로도 알리+ㅁ으로도 읽는다(문맥 의존). 색인과 질의가
+    다른 쪽으로 읽혀도 같은 토큰 "알림"을 공유해야 한다.
+    """
+
+    def test_nominalized_verb_keeps_surface_next_to_fragments(self):
+        self.assertEqual(tokenize("알림 안내"), ["알리", "알림", "안내"])
+        self.assertEqual(tokenize("알림"), ["알리", "알림"])
+
+    def test_noun_reading_and_nominalized_reading_share_the_surface_token(self):
+        # "알림을"은 kiwi가 명사로 읽어 알림이 조각 자체다 — 표면 토큰은 중복 없이 하나.
+        toks = tokenize("알림을 보낸다")
+        self.assertEqual(toks[:3], ["알림", "을", "보내"])
+        self.assertEqual(toks.count("알림"), 1)
+        self.assertTrue(set(tokenize("알림 안내")) & set(tokenize("알림을 보낸다")) >= {"알림"})
+
+    def test_gi_nominalization_and_auxiliary_chain(self):
+        self.assertEqual(tokenize("만들기 버튼"), ["만들", "기", "만들기", "버튼"])
+        self.assertEqual(tokenize("보여주기 옵션"), ["보이", "어", "주", "기", "보여주기", "옵션"])
+
+    def test_plain_verb_endings_do_not_create_a_surface(self):
+        # EF·EC·ETM 뒤에는 명사형 표면을 만들지 않는다.
+        self.assertEqual(tokenize("보상을 받았대"), ["보상", "을", "받", "었", "대"])
+        self.assertEqual(tokenize("레이스 끝났는데 보상"), ["레이스", "끝나", "었", "는데", "보상"])
 
 
 class CompoundNounTokenTest(unittest.TestCase):
@@ -219,16 +247,19 @@ class CompoundNounTokenTest(unittest.TestCase):
         self.assertNotIn("보상을", toks)
         self.assertNotIn("받았대", toks)
 
-    def test_digit_and_foreign_fragments_do_not_join_compounds(self):
-        # SN(숫자)·SL(외국어) 조각은 한글이 없어 결합에 참여하지 않는다 — 태그 집합에서도 뺐다.
-        toks = tokenize("3단계 오픈 팝업")
-        self.assertIn("단계", toks)
-        self.assertIn("3", toks)
-        self.assertNotIn("3단계", toks)
-        toks = tokenize("UI버튼 클릭")
-        self.assertIn("버튼", toks)
-        self.assertIn("ui", toks)
-        self.assertNotIn("ui버튼", toks)
+    def test_digit_and_foreign_fragments_join_when_a_hangul_fragment_is_present(self):
+        # 규칙 버전 3: SN(숫자)·SL(외국어) 조각도 한글 조각과 이어지면 결합형이 된다(소문자 정규화).
+        self.assertEqual(tokenize("3단계 오픈 팝업"), ["단계", "3단계", "오픈", "팝업", "3"])
+        self.assertEqual(tokenize("2차 레이스"), ["차", "2차", "레이스", "2"])
+        self.assertEqual(tokenize("UI버튼 클릭"), ["버튼", "ui버튼", "클릭", "ui"])
+
+    def test_digit_and_foreign_only_eojeol_is_not_compounded(self):
+        # 한글 조각이 없는 어절은 심볼 경로가 처리하므로 결합형을 만들지 않는다.
+        toks = tokenize("3.7new 패키지")
+        self.assertNotIn("3.7new패키지", toks)
+        self.assertEqual([t for t in toks if "new" in t], ["7new", "3.7new"])
+        toks = tokenize("v8 기획서")
+        self.assertEqual(toks, ["기획서", "v8"])
 
     def test_same_input_twice_is_identical(self):
         text = "인게임에서 럭키박스 아이템 사용하면"
