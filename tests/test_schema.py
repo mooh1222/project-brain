@@ -287,9 +287,9 @@ class TestInsightKind(unittest.TestCase):
         self.assertTrue(any("candidate Insight not supported" in e for e in errors))
 
 
-class TestSynonymGatePassRule(unittest.TestCase):
-    """synonyms/aliases가 게이트 통과권으로 승격(registry_match) — 단독 일반명사·2자 이하는
-    D1 부분문자열로 아무 질의에나 걸려 s5 거짓양성을 낸다. 적재 시점 lint로 막는다."""
+class TestSynonymSurfaceRule(unittest.TestCase):
+    """synonyms/aliases는 검색 색인 표면에 함께 오르는 표면형이다. 2자 이하와 단독
+    일반명사는 적재 시점 lint로 막는다(#78 — 규칙 값은 그대로, 문구만 회수 언어로)."""
 
     def _term(self, gid, synonyms):
         return {"id": gid, "kind": "GlossaryTerm", "status": "reviewed",
@@ -308,6 +308,12 @@ class TestSynonymGatePassRule(unittest.TestCase):
     def test_glossary_good_synonym_passes(self):
         errors = validate_object(self._term("g.n.z", ["럭키박스", "클리어 패스 티켓 복구"]))
         self.assertFalse(any(("too short" in e or "generic" in e) for e in errors))
+
+    def test_synonym_rule_messages_carry_no_retired_gate_wording(self):
+        errors = validate_object(self._term("g.n.w", ["NL", "이벤트"]))
+        self.assertTrue(any("too short" in e for e in errors))
+        self.assertTrue(any("generic" in e for e in errors))
+        self.assertFalse(any("게이트" in e for e in errors))
 
 
 if __name__ == "__main__":

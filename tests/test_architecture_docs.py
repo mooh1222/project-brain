@@ -163,6 +163,21 @@ def test_runtime_map_states_non_corpus_write_boundaries():
     assert missing == []
 
 
+def test_search_docs_describe_recall_instead_of_the_retired_gate():
+    """#78 — runtime map과 진입 지도가 폐지된 게이트를 현재 동작으로 서술하지 않는다."""
+    runtime = _read_architecture_doc("runtime-map.md")
+    entry = _read_architecture_doc("README.md")
+
+    required_phrases = (
+        "검수 상태와 객체 종류로만",
+        "회수 결과를 그대로 노출한다",
+    )
+    missing = [phrase for phrase in required_phrases if phrase not in runtime]
+    assert missing == []
+    assert "게이트" not in runtime
+    assert "게이트" not in entry
+
+
 def test_architecture_entry_states_authority_and_two_repo_boundary():
     text = _read_architecture_doc("README.md")
     required_phrases = (

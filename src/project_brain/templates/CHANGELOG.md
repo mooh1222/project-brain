@@ -10,6 +10,15 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-09-04 — 조회·적재 스킬을 회수·답변 판정 언어로
+
+엔진이 답변 게이트를 폐지하고 회수만 맡게 되면서(#71/#77, ADR 0008) query의 "없으면 없다"를
+사실 기반 규칙으로 다시 썼다 — `query_tokens`의 `object_df`가 0이고 어느 적중의
+`matched_query_tokens`에도 없는 토큰은 "객체로 회수되지 않았다"로 명시하고, `raw_df`가 있으면
+raw 발췌를 열어 확인한 뒤 말하며, 토큰 부재는 확인 지시이지 판정이 아니다. `needs_clarification`
+행·문구를 지우고 회수 사실 세 필드 읽는 법을 더했다. ingest의 `object-model.md`는
+"synonyms와 aliases 표면 규칙"으로 바꿔 게이트 근거를 뺐다(3글자 최소·일반명사 규칙 값은 그대로).
+
 ## 2026-09-04 — 조회 스킬에 scope·표시 상한 옵션 안내
 
 `search`에 `--context-id <id>`·`--all-contexts`·`--top-k`가 생겨(#74) query의 scope 절을

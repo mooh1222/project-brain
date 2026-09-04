@@ -128,8 +128,8 @@ REVIEW_STATE_KEYS = frozenset({
 # insight_type은 필수가 아니되 값이 있으면 이 둘 중 하나여야 한다.
 INSIGHT_TYPE_VALUES = frozenset({"cross-cutting-risk", "operational-lesson"})
 
-_SYNONYM_MIN_LEN = 3  # synonyms/aliases는 게이트 통과권 표면형(2자 이하 오매칭 방지).
-# 단독으로 쓰면 아무 질의에나 부분문자열로 걸려 게이트를 오염시키는 흔한 일반명사(3자+, bb2 실측 critic 확정).
+_SYNONYM_MIN_LEN = 3  # synonyms/aliases는 검색 색인 표면에 오르는 표면형(2자 이하 오매칭 방지).
+# 단독으로 쓰면 그 용어를 묻지 않은 질의에도 걸리는 흔한 일반명사(3자+, bb2 실측 critic 확정).
 # 2자 이하 일반명사(버블 283·팝업 180·모드·보상·영역·타입)는 _SYNONYM_MIN_LEN 규칙이 이미 막는다.
 # ★유한 목록은 완전성을 주장 못 한다 — 명백한 실수의 즉시 차단용. 실가드는 B+C 검수 + 골든셋 eval.
 # df 기반 하드 판정은 불가(고유명·generic df 구간 겹침: 레이스121>아이콘79, 카테고리17<리스킨22).
@@ -308,11 +308,11 @@ def _validate_object_schema(
                 if len(s) < _SYNONYM_MIN_LEN:
                     errors.append(
                         f"{obj['id']}: GlossaryTerm {field} {surface!r} too short "
-                        f"(min {_SYNONYM_MIN_LEN} — 게이트 통과권 표면형)")
+                        f"(min {_SYNONYM_MIN_LEN} — 검색 표면에 오르는 표면형)")
                 elif s.lower() in _SYNONYM_GENERIC_BLOCKLIST:
                     errors.append(
                         f"{obj['id']}: GlossaryTerm {field} {surface!r} bare generic "
-                        f"(게이트 오염 — 고유성 있는 표현만)")
+                        f"(검색 표면 — 고유성 있는 표현만)")
     elif kind == "ContextProjection":
         fmt = obj.get("format")
         if fmt is not None and fmt not in PROJECTION_FORMAT_VALUES:

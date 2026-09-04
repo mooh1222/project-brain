@@ -27,7 +27,7 @@
 | L1 인사이트 그릇 | ✅ `Insight` kind (2026-06-15) | advisories 별도 통로·candidate 적재 거부(1차) |
 | L0 raw 보관 | ✅ 있음 | `raw/sources/<context>/` 텍스트 추적·locator brain root 상대·보수적 토큰 근사와 과대 유닛 분할 |
 | L2 검색 색인 | ✅ 있음 | FTS5 BM25 + bge-m3 벡터 + RRF + 그래프 재정렬 + scoped BM25 + raw 색인 |
-| L3 라우터·회상 | ✅ 책임 분리 (#61, 2026-09-01) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 조회 축 |
+| L3 라우터·회상 | ✅ 회수 전담 (#71 프로그램, 2026-09-04) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 조회 축(#61). 다신호 답변 게이트·점수 바닥·`needs_clarification`을 폐지해 채널을 검수 상태·객체 종류로만 가르고(#77, ADR 0008), 그 자리에 회수 사실을 실었다 — `query_tokens`(토큰별 `object_df`·`raw_df`)·적중별 `matched_query_tokens`·`scope`(#73). `search`에 `--context-id`·`--all-contexts`·`--top-k`(#74), 평가 하네스는 `no_answer` 대신 부재 토큰 보고를 단언한다(#76). 답변 판정은 조회 스킬을 따르는 에이전트 몫(#78) |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
 | 어휘 기준·지식 초안 | ✅ 대체 범위 완료 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬, #51 실제 BB2 로컬 전용 파일럿 완료 |

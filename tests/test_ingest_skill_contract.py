@@ -442,6 +442,16 @@ class IngestSkillContractTest(unittest.TestCase):
             self.assertIn(contract, text)
         self.assertNotIn("EventLedgerRecord 없이는 적재도", text)
 
+    def test_object_model_states_surface_rules_without_the_retired_gate(self):
+        """#78 — 게이트 폐지(ADR 0008) 뒤에도 3글자·일반명사 규칙 값은 그대로 남는다."""
+        text = (REFERENCES / "object-model.md").read_text(encoding="utf-8")
+        self.assertIn("## synonyms와 aliases 표면 규칙", text)
+        self.assertIn("- synonyms와 aliases 표면 규칙", text)
+        for rule in ("세 글자 미만 표면형", "단독 일반명사",
+                     "definition 본문에 이미 들어 있어 색인되는 표현"):
+            self.assertIn(rule, text)
+        self.assertNotIn("게이트", text)
+
     def test_object_model_restores_temporal_and_insight_contracts(self):
         text = (REFERENCES / "object-model.md").read_text(encoding="utf-8")
         self.assertIn("## TemporalFact 시간·연결 계약", text)

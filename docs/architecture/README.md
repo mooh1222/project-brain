@@ -59,7 +59,7 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
 | 무엇을 왜 만드는가 | [설계 정본](../design-canonical.md) | 정체성, 철학, 안정적인 경계, 미결 |
 | 완료·진행·미뤄둔 일 | [ROADMAP](../../ROADMAP.md) | 현재 상태와 발전 히스토리 |
 | 설치·일상 사용 | [루트 README](../../README.md) | 설치와 대표 명령 |
-| 검색 세부 | [검색 내부 구조](../search-internals.md) | 색인, BM25·벡터·RRF, 게이트 |
+| 검색 세부 | [검색 내부 구조](../search-internals.md) | 색인, BM25·벡터·RRF, 회수 계약 |
 | 과거 결정과 당시 증거 | `docs/specs/`, `docs/plans/`, `docs/reports/` | 역사 자료. 현재 코드·테스트와 반드시 대조 |
 
 의도에 대한 우선순위는 최신의 명시적 사용자 결정과 정정, 사용자 발언 원장, 설계 정본,

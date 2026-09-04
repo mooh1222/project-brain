@@ -22,7 +22,7 @@
 - DecisionRecord
 - Insight 적재 규칙
 - 논리 key와 완성 ID
-- synonyms와 aliases 게이트
+- synonyms와 aliases 표면 규칙
 
 ## 공통 필드와 enum
 
@@ -177,9 +177,11 @@ commit SHA는 별도 코드 앵커 정보로 남긴다.
 완성 ID를 논리 key 자리에 넣으면 build가 다시 접두를 붙여 이중 ID를 만들 수 있다.
 자동으로 접두를 떼어 고치지 않는다. 잘못된 Context의 ID를 정상 key로 바꿔 조용히 연결을 틀릴 수 있기 때문이다.
 
-## synonyms와 aliases 게이트
+## synonyms와 aliases 표면 규칙
 
-`GlossaryTerm`의 `synonyms`와 `aliases`는 사용자가 실제로 쓰는 다른 표면형을 질의 게이트에 연결한다.
+`GlossaryTerm`의 `synonyms`와 `aliases`는 대표 어휘와 같은 개념에 도달하는 정식 질문 표현이다.
+동의어는 뜻이 같은 자연어 표현이고, 별칭은 옛 이름·화면 표기·내부 이름처럼 성격이 다른 이름이다.
+둘 다 term과 함께 검색 색인 표면에 오른다.
 용어 본문에 없는 한국어·영문 등가어, 기획서 표현, 충분히 구체적인 식별자 변형만 넣는다.
 
 다음은 넣지 않는다.

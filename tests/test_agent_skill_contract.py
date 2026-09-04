@@ -304,3 +304,26 @@ def test_query_skill_documents_scope_and_display_limit_options():
     # 다른 서브커맨드의 --scope(promote 승격 단위, draft 범위 서술)와 섞이지 않게
     # 조회 스킬은 그 이름을 쓰지 않는다.
     assert "search \"<질문>\" --scope" not in query
+
+
+def test_query_skill_states_the_fact_based_absence_rule():
+    """#78 — 설치 조회 스킬이 엔진 판정 대신 회수 사실로 "없다"를 말하게 한다(ADR 0008)."""
+    query = _installed_skill("query")
+
+    for required in (
+        "엔진은 회수만 하고",
+        "답변 판정",
+        "query_tokens",
+        "object_df",
+        "raw_df",
+        "matched_query_tokens",
+        "객체로 회수되지 않았다",
+        "raw 발췌를 열어 확인",
+        "확인 지시이고 판정이 아니다",
+        "`scope`",
+        "origin",
+    ):
+        assert required in query
+
+    for retired in ("needs_clarification", "게이트"):
+        assert retired not in query

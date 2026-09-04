@@ -261,7 +261,7 @@ artifact를 만들 뿐 객체를 확정 적용하지 않는다.
 
 ### search와 bare 자유질의: fresh index 기반 일반 회수
 
-`search`는 `search.eval_recall()`의 의미 회상과 게이트를 직접 노출한다. DB가 없거나 코퍼스
+`search`는 `search.eval_recall()`의 회수 결과를 그대로 노출한다. DB가 없거나 코퍼스
 지문이 달라 stale이면 rebuild 안내와 함께 실패한다. 즉 **search는 fresh index가 필요**하다.
 첫 인자가 알려진 명령이 아니면 `cli.main()`도 같은 `_run_search()`로 보낸다. 따라서
 `project-brain "질문"`과 `project-brain search "질문"`은 결과와 missing/stale index 실패 계약이 같다.
@@ -271,13 +271,16 @@ redaction 또는 ACL 집행이 아니다.
 
 | 출력 채널 | 의미 |
 |---|---|
-| `results` | 게이트를 통과한 reviewed 객체 |
-| `candidates` | 게이트를 통과한 미검수 candidate 객체 |
+| `results` | reviewed 객체 |
+| `candidates` | 미검수 candidate 객체 |
 | `raw_excerpts` | 객체와 분리된 미검수 원문 발췌 |
 | `advisories` | 질의와 관련된 reviewed Insight 위험·교훈 |
 | `projection_reuse` | 이전에 조립한 candidate/reviewed 착수 브리핑 재사용 후보 |
 
-다섯 채널은 섞지 않고 각 hit의 기존 `status`와 채널 의미를 유지한다. `search`가 모든 hit에 별도
+다섯 채널은 **검수 상태와 객체 종류로만** 갈리며 섞지 않고, 각 hit의 기존 `status`와 채널 의미를
+유지한다. 회수한 객체를 엔진 판정으로 숨기는 층은 없고, 답변 판정은 회수 결과와 동반 사실
+(`query_tokens`·`matched_query_tokens`·`scope`)을 읽는 에이전트 몫이다
+([ADR 0008](../adr/0008-engine-recalls-agent-judges-answers.md)). `search`가 모든 hit에 별도
 redaction trust label을 계산하는 것은 아니다. 설치 조회 스킬은 일반 의미·코드 위치·개발 착수 질문에서
 관련 `results`와 `candidates`를 읽고 핵심 객체를 고른 뒤 `show <id>`로 본문과 이웃을 확인해 답을
 조합한다. candidate를 쓰면 확인 필요 상태를 표시하며 단순 확인을 승격 승인으로 확대하지 않는다.
