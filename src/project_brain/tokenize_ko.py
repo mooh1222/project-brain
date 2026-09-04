@@ -41,10 +41,12 @@ _KOREAN_SPLITTER = None
 # backend="kiwipiepy" 명시 주입과 기본 경로가 같은 Kiwi 인스턴스를 쓰도록 따로 캐시한다.
 _KIWI_SPLITTER = None
 
-# 결합형을 만들 수 있는 kiwi 품사 태그 — 명사류만(spec #72에서 프로토타입으로 확정).
-# NNG 일반명사 / NNP 고유명사 / NNB 의존명사 / XR 어근 / SL 외국어 / SN 숫자.
-# 조사·어미·동사 조각은 여기 없으므로 결합에 섞이지 않는다.
-_COMPOUND_TAGS = frozenset({"NNG", "NNP", "NNB", "XR", "SL", "SN"})
+# 결합형을 만들 수 있는 kiwi 품사 태그 — 한글 명사류만(spec #72에서 프로토타입으로 확정).
+# NNG 일반명사 / NNP 고유명사 / NNB 의존명사 / XR 어근. 조사·어미·동사 조각은 여기 없으므로
+# 결합에 섞이지 않는다. 숫자(SN)·외국어(SL) 조각은 한글이 없어 결합 조건을 통과하지 못하므로
+# 태그 집합에 넣지 않는다 — "3단계"·"UI버튼"은 단계·3 / 버튼·ui로만 남고(영숫자는 심볼 경로가
+# 1급으로 처리), 이들을 결합형에 넣는 것은 규칙 버전을 올리는 별도 결정이다.
+_COMPOUND_TAGS = frozenset({"NNG", "NNP", "NNB", "XR"})
 
 # 한글 연속을 잡는 정규식 (정규식 분리·한글 토큰 필터 공통).
 _HANGUL_RUN = re.compile(r"[가-힣]+")

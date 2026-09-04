@@ -177,6 +177,11 @@ def test_search_docs_describe_recall_instead_of_the_retired_gate():
     assert "게이트" not in runtime
     assert "게이트" not in entry
 
+    changes = _read_architecture_doc("change-map.md")
+    assert "게이트" not in changes
+    assert "답변 gate" not in changes
+    assert "router·intent·회수·ranking" in changes
+
 
 def test_architecture_entry_states_authority_and_two_repo_boundary():
     text = _read_architecture_doc("README.md")

@@ -219,6 +219,17 @@ class CompoundNounTokenTest(unittest.TestCase):
         self.assertNotIn("보상을", toks)
         self.assertNotIn("받았대", toks)
 
+    def test_digit_and_foreign_fragments_do_not_join_compounds(self):
+        # SN(숫자)·SL(외국어) 조각은 한글이 없어 결합에 참여하지 않는다 — 태그 집합에서도 뺐다.
+        toks = tokenize("3단계 오픈 팝업")
+        self.assertIn("단계", toks)
+        self.assertIn("3", toks)
+        self.assertNotIn("3단계", toks)
+        toks = tokenize("UI버튼 클릭")
+        self.assertIn("버튼", toks)
+        self.assertIn("ui", toks)
+        self.assertNotIn("ui버튼", toks)
+
     def test_same_input_twice_is_identical(self):
         text = "인게임에서 럭키박스 아이템 사용하면"
         self.assertEqual(tokenize(text), tokenize(text))

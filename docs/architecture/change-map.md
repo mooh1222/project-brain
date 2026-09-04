@@ -2,7 +2,7 @@
 
 이 문서는 “어디를 고치고 어디까지 확인해야 하는가”를 현재 코드 구조에 맞춰 연결한다.
 production 파일 하나만 보고 검증 범위를 줄이지 않는다. 먼저 변경이 코퍼스 쓰기, 색인 입력,
-회상·게이트, 설치 runtime 중 어디까지 영향을 주는지 분류한 뒤 아래 표를 따른다.
+회상·회수 계약, 설치 runtime 중 어디까지 영향을 주는지 분류한 뒤 아래 표를 따른다.
 
 ## 검증 층
 
@@ -10,7 +10,7 @@ production 파일 하나만 보고 검증 범위를 줄이지 않는다. 먼저 
 2. 엔진 합성 회귀를 돌린다.
 3. 설치 템플릿이나 ingest 흐름을 건드렸다면 설치되는 runtime unittest와 installer 회귀를
    함께 돌린다.
-4. schema, 검색 품질, 색인, router, gate, ranking처럼 실제 데이터에 따라 결과가 달라지는
+4. schema, 검색 품질, 색인, router, 회수 계약, ranking처럼 실제 데이터에 따라 결과가 달라지는
    엔진 변경은 소비 데이터 레포의 `brain/checks`와 `eval`까지 확인한다.
 5. 색인에 들어가는 텍스트·청크·토큰·벡터·DB 계약이 바뀐 경우에만 실모델 index를 한 번
    rebuild한다.
@@ -42,7 +42,7 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 | 한국어 tokenizer | `tokenize_ko.py` | `test_tokenize_ko.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | **필요** | index/query tokenizer 대칭, kiwipiepy 단일 백엔드·고정 버전, 어절 안 명사 결합형, 규칙 버전 상향 시 옛 색인 StaleIndexError, 정규식은 테스트 주입 전용 결정론 |
 | surface·raw chunk·index schema | `surface.py`, `raw_chunks.py`, `search_index.py` | `test_surface.py`, `test_raw_chunks.py`, `test_search_index.py`, `test_search.py` | 적재 finalizer의 기대 행·결과가 바뀌면 runtime | `brain/checks` + `eval` | 필요 | **필요** | 객체 lane과 raw lane 분리, corpus fingerprint, 원자 DB 교체 |
 | embedder | `embedder.py`, `search_index.py` | `test_embedder.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | 모델·차원·벡터 생성 계약 변경 시 **필요** | index/query 모델 이름·차원 대칭, 테스트는 StubEmbedder |
-| router·intent·gate·ranking | `intent.py`, `router.py`, `search.py`, `status.py`, `eval_harness.py` | `test_router.py`, `test_search.py`, `test_status.py`, `test_eval_harness.py`, bare/search CLI 회귀 | 설치 조회 스킬이나 query 출력 계약이 바뀌면 runtime + installer 2회 | `brain/checks` + `eval`; 일반 조회 변경이면 표적 search/show | 필요 | 색인 입력과 저장 DB가 그대로면 불필요 | bare/search 동일 회수·동일 freshness 실패, five channels, query 네 결정론 조회 축, reviewed 이름 표면의 결정·scope 일관성, CurrentView source 유효성, mapping stale은 show·Insight는 search 소유 |
+| router·intent·회수·ranking | `intent.py`, `router.py`, `search.py`, `status.py`, `eval_harness.py` | `test_router.py`, `test_search.py`, `test_status.py`, `test_eval_harness.py`, bare/search CLI 회귀 | 설치 조회 스킬이나 query 출력 계약이 바뀌면 runtime + installer 2회 | `brain/checks` + `eval`; 일반 조회 변경이면 표적 search/show | 필요 | 색인 입력과 저장 DB가 그대로면 불필요 | bare/search 동일 회수·동일 freshness 실패, five channels, query 네 결정론 조회 축, reviewed 이름 표면의 결정·scope 일관성, CurrentView source 유효성, mapping stale은 show·Insight는 search 소유 |
 | 공통 어휘 기준(#48·#50 구현)·대표어/동의어/별칭 회수(#49 구현) | `templates/ingest/references/glossary-criteria.md`, 관련 설치 스킬, `router.py`, `surface.py` | #48·#50은 `test_agent_skill_contract.py`, `test_ingest_skill_contract.py`, `test_installer.py`; #49는 `test_router.py`, `test_surface.py`와 회수 표적 테스트 | ingest·session-ingest·draft·audit 조건부 pointer와 installer 첫/두 번째 install | 설치 산출물 합성 검증. #49는 실제 BB2 대표어·동의어·별칭 표적 search + `brain/checks`. 전체 어휘 기계 현황 + 샐리 카누 의미 판정은 #51에서 자동 수정 없이 읽기 전용 보고부터 | #48·#50 연결은 검색 결과를 바꾸지 않아 불필요. #49는 실제 BB2 eval·표적 회상 필요 | #48·#50은 색인 입력을 바꾸지 않아 불필요. #49는 reviewed mapping surface에 aliases를 추가하고 extractor v4로 올렸으므로 실모델 rebuild 필요 | 실제 프로젝트 이름·독립 개념·근거, 코드 토큰 제외, reviewed term+synonyms+aliases 동등 회수, candidate alias 권한·이번 범위의 GCR·공통 verification 제외 |
 | graph·reference 시각화·support | `reference_fields.py`, `graph.py`, `graph_viz.py`, `search.py` | `test_reference_fields.py`, `test_graph.py`, `test_graph_viz.py`, `test_search.py` | 보통 불필요 | 실제 `lint`/`audit`/`graph`; ranking support에 영향이면 checks + eval | search graph support가 바뀌면 필요 | DB 입력이 그대로면 불필요 | graph·lint·reference rewrite의 registry 공유, 외부 식별자 제외, 기본 고립 잎 kind |
 | projection | `context_projection.py`, `hash_utils.py`, `lint.py`, `search.py`, `search_index.py` | `test_context_projection.py`, `test_lint.py`, `test_search.py`, `test_search_index.py`, `test_mutation.py` | 설치된 query 흐름이 바뀌면 installer/runtime | `brain/checks` + `eval` | 필요 | indexed payload, source fingerprint, surface 코드가 바뀌면 필요. 실제 projection write/repair 뒤에도 DB가 무효화되므로 후속 search/eval 전 필요 | creator의 source IDs, semantic hash, manual-edit 정책, 별도 `projection_reuse` lane |
@@ -69,7 +69,7 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
   보존 정책으로 기존 DB를 유지하고 검증하므로 이 조건에서 제외한다.
 - `ContextProjection`의 indexed payload나 source fingerprint가 바뀐 경우
 
-반대로 router, intent 분류, 답변 gate, 결과 채널 배치, RRF 이후 ranking만 바뀌고 색인 입력과
+반대로 router, intent 분류, 회수 사실 필드, 결과 채널 배치, RRF 이후 ranking만 바뀌고 색인 입력과
 기존 DB가 같다면 rebuild는 생략할 수 있다. 이 경우에도 `brain/checks`와 `eval`은 생략하지 않는다.
 
 ## 기본 명령
