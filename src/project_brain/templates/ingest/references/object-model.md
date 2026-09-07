@@ -79,7 +79,10 @@ MutationService가 한 번 읽은 clock으로 `created_at`·`updated_at`을 찍�
 | DecisionRecord | `decision_type`, `summary`, `decision`, `source_object_ids`, `affected_context_ids`, `spec_reflected` |
 | Insight | `body`, `source_object_ids` |
 
-`source_type`은 `session`, `slack`, `jira`, `pr`, `commit`, `spec`, `build_log`, `code_search`, `wiki`, `context` 중 하나다.
+`source_type`은 `session`, `slack`, `jira`, `pr`, `commit`, `spec`, `build_log`, `code_search`, `wiki`, `context`, `user_statement` 중 하나다.
+`user_statement`는 개념 선언 문서에 쓴다. 사용자가 문장 단위로 확인해 승인한 진술만 이 값이며, 승인 전 초안이나 에이전트 요약은 쓰지 못한다.
+개념 선언 밖의 사용자 확인 기록에 이 값을 쓰는 규정은 후속 판단으로 남긴다.
+짝이 되는 `EvidenceRef.ref_type`도 `user_statement`다. 저장 규약은 `ingest-tools.md`의 개념 선언 문서 절을 따른다.
 `ref_type`, `locator_source`, `confidence`, `decision_type`, `spec_reflected`도 엔진 enum을 따른다.
 확신이 낮은 사실에는 `confidence=low`를 쓰고, 이 값은 SKILL의 독립 적대 검증 대상이다.
 

@@ -20,6 +20,15 @@
 - lint는 형식과 끊긴 참조를 잡지만 통째로 빠진 규칙은 찾지 못하므로 수동 의미 검사가 필요하다.
 - coverage는 verify/notes/build/ingest의 identity를 결속하지만 원문 의미가 완전한지는 추론하지 않는다.
 - assembled는 `COVERAGE`와 `--coverage-out`, direct/assembled build·ingest는 같은 `--coverage-file`을 쓴다. coverage 없는 single/batch가 objects·raw·index를 쓰기 전에 실패했는지 확인한다.
+- 어휘를 만들거나 바꾼 적재(`Concept Intake: <개념 수>`)는 이번 적재의 모든 `GlossaryTerm`에 대해 term별로 정의 첫 문장이
+  개념 선언 문서의 "팀의 뜻"에서 왔음을 확인한다. 코드 대응(관리 클래스·식별 코드·저장 필드)은 두 번째 문장 이후에 있어야
+  하고, 이름 유래를 밝히는 짧은 괄호 설명은 허용한다. 코드 식별자 유무는 보조 신호일 뿐이며 문자열 기계 거부 게이트는 두지 않는다.
+- 각 `GlossaryTerm`의 연결 mapping마다 "그 mapping이 개념의 정의·범위나 발동·적용·처리 동작을 설명한다"는 근거를 term별
+  한 줄로 적는다. 연결 수만 세는 검사는 두지 않는다 — 수 검사는 연결 1개짜리 결함 term을 그대로 통과시킨다. 지나가며 언급만 하는
+  mapping이 연결돼 있거나 근거를 쓸 수 없으면 적재 전에 연결이나 정의를 고친다. `Concept Intake: none`이거나 개념 선언 단계가
+  없는 흐름(session-ingest)이면 두 확인은 `해당 없음`으로 기록한다.
+- 선언을 받지 못해 어휘를 만들지 않은 컨텍스트는 `GlossaryTerm`이 candidate로도 생기지 않았고, 적재 보고서 `pending_concepts`에
+  컨텍스트·후보 표현·출처가 남았는지 확인한다.
 
 ## 실행 후 일곱 게이트
 

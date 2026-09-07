@@ -12,7 +12,8 @@
     "sources": {
       "ids": [
         "manifest.ctx-build.code",
-        "manifest.ctx-build.commit"
+        "manifest.ctx-build.commit",
+        "manifest.ctx-build.declaration"
       ]
     },
     "glossary": {
@@ -56,6 +57,10 @@
     "extra_objects": {
       "objects": [
         {
+          "id": "evref.ctx-build.declaration",
+          "kind": "EvidenceRef"
+        },
+        {
           "id": "ledger.ctx-build.note",
           "kind": "EventLedgerRecord"
         }
@@ -80,6 +85,10 @@
       "kind": "EvidenceRef"
     },
     {
+      "id": "evref.ctx-build.declaration",
+      "kind": "EvidenceRef"
+    },
+    {
       "id": "evref.ctx-build.handler",
       "kind": "EvidenceRef"
     },
@@ -97,6 +106,10 @@
     },
     {
       "id": "manifest.ctx-build.commit",
+      "kind": "EvidenceManifest"
+    },
+    {
+      "id": "manifest.ctx-build.declaration",
       "kind": "EvidenceManifest"
     },
     {

@@ -316,5 +316,35 @@ class TestSynonymSurfaceRule(unittest.TestCase):
         self.assertFalse(any("게이트" in e for e in errors))
 
 
+class TestUserStatementEnum(unittest.TestCase):
+    """개념 선언(Concept Intake, #83) 근거용 enum 한 축 — EvidenceManifest.source_type과
+    EvidenceRef.ref_type 양쪽에 `user_statement`를 더한다(source_type 비대칭 메움 선례와 같은 이유).
+    사용자가 문장 단위로 확인해 승인한 진술만 이 값을 쓴다. schema는 소속 여부만 본다."""
+
+    def test_user_statement_source_type_valid(self):
+        obj = manifest("manifest.neutral.declaration")
+        obj["source_type"] = "user_statement"
+        self.assertEqual(validate_object(obj), [])
+
+    def test_user_statement_ref_type_valid(self):
+        from tests.test_ingest import evidence_ref
+        obj = evidence_ref("evref.neutral.declaration", "manifest.neutral.declaration")
+        obj["ref_type"] = "user_statement"
+        self.assertEqual(validate_object(obj), [])
+
+    def test_bogus_source_type_still_rejected(self):
+        obj = manifest("manifest.neutral.declaration")
+        obj["source_type"] = "spec_ppt"
+        errors = validate_object(obj)
+        self.assertTrue(any("invalid source_type" in e for e in errors), errors)
+
+    def test_bogus_ref_type_still_rejected(self):
+        from tests.test_ingest import evidence_ref
+        obj = evidence_ref("evref.neutral.declaration", "manifest.neutral.declaration")
+        obj["ref_type"] = "user_declaration"
+        errors = validate_object(obj)
+        self.assertTrue(any("invalid ref_type" in e for e in errors), errors)
+
+
 if __name__ == "__main__":
     unittest.main()

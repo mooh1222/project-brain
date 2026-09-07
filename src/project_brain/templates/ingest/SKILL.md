@@ -19,10 +19,10 @@ description: |
 기본 source packet은 현재 {{DEFAULT_BRANCH}} 코드, 현행 기능 문서, 현재 운영·서비스 규칙이다.
 기본 목표는 현재 사실 적재이며, 이력 범위는 `references/scope.md`의 `history_coverage=unsearched`로 기록한다.
 기본 source packet을 선언한 뒤에만 코드와 문서를 탐색한다.
-소스 읽기 전에 사용자에게 보이는 첫 진행 보고에 `Source Intake`, `route=single|batch` 중 하나, `history_coverage=<값>`을 정확히 표기하고 대상·소스 묶음·코드 기준점을 남긴다; 보류해도 이 선언은 생략하지 않는다.
+소스 읽기 전에 사용자에게 보이는 첫 진행 보고에 `Source Intake`, `route=single|batch` 중 하나, `history_coverage=<값>`, 그리고 `Concept Intake: <개념 수>` 또는 `Concept Intake: none(어휘 변경 없음)`을 정확히 표기하고 대상·소스 묶음·코드 기준점을 남긴다; 보류해도 이 선언은 생략하지 않는다.
 
 소스 위치를 찾지 못했거나 사용자가 소스 범위를 제한했으면 필요한 범위만 짧게 확인한다.
-소스 충돌, 현행 소스 부재, 경계 불명확, 이력 근거 부족, 원자 승격이 결과를 바꾸는 경우만 예외 큐로 모은다.
+소스 충돌, 현행 소스 부재, 경계 불명확, 이력 근거 부족, 원자 승격이 결과를 바꾸는 경우, 개념 선언에 없는 개념 후보(표현·출처·잠정 뜻)만 예외 큐로 모은다.
 그 밖의 세부 판단은 source에 맞으면 조용히 진행하고, 예외 큐만 사용자에게 확인한다.
 
 적재 전 대상이 완료 소급 적재인지, 코드 앵커를 {{DEFAULT_BRANCH}}에서 고정할 수 있는지 확인한다.
@@ -34,8 +34,8 @@ description: |
 상태축과 머지 전·후 경계는 `references/scope.md`가 정한다.
 상태 이름을 적었다고 적재나 이력 확인이 끝난 것으로 간주하지 않는다.
 
-`GlossaryTerm`을 생성하거나 변경할 때 `references/glossary-criteria.md`를 먼저 읽는다.
-어휘를 만들거나 바꾸지 않는 적재에서는 이 기준을 읽을 필요가 없다.
+`GlossaryTerm`을 생성하거나 변경할 때 `references/glossary-criteria.md`를 먼저 읽는다. 어휘를 만들거나 바꾸지 않는 적재에서는 이 기준을 읽을 필요가 없고 개념 선언도 생략할 수 있다; 생략했으면 `GlossaryTerm` 생성·변경을 하지 않는다.
+`GlossaryTerm`은 사용자의 개념 선언에서만 만든다. 사용자가 없어 선언을 받지 못하면 candidate로도 만들지 않고, mapping·CodeLocator는 정상 적재하되 어휘는 적재 보고서의 `pending_concepts`(컨텍스트, 후보 표현, 출처)에만 남긴다. 지속 상태나 corpus 흔적은 만들지 않으며, 그 컨텍스트의 다음 적재가 Concept Intake에서 이 목록을 다시 제시한다.
 
 ## 절대 규칙
 
@@ -66,13 +66,14 @@ description: |
 ## 실행 흐름
 
 1. **Source Intake.** 대상, 현재 사실 또는 이력 범위, 이번 소스 묶음, 코드 기준점을 짧게 선언한다.
-2. **소스 읽기.** 코드·현행 문서·보조 근거를 읽고, 코드로 확인 가능한 흐름은 프로젝트 규칙에 맞춰 추적한다.
-3. **원자·coverage 선언.** 의미 원자와 독립 expected planner 입력을 먼저 정해 `COVERAGE`의 `expected_objects`에 정확한 `(id, kind)`를 선언한다. coverage는 원문 의미 완전성을 추론하지 않는다.
-4. **연결 조립.** coverage를 `--coverage-out`으로 고정하고 notes와 exact 비교한 뒤, build에 같은 `--coverage-file`을 넘겨 ID와 연결을 조립한다.
-5. **적대 검증.** 별도 검증자가 근거, 경계, 코드 앵커, 중복을 반박하며 확인한다. 변경 이력의 결론은 `references/judgment.md`로 판정한다.
-6. **수정 또는 보류.** 기존 사실을 갱신하거나 대체하면 `references/update-rules.md`의 kind별 묶음을 따른다. 근거가 없는 항목은 억지로 채우지 않는다.
-7. **적재.** build 오류가 없고 coverage-bound build report가 맞을 때만 같은 `--coverage-file`로 한 묶음 ingest한다. coverage 없는 single/batch는 쓰기 전에 실패해야 한다.
-8. **마무리.** 적재 뒤 검증과 회상 확인은 `references/completeness-checklist.md` 및 `references/ingest-tools.md`를 따른다.
+2. **개념 선언(Concept Intake).** 사용자가 이번 컨텍스트의 개념을 먼저 말한다. 개념마다 네 칸 — 대표 이름, 팀의 뜻(한두 문장), 예시, 아님/이웃(헷갈리는 이웃 개념) — 을 받고, 동의어·별칭 후보는 있으면 적되 표면 규칙은 `references/object-model.md`를 따른다. 인터뷰가 아니라 역제안 후 확인이다: 선언 없이 기능 이름만 왔으면 소스를 읽어 개념 후보 목록(이름·잠정 뜻·출처)을 만들고 "맞다 / 빼라 / 더 있다"를 한 번에 받는다 — 후보는 질문지일 뿐 객체(candidate 포함)로 만들지 않으며, 열린 질문은 이것 하나다. 질문마다 에이전트의 추정 답과 근거를 붙여 "예 / 아니오 / 수정"으로 끝나게 하고, 횟수 상한은 두지 않되 확인형으로 닫히지 않는 개념은 이번 적재에서 어휘로 만들지 않고 보류한다. 그 외 모호성은 `references/glossary-criteria.md`의 사용자 판단 네 가지를 그대로 따른다. 사용자가 문장 단위로 확인해 승인한 선언만 raw 문서로 저장하고 `EvidenceManifest`(`source_type=user_statement`)로 등록한다 — 저장 규약과 근거 조립은 `references/ingest-tools.md`. 답은 선언 문서에 그대로 들어가 근거가 되며, 확인한 대상과 질문을 명시하고 확인 하나를 다른 개념의 승격으로 넓히지 않는다.
+3. **소스 읽기.** 코드·현행 문서·보조 근거를 읽고, 코드로 확인 가능한 흐름은 프로젝트 규칙에 맞춰 추적한다. 선언에 없는 개념 후보가 나오면 term을 만들지 않고 즉시 묻지도 않으며, 예외 큐에 모아 한 번에 묻는다.
+4. **원자·coverage 선언.** 의미 원자와 독립 expected planner 입력을 먼저 정해 `COVERAGE`의 `expected_objects`에 정확한 `(id, kind)`를 선언한다. coverage는 원문 의미 완전성을 추론하지 않는다.
+5. **연결 조립.** coverage를 `--coverage-out`으로 고정하고 notes와 exact 비교한 뒤, build에 같은 `--coverage-file`을 넘겨 ID와 연결을 조립한다. `GlossaryTerm` 정의의 첫 문장은 선언의 "팀의 뜻"을 그대로 또는 다듬어 쓰고, 코드 대응(관리 클래스·식별 코드·저장 필드)은 두 번째 문장 이후에 둔다; 첫 문장에 코드 식별자가 있으면 다시 쓰되 이름 유래를 밝히는 짧은 괄호 설명은 허용하고, 문자열 기계 거부 게이트는 두지 않는다. 선언 개념이 기존 `GlossaryTerm`과 같은 개념이면 ID를 승계하고 정의를 선언의 뜻으로 다시 쓴다(`references/update-rules.md`). mapping의 `glossary_term_ids`에 term을 넣는 조건은 "그 mapping이 개념의 정의·범위나 개념이 발동·적용·처리되는 동작을 설명한다"이며, 개념을 지나가며 언급하거나 다른 개념의 설명 안에서 참조만 하는 mapping은 연결하지 않는다 — 그 mapping은 본문에 개념 이름을 쓰므로 검색 표면에서는 회수된다.
+6. **적대 검증.** 별도 검증자가 근거, 경계, 코드 앵커, 중복을 반박하며 확인한다. 변경 이력의 결론은 `references/judgment.md`로 판정한다.
+7. **수정 또는 보류.** 기존 사실을 갱신하거나 대체하면 `references/update-rules.md`의 kind별 묶음을 따른다. 근거가 없는 항목은 억지로 채우지 않는다.
+8. **적재.** build 오류가 없고 coverage-bound build report가 맞을 때만 같은 `--coverage-file`로 한 묶음 ingest한다. coverage 없는 single/batch는 쓰기 전에 실패해야 한다.
+9. **마무리.** 적재 뒤 검증과 회상 확인은 `references/completeness-checklist.md` 및 `references/ingest-tools.md`를 따른다.
 
 원자별로 source의 위치, 확인한 경계, 남은 불확실성을 짧게 기록한다.
 나중에 추적할 수 없는 설명은 검증을 통과한 것으로 취급하지 않는다.
@@ -103,7 +104,7 @@ description: |
 단건도 부분 결과를 성공으로 부르지 않는다.
 검증이나 적재가 실패하면 원인을 고친 뒤 같은 완료 게이트를 다시 통과한다.
 
-여러 항목이면 batch manifest와 report를 사용한다.
+여러 항목이면 batch manifest와 report를 사용한다. 배치 시작 전에 배치에 든 컨텍스트들의 개념 선언을 한 세션에서 모아 받고(추정: 컨텍스트 10개면 30~40분), 그 뒤 에이전트가 자율로 돈다. 선언을 못 받은 컨텍스트는 mapping·locator만 적재하고 어휘는 `pending_concepts`로 남겨 배치가 막히지 않게 한다.
 각 항목은 build·검증·ingest까지만 수행하고, 중간에 색인 재생성이나 전체 검수를 반복하지 않는다.
 실패 항목이 하나라도 있으면 finalization을 호출하지 않는다.
 
@@ -130,7 +131,7 @@ workflow 최상위 상태만으로 완료를 선언하지 않는다.
 
 ## 완료 게이트
 
-적재 전에는 이번 소스 묶음, 의미 원자, 논리 key, 연결, 적대 검증 결과를 확인한다.
+적재 전에는 이번 소스 묶음, 의미 원자, 논리 key, 연결, 적대 검증 결과를 확인한다. 어휘를 만들거나 바꾼 적재는 term별로 (1) 정의 첫 문장이 개념 선언의 "팀의 뜻"에서 왔는지 확인하고 (2) 연결 mapping마다 "정의나 동작을 설명한다"는 근거를 한 줄로 적는다; 연결 수만 세는 검사는 두지 않으며, 어긋나면 적재 전에 고친다.
 상태축의 허용값과 현재 검수 상태는 `references/scope.md` 및 `references/completeness-checklist.md`로 점검한다.
 
 단건은 build 오류가 없고 필요한 검증을 통과해야 적재한다.

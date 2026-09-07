@@ -92,14 +92,16 @@ if VALID_KINDS != frozenset(ID_GRAMMARS):
 
 # enum 값 집합 (spec §6.1 EvidenceManifest.source_type / §6.2 EvidenceRef.ref_type).
 # 필드 존재만 보던 검증이 잘못된 값(예: spec_ppt, slide)을 통과시켰던 회귀를 막는다.
+# `user_statement`(#83): 개념 선언 문서 — 사용자가 문장 단위로 확인해 승인한 진술. source_type과
+# ref_type 양쪽에 같은 값을 둔다(비대칭 메움). lint의 legacy 근거 집합(context·wiki)에는 넣지 않는다.
 SOURCE_TYPE_VALUES = frozenset({
     "session", "slack", "jira", "pr", "commit", "spec",
-    "build_log", "code_search", "wiki", "context",
+    "build_log", "code_search", "wiki", "context", "user_statement",
 })
 REF_TYPE_VALUES = frozenset({
     "slack_message", "slack_thread", "jira_comment", "spec_slide", "spec_section",
     "code_locator", "build_log_range", "session_turn", "wiki_section", "context_term",
-    "commit", "pr", "jira_issue",
+    "commit", "pr", "jira_issue", "user_statement",
 })
 # spec §6.1 EvidenceManifest.redaction_status. 라우터 _restricted_for(router.py)가
 # "approved"만 통과시키는 화이트리스트라, enum 밖 문자열(예: 옛 assembly 기본값 "none")은

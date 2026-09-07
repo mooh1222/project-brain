@@ -10,6 +10,7 @@
 - [build](#build--구조화-노트--객체-묶음-조립-자동화-2026-06-16)
 - [ingest와 promote](#ingest--cli로-부르기)
 - [저장 레이아웃과 raw 원문](#기획서-원문-보관-2026-06-10-확정)
+- [개념 선언 문서 보관](#개념-선언-문서-보관-2026-09-06-확정)
 - [단건·대량 실행](#조립적재-스크립트-scripts)
 - [적재 후 확인](#적재-후-확인--lint--색인--골든셋--회상--고립-재점검)
 
@@ -224,12 +225,47 @@ keyword-only 필수다.
 | EvidenceManifest 필드 | 기록값 |
 |---|---|
 | `title` | 원본 파일명 그대로 |
-| `captured_by` | 변환 도구 이름/버전 |
+| `captured_by` | 변환 도구 이름/버전 (예외: 개념 선언 문서는 말한 사람 — 아래 절) |
 | `captured_at` | 캡처 시각 |
 | `locator` | brain root 기준 최종 raw 상대 경로 |
 
 새 엔진 필드는 만들지 않는다. 텍스트만 Git으로 추적하고 바이너리(PPT·이미지)는 계속 미추적으로 로컬 보관한다. 규약 정본은
 `{{BRAIN_ROOT}}/README.md`이며 서버 위키·세션은 링크만(`EvidenceManifest.locator`) 남긴다.
+
+## 개념 선언 문서 보관 (2026-09-06 확정)
+
+적재 스킬 실행 흐름 2단계(Concept Intake)에서 사용자가 문장 단위로 확인해 승인한 개념 선언은
+`{{BRAIN_ROOT}}/raw/sources/<context-slug>/concept-declaration.md`에 보관한다. 이름은 위 `<sanitized-original-basename>.md`
+형식이며 컨텍스트마다 파일 하나다. 개정은 같은 파일을 제자리에서 고치고 이력은 git이 맡는다 — 새 파일을 만들지 않으므로
+같은 basename 충돌 규칙(`-<sha256-12>` 접미사)은 발동하지 않는다. 이 파일은 사람과 에이전트가 직접 쓰는 보관 정책이며
+위 재생 드라이버로는 쓰지 않는다(드라이버의 fail-closed·덮어쓰기 금지 규칙에는 예외가 없다). 승인 전 초안·에이전트 요약은
+이 파일에 넣지 않는다. 데이터 레포 README의 "세션을 해석해 만든 요약·인사이트 후보·개발 제안은 원문이 아니다" 규칙은
+에이전트 파생 텍스트를 막는 것이고, 사용자가 승인한 1차 진술인 이 문서는 그 규칙 밖이다 — 이 사실을 데이터 레포 README에
+한 줄 적는 것은 데이터 레포 티켓의 몫이다.
+
+내용은 개념마다 네 칸(대표 이름, 팀의 뜻, 예시, 아님/이웃)과 있으면 동의어·별칭 후보, 그리고 확인 질문과 사용자의 답(확인한
+대상과 질문 명시)이다. 개념마다 절(heading) 하나를 둔다 — EvidenceRef의 `locator.heading`이 이 절을 가리킨다.
+
+| EvidenceManifest 필드 | 기록값 |
+|---|---|
+| `source_type` | `user_statement` (lint legacy 근거 집합 `context`·`wiki`에 속하지 않는다) |
+| `title` | `concept-declaration.md` |
+| `captured_by` | 말한 사람(역할 또는 이름) — 파일 기반 manifest 표의 "변환 도구 이름/버전" 규약의 예외 |
+| `captured_at` | 사용자가 확인한 시각 |
+| `locator` | brain root 기준 상대 경로 `raw/sources/<context-slug>/concept-declaration.md` |
+| `redaction_status` | 명시한다(기본값 추측 금지) |
+
+선언 EvidenceRef는 코드 앵커 빌더가 만들지 않으므로 build notes의 `extra_objects[]`에 완성 EvidenceRef를 직접 넣는다 —
+`ref_type: "user_statement"`, `evidence_manifest_id`는 위 manifest, `locator`는 `{"path": <raw 상대 경로>, "heading": <개념 절>}`.
+그 컨텍스트 `GlossaryTerm`들의 `evidence_refs`가 이 EvidenceRef를 가리킨다(reviewed term의 근거 비어 있음 금지를 사람 확인으로
+채운다). 기존 term의 정의를 다시 쓸 때는 `updates[]`의 `set.definition`과 `union.evidence_refs`를 함께 쓴다(`update-rules.md`).
+예시는 `object-templates/build-notes.complete.template.json`의 `manifest.ctx-build.declaration`·`evref.ctx-build.declaration`.
+선언을 개정하며 같은 EvidenceRef ID를 `extra_objects[]`로 다시 넣으면 same-ID amend가 되는데, build는 완성 객체를 그대로
+붙일 뿐 `expected_updated_at` 잠금이나 diff를 만들지 않는다 — 개정 적재에서는 바뀐 EvidenceRef를 검토 목록에 직접 적는다.
+
+★이 파일은 `raw/sources/` 아래라 raw 색인 대상이다★ — 저장·개정마다 raw 청크와 corpus fingerprint가 바뀌므로 그 적재는
+실모델 `project-brain index rebuild`와 실코퍼스 가드 `EXPECTED_RAW_CHUNKS` 갱신을 함께 요구한다. 이번 적재에서
+`source_type=user_statement`를 처음 쓰면 SKILL의 고위험 규칙(새 `source_type` 첫 사용)이 그대로 적용된다.
 
 ## promote-auto — 매핑 보증 용어 일괄 승격
 
@@ -398,7 +434,7 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
    골든셋 시나리오를 늘려가는 게 P2 방침). 객체 색인 행은 가드가 디스크의 색인 대상 kind
    `.json` 수를 세서 `indexed - raw_chunks`와 자동 대조하니 손으로 갱신하지 않는다
    (`test_real_corpus.py`의 `INDEXED_OBJECT_DIRS`, 색인 제외 kind는 아래 표). raw 청크 수
-   (`EXPECTED_RAW_CHUNKS`)만 기획서 원문·청커가 바뀔 때 의식적으로 갱신:
+   (`EXPECTED_RAW_CHUNKS`)만 기획서 원문·개념 선언 문서·청커가 바뀔 때 의식적으로 갱신:
    ```bash
    project-brain eval
    python3 -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"  # 표준 unittest — pytest 불필요

@@ -124,7 +124,8 @@ interface EvidenceManifest extends BrainObjectBase {
     | "build_log"
     | "code_search"
     | "wiki"
-    | "context";
+    | "context"
+    | "user_statement";
   locator: string;
   content_hash?: string;
   source_version?: string;
@@ -163,7 +164,8 @@ interface EvidenceRef extends BrainObjectBase {
     | "build_log_range"
     | "session_turn"
     | "wiki_section"
-    | "context_term";
+    | "context_term"
+    | "user_statement";
   locator: {
     path?: string;
     url?: string;

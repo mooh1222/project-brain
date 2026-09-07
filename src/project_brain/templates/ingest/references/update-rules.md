@@ -51,6 +51,12 @@ reviewed 새 fact를 같은 묶음에 넣는다. 새 fact의 `supersedes`는 old
 generic supersede 링크가 없다. 같은 ID를 amend하거나 build `updates`의 `set`/`union`과
 `expected_updated_at`을 사용한다. 의미 변경 승인을 거쳤는지와 근거 변화는 diff에 남긴다.
 
+개념 선언(Concept Intake)의 개념이 기존 `GlossaryTerm`과 같은 개념이면 — 기존 컨텍스트 확장 적재를 포함해 — 새 객체를
+만들지 않고 ID를 승계하며, 정의를 선언의 "팀의 뜻"으로 다시 쓴다(첫 문장은 팀의 뜻, 코드 대응은 두 번째 문장 이후).
+기존 정의를 그대로 두는 선택지는 없다. `synonyms`·`aliases`는 `union`으로 합치고, 선언 EvidenceRef는 `union.evidence_refs`로
+더한다. `definition`은 의미 주장 필드라 `set`으로 고칠 때 근거 변경이 함께 있어야 하며, 이 `union.evidence_refs`가 그 근거
+변경이다. 확인한 대상과 질문은 선언 문서와 diff에 남긴다.
+
 ### CodeLocator
 
 코드가 그대로인지 다시 확인한 경우 `project-brain mark-checked`가 `commit_sha`, `verified_at`,

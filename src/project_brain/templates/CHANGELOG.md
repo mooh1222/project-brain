@@ -10,6 +10,22 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-09-07 — 적재 스킬에 개념 선언(Concept Intake) 단계와 `user_statement` 근거 (#83)
+
+ingest 실행 흐름에 Source Intake 다음 2단계 "개념 선언"을 넣었다. 사용자가 컨텍스트의 개념을
+네 칸(대표 이름·팀의 뜻·예시·아님/이웃)으로 먼저 말하고, `GlossaryTerm`은 그 선언에서만 만든다 —
+정의 첫 문장은 팀의 뜻, 코드 대응은 뒤. mapping의 `glossary_term_ids`는 "정의·범위나 발동·적용·처리
+동작을 설명하는가"로만 건다. 첫 진행 보고에 `Concept Intake: <개념 수>|none(어휘 변경 없음)` 표기,
+선언 밖 개념 후보는 예외 큐, 사용자 부재 시 어휘는 candidate로도 만들지 않고 보고서 `pending_concepts`에만
+남기며, 대량 적재는 배치 전에 선언을 모아 받는다. 완료 점검표에 term별 두 확인(첫 문장 출처·연결 근거 한 줄)을
+더했고 연결 수 검사와 문자열 기계 거부 게이트는 두지 않는다. 선언은 `raw/sources/<ctx>/concept-declaration.md`에
+제자리 갱신으로 보관하고(ingest-tools), EvidenceManifest `source_type`과 EvidenceRef `ref_type`에 새 enum
+`user_statement`를 더했다(엔진 schema 한 축, lint legacy 집합 제외). 선언 EvidenceRef는 build notes
+`extra_objects[]`로 넣고 기존 term은 ID 승계·정의 재작성(update-rules). `captured_by`는 말한 사람(예외).
+enum 변경 자체는 rebuild를 부르지 않지만 선언 파일이 raw 색인 대상이라 그 적재는 rebuild와
+`EXPECTED_RAW_CHUNKS` 갱신이 필요하다. `build-notes.complete.template.json` 예시의 glossary 근거를
+선언 EvidenceRef로 바꿨다(coverage 템플릿 동반 갱신).
+
 ## 2026-09-04 — 토크나이저 규칙 버전 4: 명사+파생 접미사 결합형
 
 토큰 산출 규칙이 3에서 4로 올라가 기존 색인은 검색 진입에서 `StaleIndexError`가 나고

@@ -527,5 +527,27 @@ class TestContextProjectionDangling(unittest.TestCase):
         self.assertFalse([p for p in problems if "dangling source_object_id" in p], problems)
 
 
+class TestUserStatementEvidenceIsNotLegacy(unittest.TestCase):
+    """#83 — 개념 선언 문서(source_type=user_statement)만 근거로 가진 reviewed GlossaryTerm은
+    legacy-only(context·wiki)로 잡히지 않는다. 대조군으로 wiki만 근거인 term은 여전히 잡힌다."""
+
+    def _store_with_source_type(self, source_type):
+        src = manifest("manifest.neutral.declaration")
+        src["source_type"] = source_type
+        ref = evidence_ref("evref.neutral.declaration", "manifest.neutral.declaration")
+        term = reviewed_term("g.neutral.declared", evidence_refs=["evref.neutral.declaration"])
+        return store_of(src, ref, context(), term)
+
+    def test_user_statement_only_evidence_is_not_legacy_only(self):
+        # schema가 값을 받아야 semantic lint까지 도달한다 — 0건이어야 한다.
+        self.assertEqual(lint_store(self._store_with_source_type("user_statement")), [])
+
+    def test_wiki_only_evidence_is_still_legacy_only(self):
+        problems = lint_store(self._store_with_source_type("wiki"))
+        self.assertTrue(
+            any("legacy-only" in p for p in problems), problems
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
