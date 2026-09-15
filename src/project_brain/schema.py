@@ -130,14 +130,19 @@ REVIEW_STATE_KEYS = frozenset({
 # insight_type은 필수가 아니되 값이 있으면 이 둘 중 하나여야 한다.
 INSIGHT_TYPE_VALUES = frozenset({"cross-cutting-risk", "operational-lesson"})
 
-_SYNONYM_MIN_LEN = 3  # synonyms/aliases는 검색 색인 표면에 오르는 표면형(2자 이하 오매칭 방지).
+_SYNONYM_MIN_LEN = 3  # 기본 최소 길이. 한글 2음절 이름은 아래 예외로 허용한다.
 # 단독으로 쓰면 그 용어를 묻지 않은 질의에도 걸리는 흔한 일반명사(3자+, bb2 실측 critic 확정).
-# 2자 이하 일반명사(버블 283·팝업 180·모드·보상·영역·타입)는 _SYNONYM_MIN_LEN 규칙이 이미 막는다.
+# 한글 2음절 이름을 허용하므로 짧은 일반명사도 이 목록에서 명시적으로 막는다.
 # ★유한 목록은 완전성을 주장 못 한다 — 명백한 실수의 즉시 차단용. 실가드는 B+C 검수 + 골든셋 eval.
 # df 기반 하드 판정은 불가(고유명·generic df 구간 겹침: 레이스121>아이콘79, 카테고리17<리스킨22).
 # 스테이지148·레이스121·말풍선44는 도메인 고유명이라 넣으면 안 됨(B+C 판단 영역).
 _SYNONYM_GENERIC_BLOCKLIST = frozenset({
+    "버블", "팝업", "모드", "보상", "영역", "타입",
     "이벤트", "아이콘", "카테고리", "레이아웃", "리스트", "메시지", "프로필"})
+
+
+def _is_two_syllable_hangul_surface(surface: str) -> bool:
+    return len(surface) == 2 and all("가" <= char <= "힣" for char in surface)
 
 
 class SchemaError(ValueError):
@@ -307,10 +312,10 @@ def _validate_object_schema(
         for field in ("synonyms", "aliases"):
             for surface in obj.get(field) or []:
                 s = surface.strip() if isinstance(surface, str) else ""
-                if len(s) < _SYNONYM_MIN_LEN:
+                if len(s) < _SYNONYM_MIN_LEN and not _is_two_syllable_hangul_surface(s):
                     errors.append(
                         f"{obj['id']}: GlossaryTerm {field} {surface!r} too short "
-                        f"(min {_SYNONYM_MIN_LEN} — 검색 표면에 오르는 표면형)")
+                        f"(min {_SYNONYM_MIN_LEN}, 한글 2음절 이름 허용 — 검색 표면에 오르는 표면형)")
                 elif s.lower() in _SYNONYM_GENERIC_BLOCKLIST:
                     errors.append(
                         f"{obj['id']}: GlossaryTerm {field} {surface!r} bare generic "

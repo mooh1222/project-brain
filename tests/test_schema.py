@@ -288,8 +288,7 @@ class TestInsightKind(unittest.TestCase):
 
 
 class TestSynonymSurfaceRule(unittest.TestCase):
-    """synonyms/aliases는 검색 색인 표면에 함께 오르는 표면형이다. 2자 이하와 단독
-    일반명사는 적재 시점 lint로 막는다(#78 — 규칙 값은 그대로, 문구만 회수 언어로)."""
+    """synonyms/aliases는 검색 색인 표면에 함께 오르는 표면형이다."""
 
     def _term(self, gid, synonyms):
         return {"id": gid, "kind": "GlossaryTerm", "status": "reviewed",
@@ -301,8 +300,16 @@ class TestSynonymSurfaceRule(unittest.TestCase):
         errors = validate_object(self._term("g.n.x", ["NL"]))
         self.assertTrue(any("too short" in e for e in errors))
 
+    def test_two_syllable_korean_project_name_passes(self):
+        errors = validate_object(self._term("g.n.venom", ["베놈"]))
+        self.assertFalse(any("too short" in e for e in errors))
+
     def test_glossary_synonym_bare_generic_rejected(self):
         errors = validate_object(self._term("g.n.y", ["이벤트"]))
+        self.assertTrue(any("generic" in e for e in errors))
+
+    def test_two_syllable_korean_generic_is_still_rejected(self):
+        errors = validate_object(self._term("g.n.mode", ["모드"]))
         self.assertTrue(any("generic" in e for e in errors))
 
     def test_glossary_good_synonym_passes(self):
