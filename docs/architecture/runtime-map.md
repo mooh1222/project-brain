@@ -163,7 +163,7 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | show가 mapping stale advisory로 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
 | `.brain-local/sessions/*.json` | `session complete` | transcript·batch manifest·finalization report·durable receipt에 결속한 처리 marker v2. 지식 객체가 아님 | 같은 valid v2 요청은 기존 bytes 보존 no-op. `session mark-processed`는 report 없이는 쓰지 않고 실패 |
 | `brain/drafts/*.md` | `draft create`, expected-SHA `draft update` | 여러 작업 구간에서 이어갈 주제별 Git 추적 초안. BrainStore·raw·index·query·graph·snapshot 입력이 아님 | 원본이므로 자동 재생성 대상 아님. list/show/lint는 읽기, update는 같은 디렉터리 원자 교체 |
-| `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
+| `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태. 새 커밋은 journal과 intent를 남기고 임시·롤백 사본을 정리한다 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
 | context-replace/migration manifest | 각 `plan` 명령 | exact SHA와 live precondition을 후속 apply에 묶는 파일. 그 자체가 객체 정본은 아님 | 같은 입력과 precondition에서 다시 plan |
 | snapshot | `snapshot create`, migration plan | 적용 전 복구 증거. `snapshot restore`는 brain 복구 전용 | create/verify로 새 snapshot 작성·검증 |
@@ -174,6 +174,12 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 
 raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르다. 일반 코퍼스 mutation은
 `index.db*`와 stale cache를 무효화하지만 자동으로 rebuild하지 않는다.
+
+트랜잭션의 `temp/`, `before/`, `snapshots/`는 커밋 확정 전 자동 롤백·재시작 복구에만
+필요하다. 새 트랜잭션은 `committed` journal을 영속 기록한 다음 이 세 디렉터리를 정리한다.
+커밋 journal과 batch intent는 영수증 재확인·배치 재개에 필요하므로 보존한다. 정리에 실패해도
+확정된 커밋은 실패로 바꾸지 않고 경고한다. 기존 완료 트랜잭션은 자동 소급 정리하지 않는다.
+미완료·`recovery_required` 트랜잭션의 복구 사본은 정리 대상이 아니다.
 
 Task 18 표시 제목 변경은 이 일반 규칙의 예외다. `MutationOperation.DISPLAY_MIGRATION`은
 `DerivedFilePolicy.PRESERVE`로 적용되어 index와 stale 파일을 지우지 않는다. title은 색인 입력이

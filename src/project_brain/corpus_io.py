@@ -6,6 +6,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -3093,6 +3094,24 @@ def apply_transaction(
                 _inject(
                     failure_injector,
                     "after_journal_committed",
+                )
+            # The journal and batch intent are durable proof of the commit.
+            # Backup payloads are needed only until that point; keeping them
+            # would retain a full index image (twice) after every mutation.
+            try:
+                for child in ("temp", "before", "snapshots"):
+                    _remove_child_if_present(
+                        private_fd,
+                        child,
+                        expected_device=anchored.device,
+                    )
+            except Exception as cleanup_exc:
+                # A cleanup error must not turn a durable commit into an
+                # apparent mutation failure that callers might retry.
+                logging.getLogger(__name__).warning(
+                    "%s: committed backup cleanup failed: %s",
+                    transaction_id,
+                    cleanup_exc,
                 )
     except CorpusIOError as exc:
         if (

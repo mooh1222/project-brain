@@ -9,6 +9,7 @@ import stat
 import sys
 import threading
 import time
+import warnings
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -1453,10 +1454,22 @@ def test_legacy_nonbatch_terminal_and_unfinished_journals_recover_then_write_nul
     brain_root = tmp_path / "brain"
     before, after = _changed_context()
     _write_object(brain_root, before)
-    result = _service().apply(
-        (after,),
-        request=_request(brain_root, (after,)),
-    )
+    request = _request(brain_root, (after,))
+    if unfinished:
+        result = _service().plan((after,), request=request)
+        crash_point = (
+            "after_journal_prepared"
+            if legacy_state == "preparing"
+            else "after_first_live_replace"
+        )
+        with pytest.raises(InjectedCrash):
+            _service().apply(
+                (after,),
+                request=request,
+                failure_injector=_crash_at(crash_point),
+            )
+    else:
+        result = _service().apply((after,), request=request)
     assert result.ok and result.manifest is not None
     journal_path = (
         brain_root
@@ -2381,6 +2394,99 @@ def test_apply_uses_the_required_stage_order_and_invalidates_derived_files(
     assert journal["state"] == "committed"
     assert len(journal["before_derived_fingerprint"]) == 64
     assert len(journal["expected_after_derived_fingerprint"]) == 64
+
+
+def test_committed_transaction_releases_backups_but_keeps_batch_receipt(tmp_path):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    _seed_derived_files(brain_root)
+    binding = _batch_binding(brain_root=brain_root)
+
+    result = _service().apply(
+        (after,),
+        request=_request(brain_root, (after,), batch_binding=binding),
+    )
+
+    transaction_root = (
+        brain_root / ".brain-local" / "transactions"
+        / result.manifest.transaction_id
+    )
+    assert (transaction_root / "journal.json").is_file()
+    assert not (transaction_root / "temp").exists()
+    assert not (transaction_root / "before").exists()
+    assert not (transaction_root / "snapshots").exists()
+    assert recover_committed_receipt(brain_root, binding)["outcome"] == (
+        "committed"
+    )
+
+
+def test_committed_display_migration_releases_object_backups(tmp_path):
+    brain_root, _request, planned, after_files = _display_transaction_inputs(
+        tmp_path
+    )
+    derived_before = _derived_bytes(brain_root)
+
+    apply_transaction(
+        brain_root,
+        manifest=_journal_manifest(planned.manifest),
+        after_files=after_files,
+        derived_policy="preserve",
+    )
+
+    transaction_root = (
+        brain_root / ".brain-local" / "transactions"
+        / planned.manifest.transaction_id
+    )
+    assert (transaction_root / "journal.json").is_file()
+    assert not (transaction_root / "before").exists()
+    assert not (transaction_root / "snapshots").exists()
+    assert _derived_bytes(brain_root) == derived_before
+
+
+def test_committed_backup_cleanup_error_does_not_lose_receipt(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    brain_root = tmp_path / "brain"
+    before, after = _changed_context()
+    _write_object(brain_root, before)
+    _seed_derived_files(brain_root)
+    binding = _batch_binding(brain_root=brain_root)
+    original_remove = corpus_io._remove_child_if_present
+
+    def fail_before_cleanup(parent_fd, name, *, expected_device):
+        if name == "before":
+            raise OSError("injected cleanup failure")
+        return original_remove(
+            parent_fd,
+            name,
+            expected_device=expected_device,
+        )
+
+    monkeypatch.setattr(
+        corpus_io,
+        "_remove_child_if_present",
+        fail_before_cleanup,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = _service().apply(
+            (after,),
+            request=_request(brain_root, (after,), batch_binding=binding),
+        )
+
+    transaction_root = (
+        brain_root / ".brain-local" / "transactions"
+        / result.manifest.transaction_id
+    )
+    assert result.ok is True
+    assert "committed backup cleanup failed" in caplog.text
+    assert (transaction_root / "before").is_dir()
+    assert recover_committed_receipt(brain_root, binding)["outcome"] == (
+        "committed"
+    )
 
 
 def test_display_migration_preserves_derived_files_byte_for_byte(tmp_path):
