@@ -169,6 +169,24 @@ registry는 참조 대상 ID가 존재하는지는 검사하지만, 대부분의
 | **DomainMapping** / `domain` | R `context_id`, `mapping_key`, `canonical_summary`, `meaning`, `boundary`, `glossary_term_ids`, `decision_record_ids`; reviewed면 evidence 1+. O `review_state`는 정해진 4개 boolean 키만 | `mapping.<ctx>.<key>`와 context/key 결속. mappings build, 직접 입력, bundle promote. 적재자가 의미·경계·refs를 쓰고 build가 ID/meta 및 decision inverse를 만든다 | context 1; glossary/decision 0+; O code locators/superseded mappings 0+, review record 1; evidence reviewed 1+ | 핵심 query 객체, graph rerank, projection, term promotion, supersession/decision lint. 색인은 reviewed 참조 GlossaryTerm의 term/synonyms/aliases를 같은 이름 표면으로 이어받고 candidate 참조는 기존 term/synonyms만 쓴다. reviewed↔candidate 후퇴 금지; superseded target lifecycle도 merged lint를 통과해야 한다 |
 | **Insight** / `synthesis` | R `body`, `source_object_ids`. candidate 금지. O `insight_type=cross-cutting-risk|operational-lesson`; 전자는 sources 2+, 그 밖은 1+ | `insight.<ctx>.<key>`. 전용 assembly 없음, 검증 뒤 직접 입력. 적재자가 종합 판단·scope·sources를 쓴다 | sources → canonical objects 1+; O code locators 0+; evidence 0+ | reviewed 전용 `advisories` lane과 검색 표면. candidate는 노출 통로가 없어 신규 쓰기에서 거부하며 별도 legacy 후보 보존 정책 없음 |
 
+### EvidenceManifest의 로컬 locator 검사 (#96)
+
+`lint`와 `audit`은 `source_type`에 관계없이 `raw/`로 시작하는 문자열
+`EvidenceManifest.locator`를 설정에서 해석한 brain 루트 기준 파일 경로로 검사한다.
+파일 누락·디렉터리 지정은 `manifest_local_file_missing`, `..` 경로 요소·심볼릭 링크를
+통한 brain 루트 이탈·경로 해석 실패는 `manifest_local_path_invalid`다. 오류에는 manifest
+ID와 locator가 포함되며 CLI는 종료 코드 1을 반환한다. 루트 내부 파일의 심볼릭 링크는 허용한다.
+
+그 외 URL·Jira 키·Slack 주소·코드 검색 식별자는 파일로 추측하지 않는다.
+`EvidenceRef.locator`도 이 검사 대상이 아니다. Python `lint_store`/`lint_store_report`는
+`brain_root`를 명시한 경우에만 파일 검사를 하며, 루트 없는 메모리 bundle·mutation 검증은
+기존 구조 검사만 수행한다.
+
+기존 코퍼스에 오류가 있으면 해당 ID의 manifest를 찾아 실제 원문을 확인하고 `locator`를
+현재 `raw/...` 경로로 교정하거나 누락된 원문을 복구한 뒤 lint/audit을 다시 실행한다.
+자동 rename 추적·자동 교정·별도 migration 명령은 제공하지 않는다. 이 검사는 원문 내용의
+일치까지 보장하지 않는다.
+
 ## 공통 legacy ID 문법과 신규 쓰기 경계
 
 CodeLocator 외 kind에도 읽기 호환과 신규 쓰기의 비대칭이 있다.

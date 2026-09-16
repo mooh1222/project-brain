@@ -2,6 +2,8 @@
 dangling evidence_ref는 1 problem. promote 사후 lint가 의존하는 동작을 고정한다."""
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from project_brain.lint import (
     LintProblem,
@@ -73,6 +75,80 @@ def _temporal_fact(fid, *, value, supersedes=None, closed=False):
 
 
 class TestLintStore(unittest.TestCase):
+    def test_manifest_locator_scope_and_file_types(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            raw.mkdir()
+            (raw / "source.md").write_text("source", encoding="utf-8")
+            (raw / "alias.md").symlink_to("source.md")
+            (raw / "broken.md").symlink_to("missing.md")
+            cases = (
+                ("raw/source.md", None),
+                ("raw/alias.md", None),
+                ("raw/", "manifest_local_file_missing"),
+                ("raw/broken.md", "manifest_local_file_missing"),
+                ("https://example.test/raw/missing.md", None),
+                ("JIRA-123", None),
+                ("slack://channel/message", None),
+                ("demo@main:abcdef", None),
+                ("spec://neutral", None),
+            )
+            for locator, code in cases:
+                with self.subTest(locator=locator):
+                    obj = manifest()
+                    obj["locator"] = locator
+                    problems = lint_store_report(store_of(obj), brain_root=root)
+                    self.assertEqual([p.code for p in problems], [code] if code else [])
+
+    def test_local_locator_checks_ignore_source_type_and_evidence_ref_locator(self):
+        obj = manifest()
+        obj["source_type"] = "code_search"
+        obj["locator"] = "raw/missing.md"
+        ref = evidence_ref()
+        ref["locator"] = {"path": "raw/another-missing.md"}
+        with TemporaryDirectory() as tmp:
+            store = store_of(obj, ref)
+            problems = lint_store_report(store, brain_root=Path(tmp))
+            self.assertEqual([p.object_ids for p in problems], [(obj["id"],)])
+            # In-memory bundle validation has no filesystem context.
+            self.assertEqual(lint_store_report(store), ())
+
+    def test_manifest_local_locator_rejects_traversal_and_symlink_escape(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "corpus"
+            raw = root / "raw"
+            raw.mkdir(parents=True)
+            outside = Path(tmp) / "outside.md"
+            outside.write_text("outside", encoding="utf-8")
+            (raw / "escape.md").symlink_to(outside)
+            (raw / "loop").symlink_to("loop")
+            for locator in ("raw/../../outside.md", "raw/../raw/escape.md",
+                            "raw/escape.md", "raw/loop", "raw/invalid\x00.md"):
+                with self.subTest(locator=locator):
+                    obj = manifest()
+                    obj["locator"] = locator
+                    problems = lint_store_report(store_of(obj), brain_root=root)
+                    self.assertEqual(len(problems), 1)
+                    self.assertEqual(problems[0].code, "manifest_local_path_invalid")
+                    self.assertIn(locator, problems[0].message)
+
+    def test_manifest_local_file_rename_is_reported(self):
+        obj = manifest()
+        obj["locator"] = "raw/sources/example/spec-v1.md"
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-corpus"
+            source = root / obj["locator"]
+            source.parent.mkdir(parents=True)
+            source.write_text("source", encoding="utf-8")
+            self.assertEqual(lint_store_report(store_of(obj), brain_root=root), ())
+            source.rename(source.with_name("spec-v2.md"))
+            problems = lint_store_report(store_of(obj), brain_root=root)
+            self.assertEqual(len(problems), 1)
+            self.assertEqual(problems[0].code, "manifest_local_file_missing")
+            self.assertEqual(problems[0].object_ids, (obj["id"],))
+            self.assertIn(obj["locator"], problems[0].message)
+
     def test_mutation_input_lint_opt_in_does_not_weaken_default_lint(self):
         locator = base(
             {

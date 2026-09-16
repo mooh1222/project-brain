@@ -160,7 +160,7 @@ def run_audit(
     acl_evaluator: AclEvaluator | None,
     now: str | None = None,
 ) -> dict:
-    problems = lint_store(store)
+    problems = lint_store(store, brain_root=brain_root)
     isolated = find_isolated(store)
     by_kind: dict[str, int] = {}
     for object_id in isolated:

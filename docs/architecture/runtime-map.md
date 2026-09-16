@@ -399,6 +399,9 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 - `reference_fields.py`의 registry를 graph edge, lint dangling 검사, reference rewrite가 공유한다.
   registry 밖 필드를 graph가 자동으로 참조라고 추측하지 않는다.
 - `lint`는 schema·ID·reference·projection 등 저장소 전체 무결성을 검사한다.
+  CLI는 설정으로 해석한 brain 루트를 전달해 EvidenceManifest의 `raw/` locator 파일 존재와
+  경로 이탈도 검사한다. audit은 같은 검사를 포함한다. 상세 경계와 기존 데이터 교정은
+  [데이터 계약](data-contracts.md#evidencemanifest의-로컬-locator-검사-96)을 본다.
 - `graph isolated`는 registry 기준 인바운드가 없는 기본 잎 kind를 보고하고,
   `graph export`는 같은 edge 정의로 HTML을 만든다.
 - `audit`은 lint, isolated, stale/코드 quote·symbol 상태를 묶고 기본 실행은 읽기 전용이다.

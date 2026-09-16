@@ -155,6 +155,7 @@ def _lint_store_report(
     *,
     mutation_input: bool,
     operation: str | None = None,
+    brain_root: Path | None = None,
 ) -> tuple[LintProblem, ...]:
     problems: list[LintProblem] = []
     objs = store.all()
@@ -200,6 +201,31 @@ def _lint_store_report(
     # 계속 흘리면 malformed 참조 원소가 hash lookup 등에서 예외를 내 schema 진단을 가린다.
     # 단 공용 iter 기반 dangling은 malformed를 안전히 skip하므로 원본 objs/store로 전수한다.
     semantic_store = BrainStore({obj["id"]: obj for obj in schema_valid_objs})
+
+    if brain_root is not None:
+        for manifest in semantic_store.by_kind("EvidenceManifest"):
+            locator = manifest["locator"]
+            if not isinstance(locator, str) or not locator.startswith("raw/"):
+                continue
+            try:
+                root = Path(brain_root).resolve()
+                path = root / locator
+                if ".." in path.parts or not path.resolve().is_relative_to(root):
+                    raise ValueError("locator must stay inside brain root without '..'")
+                is_file = path.is_file()
+            except (OSError, ValueError, RuntimeError) as exc:
+                add(
+                    "manifest_local_path_invalid",
+                    (manifest["id"],),
+                    f"{manifest['id']}: invalid local locator {locator}: {exc}",
+                )
+                continue
+            if not is_file:
+                add(
+                    "manifest_local_file_missing",
+                    (manifest["id"],),
+                    f"{manifest['id']}: local locator is not a file: {locator}",
+                )
 
     # 2) 같은 subject+predicate에 valid_until 없는 reviewed fact가 값 갈리며 2+ (object-model L298)
     for group in _conflicting_fact_groups(semantic_store.by_kind("TemporalFact")):
@@ -349,13 +375,20 @@ def _lint_store_report(
 def lint_store_report(
     store: BrainStore,
     workspace_root: Path | None = None,
+    *,
+    brain_root: Path | None = None,
 ) -> tuple[LintProblem, ...]:
-    """최종 저장 객체에 대한 엄격한 구조화 lint."""
+    """최종 저장 객체에 대한 엄격한 구조화 lint.
+
+    brain_root가 주어지면 EvidenceManifest의 raw/ locator 파일도 검사한다.
+    루트 없는 메모리 bundle 검증에서는 파일 존재를 추측하지 않는다.
+    """
     return _lint_store_report(
         store,
         workspace_root,
         mutation_input=False,
         operation=None,
+        brain_root=brain_root,
     )
 
 
@@ -379,9 +412,16 @@ def lint_mutation_input_store_report(
     )
 
 
-def lint_store(store: BrainStore, workspace_root: Path | None = None) -> list[str]:
+def lint_store(
+    store: BrainStore,
+    workspace_root: Path | None = None,
+    *,
+    brain_root: Path | None = None,
+) -> list[str]:
     """호환용 문자열 message 목록 wrapper."""
     return [
         problem.message
-        for problem in lint_store_report(store, workspace_root=workspace_root)
+        for problem in lint_store_report(
+            store, workspace_root=workspace_root, brain_root=brain_root,
+        )
     ]

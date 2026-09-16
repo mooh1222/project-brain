@@ -1637,8 +1637,9 @@ def _run_lint(argv) -> int:
     parser = argparse.ArgumentParser(prog="cli lint")
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     args = parser.parse_args(argv)
-    store = BrainStore.load(resolve_brain_root(args.brain_root))
-    problems = lint_store(store)
+    brain_root = resolve_brain_root(args.brain_root)
+    store = BrainStore.load(brain_root)
+    problems = lint_store(store, brain_root=brain_root)
     print(json.dumps({"ok": not problems, "problems": problems},
                      ensure_ascii=False, indent=2))
     return 0 if not problems else 1

@@ -1223,6 +1223,24 @@ class TestCli(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(report["problems"], [])
 
+    def test_lint_and_audit_detect_missing_local_manifest_from_config(self):
+        obj = manifest()
+        obj["locator"] = "raw/sources/example/missing.md"
+        BrainStore.save_object(self.root, obj)
+        for command in (["lint"], ["audit", "--no-stale"]):
+            with self.subTest(command=command):
+                out = io.StringIO()
+                with mock.patch("project_brain.config.load_config",
+                                return_value={"brain_root": self.root,
+                                              "default_branch": "develop"}), \
+                     mock.patch("sys.argv", ["cli", *command]), redirect_stdout(out):
+                    rc = cli.main()
+                self.assertEqual(rc, 1)
+                payload = json.loads(out.getvalue())
+                report = payload["lint"] if command[0] == "audit" else payload
+                self.assertFalse(report["ok"])
+                self.assertTrue(any(obj["locator"] in p for p in report["problems"]))
+
     def test_cli_lint_reports_dangling(self):
         # 근거 객체가 없는 Insight → dangling source_object_ids 보고 + rc=1
         from tests.test_ingest import insight
