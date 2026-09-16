@@ -7,7 +7,7 @@ spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 두 종류:
 1. RealEmbedder — bge-m3 로컬(sentence-transformers). ★lazy 로드★: import·생성
-   시점에는 모델을 안 올리고, 첫 embed() 호출에서 1회 로드 후 상주한다(§5·§11).
+   시점에는 모델을 안 올리고, 첫 임베딩 또는 identity 조회에서 1회 로드 후 상주한다(§5·§11).
    로드 비용이 크므로(초회 수 초~수십 초) 색인 배치·세션 반복 질의에 분할 상환.
 2. StubEmbedder — 텍스트 SHA-256 시드 가짜 벡터(결정론). 모델·네트워크 없이
    테스트가 결정론으로 돈다(§5). 같은 텍스트→같은 벡터, L2 노름≈1 유지.
@@ -18,7 +18,9 @@ search_vector에서 소수 6자리 반올림 후 정렬에 쓴다.
 """
 
 import hashlib
+import json
 import os
+from importlib.metadata import version
 
 import numpy as np
 
@@ -27,6 +29,9 @@ EMBED_DIM = 1024
 
 # 실모델 식별자. meta.embed_model 기록용(§4). stub은 "stub:..." 접두로 구분(§5).
 REAL_MODEL_NAME = "BAAI/bge-m3"
+# Immutable Hugging Face artifact revision; upgrade deliberately.
+REAL_MODEL_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
+MAX_SEQUENCE_LENGTH = 2048
 STUB_MODEL_NAME = "stub:sha256-gaussian"
 
 # 환경 플래그: 색인 빌드·테스트에서 stub을 강제(CI·결정론, §5).
@@ -53,6 +58,10 @@ class StubEmbedder:
     def __init__(self, dim: int = EMBED_DIM):
         self._dim = dim
 
+    @property
+    def embedding_identity(self) -> str:
+        return f"{self.model_name}:v1:dim={self._dim}:numpy={np.__version__}"
+
     def embed(self, text: str) -> np.ndarray:
         seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
         rng = np.random.default_rng(seed)
@@ -66,7 +75,8 @@ class StubEmbedder:
 class RealEmbedder:
     """bge-m3 로컬 임베더 (sentence-transformers, lazy 로드 §5).
 
-    생성 시점엔 모델을 안 올린다. 첫 embed/embed_many에서 1회 로드 후 상주한다.
+    생성 시점엔 모델을 안 올린다. 첫 embed/embed_many 또는 embedding_identity 조회에서
+    1회 로드 후 상주한다.
     """
 
     model_name = REAL_MODEL_NAME
@@ -87,7 +97,7 @@ class RealEmbedder:
             pass
         from sentence_transformers import SentenceTransformer  # type: ignore
 
-        self._model = SentenceTransformer(self.model_name)
+        self._model = SentenceTransformer(self.model_name, revision=REAL_MODEL_REVISION)
         # ★메모리 방어선★: 청커의 approx_tokens는 ASCII 단어, 한글 글자 하나씩, 나머지
         # 비공백 기호 두 글자당 하나를 보수적으로 센다. 그래도 이 근사식은 실제 BAAI/bge-m3
         # tokenizer와 같지 않아 일부 입력은 실토큰 수가 더 클 수 있으므로, 2048 상한이 MPS
@@ -96,7 +106,27 @@ class RealEmbedder:
         # "Invalid buffer size: 24.29 GiB"). 당시 512-근사 청크는 실토큰이 한글 기준
         # 약 1000-2000까지 커졌고, 2048 절단이 생겨도 손실은 입력 꼬리에만 한정된다.
         # 색인·질의가 같은 임베더를 쓰므로 결정론에 영향 없음(같은 텍스트 → 같은 벡터).
-        self._model.max_seq_length = 2048
+        self._model.max_seq_length = MAX_SEQUENCE_LENGTH
+
+    @property
+    def embedding_identity(self) -> str:
+        # Load is permitted on a full hit: the identity describes the actual execution
+        # configuration as well as the pinned model/tokenizer/pooling artifact.
+        self._ensure_model()
+        return json.dumps({
+            "model": self.model_name,
+            "revision": REAL_MODEL_REVISION,
+            "max_seq_length": self._model.max_seq_length,
+            "normalize_embeddings": True,
+            "output_dtype": "float32",
+            "dimension": EMBED_DIM,
+            "device": str(self._model.device),
+            "model_dtype": str(self._model.dtype),
+            "implementation": 2,
+            "packages": {name: version(name) for name in (
+                "sentence-transformers", "transformers", "torch", "numpy",
+            )},
+        }, sort_keys=True)
 
     def embed(self, text: str) -> np.ndarray:
         return self.embed_many([text])[0]
@@ -104,12 +134,12 @@ class RealEmbedder:
     def embed_many(self, texts: list[str]) -> list[np.ndarray]:
         self._ensure_model()
         # normalize_embeddings=True로 L2 정규화된 1024차원 벡터를 받는다(§3.3).
-        # batch_size 8 명시: 기본(32)은 짧은 객체 표면에선 무탈했지만 긴 raw 청크가
-        # 섞이면 배치 한 번의 어텐션 텐서가 Metal(MPS) 4GB 한계를 넘어 단언 실패로
-        # 죽는다(2026-06-11 실측 — "total bytes of NDArray > 2**32"). 배치 크기는
-        # 결과 벡터에 영향 없음(같은 텍스트 → 같은 임베딩).
+        # One sample per model batch makes padding and kernel shape independent of
+        # other miss surfaces. With batch_size=8 the same text differed by ~1e-7
+        # between mixed and single-text calls on MPS, violating exact vector reuse.
+        # The rebuild still submits all misses through one embed_many/encode call.
         arr = self._model.encode(
-            texts, batch_size=8, normalize_embeddings=True, convert_to_numpy=True
+            texts, batch_size=1, normalize_embeddings=True, convert_to_numpy=True
         )
         return [row.astype(np.float32) for row in arr]
 

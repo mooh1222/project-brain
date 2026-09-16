@@ -39,9 +39,10 @@
 - **최대 시퀀스 2,048**: 모델을 올린 직후 `max_seq_length=2048`로 제한한다
   (`embedder.py:90-99`). raw 청커의 근사는 실제 bge-m3 tokenizer와 같지 않으므로,
   긴 한글·표 입력이 근사를 통과해도 Metal 어텐션 버퍼가 폭증하지 않게 하는 최종 방어선이다.
-- **배치 크기 8**: 기본값(32) 대신 8을 쓴다 — 긴 raw 청크에서 맥 GPU(MPS) 메모리 4GB
-  한계를 넘겨 죽던 실측 이슈(2026-06-11) 때문(`embedder.py:104-114`). 배치 크기는 결과
-  벡터 값에는 영향이 없다.
+- **모델 실행 배치 크기 1**: #58 실측에서 배치 8은 같은 텍스트도 다른 길이의 텍스트와
+  함께 계산하면 MPS에서 약 `1e-7` 차이를 냈다. 정확한 surface 재사용과 cold/warm
+  벡터 바이트 동치를 위해 모델 내부 실행은 1로 고정한다. 호출자는 miss 전체를 한 번의
+  `embed_many`로 전달하며 cold 중복 surface 계산을 생략하지 않는다.
 - **테스트용 가짜 임베더(`StubEmbedder`)**: 텍스트의 SHA-256 해시 앞 8바이트를 시드로
   가우시안 난수 벡터를 만들어 L2 정규화한다(`embedder.py:56-60`, model_name
   `stub:sha256-gaussian`). 모델 없이도 결정론이 보장돼 테스트에서 쓴다.
@@ -96,20 +97,19 @@
 
 ## 3. 색인 빌드 (`search_index.py`)
 
-`rebuild()` 하나가 색인을 만드는 유일한 경로다. **"전체 재구축 = DB 파일을 지우고 처음부터
-다시 만든다"가 불변 규칙**이다(`search_index.py:111`). 증분 갱신(바뀐 것만 다시 색인)
-함수는 코드에 없다 — `content_hash`는 `documents`에 저장만 될 뿐 색인 갱신 비교에 쓰는
-코드가 없다.
+`rebuild()` 하나가 색인을 만드는 유일한 경로다. **새 DB를 완성·검증한 뒤 원자 교체**하며,
+live DB를 제자리에서 증분 갱신하지 않는다. `content_hash`는 문서 metadata로 저장하고,
+벡터 재사용에는 `surface_text`를 쓴다.
 
 SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_index.py:102-132`,
-`SCHEMA_VERSION=4`):
+`SCHEMA_VERSION=5`):
 
 | 테이블 | 역할 |
 |--------|------|
 | `documents` | 한 행 = 한 객체(또는 raw 청크). `tokenized_text`와 `surface_text`를 둘 다 보관 |
 | `documents_fts` | FTS5 가상 테이블(`tokenize='unicode61'`). BM25 키워드 검색용 |
 | `documents_vec` | sqlite-vec의 `vec0` 가상 테이블(`embedding FLOAT[1024]`). 벡터 저장 |
-| `meta` | 스키마 버전·임베딩 모델명·토크나이저(`이름@규칙 버전`)·코퍼스 지문 한 줄 |
+| `meta` | 스키마 버전·임베딩 모델명·embedding identity·토크나이저(`이름@규칙 버전`)·코퍼스 지문 한 줄 |
 
 빌드할 때 **같은 텍스트를 두 갈래로** 넣는 게 핵심이다:
 
@@ -118,6 +118,38 @@ SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_ind
 - **벡터에는** 토큰화하지 않은 **원문 표면**을 모아서 `embed_many`로 한 번에 배치
   임베딩한 뒤, `sqlite_vec.serialize_float32`로 직렬화해 넣는다
   (`search_index.py:199-210,234-238`).
+
+### 자동 벡터 재사용 (#57·#58)
+
+새 DB와 FTS는 매번 전체를 다시 만든다. 벡터만 마지막 정상 완료 live index에서
+**정확히 같은 `surface_text`**를 키로 복사하며, miss만 한 번의 `embed_many`로 계산한다.
+객체·raw가 같은 규칙을 쓰며 ID·status·content hash·corpus fingerprint는 벡터 재사용 키가 아니다.
+
+Embedder가 `embedding_identity`를 소유한다. 실모델은 불변 Hugging Face revision
+`5617a9f61b028005a4858fdac845db406aefb181`에 고정하고 최대 길이, 정규화, 출력 차원·dtype,
+실행 device·모델 dtype, 라이브러리 버전을 identity에 포함한다. 배치 크기를 사용자가 조절하지 않으며, 실행 의미 버전 2로 배치 독립 계산을 구분한다.
+가중치 로드는 전량 재사용에서도 수행할 수 있다.
+
+이전 DB를 읽기 전용으로 열어 schema·identity, SQLite 무결성, 단일 metadata, 문서/FTS 일치,
+문서/벡터 row ID 일치, 벡터 길이·유한값, 동일 surface의 벡터 충돌을 검사한다. 하나라도
+실패하면 이전 DB **전체**를 포기한다. 중단된 임시 DB는 읽지 않는다. 기능 도입 전 색인은
+identity가 없으므로 첫 실행은 전체 계산이다. 기존 lock·임시 DB 검사·fsync·원자 교체는 유지한다.
+
+`index rebuild` 완료 JSON의 추가 필드:
+
+| 필드 | 의미 |
+|---|---|
+| `vectors_total` | 현재 벡터 대상 행 수 |
+| `vectors_reused` | 이전 정상 색인에서 복사한 행 수 |
+| `vectors_computed` | 새로 계산한 행 수 |
+| `vector_reuse_fallback` | 정상 재사용 원천이면 `null`, 아니면 전체 계산 사유 |
+| `elapsed_seconds` | 경로 해석부터 교체·동기화까지 총 시간(초) |
+
+사유는 `no_previous_index`, `legacy_index`, `fts_only_index`,
+`embedding_identity_mismatch`, `invalid_previous_index`,
+`conflicting_surface_vectors`, `unreadable_previous_index`다.
+FTS 전용 API 호출은 `embedding_disabled`와 벡터 통계 0을 반환한다.
+전체 = 재사용 + 새 계산이며, 이 통계는 DB metadata에 저장하지 않아 cold/warm 결과가 같다.
 
 특징 몇 가지:
 

@@ -1081,6 +1081,18 @@ class TestCli(unittest.TestCase):
         # --stub-embedder면 embed_model이 stub 접두로 기록(§4·§5).
         self.assertTrue(payload["embed_model"].startswith("stub:"))
         self.assertTrue(db.exists())
+        self.assertEqual(payload["vectors_total"], payload["indexed"])
+        self.assertEqual(payload["vectors_computed"], payload["vectors_total"])
+        self.assertEqual(payload["vectors_reused"], 0)
+        self.assertEqual(payload["vector_reuse_fallback"], "no_previous_index")
+        self.assertGreaterEqual(payload["elapsed_seconds"], 0)
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli"] + argv), redirect_stdout(out):
+            self.assertEqual(cli.main(), 0)
+        warm = json.loads(out.getvalue())
+        self.assertEqual(warm["vectors_reused"], payload["vectors_total"])
+        self.assertEqual(warm["vectors_computed"], 0)
+        self.assertIsNone(warm["vector_reuse_fallback"])
 
     def test_cli_index_rebuild_lock_contention_is_normal_json_failure(self):
         from project_brain.search_index import IndexRebuildInProgressError

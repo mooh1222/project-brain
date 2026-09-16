@@ -110,16 +110,59 @@ class RealEmbedderLazyTest(unittest.TestCase):
 
     def test_lazy_load_sets_max_sequence_length(self):
         class FakeModel:
-            def __init__(self, name):
+            def __init__(self, name, *, revision):
                 self.name = name
+                self.revision = revision
                 self.max_seq_length = None
 
         fake_module = types.SimpleNamespace(SentenceTransformer=FakeModel)
-        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module,
+                                     "torch": types.SimpleNamespace(set_num_threads=lambda n: None)}):
             e = RealEmbedder()
             e._ensure_model()
         self.assertEqual(e._model.max_seq_length, 2048)
+        from project_brain.embedder import REAL_MODEL_REVISION
+        self.assertEqual(e._model.revision, REAL_MODEL_REVISION)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_real_identity_tracks_artifact_and_output_settings_without_real_model():
+    import json
+    import project_brain.embedder as module
+
+    class FakeModel:
+        device = "cpu"
+        dtype = "torch.float32"
+        max_seq_length = 2048
+
+    e = RealEmbedder()
+    e._model = FakeModel()
+    original = e.embedding_identity
+    assert json.loads(original)["revision"] == module.REAL_MODEL_REVISION
+    with patch.object(module, "REAL_MODEL_REVISION", "different-artifact"):
+        assert e.embedding_identity != original
+    e._model.max_seq_length = 512
+    assert e.embedding_identity != original
+    e._model.max_seq_length = 2048
+    e._model.dtype = "torch.float16"
+    assert e.embedding_identity != original
+    assert StubEmbedder(32).embedding_identity != StubEmbedder().embedding_identity
+
+
+def test_real_embedder_is_independent_of_other_texts_in_the_batch():
+    class PaddingSensitiveModel:
+        def encode(self, texts, *, batch_size, **kwargs):
+            # Model boundary fake: reproduces padding/batch-dependent float noise.
+            rows = np.zeros((len(texts), EMBED_DIM), dtype=np.float32)
+            rows[:, 0] = 1
+            if batch_size > 1 and len(texts) > 1:
+                rows[:, 1] = 1e-7
+            return rows
+
+    e = RealEmbedder()
+    e._model = PaddingSensitiveModel()
+    assert np.array_equal(e.embed_many(["같은 입력", "길이가 다른 입력"])[0],
+                          e.embed("같은 입력"))

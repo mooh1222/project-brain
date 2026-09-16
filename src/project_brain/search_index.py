@@ -21,7 +21,9 @@ import hashlib
 import math
 import os
 import sqlite3
+import struct
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -64,7 +66,8 @@ class IndexRebuildDurabilityError(RuntimeError):
 #     색인 대상 전체(객체 표면 + raw 청크)를 sha256으로 기록해 두고, Task 5에서
 #     검색 시점에 비교해 낡은 색인을 명확히 거부한다.
 # (EMBED_DIM은 embedder.py와 일치해야 한다 — vec0 FLOAT[1024].)
-SCHEMA_VERSION = 4
+# v5: embedder-owned embedding identity for safe live-index vector reuse.
+SCHEMA_VERSION = 5
 
 # 벡터 거리값 반올림 자릿수(§5 결정론 가드 — top-K 경계 흔들림 완화).
 _DISTANCE_ROUND = 6
@@ -73,7 +76,7 @@ _DISTANCE_ROUND = 6
 # .brain-local/은 gitignore된 로컬 파생물.
 
 
-def _vec_connect(db_path: str) -> sqlite3.Connection:
+def _vec_connect(db_path: str, *, uri: bool = False) -> sqlite3.Connection:
     """sqlite-vec 확장을 로드한 연결을 만든다(§3.3·§11).
 
     vec0 가상 테이블을 만들거나 KNN을 쓰려면 enable_load_extension + sqlite_vec.load가
@@ -86,7 +89,7 @@ def _vec_connect(db_path: str) -> sqlite3.Connection:
             "sqlite-vec 미설치 — project-brain이 설치된 환경에서 실행해야 한다"
             "(스펙 §5·§11). `pip install sqlite-vec`."
         ) from exc
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, uri=uri)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -100,7 +103,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _create_schema(conn: sqlite3.Connection) -> None:
-    # documents: 원본 객체 메타 + 토큰화 텍스트(증분 비교는 content_hash로).
+    # documents: 원본 객체 메타 + 토큰화 텍스트. 벡터 재사용은 exact surface_text로.
     # context_id는 §2.1 행 메타 — 슬라이스 3+의 scope 후처리(over-fetch 후 필터)가
     # store 재로드 없이 행만으로 거를 수 있게 동반한다(2026-06-10 리뷰 반영).
     # row_id(v2): vec0가 rowid 기반이라 KNN 결과를 object_id로 되짚는 정수 키.
@@ -128,7 +131,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE meta ("
         "schema_version INTEGER, embed_model TEXT, tokenizer TEXT, "
-        "extractor_version INTEGER, corpus_fingerprint TEXT)"
+        "extractor_version INTEGER, corpus_fingerprint TEXT, embedding_identity TEXT)"
     )
 
 
@@ -231,6 +234,70 @@ def _validate_rebuilt_index(
         conn.close()
 
 
+def _previous_vectors(db_path: Path, identity: str) -> tuple[dict[str, bytes], str | None]:
+    """Read only a complete compatible live DB; any source failure means a cold build."""
+    conn = None
+    try:
+        if not db_path.exists():
+            return {}, "no_previous_index"
+        conn = _vec_connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn.execute("BEGIN")
+        if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+            return {}, "invalid_previous_index"
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(meta)")}
+        if "embedding_identity" not in columns:
+            return {}, "legacy_index"
+        metadata = conn.execute(
+            "SELECT schema_version, embed_model, embedding_identity, tokenizer, "
+            "extractor_version, corpus_fingerprint FROM meta"
+        ).fetchall()
+        if len(metadata) != 1:
+            return {}, "invalid_previous_index"
+        schema, model, previous_identity, tokenizer, extractor, fingerprint = metadata[0]
+        if schema != SCHEMA_VERSION:
+            return {}, "legacy_index"
+        if not model:
+            return {}, "fts_only_index"
+        if not identity or not previous_identity or previous_identity != identity:
+            return {}, "embedding_identity_mismatch"
+        if (not isinstance(tokenizer, str) or not tokenizer
+                or not isinstance(extractor, int)
+                or not isinstance(fingerprint, str) or len(fingerprint) != 64
+                or any(c not in "0123456789abcdef" for c in fingerprint)):
+            return {}, "invalid_previous_index"
+        # Resolve every required column, even fields not used as reuse keys.
+        conn.execute(
+            "SELECT kind, status, context_id, content_hash FROM documents LIMIT 0"
+        )
+        documents = conn.execute(
+            "SELECT row_id, object_id, tokenized_text, surface_text FROM documents"
+        ).fetchall()
+        fts = conn.execute(
+            "SELECT object_id, tokenized_text FROM documents_fts"
+        ).fetchall()
+        if sorted(fts) != sorted((row[1], row[2]) for row in documents):
+            return {}, "invalid_previous_index"
+        vectors = dict(conn.execute("SELECT rowid, embedding FROM documents_vec"))
+        if set(vectors) != {row[0] for row in documents}:
+            return {}, "invalid_previous_index"
+        by_surface = {}
+        for row_id, _, _, surface in documents:
+            vector = vectors[row_id]
+            if (not isinstance(surface, str) or not surface
+                    or len(vector) != EMBED_DIM * 4
+                    or not all(math.isfinite(v) for v in struct.unpack(f"{EMBED_DIM}f", vector))):
+                return {}, "invalid_previous_index"
+            if surface in by_surface and by_surface[surface] != vector:
+                return {}, "conflicting_surface_vectors"
+            by_surface[surface] = vector
+        return by_surface, None
+    except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, struct.error):
+        return {}, "unreadable_previous_index"
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
     """brain/ 전 객체에서 FTS(+벡터) 색인을 전체 재구축한다(§4).
 
@@ -243,10 +310,11 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
 
     embedder: 주면 표면 원문(토큰화 전 §3.3)을 임베딩해 documents_vec에 저장한다.
     None이면 FTS만 색인(벡터 테이블은 비어 있음) — 무회귀 FTS 테스트·CI용. embedder가
-    있으면 표면들을 한 번에 batch 임베딩하고 meta.embed_model에 모델명을 기록한다(§4).
+    있으면 이전 정상 색인의 exact surface 벡터를 재사용하고 miss만 batch 임베딩한다.
 
-    반환: {indexed, total_objects, skipped, tokenizer, embed_model, db} 통계.
+    반환: 기존 색인 통계 + vectors_total/reused/computed, fallback 사유, 총 소요 시간.
     """
+    started = time.perf_counter()
     db_path = resolve_db_path(db_path)
     brain_root = resolve_brain_root(brain_root)
 
@@ -261,6 +329,11 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
             # 규칙 변경(같은 이름, 다른 토큰)을 감지할 수 없다(§6).
             tokenizer_meta = tokenizer_signature()
             embed_model = embedder.model_name if embedder is not None else ""
+            identity = getattr(embedder, "embedding_identity", "") if embedder is not None else ""
+            previous, fallback = (
+                _previous_vectors(db_path, identity) if embedder is not None
+                else ({}, "embedding_disabled")
+            )
 
             conn = _connect(temp_path)
             try:
@@ -327,23 +400,31 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                     )
                     if embedder is not None:
                         pending_vectors.append((row_id, ch["text"]))
-                # 벡터는 ★토큰화 전 원문 표면★을 embed_many로 한 번에 배치 임베딩(§3.3) —
-                # 실모델(bge-m3)에서 객체당 encode 1회보다 훨씬 빠르다(2026-06-10 리뷰 반영:
-                # 주석만 "배치"라던 것을 실구현으로).
-                if embedder is not None and pending_vectors:
-                    vectors = embedder.embed_many([s for _, s in pending_vectors])
+                # Exact surfaces alone select hits; current row IDs always come from
+                # the freshly assembled corpus, including raw chunks.
+                hits = [(row_id, previous[surface]) for row_id, surface in pending_vectors
+                        if surface in previous]
+                misses = [(row_id, surface) for row_id, surface in pending_vectors
+                          if surface not in previous]
+                conn.executemany(
+                    "INSERT INTO documents_vec (rowid, embedding) VALUES (?, ?)", hits,
+                )
+                if misses:
+                    vectors = embedder.embed_many([surface for _, surface in misses])
+                    if len(vectors) != len(misses):
+                        raise RuntimeError("임베딩 결과 수가 요청한 surface 수와 다릅니다.")
                     conn.executemany(
                         "INSERT INTO documents_vec (rowid, embedding) VALUES (?, ?)",
                         [(row_id, _serialize(v))
-                         for (row_id, _), v in zip(pending_vectors, vectors)],
+                         for (row_id, _), v in zip(misses, vectors)],
                     )
                 # 지문은 색인 대상을 모두 INSERT한 뒤 계산해 meta 단일 행에 기록한다(§7).
                 fingerprint = compute_corpus_fingerprint(store, Path(brain_root))
                 conn.execute(
                     "INSERT INTO meta (schema_version, embed_model, tokenizer, "
-                    "extractor_version, corpus_fingerprint) VALUES (?, ?, ?, ?, ?)",
+                    "extractor_version, corpus_fingerprint, embedding_identity) VALUES (?, ?, ?, ?, ?, ?)",
                     (SCHEMA_VERSION, embed_model, tokenizer_meta, EXTRACTOR_VERSION,
-                     fingerprint),
+                     fingerprint, identity),
                 )
                 conn.commit()
             finally:
@@ -377,6 +458,11 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
         "tokenizer": tokenizer,
         "embed_model": embed_model,
         "db": str(db_path),
+        "vectors_total": len(pending_vectors),
+        "vectors_reused": len(hits),
+        "vectors_computed": len(misses),
+        "vector_reuse_fallback": fallback,
+        "elapsed_seconds": time.perf_counter() - started,
     }
 
 

@@ -1228,7 +1228,12 @@ def _run_index(argv) -> int:
     print(json.dumps(
         {"ok": True, "indexed": stats["indexed"], "raw_chunks": stats["raw_chunks"],
          "tokenizer": stats["tokenizer"],
-         "embed_model": stats["embed_model"], "db": stats["db"]},
+         "embed_model": stats["embed_model"], "db": stats["db"],
+         "vectors_total": stats["vectors_total"],
+         "vectors_reused": stats["vectors_reused"],
+         "vectors_computed": stats["vectors_computed"],
+         "vector_reuse_fallback": stats["vector_reuse_fallback"],
+         "elapsed_seconds": stats["elapsed_seconds"]},
         ensure_ascii=False, indent=2))
     return 0
 

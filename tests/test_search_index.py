@@ -782,11 +782,12 @@ class PreviousRulesVersionIndexTest(unittest.TestCase):
 
 
 class SchemaVersionTest(unittest.TestCase):
-    def test_schema_version_is_4(self):
+    def test_schema_version_is_5(self):
         # v2: 벡터 테이블 추가(슬라이스 3). v3: documents.surface_text 컬럼(raw 본문
         # 색인 — raw 청크는 store에 없는 행이라 원문을 색인이 직접 운반, §2.2).
         # v4: meta.corpus_fingerprint 추가(§7 신선도 가드 1/2).
-        self.assertEqual(SCHEMA_VERSION, 4)
+        # v5: meta.embedding_identity 추가(#58).
+        self.assertEqual(SCHEMA_VERSION, 5)
 
 
 class RawIndexTest(unittest.TestCase):
