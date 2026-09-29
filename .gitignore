@@ -19,3 +19,5 @@ __pycache__/
 .codex/hooks.json
 .claude/settings.local.json
 .github/hooks/agent-team-worker.json
+# release artifact (tools/release.py build 산출물)
+/dist/

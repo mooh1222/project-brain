@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
 from pathlib import Path
 
 from project_brain.config import (
@@ -3263,6 +3264,20 @@ def _run_migration(argv) -> int:
         return 1
 
 
+def _run_version() -> int:
+    """설치된 배포 metadata의 버전 — wheel 설치본과 편집 설치 모두 같은 출처다.
+
+    PYTHONPATH로만 import해 metadata가 없으면 추측하지 않고 실패한다."""
+    try:
+        package_version = _distribution_version("project-brain")
+    except PackageNotFoundError:
+        print("project-brain: 설치된 배포 metadata가 없어 버전을 알 수 없습니다 "
+              "(source 경로로만 import됨)", file=sys.stderr)
+        return 1
+    print(f"project-brain {package_version}")
+    return 0
+
+
 def _run_top_level_help(argv) -> int:
     parser = argparse.ArgumentParser(
         prog="project-brain",
@@ -3279,6 +3294,11 @@ def _run_top_level_help(argv) -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="설치된 project-brain 버전을 출력하고 종료",
+    )
     parser.add_argument("query", nargs="?")
     parser.parse_args(argv)
     return 0
@@ -3289,6 +3309,8 @@ def main() -> int:
     try:
         if argv in (["--help"], ["-h"]):
             return _run_top_level_help(argv)
+        if argv == ["--version"]:
+            return _run_version()
         # 첫 인자가 서브커맨드면 해당 경로, 아니면 일반 자유질의를 search로 처리한다.
         if argv and argv[0] == "build":
             return _run_build(argv[1:])

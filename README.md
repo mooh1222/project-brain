@@ -23,14 +23,42 @@
 
 ## 설치
 
-전제는 [uv](https://docs.astral.sh/uv/) 하나다.
+전제는 [uv](https://docs.astral.sh/uv/) 하나다. 설치 경로는 두 가지이며 섞지 않는다.
+
+### 소비자 설치 (release wheel)
+
+엔진 저장소를 clone하지 않고 GitHub Release의 wheel과 잠긴 runtime constraints로 설치한다.
+constraints는 엔진 `uv.lock`의 runtime 해석 결과라 설치 시점과 무관하게 같은 의존성이 깔린다.
+
+```bash
+V=0.1.0
+BASE=https://github.com/mooh1222/project-brain/releases/download/v$V
+uv tool install "$BASE/project_brain-$V-py3-none-any.whl" \
+  --constraints "$BASE/project-brain-$V-constraints.txt"
+project-brain --version   # project-brain 0.1.0
+```
+
+- 무결성 확인: 같은 release의 `SHA256SUMS`와 두 artifact를 내려받아
+  `shasum -a 256 -c SHA256SUMS`.
+- 업그레이드·rollback: `V`만 원하는 release로 바꿔 같은 명령을 다시 실행한다. 이전 버전으로
+  되돌릴 때도 같다. editable 설치에서 넘어올 때도 같은 명령이면 된다.
+- 설치 후 프로젝트에 붙이는 방법(`install`·`bootstrap`)은 아래 절과 같다. 이미 주입된 스킬은
+  업그레이드 뒤 `project-brain install`을 다시 실행해 갱신한다(사용자 수정 파일은 건너뜀).
+- 엔진 git checkout을 요구하는 경로(batch ingest, `migration`, foundation 검증 스크립트)는
+  release 설치본에서 동작하지 않는다. 범위는 [v0.1.0 release notes](docs/releases/v0.1.0.md)의
+  제약 절을 본다.
+
+### 엔진 개발자 설치 (editable)
 
 ```bash
 git clone <this-repo> project-brain
 uv tool install -e ./project-brain
 ```
 
-편집 설치(-e)라 엔진 수정이 모든 프로젝트에 즉시 반영된다.
+편집 설치(-e)라 엔진 수정이 모든 프로젝트에 즉시 반영된다. pyproject 의존성이 바뀌면
+`uv tool install -e ./project-brain --force`. 적재 운영(batch ingest·migration)도 이 경로를 쓴다.
+
+### 공통
 
 - 임베딩 모델(bge-m3)은 첫 색인 때 자동 다운로드된다. 미리 받으려면
   `project-brain doctor --download`.
@@ -155,5 +183,26 @@ uv sync
 ```
 
 첫 명령은 엔진 합성 회귀, 두 번째는 installer가 배포하는 ingest 런타임의 독립 unittest다.
+
+### 릴리스
+
+`tools/release.py`가 커밋된 HEAD만으로 artifact를 만들고 격리 설치로 검증한다.
+
+```bash
+.venv/bin/python tools/release.py build --tag v0.1.0   # dist/release/v0.1.0/
+.venv/bin/python tools/release.py smoke --tag v0.1.0   # 로컬 artifact 격리 설치
+git tag v0.1.0 && git push origin v0.1.0
+gh release create v0.1.0 -R mooh1222/project-brain --notes-file docs/releases/v0.1.0.md \
+  dist/release/v0.1.0/*
+.venv/bin/python tools/release.py smoke --tag v0.1.0 --from-release
+```
+
+build는 추적 파일이 dirty하면 거부하고, `git archive HEAD`에서 wheel을 빌드한 뒤 wheel 안의
+템플릿 집합·실행 비트를 HEAD 커밋과 대조한다. constraints는 `uv export --locked`라 lock이
+pyproject와 어긋나면 실패한다. 검사를 모두 통과한 산출물만 `dist/release/<tag>/`로 옮긴다.
+smoke는 임시 `UV_TOOL_DIR`에 설치해 버전·도움말, import 위치(source checkout 아님), 설치 파일이
+검증한 wheel과 같은지(RECORD 해시), constraints 버전 일치, 임시 프로젝트 `install` 2회 무변경,
+주입 파일의 실행 비트를 확인한다. `--from-release`는 게시된 wheel을 tag 커밋의 템플릿과도 대조한다.
+버전은 `pyproject.toml`의 `version`과 tag가 같아야 한다.
 검색·청킹·색인 계약을 바꿨다면 소비 프로젝트의 `brain/checks/`, lint, eval, graph와
 필요한 경우 실모델 rebuild까지 별도로 검증한다.

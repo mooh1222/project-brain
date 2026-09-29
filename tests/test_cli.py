@@ -3900,6 +3900,51 @@ class TestCliTopLevelHelp(unittest.TestCase):
         self.assertRegex(text, r"검색·색인.*\bshow\b")
 
 
+class TestCliVersion(unittest.TestCase):
+    """--version은 source checkout이 아니라 설치된 배포 metadata의 버전을 낸다."""
+
+    def _run(self, argv):
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["cli", *argv]), redirect_stdout(out):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main()
+        return raised.exception.code, out.getvalue()
+
+    def test_version_prints_distribution_metadata_version(self):
+        out = io.StringIO()
+        with mock.patch.object(cli, "_distribution_version", return_value="9.8.7"), \
+                mock.patch("sys.argv", ["cli", "--version"]), redirect_stdout(out):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "project-brain 9.8.7\n")
+
+    def test_help_works_without_distribution_metadata(self):
+        """source 경로(PYTHONPATH)로만 import돼 metadata가 없어도 --help는 막히지 않는다."""
+        from importlib.metadata import PackageNotFoundError
+
+        with mock.patch.object(cli, "_distribution_version",
+                               side_effect=PackageNotFoundError("project-brain")):
+            code, text = self._run(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--version", text)
+
+    def test_version_without_metadata_fails_with_message(self):
+        from importlib.metadata import PackageNotFoundError
+
+        err = io.StringIO()
+        with mock.patch.object(cli, "_distribution_version",
+                               side_effect=PackageNotFoundError("project-brain")), \
+                mock.patch("sys.argv", ["cli", "--version"]), redirect_stderr(err):
+            code = cli.main()
+        self.assertEqual(code, 1)
+        self.assertIn("metadata", err.getvalue())
+
+    def test_help_mentions_version_flag(self):
+        code, text = self._run(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--version", text)
+
+
 class TestCliShow(unittest.TestCase):
     """cli show <id> — 단일 객체 본문 + 1-hop 이웃(저장소에 실존하는 참조만)을 종류·
     제목과 함께 낸다(회상 결과에서 그래프 연결을 손수 따라가는 탐색 입구)."""
