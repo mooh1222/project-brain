@@ -10,6 +10,15 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-09-29 — 적재 스크립트가 엔진 Python으로 스스로 넘어감 (#107)
+
+release wheel 설치본은 엔진이 uv tool 환경에만 있어 wrapper의 시스템 `python3`로는 import되지 않았다.
+`scripts/engine_python.py`를 추가했다. 엔진을 import하는 스크립트(`assemble_notes`·`finalize_ingest`·
+`run_ingest_batch`·`validate_foundation`)는 import 전에 `ensure()`를 거쳐 `PROJECT_BRAIN_PYTHON`(지정 시 항상 우선) →
+엔진을 import하는 현재 Python → `project-brain` launcher shebang(`env`·sh trampoline 포함) 순으로 고른 Python으로
+재실행하고, 못 고르면 이유를 남기고 멈춘다. `run_ingest.sh`·`finalize_ingest.sh`는 `python3 engine_python.py`로
+엔진 Python을 한 번 골라 쓰고, finalizer의 corpus checks는 `sys.executable`, 문서의 checks 명령도 같은 Python을 쓴다.
+
 ## 2026-09-07 — 적재 스킬에 개념 선언(Concept Intake) 단계와 `user_statement` 근거 (#83)
 
 ingest 실행 흐름에 Source Intake 다음 2단계 "개념 선언"을 넣었다. 사용자가 컨텍스트의 개념을

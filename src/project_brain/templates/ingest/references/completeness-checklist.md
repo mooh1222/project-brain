@@ -57,7 +57,8 @@
 4. `project-brain eval`이 모두 통과했다.
 5. finalization의 `unexpected_new_ids=[]`다. 이번 적재로 새로 생긴 고립 객체 중
    `intentional_terminal_ids`에 객체 ID·분류·근거를 기록한 의도적 종착점만 허용하며, 0개를 만들려고 의미 없는 연결은 추가하지 않는다.
-6. `python3 -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"`가 통과했다.
+6. 엔진 Python(`"$(python3 .agents/skills/{{PROJECT}}-brain-ingest/scripts/engine_python.py)"`)으로
+   `-m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"`가 통과했다.
 7. 모든 recall check의 `missing_object_ids=[]`, `missing_code_locator_object_ids=[]`다. 즉 manifest에
    선언한 도메인 질문이 기대 객체를 회수하고, 요구한 mapping에는 연결된 code locator가 함께 나온다.
 

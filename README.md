@@ -45,9 +45,9 @@ project-brain --version   # project-brain 0.1.0
 - 설치 후 프로젝트에 붙이는 방법(`install`·`bootstrap`)은 아래 절과 같다. 이미 주입된 스킬은
   업그레이드 뒤 `project-brain install`을 다시 실행해 갱신한다(사용자 수정 파일은 건너뜀).
 - 엔진 git checkout을 요구하는 경로(batch ingest, `migration`, foundation 검증 스크립트)는
-  release 설치본에서 동작하지 않는다. 적재 wrapper(`run_ingest.sh`)는 시스템 `python3`를 쓰므로
-  tool 환경 bin을 PATH 앞에 둬야 한다. 범위와 우회법은
-  [v0.1.0 release notes](docs/releases/v0.1.0.md)의 제약 절을 본다.
+  release 설치본에서 동작하지 않는다. 범위는 [v0.1.0 release notes](docs/releases/v0.1.0.md)의
+  제약 절을 본다. 설치 스킬의 스크립트는 시스템 `python3`로 시작해도 엔진이 깔린 Python으로
+  스스로 넘어간다(`PROJECT_BRAIN_PYTHON`으로 지정 가능).
 
 ### 엔진 개발자 설치 (editable)
 

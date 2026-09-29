@@ -12,10 +12,19 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
+
+if __name__ == "__main__":
+    # 시스템 python3로 실행돼도 엔진(project_brain)이 깔린 Python으로 넘어간다.
+    # -P/PYTHONSAFEPATH에서도 찾도록 스크립트 디렉토리를 직접 넣는다.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import engine_python
+
+    engine_python.ensure()
 
 
 ItemRunner = Callable[[dict[str, Any]], Any]

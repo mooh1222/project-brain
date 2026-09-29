@@ -217,6 +217,8 @@ class BatchRunnerCliTest(unittest.TestCase):
         shutil.copy2(VALIDATOR_SCRIPT, self.runtime / VALIDATOR_SCRIPT.name)
         shutil.copy2(SCRIPTS / "assemble_notes.py", self.runtime / "assemble_notes.py")
         shutil.copy2(SCRIPTS / "finalize_ingest.py", self.runtime / "finalize_ingest.py")
+        # 설치본처럼 엔진 Python 부트스트랩도 같은 scripts 디렉토리에 둔다.
+        shutil.copy2(SCRIPTS / "engine_python.py", self.runtime / "engine_python.py")
         self._write_executable(
             "run_ingest.sh",
             """#!/usr/bin/env python3
@@ -1926,6 +1928,7 @@ class RunIngestCleanupTest(unittest.TestCase):
         self.tmp_dir.mkdir()
         self.call_log = self.root / "calls.jsonl"
         shutil.copy2(SCRIPTS / "run_ingest.sh", self.runtime / "run_ingest.sh")
+        shutil.copy2(SCRIPTS / "engine_python.py", self.runtime / "engine_python.py")
         (self.runtime / "assemble_notes.py").write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
             import json

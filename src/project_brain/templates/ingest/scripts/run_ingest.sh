@@ -60,14 +60,17 @@ TRANSACTION_RESULT="$(mktemp -t transaction-result.XXXXXX.json)"
 
 step() { echo "── [$1] ──" >&2; }
 
+# 엔진(project_brain)이 깔린 Python을 한 번 고른다 — release 설치본은 uv tool 환경에만 있다.
+PY="$(python3 "$HERE/engine_python.py")"
+
 step "assemble_notes"
-ASSEMBLE=(python3 "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES" --coverage-out "$COVERAGE")
+ASSEMBLE=("$PY" "$HERE/assemble_notes.py" "$VERIFY" "$SPEC" -o "$NOTES" --coverage-out "$COVERAGE")
 if [ "$DRY" = "0" ] && [ "$DEFER_FINALIZE" = "0" ]; then
   ASSEMBLE+=(--finalization-out "$FINALIZATION_CONFIG")
 fi
 "${ASSEMBLE[@]}" >&2
 if [ "$DRY" = "0" ] && [ "$DEFER_FINALIZE" = "0" ]; then
-  python3 "$HERE/finalize_ingest.py" --validate-config "$FINALIZATION_CONFIG" >/dev/null
+  "$PY" "$HERE/finalize_ingest.py" --validate-config "$FINALIZATION_CONFIG" >/dev/null
 fi
 
 step "build"
@@ -101,7 +104,7 @@ if [ -n "$BATCH_BINDING_FILE" ]; then
   )
 fi
 "${INGEST[@]}" > "$TRANSACTION_RESULT"
-python3 "$HERE/finalize_ingest.py" --validate-transaction "$TRANSACTION_RESULT" >/dev/null
+"$PY" "$HERE/finalize_ingest.py" --validate-transaction "$TRANSACTION_RESULT" >/dev/null
 
 if [ "$DEFER_FINALIZE" = "1" ]; then
   step "defer-finalize ingest까지 OK"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -236,7 +237,8 @@ class SemanticFinalizerTest(unittest.TestCase):
             ["project-brain", "eval"],
             ["project-brain", "graph", "isolated"],
             ["project-brain", "audit", "--no-fetch", "--write-stale-cache"],
-            ["python3", "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
+            # corpus checks는 엔진이 import되는 지금 인터프리터로 돈다(시스템 python3 아님).
+            [sys.executable, "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
              "-p", "test_*.py"],
             ["project-brain", "search", self.contract["recall_checks"][0]["query"]],
         ):
@@ -908,7 +910,14 @@ class SemanticFinalizerTest(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             fake = bin_dir / "project-brain"
-            fake.write_text("""#!/usr/bin/env python3
+            # 실제 uv tool launcher의 sh trampoline 형식(공백·긴 경로에도 안전)으로 엔진이
+            # 깔린 Python을 가리킨다 — wrapper는 engine_python으로 이 인터프리터를 고른다.
+            launcher = (
+                "#!/bin/sh\n"
+                + "'''exec' " + shlex.quote(sys.executable) + ' "$0" "$@"\n'
+                + "' '''\n"
+            )
+            fake.write_text(launcher + """
 import json
 import sys
 

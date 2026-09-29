@@ -5,8 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
+
+if __name__ == "__main__":
+    # 시스템 python3로 실행돼도 엔진(project_brain)이 깔린 Python으로 넘어간다.
+    # -P/PYTHONSAFEPATH에서도 찾도록 스크립트 디렉토리를 직접 넣는다.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import engine_python
+
+    engine_python.ensure()
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
@@ -564,7 +573,7 @@ def run_finalization(
         ),
         "corpus_tests": _run_command(
             runner,
-            ["python3", "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
+            [sys.executable, "-m", "unittest", "discover", "-s", "{{BRAIN_ROOT}}/checks",
              "-p", "test_*.py"],
             json_output=False),
     }

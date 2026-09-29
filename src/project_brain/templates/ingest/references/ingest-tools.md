@@ -118,7 +118,7 @@ project-brain ingest \
 
 **묶음 승격**(적재 슬라이스 전체를 한 검토 기록으로)은 `promote` 함수로 한다. 작은 파이썬
 한 토막(엔진이 깔린 도구 venv python으로 실행 —
-경로는 `$(head -1 "$(which project-brain)" | sed 's/^#!//')` 로 얻는다):
+경로는 스킬 디렉토리에서 `python3 scripts/engine_python.py` 로 얻는다 — `PROJECT_BRAIN_PYTHON` 지정도 따른다):
 
 ```python
 from project_brain.promote import promote
@@ -437,8 +437,12 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
    (`EXPECTED_RAW_CHUNKS`)만 기획서 원문·개념 선언 문서·청커가 바뀔 때 의식적으로 갱신:
    ```bash
    project-brain eval
-   python3 -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"  # 표준 unittest — pytest 불필요
+   ENGINE_PY="$(python3 .agents/skills/{{PROJECT}}-brain-ingest/scripts/engine_python.py)"  # 엔진이 깔린 Python(PROJECT_BRAIN_PYTHON 우선)
+   "$ENGINE_PY" -m unittest discover -s {{BRAIN_ROOT}}/checks -p "test_*.py"  # 표준 unittest — pytest 불필요
    ```
+   checks는 `project_brain`을 import하므로 시스템 `python3`가 아니라 엔진 Python으로 돌린다.
+   `scripts/*.py`는 시스템 `python3`로 실행돼도 `engine_python.py`가 엔진 Python으로 넘긴다
+   (`PROJECT_BRAIN_PYTHON`으로 직접 지정 가능).
 4. **계약 회상** — `recall_checks`의 각 query가 모든 `expected_object_ids`를 회수하고,
    `require_code_locators=true`면 각 기대 객체의 `linked.code_locators`가 비어 있지 않은지 확인한다.
    ```bash

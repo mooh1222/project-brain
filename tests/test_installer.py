@@ -1134,7 +1134,7 @@ class InstallTest(unittest.TestCase):
 
         scripts = self._skill_dir("demo-brain-ingest") / "scripts"
         for name in ("run_ingest.sh", "finalize_ingest.sh", "finalize_ingest.py", "run_ingest_batch.py",
-                     "validate_workflow_result.py", "validate_foundation.py"):
+                     "validate_workflow_result.py", "validate_foundation.py", "engine_python.py"):
             with self.subTest(name=name):
                 script = scripts / name
                 self.assertTrue(script.is_file())
