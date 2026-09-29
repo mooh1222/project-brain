@@ -317,8 +317,9 @@ def build(tag: str, out_root: Path, repo_root: Path = REPO_ROOT) -> dict:
             raise ReleaseError("release artifact check failed:\n" + "\n".join(problems))
         write_checksums([wheel, constraints], staging / CHECKSUMS_NAME)
         artifacts = {path.name: _sha256(path) for path in (wheel, constraints)}
-        out_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(staging, out_dir)
+        out_dir.mkdir(parents=True)
+        for path in (wheel, constraints, staging / CHECKSUMS_NAME):
+            shutil.copyfile(path, out_dir / path.name)
     return {
         "ok": True,
         "tag": tag,

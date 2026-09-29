@@ -110,6 +110,7 @@ class TestBuildFailureLeavesNoArtifacts(unittest.TestCase):
                 "project_brain/templates/ingest/scripts/run.sh": 0o755,
             })
             (staging / release.constraints_name(version)).write_text("numpy==2.3.2\n")
+            (staging / ".gitignore").write_text("*\n")  # uv build가 out-dir에 남기는 파일
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "repo").mkdir()
