@@ -49,7 +49,9 @@
    파일별 diagnostics/partial, 짧은 scope, query/session-ingest의 공통 발견과 미검수 답변 구분 — 구현.
 2. [#110](https://github.com/mooh1222/project-brain/issues/110): JSON v2 항목·근거의 선택 읽기/갱신과 v1 공존 — 구현.
 3. [#111](https://github.com/mooh1222/project-brain/issues/111): 읽기 전용 prepare와 기존 ingest/finalization 연결 — 구현.
-4. [#112](https://github.com/mooh1222/project-brain/issues/112): BB2 스킬 갱신·별도 세션의 실제 재개·적재·비용 관찰 — 후속.
+4. [#112](https://github.com/mooh1222/project-brain/issues/112): BB2 설치·별도 세션의 발견/재개·prepare 확인.
+   기존 reviewed mapping의 범위 설명 정정 승인 대기로 실제 적재·최종화는 미완료.
+   [파일럿 관찰](docs/reports/2026-10-19-knowledge-draft-v2-bb2-pilot.md)에 기능 결과와 비용 미측정을 구분했다.
 
 신규 CLI create는 JSON v2이며 기본 show는 요약·목차, --item은 항목/근거, --patch-file은
 항목/source의 add·replace·delete와 metadata 교체다. 기존 Python create API는 v1 호환을 유지한다.
