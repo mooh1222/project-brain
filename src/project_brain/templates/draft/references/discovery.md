@@ -16,7 +16,9 @@ project-brain draft list
   모든 파일에 문제가 있어 `drafts=[]`여도 초안 부재로 판정하지 않는다.
 - 루트 경로·접근 오류는 **발견 실패**다. 정상적인 빈 목록과 구분해 알린다.
   초안 발견이 실패해도 가능한 Brain 조회는 계속하되, 초안까지 조회했다고 말하지 않는다.
-- 현재 `markdown-v1`은 `project-brain draft show <topic-id>`로 전체 본문을 읽는다.
+- `json-v2`는 기본 show의 요약·목차 뒤 `show <topic-id> --item <key>`로 필요한 항목과
+  참조 source를 읽는다. 요약만으로 본문 사실에 관한 답을 끝내지 않는다.
+- `markdown-v1`은 `project-brain draft show <topic-id>`로 전체 본문을 읽는다.
   여러 읽기 후보는 metadata로 좁히고 답에 필요한 본문만 연다. 읽기 전용 조회를
   사용자 topic 선택 대기로 중단하지 않는다. 갱신할 topic이 모호하면 draft 스킬에서 선택받는다.
 - 발견 범위는 **topic 단위**다. metadata에 없다고 다른 topic 내부에도 지식이 없다고

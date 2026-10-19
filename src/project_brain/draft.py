@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import copy
+import fcntl
+import subprocess
 import os
 import re
 import stat
 import tempfile
 from collections.abc import Iterable
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -101,7 +106,7 @@ def _ensure_write_root(brain_root: Path) -> Path:
     try:
         root_mode = root.lstat().st_mode
     except FileNotFoundError:
-        root.mkdir(parents=True)
+        root.mkdir(parents=True, exist_ok=True)
         root_mode = root.lstat().st_mode
     if not stat.S_ISDIR(root_mode):
         raise DraftError(
@@ -113,7 +118,7 @@ def _ensure_write_root(brain_root: Path) -> Path:
     try:
         drafts_mode = drafts_root.lstat().st_mode
     except FileNotFoundError:
-        drafts_root.mkdir()
+        drafts_root.mkdir(exist_ok=True)
         drafts_mode = drafts_root.lstat().st_mode
     if not stat.S_ISDIR(drafts_mode):
         raise DraftError(
@@ -401,214 +406,491 @@ def create(
     if problems:
         problem = problems[0]
         raise DraftError(problem["code"], problem["detail"])
-    _ensure_write_root(brain_root)
     payload = content.encode("utf-8")
-    try:
-        with path.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except FileExistsError as exc:
-        raise DraftError(
-            "draft_exists",
-            f"이미 존재하는 초안입니다: {topic_id}",
-        ) from exc
+    _create_file(brain_root, topic_id, ".md", payload)
     return show(brain_root, topic_id)
 
 
-def show(brain_root: Path, topic_id: str) -> dict[str, str]:
-    """초안 본문과 현재 SHA를 반환한다."""
-    path = _draft_path(brain_root, topic_id)
-    problems = lint(brain_root, topic_id=topic_id)
-    if problems:
-        problem = problems[0]
-        raise DraftError(problem["code"], problem["detail"])
-    return _document(path, path.read_bytes())
-
-
-def list_drafts(brain_root: Path) -> dict[str, object]:
-    """정상 metadata와 파일별 진단을 반환하며 루트 조회 실패는 거부한다."""
-    drafts: list[dict[str, object]] = []
-    diagnostics: list[dict[str, str]] = []
-    result = {"drafts": drafts, "diagnostics": diagnostics, "partial": False}
+@contextmanager
+def _directory(brain_root: Path, *, write: bool = False):
+    """공유 디렉터리 fd를 고정하며 writer만 짧게 잠근다."""
     try:
-        drafts_root = _exact_brain_root(brain_root) / "drafts"
-        try:
-            mode = drafts_root.lstat().st_mode
-        except FileNotFoundError:
-            return result
-        if not stat.S_ISDIR(mode):
-            raise DraftError("draft_path_invalid", "drafts 루트는 실제 디렉터리여야 합니다")
-        directory_fd = os.open(drafts_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            with os.scandir(directory_fd) as entries:
-                names = sorted(entry.name for entry in entries if entry.name.endswith(".md"))
-            for name in names:
-                relative = f"drafts/{name}"
-                if _TOPIC_ID.fullmatch(Path(name).stem) is None:
-                    diagnostics.append({
-                        "path": relative,
-                        "code": "draft_path_invalid",
-                        "detail": "초안 파일명은 <ASCII-kebab-topic-id>.md여야 합니다",
-                    })
-                    continue
-                try:
-                    file_mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
-                    if not stat.S_ISREG(file_mode):
-                        raise DraftError("draft_path_invalid", "초안은 symlink가 아닌 일반 파일이어야 합니다")
-                    fd = os.open(
-                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                        dir_fd=directory_fd,
-                    )
-                    with os.fdopen(fd, "rb") as stream:
-                        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                            raise DraftError("draft_path_invalid", "초안은 일반 파일이어야 합니다")
-                        text = stream.read().decode("utf-8")
-                    metadata, problems = _parse_content(drafts_root / name, text)
-                    if problems:
-                        diagnostics.extend(problems)
-                    else:
-                        scope = metadata["scope"]
-                        drafts.append({
-                            **metadata,
-                            "scope": scope[:_SCOPE_PREVIEW_LIMIT],
-                            "scope_truncated": len(scope) > _SCOPE_PREVIEW_LIMIT,
-                            "format": "markdown-v1",
-                        })
-                except (DraftError, OSError, UnicodeDecodeError) as exc:
-                    if isinstance(exc, DraftError):
-                        code, detail = exc.code, exc.detail
-                    elif isinstance(exc, UnicodeDecodeError):
-                        code, detail = "draft_utf8_invalid", "초안은 UTF-8 Markdown이어야 합니다"
-                    else:
-                        code, detail = "draft_read_failed", str(exc)
-                    diagnostics.append({"path": relative, "code": code, "detail": detail})
-        finally:
-            os.close(directory_fd)
+        root = _exact_brain_root(brain_root)
+        directory = _ensure_write_root(root) if write else root / "drafts"
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise DraftError("draft_path_invalid", "drafts 루트는 symlink가 아닌 실제 디렉터리여야 합니다")
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        if write:
+            raise
+        yield None
+        return
     except OSError as exc:
         raise DraftError("draft_read_failed", f"초안 루트를 조회할 수 없습니다: {exc}") from exc
-    result["partial"] = bool(diagnostics)
-    return result
+    try:
+        if write:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    except OSError as exc:
+        raise DraftError("draft_write_failed" if write else "draft_read_failed", str(exc)) from exc
+    finally:
+        os.close(fd)
 
 
-def update(
-    brain_root: Path,
-    topic_id: str,
-    *,
-    expected_sha: str,
-    content: str,
-) -> dict[str, str]:
-    """expected SHA와 같은 초안만 같은 디렉터리에서 원자 교체한다."""
-    if type(expected_sha) is not str or _SHA256.fullmatch(expected_sha) is None:
-        raise DraftError(
-            "draft_expected_sha_invalid",
-            "expected_sha는 lowercase SHA-256이어야 합니다",
-        )
-    current = show(brain_root, topic_id)
-    if current["sha256"] != expected_sha:
-        raise DraftError(
-            "draft_stale_sha",
-            f"초안 SHA가 달라졌습니다: {topic_id}",
-            actual_sha=current["sha256"],
+def _names(fd: int) -> list[str]:
+    with os.scandir(fd) as entries:
+        return sorted(
+            (entry.name for entry in entries if entry.name.endswith((".md", ".json"))),
+            key=lambda name: (Path(name).stem, name),
         )
 
-    path = _draft_path(brain_root, topic_id)
-    if type(content) is not str:
-        raise DraftError(
-            "draft_utf8_invalid",
-            "갱신 content는 UTF-8로 쓸 수 있는 문자열이어야 합니다",
-        )
-    problems = _content_problems(path, content)
-    if problems:
-        problem = problems[0]
-        raise DraftError(problem["code"], problem["detail"])
-    existing_mode = stat.S_IMODE(path.lstat().st_mode)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
+
+def _read_regular(fd: int, name: str) -> bytes:
+    if not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+        raise DraftError("draft_path_invalid", "초안은 symlink가 아닌 일반 파일이어야 합니다")
+    file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    with os.fdopen(file_fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise DraftError("draft_path_invalid", "초안은 일반 파일이어야 합니다")
+        return stream.read()
+
+
+def _read_topic(fd: int | None, topic_id: str) -> tuple[str, bytes]:
+    _validate_topic_id(topic_id)
+    names = [] if fd is None else [name for name in _names(fd) if Path(name).stem == topic_id]
+    if len(names) > 1:
+        raise DraftError("draft_topic_conflict", f"동일 topic의 v1/v2가 함께 있습니다: {topic_id}")
+    if not names:
+        raise DraftError("draft_not_found", f"초안 파일이 없습니다: {topic_id}")
+    return names[0], _read_regular(fd, names[0])
+
+
+def _replace_file(brain_root: Path, fd: int, name: str, payload: bytes, mode: int = 0o600):
+    descriptor, temporary_name = tempfile.mkstemp(dir=Path(brain_root) / "drafts", prefix=f".{name}.", suffix=".tmp")
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content.encode("utf-8"))
+            stream.write(payload)
             stream.flush()
-            os.fchmod(stream.fileno(), existing_mode)
+            os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        os.replace(temporary.name, name, src_dir_fd=fd, dst_dir_fd=fd)
+        os.fsync(fd)
     finally:
         try:
-            temporary.unlink()
+            os.unlink(temporary.name, dir_fd=fd)
         except FileNotFoundError:
             pass
-    return show(brain_root, topic_id)
 
 
-def lint(
-    brain_root: Path,
-    *,
-    topic_id: str | None = None,
-) -> list[dict[str, str]]:
-    """drafts 영역의 v1 구조 문제를 반환한다."""
+def _create_file(brain_root: Path, topic_id: str, suffix: str, payload: bytes):
+    with _directory(brain_root, write=True) as fd:
+        if any(Path(name).stem == topic_id for name in _names(fd)):
+            raise DraftError("draft_exists", f"이미 존재하는 초안입니다: {topic_id}")
+        _replace_file(brain_root, fd, topic_id + suffix, payload)
+
+
+def _json_bytes(document: dict) -> bytes:
     try:
-        root = _exact_brain_root(brain_root)
-    except DraftError as exc:
-        return [{
-            "path": "drafts",
-            "code": exc.code,
-            "detail": exc.detail,
-        }]
-    drafts_root = root / "drafts"
+        return (json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    except (ValueError, TypeError, UnicodeEncodeError) as exc:
+        raise DraftError("draft_json_invalid", str(exc)) from exc
+
+
+def _unique_json(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"중복 JSON 필드: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"JSON에 허용되지 않는 상수: {value}")
+
+
+def _check_v2(document: dict, topic_id: str):
+    expected = {"version", "topic_id", "title", "scope", "resume_summary", "updated", "items", "sources"}
+    if (
+        type(document) is not dict or set(document) != expected
+        or type(document["version"]) is not int or document["version"] != 2
+        or document["topic_id"] != topic_id or not _valid_updated(document["updated"])
+        or any(type(document[key]) is not str for key in ("title", "scope", "resume_summary"))
+        or not document["title"].strip() or any(c in document["title"] for c in "\r\n")
+        or len(document["scope"]) > 240 or len(document["resume_summary"]) > 2000
+    ):
+        raise ValueError("v2 metadata가 잘못됐습니다 (scope 최대 240자, resume_summary 최대 2000자)")
+    for field in ("items", "sources"):
+        values = document[field]
+        if type(values) is not list:
+            raise ValueError(f"{field}는 배열이어야 합니다")
+        keys = []
+        for entry in values:
+            if type(entry) is not dict or type(entry.get("key")) is not str or _TOPIC_ID.fullmatch(entry["key"]) is None:
+                raise ValueError(f"{field} key는 ASCII kebab-case여야 합니다")
+            keys.append(entry["key"])
+        if len(keys) != len(set(keys)):
+            raise ValueError(f"중복 {field} key")
+    source_keys = {entry["key"] for entry in document["sources"]}
+    for entry in document["items"]:
+        if (
+            not {"key", "kind", "text", "source_keys"} <= set(entry)
+            or set(entry) - {"key", "kind", "text", "source_keys", "limits", "recall_question"}
+            or entry["kind"] not in {"finding", "concept", "decision", "hypothesis", "question"}
+            or type(entry["text"]) is not str or not entry["text"].strip()
+            or type(entry["source_keys"]) is not list
+            or any(type(key) is not str for key in entry["source_keys"])
+            or len(entry["source_keys"]) != len(set(entry["source_keys"]))
+            or not set(entry["source_keys"]) <= source_keys
+            or any(type(entry[key]) is not str for key in ("limits", "recall_question") if key in entry)
+        ):
+            raise ValueError(f"항목 구조·근거 참조가 잘못됐습니다: {entry['key']}")
+    for source in document["sources"]:
+        if (
+            not {"key", "kind", "locator"} <= set(source)
+            or set(source) - {"key", "kind", "locator", "quote", "observation", "context"}
+            or source["kind"] not in {"code", "document", "session", "object"}
+            or type(source["locator"]) is not dict or not source["locator"]
+            or any(type(value) is not str or not value.strip() for value in source["locator"].values())
+            or any(type(source[key]) is not str for key in ("quote", "context") if key in source)
+        ):
+            raise ValueError(f"source 구조가 잘못됐습니다: {source['key']}")
+        locator = source["locator"]
+        required = {"code": {"repo", "path"}, "session": {"session_id", "position"}, "object": {"object_id"}}
+        if not required.get(source["kind"], set()) <= set(locator):
+            raise ValueError(f"source locator 필드가 누락됐습니다: {source['key']}")
+        if source["kind"] == "document" and not set(locator) & {"path", "url", "uri"}:
+            raise ValueError("문서 locator는 path/url/uri가 필요합니다")
+        if "occurred_at" in locator and not _valid_updated(locator["occurred_at"]):
+            raise ValueError("발화 시각은 timezone을 포함해야 합니다")
+        if "observation" in source:
+            observation = source["observation"]
+            if type(observation) is not dict or observation.get("status") not in {"current", "historical", "unavailable"}:
+                raise ValueError("관찰 status가 잘못됐습니다")
+            if set(observation) - {"status", "repo_root", "repo", "head_sha", "observed_at", "path_dirty", "sha256", "quote_status", "detail"}:
+                raise ValueError("알 수 없는 관찰 필드입니다")
+            if "sha256" in observation and (type(observation["sha256"]) is not str or _SHA256.fullmatch(observation["sha256"]) is None):
+                raise ValueError("관찰 hash가 잘못됐습니다")
+            if "head_sha" in observation and (type(observation["head_sha"]) is not str or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", observation["head_sha"]) is None):
+                raise ValueError("관찰 HEAD는 정확한 full SHA여야 합니다")
+            if "observed_at" in observation and not _valid_updated(observation["observed_at"]):
+                raise ValueError("관찰 시각은 timezone을 포함해야 합니다")
+            if "path_dirty" in observation and type(observation["path_dirty"]) is not bool:
+                raise ValueError("path_dirty는 boolean입니다")
+            if "quote_status" in observation and observation["quote_status"] not in ("present", "absent", "multiple"):
+                raise ValueError("quote_status가 잘못됐습니다")
+            if observation["status"] == "current" and not {"repo_root", "repo", "head_sha", "observed_at", "path_dirty", "sha256"} <= set(observation):
+                raise ValueError("현재 관찰 필드가 누락됐습니다")
+        if "quote" in source and not source["quote"]:
+            raise ValueError("quote는 비어 있을 수 없습니다")
+
+
+def _parse_v2(path: Path, payload: bytes) -> dict:
     try:
-        drafts_mode = drafts_root.lstat().st_mode
-    except FileNotFoundError:
-        drafts_mode = None
-    if drafts_mode is not None and not stat.S_ISDIR(drafts_mode):
-        return [{
-            "path": "drafts",
-            "code": "draft_path_invalid",
-            "detail": "drafts 루트는 symlink가 아닌 실제 디렉터리여야 합니다",
-        }]
-    if topic_id is not None:
-        paths = [_draft_path(brain_root, topic_id)]
+        document = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json, parse_constant=_reject_json_constant)
+        _check_v2(document, path.stem)
+        return document
+    except (ValueError, TypeError, UnicodeDecodeError) as exc:
+        raise DraftError("draft_json_invalid", str(exc)) from exc
+
+
+def parse_patch(text: str) -> object:
+    try:
+        return json.loads(text, object_pairs_hook=_unique_json, parse_constant=_reject_json_constant)
+    except ValueError as exc:
+        raise DraftError("draft_patch_invalid", str(exc)) from exc
+
+
+def _v2_view(path: Path, payload: bytes, *, item: str | None = None, full: bool = False) -> dict:
+    document = _parse_v2(path, payload)
+    result = {
+        key: document[key] for key in ("topic_id", "title", "scope", "updated", "resume_summary")
+    }
+    result.update(format="json-v2", path=f"drafts/{path.name}", sha256=hashlib.sha256(payload).hexdigest())
+    if full:
+        result["document"] = document
+    elif item is not None:
+        selected = next((entry for entry in document["items"] if entry["key"] == item), None)
+        if selected is None:
+            raise DraftError("draft_item_not_found", f"항목이 없습니다: {item}")
+        result["item"] = selected
+        result["sources"] = [source for source in document["sources"] if source["key"] in selected["source_keys"]]
     else:
-        if drafts_mode is None:
-            return []
-        paths = sorted(drafts_root.glob("*.md"), key=lambda item: item.name)
+        result["items"] = [
+            {"key": entry["key"], "kind": entry["kind"], "preview": entry["text"][:120]}
+            for entry in document["items"]
+        ]
+    return result
 
-    problems = []
-    for path in paths:
+
+def create_v2(
+    brain_root: Path, *, topic_id: str, title: str, scope: str,
+    sources: Iterable[str] = (),
+) -> dict:
+    """CLI의 신규 topic을 JSON v2로 만든다. 기존 create는 Python v1 호환용이다."""
+    _validate_topic_id(topic_id)
+    if type(title) is not str or not title.strip() or "\n" in title or "\r" in title:
+        raise DraftError("draft_title_invalid", "title은 비어 있지 않은 한 줄이어야 합니다")
+    path = _draft_path(brain_root, topic_id).with_suffix(".json")
+    document = {
+        "version": 2, "topic_id": topic_id, "title": title, "scope": scope,
+        "resume_summary": "", "updated": now_kst(), "items": [],
+        "sources": [
+            {"key": f"source-{index}", "kind": "document", "locator": {"uri": source}}
+            for index, source in enumerate(sources, 1)
+        ],
+    }
+    payload = _json_bytes(document)
+    _parse_v2(path, payload)
+    _create_file(brain_root, topic_id, ".json", payload)
+    return _v2_view(path, payload)
+
+
+def show(brain_root: Path, topic_id: str, *, item: str | None = None, full: bool = False) -> dict:
+    """v1은 기존 전체 본문, v2는 요약·선택 항목을 반환한다."""
+    try:
+        with _directory(brain_root) as fd:
+            name, payload = _read_topic(fd, topic_id)
+        path = Path(name)
+        if path.suffix == ".json":
+            return _v2_view(path, payload, item=item, full=full)
+        if item is not None or full:
+            raise DraftError("draft_format_mismatch", "v1은 기본 show로 전체 본문을 읽습니다")
+        return _document(path, payload)
+    except FileNotFoundError as exc:
+        raise DraftError("draft_not_found", f"초안 파일이 없습니다: {topic_id}") from exc
+    except UnicodeDecodeError as exc:
+        raise DraftError("draft_utf8_invalid", "초안은 UTF-8이어야 합니다") from exc
+    except OSError as exc:
+        raise DraftError("draft_read_failed", str(exc)) from exc
+
+
+def _problem(name: str, exc: Exception) -> dict[str, str]:
+    if isinstance(exc, DraftError):
+        code, detail = exc.code, exc.detail
+    elif isinstance(exc, UnicodeDecodeError):
+        code, detail = "draft_utf8_invalid", "초안은 UTF-8이어야 합니다"
+    elif isinstance(exc, FileNotFoundError):
+        code, detail = "draft_not_found", "초안 파일이 없습니다"
+    else:
+        code, detail = "draft_read_failed", str(exc)
+    return {"path": f"drafts/{name}", "code": code, "detail": detail}
+
+
+def _metadata(name: str, payload: bytes) -> dict:
+    path = Path(name)
+    if _TOPIC_ID.fullmatch(path.stem) is None:
+        raise DraftError("draft_path_invalid", "초안 파일명은 ASCII-kebab-topic-id여야 합니다")
+    if path.suffix == ".json":
+        document = _parse_v2(path, payload)
+        return {key: document[key] for key in ("topic_id", "title", "scope", "updated")} | {"format": "json-v2"}
+    document = _document(path, payload)
+    return {key: document[key] for key in ("topic_id", "title", "scope", "updated")} | {"format": "markdown-v1"}
+
+
+def list_drafts(brain_root: Path) -> dict[str, object]:
+    """정상 v1/v2 metadata와 파일별 진단을 반환한다."""
+    drafts, diagnostics = [], []
+    try:
+        with _directory(brain_root) as fd:
+            names = [] if fd is None else _names(fd)
+            markdown_topics = {Path(name).stem for name in names if name.endswith(".md")}
+            conflicts = markdown_topics & {Path(name).stem for name in names if name.endswith(".json")}
+            for name in names:
+                try:
+                    if Path(name).stem in conflicts:
+                        raise DraftError("draft_topic_conflict", "동일 topic의 v1/v2가 함께 있습니다")
+                    metadata = _metadata(name, _read_regular(fd, name))
+                    scope = metadata["scope"]
+                    drafts.append({**metadata, "scope": scope[:_SCOPE_PREVIEW_LIMIT], "scope_truncated": len(scope) > _SCOPE_PREVIEW_LIMIT})
+                except (DraftError, OSError, UnicodeDecodeError) as exc:
+                    diagnostics.append(_problem(name, exc))
+    except OSError as exc:
+        raise DraftError("draft_read_failed", str(exc)) from exc
+    return {"drafts": drafts, "diagnostics": diagnostics, "partial": bool(diagnostics)}
+
+
+def _expected_sha(expected_sha: str, payload: bytes, topic_id: str):
+    if type(expected_sha) is not str or _SHA256.fullmatch(expected_sha) is None:
+        raise DraftError("draft_expected_sha_invalid", "expected_sha는 lowercase SHA-256이어야 합니다")
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != expected_sha:
+        raise DraftError("draft_stale_sha", f"초안 SHA가 달라졌습니다: {topic_id}", actual_sha=actual)
+
+
+def update(brain_root: Path, topic_id: str, *, expected_sha: str, content: str) -> dict:
+    """기존 v1 전체 갱신·응답을 공통 배타 구간에서 유지한다."""
+    _validate_topic_id(topic_id)
+    # 존재하지 않는 초안의 update가 디렉터리를 만들지 않게 먼저 확인한다.
+    show(brain_root, topic_id)
+    with _directory(brain_root, write=True) as fd:
+        name, payload = _read_topic(fd, topic_id)
+        if not name.endswith(".md"):
+            raise DraftError("draft_format_mismatch", "v2는 --patch-file로 갱신합니다")
+        _expected_sha(expected_sha, payload, topic_id)
+        if type(content) is not str:
+            raise DraftError("draft_utf8_invalid", "갱신 content는 UTF-8 문자열이어야 합니다")
         try:
-            mode = path.lstat().st_mode
-        except FileNotFoundError:
-            problems.append({
-                "path": f"drafts/{path.name}",
-                "code": "draft_not_found",
-                "detail": "초안 파일이 없습니다",
-            })
+            new_payload = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DraftError("draft_utf8_invalid", str(exc)) from exc
+        _document(Path(name), new_payload)
+        mode = stat.S_IMODE(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+        _replace_file(brain_root, fd, name, new_payload, mode)
+        return _document(Path(name), new_payload)
+
+
+def _patch_entries(entries: list[dict], operations: object) -> tuple[list[dict], list[str]]:
+    if type(operations) is not list:
+        raise DraftError("draft_patch_invalid", "items/sources patch는 연산 배열이어야 합니다")
+    values = {entry["key"]: entry for entry in entries}
+    changed = []
+    for operation in operations:
+        if type(operation) is not dict or operation.get("op") not in ("add", "replace", "delete"):
+            raise DraftError("draft_patch_invalid", "연산은 add/replace/delete 중 하나여야 합니다")
+        action = operation["op"]
+        expected = {"op", "key"} if action == "delete" else {"op", "value"}
+        value = operation.get("value")
+        key = operation.get("key") if action == "delete" else value.get("key") if type(value) is dict else None
+        if set(operation) != expected or type(key) is not str or _TOPIC_ID.fullmatch(key) is None or key in changed:
+            raise DraftError("draft_patch_invalid", "연산 필드·key·중복 변경이 잘못됐습니다")
+        if (action == "add" and key in values) or (action != "add" and key not in values):
+            raise DraftError("draft_patch_precondition", f"key 전제 불일치: {key}")
+        if action == "delete":
+            del values[key]
+        else:
+            values[key] = copy.deepcopy(value)
+        changed.append(key)
+    return list(values.values()), changed
+
+
+def update_patch(brain_root: Path, topic_id: str, *, expected_sha: str, patch: object, repo_root: Path | None = None) -> dict:
+    """v2 patch를 검증해 한 번에 교체하고 변경 key와 SHA만 반환한다."""
+    _validate_topic_id(topic_id)
+    if type(patch) is not dict or not patch or set(patch) - {"title", "scope", "resume_summary", "items", "sources"}:
+        raise DraftError("draft_patch_invalid", "patch 허용 필드가 잘못됐습니다")
+    before = show(brain_root, topic_id, full=True)
+    if before.get("format") != "json-v2":
+        raise DraftError("draft_format_mismatch", "v1은 --content-file로 전체 갱신합니다")
+    # Git/파일 관찰은 잠금 밖에서 한다. 실제 write 시 expected SHA를 다시 확인한다.
+    patch = _observe_sources(patch, before["document"], repo_root)
+    with _directory(brain_root, write=True) as fd:
+        name, payload = _read_topic(fd, topic_id)
+        if not name.endswith(".json"):
+            raise DraftError("draft_format_mismatch", "v1은 --content-file로 전체 갱신합니다")
+        _expected_sha(expected_sha, payload, topic_id)
+        document = _parse_v2(Path(name), payload)
+        for key in ("title", "scope", "resume_summary"):
+            if key in patch:
+                document[key] = patch[key]
+        changes = {}
+        for field in ("items", "sources"):
+            document[field], changes[field] = _patch_entries(document[field], patch.get(field, []))
+        document["updated"] = now_kst()
+        new_payload = _json_bytes(document)
+        _parse_v2(Path(name), new_payload)
+        mode = stat.S_IMODE(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+        _replace_file(brain_root, fd, name, new_payload, mode)
+        return {"topic_id": topic_id, "format": "json-v2", "sha256": hashlib.sha256(new_payload).hexdigest(), "updated": document["updated"], "changed_items": changes["items"], "changed_sources": changes["sources"]}
+
+
+def _observe_code(source: dict, repo_root: Path | None) -> dict:
+    from project_brain.repo_context import RepoVerificationError, resolve_git_checkout
+    from project_brain.config import load_config
+
+    try:
+        checkout = resolve_git_checkout(Path.cwd() if repo_root is None else repo_root)
+        config = load_config(start=checkout.root)
+        if config is None or config["root"] != checkout.root or config.get("repo") != source["locator"]["repo"]:
+            raise DraftError("draft_repo_identity_mismatch", "작업 checkout의 config repo와 source locator repo를 확인할 수 없습니다")
+        relative = source["locator"]["path"]
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
+            raise DraftError("draft_source_path_invalid", "source path는 checkout 안의 상대 경로여야 합니다")
+        path = checkout.root / path
+        if path.resolve() != path:
+            raise DraftError("draft_source_path_invalid", "source path의 symlink를 따라가지 않습니다")
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise DraftError("draft_source_path_invalid", "source는 일반 파일이어야 합니다")
+            payload = stream.read()
+        git = subprocess.run(
+            ["git", "--literal-pathspecs", "status", "--porcelain", "--untracked-files=all", "--", relative],
+            cwd=checkout.root, capture_output=True, timeout=30, check=True,
+        )
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or stream.read() != payload:
+                raise DraftError("draft_observation_changed", "관찰 중 파일이 바뀌었습니다")
+        if resolve_git_checkout(checkout.root).head_sha != checkout.head_sha:
+            raise DraftError("draft_observation_changed", "관찰 중 checkout 또는 파일이 바뀌었습니다")
+        head_blob = subprocess.run(
+            ["git", "show", f"{checkout.head_sha}:{relative}"], cwd=checkout.root,
+            capture_output=True, timeout=30,
+        )
+        observation = {
+            "status": "current", "repo_root": str(checkout.root), "repo": config["repo"],
+            "head_sha": checkout.head_sha, "observed_at": now_kst(),
+            "path_dirty": bool(git.stdout) or head_blob.returncode != 0 or head_blob.stdout != payload,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        if "quote" in source:
+            count = payload.count(source["quote"].encode("utf-8"))
+            observation["quote_status"] = "present" if count == 1 else "absent" if count == 0 else "multiple"
+        return observation
+    except (DraftError, RepoVerificationError, OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError) as exc:
+        return {"status": "unavailable", "detail": str(exc)}
+
+
+def _observe_sources(patch: dict, current_document: dict, repo_root: Path | None) -> dict:
+    patch = copy.deepcopy(patch)
+    operations = patch.get("sources", [])
+    # key·연산 전제를 외부 관찰 전에 확인한다. write 시에도 같은 전제를 다시 검사한다.
+    _patch_entries(current_document["sources"], operations)
+    existing = {source["key"]: source for source in current_document["sources"]}
+    for operation in operations:
+        if type(operation) is not dict or type(operation.get("value")) is not dict:
             continue
-        if not stat.S_ISREG(mode):
-            problems.append({
-                "path": f"drafts/{path.name}",
-                "code": "draft_path_invalid",
-                "detail": "초안 경로는 symlink가 아닌 일반 파일이어야 합니다",
-            })
-            continue
-        if _TOPIC_ID.fullmatch(path.stem) is None:
-            problems.append({
-                "path": f"drafts/{path.name}",
-                "code": "draft_path_invalid",
-                "detail": "초안 파일명은 <ASCII-kebab-topic-id>.md여야 합니다",
-            })
-            continue
+        source = operation["value"]
+        observe = source.pop("observe", False)
+        if type(observe) is not bool:
+            raise DraftError("draft_patch_invalid", "observe는 boolean이어야 합니다")
         try:
-            text = path.read_bytes().decode("utf-8")
-        except UnicodeDecodeError:
-            problems.append({
-                "path": f"drafts/{path.name}",
-                "code": "draft_utf8_invalid",
-                "detail": "초안은 UTF-8 Markdown이어야 합니다",
-            })
-            continue
-        problems.extend(_content_problems(path, text))
-    return problems
+            _check_v2({**current_document, "items": [], "sources": [source]}, current_document["topic_id"])
+        except (ValueError, TypeError) as exc:
+            raise DraftError("draft_patch_invalid", str(exc)) from exc
+        if observe:
+            if source.get("kind") != "code":
+                raise DraftError("draft_patch_invalid", "현재 관찰은 code source에 지정합니다")
+            source["observation"] = _observe_code(source, repo_root)
+        else:
+            observation = source.get("observation", {})
+            if type(observation) is dict and observation.get("status") == "current":
+                old = existing.get(source.get("key"))
+                if old != source:
+                    raise DraftError("draft_observation_invalid", "current 관찰은 observe:true로 엔진이 기록합니다")
+            if "observation" not in source:
+                source["observation"] = {"status": "unavailable"}
+    return patch
+
+
+def lint(brain_root: Path, *, topic_id: str | None = None) -> list[dict[str, str]]:
+    """v1/v2 형식과 경로·참조를 검사하며 의미 검증은 수행하지 않는다."""
+    if topic_id is None:
+        try:
+            return list_drafts(brain_root)["diagnostics"]
+        except DraftError as exc:
+            return [{"path": "drafts", "code": exc.code, "detail": exc.detail}]
+    _validate_topic_id(topic_id)
+    try:
+        show(brain_root, topic_id)
+        return []
+    except DraftError as exc:
+        # 개별 오류에서도 기존 v1의 상대 경로 표시를 유지한다.
+        try:
+            with _directory(brain_root) as fd:
+                names = [] if fd is None else [name for name in _names(fd) if Path(name).stem == topic_id]
+        except (DraftError, OSError):
+            names = []
+        name = names[0] if len(names) == 1 else topic_id
+        return [{"path": f"drafts/{name}", "code": exc.code, "detail": exc.detail}]

@@ -111,9 +111,12 @@ project-brain promote --ids ...          # candidate → reviewed 승격 (검토
 project-brain eval                       # 골든셋 회귀 (실모델)
 project-brain eval --check-ids           # 골든셋 기대 id 실존 가드 (모델 불필요)
 project-brain draft list                 # 주제별 지식 초안 선택 metadata만 보기
-project-brain draft create <topic-id> --title ... --scope ...  # v1 초안 생성
-project-brain draft show <topic-id>      # 초안 본문 + 현재 SHA 보기
-project-brain draft update <topic-id> --expected-sha ... --content-file ...
+project-brain draft create <topic-id> --title ... --scope ...  # JSON v2 초안 생성
+project-brain draft show <topic-id>      # v2 요약·목차 + SHA (v1은 전체 본문)
+project-brain draft show <topic-id> --item <key>  # v2 선택 항목과 근거
+project-brain draft show <topic-id> --full        # v2 전체 JSON
+project-brain draft update <topic-id> --expected-sha ... --patch-file ...  # v2
+project-brain draft update <topic-id> --expected-sha ... --content-file ... # 기존 v1
 project-brain draft lint [topic-id]      # 초안 구조·UTF-8·실제 경로 검사
 project-brain doctor [--download]         # 환경 진단. --download는 모델 cache를 채움
 project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (코퍼스 불변)

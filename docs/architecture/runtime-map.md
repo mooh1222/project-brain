@@ -114,7 +114,7 @@ flowchart LR
     Channels --> Agent
 
     Config --> Draft[draft create · list · show · update · lint]
-    Draft --> DraftFiles[brain/drafts: Git 추적 비색인 Markdown]
+    Draft --> DraftFiles[brain/drafts: 비색인 JSON v2 · 기존 Markdown v1]
 
     Config --> Inspect[show · lint · graph · eval]
     Objects --> Inspect
@@ -162,7 +162,7 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `.brain-local/index.db*` | `index rebuild`, `bootstrap`, 적재 finalizer | 객체와 raw로부터 만든 로컬 파생 색인 | `project-brain index rebuild` |
 | `.brain-local/stale-set.json` | `stale-check --write-cache`, `audit --write-stale-cache` | show가 mapping stale advisory로 읽는 계산 결과 cache | 명시적 cache 쓰기 명령 재실행 |
 | `.brain-local/sessions/*.json` | `session complete` | transcript·batch manifest·finalization report·durable receipt에 결속한 처리 marker v2. 지식 객체가 아님 | 같은 valid v2 요청은 기존 bytes 보존 no-op. `session mark-processed`는 report 없이는 쓰지 않고 실패 |
-| `brain/drafts/*.md` | `draft create`, expected-SHA `draft update` | 여러 작업 구간에서 이어갈 주제별 Git 추적 초안. BrainStore·raw·index·query·graph·snapshot 입력이 아님 | 원본이므로 자동 재생성 대상 아님. list/show/lint는 읽기, update는 같은 디렉터리 원자 교체 |
+| `brain/drafts/*.md`, `*.json` | `draft create`(CLI 신규 v2), expected-SHA `draft update` | 여러 작업 구간에서 이어갈 주제별 Git 추적 초안. BrainStore·raw·index·query·graph·snapshot 입력이 아님 | 원본이므로 자동 재생성 대상 아님. list/show/lint는 읽기, update는 공통 디렉터리의 짧은 배타 구간에서 SHA 재확인·원자 교체 |
 | `.brain-local/transactions/**`, batch intent | `corpus_io` | 원자적 적용·복구·영수증을 위한 로컬 transaction 상태. 새 커밋은 journal과 intent를 남기고 임시·롤백 사본을 정리한다 | 완료 이력과 복구 규칙은 `corpus_io.py` 계약을 따름 |
 | build objects 출력 | `build --objects-file` | ingest 전 검토할 객체 배열. apply manifest가 아니며 diff·resolved refs·preconditions는 stdout JSON에만 있음 | 같은 notes와 store에서 다시 build |
 | context-replace/migration manifest | 각 `plan` 명령 | exact SHA와 live precondition을 후속 apply에 묶는 파일. 그 자체가 객체 정본은 아님 | 같은 입력과 precondition에서 다시 plan |
@@ -372,7 +372,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 |---|---|---|
 | 조립·적재·검수 | `build`, `ingest`, `promote`, `promote-auto`, `mark-checked` | build 출력과 실제 mutation을 분리 |
 | 조회·회상 | `query`, `search`, `show` | bare/search 일반 회수, show 본문·이웃·mapping stale, query 네 결정론 조회 축을 분리 |
-| 지식 초안 | `draft` | 정식 코퍼스 밖 Markdown의 create/list/show/update/lint만 소유 |
+| 지식 초안 | `draft` | 정식 코퍼스 밖 JSON v2·기존 Markdown v1의 create/list/show/update/lint만 소유 |
 | 색인·평가·projection | `index`, `eval`, `projection` | index는 파생물, projection write는 mutation |
 | 점검·감사 | `lint`, `audit`, `stale-check`, `graph` | 코퍼스 불변 점검과 별도 cache/export 쓰기를 구분 |
 | 세션·복구·대규모 변경 | `session`, `snapshot`, `context-replace`, `migration` | marker·snapshot·plan과 apply를 구분 |
@@ -415,10 +415,14 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
   `src/project_brain/templates/ingest/scripts`의 unittest를 통과해야 한다.
 
 `draft list`는 정상 `drafts`와 파일별 `diagnostics`, `partial`을 반환한다. 각 metadata의 `format`은
-현재 `markdown-v1`이며 `scope`는 최대 240자, `scope_truncated`는 생략 여부다. 원본과 show/update의
-전체 응답은 유지한다. 루트 접근 실패는 구조화 오류, 미생성 drafts 영역은 완전한 빈 목록이다.
+`markdown-v1` 또는 `json-v2`이며 `scope`는 최대 240자, `scope_truncated`는 생략 여부다.
+v1 show/update의 전체 응답은 유지한다. v2는 기본 요약·목차, --item 선택 읽기, --full 전체 JSON과
+--patch-file 항목 갱신을 제공한다. 루트 접근 실패는 구조화 오류, 미생성 drafts 영역은 완전한 빈 목록이다.
 query/session-ingest 스킬은 분기 전에 draft의 공통 발견 reference를 읽고 목록을 확인한다.
 색인 상태와 독립적인 이 절차는 **스킬의 초안 참고**이며 search/query 엔진의 새 채널이 아니다.
-실제 에이전트 사용 관찰과 v2/prepare는 #108의 후속 작업으로 구분한다.
+source의 observe:true는 cwd/--repo-root의 실제 checkout에서 현재 기준점을 확보하며,
+과거 관찰이나 요약 patch를 현재 관찰로 덮지 않는다. 현재 관찰의 Git/원문 읽기는 write lock 밖에서,
+SHA 재확인과 파일 교체는 모든 v1/v2 writer 공통의 짧은 배타 구간에서 수행한다.
+실제 에이전트 사용 관찰과 prepare는 #111~#112 후속으로 구분한다.
 
 변경별 정확한 검증 범위는 [변경 지도](change-map.md)를 따른다.

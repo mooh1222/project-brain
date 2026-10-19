@@ -484,7 +484,7 @@ def test_update_replace_failure_preserves_original_and_cleans_temporary_file(tmp
     )
 
     with mock.patch("project_brain.draft.os.replace", side_effect=OSError("교체 실패")):
-        with pytest.raises(OSError, match="교체 실패"):
+        with pytest.raises(DraftError, match="draft_write_failed.*교체 실패"):
             update(
                 tmp_path,
                 "atomic-update",
@@ -555,7 +555,8 @@ def test_create_validates_rendered_sections_before_writing(tmp_path):
     assert list(tmp_path.rglob("*.md")) == []
 
 
-def test_drafts_are_outside_store_raw_index_query_and_graph_inputs(tmp_path):
+@pytest.mark.parametrize("json_v2", [False, True])
+def test_drafts_are_outside_store_raw_index_query_and_graph_inputs(tmp_path, json_v2):
     from project_brain.graph import find_isolated
     from project_brain.graph_viz import build_payload
     from project_brain.raw_chunks import iter_raw_sources
@@ -569,12 +570,13 @@ def test_drafts_are_outside_store_raw_index_query_and_graph_inputs(tmp_path):
     before = BrainStore.load(brain_root)
     fingerprint_before = compute_corpus_fingerprint(before, brain_root)
 
-    create(
+    from project_brain.draft import create_v2
+
+    (create_v2 if json_v2 else create)(
         brain_root,
         topic_id="excluded-topic",
         title="DRAFT_ONLY_TITLE_8F6A",
         scope="DRAFT_ONLY_SCOPE_7C1B",
-        updated_at=UPDATED,
     )
 
     after = BrainStore.load(brain_root)

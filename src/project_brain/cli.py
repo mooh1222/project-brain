@@ -1497,7 +1497,7 @@ def _run_show(argv) -> int:
 
 
 def _run_draft(argv) -> int:
-    """주제별 지식 초안의 생성·목록·읽기·갱신·lint CLI."""
+    """신규 JSON v2와 기존 Markdown v1 초안의 생성·선택 읽기·갱신·lint."""
     parser = argparse.ArgumentParser(prog="cli draft")
     sub = parser.add_subparsers(dest="action", required=True)
 
@@ -1519,6 +1519,9 @@ def _run_draft(argv) -> int:
 
     show_parser = sub.add_parser("show")
     show_parser.add_argument("topic_id")
+    view = show_parser.add_mutually_exclusive_group()
+    view.add_argument("--item")
+    view.add_argument("--full", action="store_true")
     show_parser.add_argument(
         "--brain-root",
         help="초안이 있는 Brain root (기본: config .project-brain.json)",
@@ -1527,11 +1530,13 @@ def _run_draft(argv) -> int:
     update_parser = sub.add_parser("update")
     update_parser.add_argument("topic_id")
     update_parser.add_argument("--expected-sha", required=True)
-    update_parser.add_argument(
+    update_input = update_parser.add_mutually_exclusive_group(required=True)
+    update_input.add_argument(
         "--content-file",
-        required=True,
         help="교체할 완전한 v1 Markdown UTF-8 파일",
     )
+    update_input.add_argument("--patch-file", help="v2 항목·source·metadata patch JSON")
+    update_parser.add_argument("--repo-root", help="현재 코드 source를 관찰할 작업 checkout")
     update_parser.add_argument(
         "--brain-root",
         help="초안이 있는 Brain root (기본: config .project-brain.json)",
@@ -1547,18 +1552,20 @@ def _run_draft(argv) -> int:
 
     from project_brain.draft import (
         DraftError,
-        create,
+        create_v2,
         lint as lint_drafts,
         list_drafts,
         show,
         update,
+        update_patch,
+        parse_patch,
     )
 
     return_code = 0
     try:
         brain_root = resolve_brain_root_no_follow(args.brain_root)
         if args.action == "create":
-            draft = create(
+            draft = create_v2(
                 brain_root,
                 topic_id=args.topic_id,
                 title=args.title,
@@ -1569,21 +1576,24 @@ def _run_draft(argv) -> int:
         elif args.action == "list":
             payload = {"ok": True, **list_drafts(brain_root)}
         elif args.action == "show":
-            payload = {"ok": True, "draft": show(brain_root, args.topic_id)}
+            payload = {"ok": True, "draft": show(brain_root, args.topic_id, item=args.item, full=args.full)}
         elif args.action == "update":
             try:
-                content = Path(args.content_file).read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
+                content = Path(args.content_file or args.patch_file).read_text(encoding="utf-8")
+                patch = parse_patch(content) if args.patch_file else None
+            except (OSError, UnicodeError, ValueError) as exc:
                 raise DraftError(
                     "draft_content_read_failed",
                     f"갱신 content 파일을 읽을 수 없습니다: {exc}",
                 ) from exc
-            payload = {"ok": True, "draft": update(
-                brain_root,
-                args.topic_id,
-                expected_sha=args.expected_sha,
-                content=content,
-            )}
+            if args.patch_file:
+                updated = update_patch(brain_root, args.topic_id, expected_sha=args.expected_sha,
+                                       patch=patch, repo_root=Path(args.repo_root).absolute() if args.repo_root else None)
+            else:
+                if args.repo_root:
+                    raise DraftError("draft_format_mismatch", "--repo-root는 v2 source patch에만 사용합니다")
+                updated = update(brain_root, args.topic_id, expected_sha=args.expected_sha, content=content)
+            payload = {"ok": True, "draft": updated}
         else:
             problems = lint_drafts(brain_root, topic_id=args.topic_id)
             payload = {"ok": not problems, "problems": problems}

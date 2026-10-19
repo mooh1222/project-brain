@@ -964,14 +964,16 @@ def _snapshot_fixture(
     )
 
 
-def test_snapshot_excludes_knowledge_drafts(tmp_path):
+@pytest.mark.parametrize("json_v2", [False, True])
+def test_snapshot_excludes_knowledge_drafts(tmp_path, json_v2):
     request, _ = _snapshot_fixture(tmp_path)
-    draft = create_draft(
+    from project_brain.draft import create_v2
+
+    draft = (create_v2 if json_v2 else create_draft)(
         request.brain_root,
         topic_id="snapshot-excluded",
         title="스냅샷 제외 초안",
         scope="정식 코퍼스 밖",
-        updated_at="2026-08-28T18:30:00+09:00",
     )
 
     result = create_snapshot(request)

@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from project_brain import cli
+from project_brain.draft import create as create_legacy
 
 
 UPDATED = "2026-08-28T18:30:00+09:00"
@@ -54,7 +55,7 @@ def test_draft_create_list_and_show_resolve_brain_root_from_config(tmp_path, mon
             "title": "카누 어휘 감사",
             "scope": "기획과 서버 의미 대조",
             "updated": UPDATED,
-            "format": "markdown-v1",
+            "format": "json-v2",
             "scope_truncated": False,
         }],
     }
@@ -67,15 +68,7 @@ def test_draft_update_reports_stale_sha_as_json_without_overwriting(tmp_path, mo
     )
     monkeypatch.chdir(tmp_path)
     with mock.patch("project_brain.draft.now_kst", return_value=UPDATED):
-        _, created = _run_cli(
-            "draft",
-            "create",
-            "update-topic",
-            "--title",
-            "갱신 초안",
-            "--scope",
-            "갱신 범위",
-        )
+        created = {"draft": create_legacy((tmp_path / "brain").resolve(), topic_id="update-topic", title="갱신 초안", scope="갱신 범위")}
     first = created["draft"]
     content_path = tmp_path / "updated.md"
     content_path.write_text(
@@ -120,15 +113,7 @@ def test_draft_lint_returns_json_and_nonzero_for_a_broken_draft(tmp_path, monkey
     )
     monkeypatch.chdir(tmp_path)
     with mock.patch("project_brain.draft.now_kst", return_value=UPDATED):
-        _, created = _run_cli(
-            "draft",
-            "create",
-            "lint-topic",
-            "--title",
-            "검사 초안",
-            "--scope",
-            "검사 범위",
-        )
+        created = {"draft": create_legacy((tmp_path / "brain").resolve(), topic_id="lint-topic", title="검사 초안", scope="검사 범위")}
 
     clean_rc, clean = _run_cli("draft", "lint")
     draft_path = tmp_path / "brain" / created["draft"]["path"]
@@ -191,7 +176,7 @@ def test_list_keeps_healthy_drafts_when_another_file_is_broken(tmp_path, monkeyp
     assert payload["ok"] is True
     assert payload["partial"] is True
     assert [draft["topic_id"] for draft in payload["drafts"]] == ["healthy"]
-    assert payload["drafts"][0]["format"] == "markdown-v1"
+    assert payload["drafts"][0]["format"] == "json-v2"
     assert any(
         problem["path"] == "drafts/broken.md" and problem["code"] == "draft_marker_invalid"
         for problem in payload["diagnostics"]
@@ -204,9 +189,7 @@ def test_list_previews_long_scope_without_changing_the_v1_document(tmp_path, mon
     )
     monkeypatch.chdir(tmp_path)
     scope = "기능의 범위를 설명합니다. " * 100
-    _, created = _run_cli(
-        "draft", "create", "long-scope", "--title", "긴 초안", "--scope", scope
-    )
+    created = {"draft": create_legacy((tmp_path / "brain").resolve(), topic_id="long-scope", title="긴 초안", scope=scope)}
 
     rc, listed = _run_cli("draft", "list")
     _, shown = _run_cli("draft", "show", "long-scope")
@@ -224,9 +207,7 @@ def test_list_reports_unsafe_and_unreadable_files_without_losing_normal_metadata
         json.dumps({"brain_root": "brain"}), encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
-    _, created = _run_cli(
-        "draft", "create", "normal", "--title", "정상", "--scope", "정상 범위"
-    )
+    created = {"draft": create_legacy((tmp_path / "brain").resolve(), topic_id="normal", title="정상", scope="정상 범위")}
     root = tmp_path / "brain/drafts"
     (root / "bad-encoding.md").write_bytes(b"\xff")
     (root / "linked.md").symlink_to(root / "normal.md")
@@ -254,7 +235,7 @@ def test_list_distinguishes_unreadable_file_from_unreadable_root(tmp_path, monke
         json.dumps({"brain_root": "brain"}), encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
-    _run_cli("draft", "create", "private", "--title", "제한", "--scope", "제한 범위")
+    create_legacy((tmp_path / "brain").resolve(), topic_id="private", title="제한", scope="제한 범위")
     root = tmp_path / "brain/drafts"
     path = root / "private.md"
     path.chmod(0)

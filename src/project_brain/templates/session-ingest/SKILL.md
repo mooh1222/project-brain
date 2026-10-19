@@ -26,7 +26,7 @@ description: |
 
 | 상황 | 절차 |
 |---|---|
-| 기능 개발 시작·개발 중 적재·객체 값 갱신 | references/dev-ingest.md ((가) 4단계) |
+| 기능 개발 시작·개발 중 기록·명시적 적재·객체 값 갱신 | references/dev-ingest.md (draft 기록과 정식 적재 분기) |
 | 끝난 세션에서 지식 추출 (지정/주제/일괄) | references/session-extract.md ((다) 코어+3모드) |
 | 이미 저장된 객체와 현실이 다름 | `{{PROJECT}}-brain-ingest/references/update-rules.md` — 양쪽 공통 |
 
