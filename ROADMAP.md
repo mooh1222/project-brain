@@ -30,7 +30,7 @@
 | L3 라우터·회상 | ✅ 회수 전담 (#71 프로그램, 2026-09-04) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 조회 축(#61). 다신호 답변 게이트·점수 바닥·`needs_clarification`을 폐지해 채널을 검수 상태·객체 종류로만 가르고(#77, ADR 0008), 그 자리에 회수 사실을 실었다 — `query_tokens`(토큰별 `object_df`·`raw_df`)·적중별 `matched_query_tokens`·`scope`(#73). `search`에 `--context-id`·`--all-contexts`·`--top-k`(#74), 평가 하네스는 `no_answer` 대신 부재 토큰 보고를 단언한다(#76). 답변 판정은 조회 스킬을 따르는 에이전트 몫(#78) |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
-| 어휘 기준·지식 초안 | ✅ 대체 범위 완료 | #48 공통 어휘 기준, #49 이름 표면 회수, #50 지식 초안 엔진·CLI·설치 스킬, #51 실제 BB2 로컬 전용 파일럿 완료 |
+| 어휘 기준·지식 초안 | v1 완료 · v2 진행 | #48~#51 기존 범위 완료. #109 색인 독립 초안 발견 구현, #110~#112 v2 기록·prepare·실사용 검증 후속 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + show 노출 | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→show advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -39,6 +39,22 @@
 ---
 
 ## 진행 중
+
+### 지식 초안 v2 — 발견·작은 기록·재개·기존 적재 연결 (#108)
+
+실행 정본은 [#108](https://github.com/mooh1222/project-brain/issues/108)이다. 이전 설계 리뷰의
+합의를 통합했으며 기존 #47~#51의 완료를 v2 구현 완료로 취급하지 않는다.
+
+1. [#109](https://github.com/mooh1222/project-brain/issues/109): 기존 v1의 색인 독립 metadata 발견,
+   파일별 diagnostics/partial, 짧은 scope, query/session-ingest의 공통 발견과 미검수 답변 구분 — 구현.
+2. [#110](https://github.com/mooh1222/project-brain/issues/110): JSON v2 항목·근거의 선택 읽기/갱신과 v1 공존 — 후속.
+3. [#111](https://github.com/mooh1222/project-brain/issues/111): 읽기 전용 prepare와 기존 ingest/finalization 연결 — 후속.
+4. [#112](https://github.com/mooh1222/project-brain/issues/112): BB2 스킬 갱신·별도 세션의 실제 재개·적재·비용 관찰 — 후속.
+
+현재 공개 draft 형식은 Markdown v1이며 create/show/update/lint의 기존 계약을 유지한다.
+스킬 지침/합성 테스트 통과와 실제 에이전트의 발견·재개 및 토큰 절감 관찰을 구분한다.
+release 설치의 팀 적재 경로 지원은 [#113](https://github.com/mooh1222/project-brain/issues/113)에서
+별도로 판단하며 팀 공유 머지는 v2의 선행 조건이 아니다.
 
 ### 현재 기준 재설정과 작은 replacement spec (2026-08-28)
 

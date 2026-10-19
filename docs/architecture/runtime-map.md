@@ -414,4 +414,11 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
   runtime은 assemble → build → ingest → semantic finalization을 수행하며 엔진 pytest와 별도로
   `src/project_brain/templates/ingest/scripts`의 unittest를 통과해야 한다.
 
+`draft list`는 정상 `drafts`와 파일별 `diagnostics`, `partial`을 반환한다. 각 metadata의 `format`은
+현재 `markdown-v1`이며 `scope`는 최대 240자, `scope_truncated`는 생략 여부다. 원본과 show/update의
+전체 응답은 유지한다. 루트 접근 실패는 구조화 오류, 미생성 drafts 영역은 완전한 빈 목록이다.
+query/session-ingest 스킬은 분기 전에 draft의 공통 발견 reference를 읽고 목록을 확인한다.
+색인 상태와 독립적인 이 절차는 **스킬의 초안 참고**이며 search/query 엔진의 새 채널이 아니다.
+실제 에이전트 사용 관찰과 v2/prepare는 #108의 후속 작업으로 구분한다.
+
 변경별 정확한 검증 범위는 [변경 지도](change-map.md)를 따른다.

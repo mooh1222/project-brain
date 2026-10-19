@@ -25,6 +25,7 @@ _SECTION_HEADINGS = (
 )
 _TOPIC_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+_SCOPE_PREVIEW_LIMIT = 240
 
 
 class DraftError(RuntimeError):
@@ -425,22 +426,68 @@ def show(brain_root: Path, topic_id: str) -> dict[str, str]:
     return _document(path, path.read_bytes())
 
 
-def list_drafts(brain_root: Path) -> list[dict[str, str]]:
-    """선택에 필요한 초안 metadata만 topic ID 순으로 반환한다."""
-    drafts_root = Path(brain_root) / "drafts"
-    problems = lint(brain_root)
-    if problems:
-        problem = problems[0]
-        raise DraftError(problem["code"], problem["detail"])
-    if not drafts_root.exists():
-        return []
-    result = []
-    for path in sorted(drafts_root.glob("*.md"), key=lambda item: item.name):
-        document = show(brain_root, path.stem)
-        result.append({
-            key: document[key]
-            for key in ("topic_id", "title", "scope", "updated")
-        })
+def list_drafts(brain_root: Path) -> dict[str, object]:
+    """정상 metadata와 파일별 진단을 반환하며 루트 조회 실패는 거부한다."""
+    drafts: list[dict[str, object]] = []
+    diagnostics: list[dict[str, str]] = []
+    result = {"drafts": drafts, "diagnostics": diagnostics, "partial": False}
+    try:
+        drafts_root = _exact_brain_root(brain_root) / "drafts"
+        try:
+            mode = drafts_root.lstat().st_mode
+        except FileNotFoundError:
+            return result
+        if not stat.S_ISDIR(mode):
+            raise DraftError("draft_path_invalid", "drafts 루트는 실제 디렉터리여야 합니다")
+        directory_fd = os.open(drafts_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with os.scandir(directory_fd) as entries:
+                names = sorted(entry.name for entry in entries if entry.name.endswith(".md"))
+            for name in names:
+                relative = f"drafts/{name}"
+                if _TOPIC_ID.fullmatch(Path(name).stem) is None:
+                    diagnostics.append({
+                        "path": relative,
+                        "code": "draft_path_invalid",
+                        "detail": "초안 파일명은 <ASCII-kebab-topic-id>.md여야 합니다",
+                    })
+                    continue
+                try:
+                    file_mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+                    if not stat.S_ISREG(file_mode):
+                        raise DraftError("draft_path_invalid", "초안은 symlink가 아닌 일반 파일이어야 합니다")
+                    fd = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        dir_fd=directory_fd,
+                    )
+                    with os.fdopen(fd, "rb") as stream:
+                        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                            raise DraftError("draft_path_invalid", "초안은 일반 파일이어야 합니다")
+                        text = stream.read().decode("utf-8")
+                    metadata, problems = _parse_content(drafts_root / name, text)
+                    if problems:
+                        diagnostics.extend(problems)
+                    else:
+                        scope = metadata["scope"]
+                        drafts.append({
+                            **metadata,
+                            "scope": scope[:_SCOPE_PREVIEW_LIMIT],
+                            "scope_truncated": len(scope) > _SCOPE_PREVIEW_LIMIT,
+                            "format": "markdown-v1",
+                        })
+                except (DraftError, OSError, UnicodeDecodeError) as exc:
+                    if isinstance(exc, DraftError):
+                        code, detail = exc.code, exc.detail
+                    elif isinstance(exc, UnicodeDecodeError):
+                        code, detail = "draft_utf8_invalid", "초안은 UTF-8 Markdown이어야 합니다"
+                    else:
+                        code, detail = "draft_read_failed", str(exc)
+                    diagnostics.append({"path": relative, "code": code, "detail": detail})
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise DraftError("draft_read_failed", f"초안 루트를 조회할 수 없습니다: {exc}") from exc
+    result["partial"] = bool(diagnostics)
     return result
 
 

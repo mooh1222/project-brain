@@ -1567,7 +1567,7 @@ def _run_draft(argv) -> int:
             )
             payload = {"ok": True, "draft": draft}
         elif args.action == "list":
-            payload = {"ok": True, "drafts": list_drafts(brain_root)}
+            payload = {"ok": True, **list_drafts(brain_root)}
         elif args.action == "show":
             payload = {"ok": True, "draft": show(brain_root, args.topic_id)}
         elif args.action == "update":

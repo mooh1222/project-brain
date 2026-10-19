@@ -1,16 +1,20 @@
 ---
 status: accepted
 decision_date: 2026-08-14
-implementation: implemented_issue_50
-contract_status: mvp_implemented_2026-08-28
+implementation: implemented_issues_50_109
+contract_status: discovery_extended_issue_109
 superseded_by: null
 ---
 
 # 주제별 지식 초안은 정식 코퍼스 밖에서 이어서 다듬는다
 
+조회 발견 계약은 [#109](https://github.com/mooh1222/project-brain/issues/109)에서 아래와 같이
+확장했다. 전체 v2 설계는 [#108](https://github.com/mooh1222/project-brain/issues/108)이며,
+JSON v2 기록·prepare·실사용 검증은 #110~#112의 후속이다. 현재 파일 형식은 Markdown v1이다.
+
 여러 세션에 걸쳐 바뀌는 개발 지식을 성급하게 Brain 객체로 확정하지 않으면서도 다음 작업 구간에서 잃지 않기 위해, 소비 프로젝트에 기능·도메인 주제별 지식 초안을 Git 추적·비색인 작업물로 둔다. 개발 전 기획서·문서에서 시작할 수도 있고 작업 중 사용자 대화와 현재 코드에서 시작할 수도 있으며, 모든 작은 작업에 의무화하거나 고정된 크기 문턱을 두지 않는다. 초안은 확인된 사실·가설·충돌·열린 질문·근거 위치를 구분하고, 발견한 표현에는 공통 어휘 기준을 잠정 적용하되 표현을 버리거나 `GlossaryTerm`으로 확정하지 않는다.
 
-기본 위치 제안은 `brain/drafts/<topic-id>.md`다. 초안은 정식 Brain 객체·raw 원문·일반 query 답변 근거·snapshot 입력이 아니며, 관련 작업이나 명시적인 이어가기 요청에서만 찾아 별도의 진행 중 초안으로 읽는다. 첫 버전에는 세션 시작 훅을 두지 않는다.
+현재 위치는 `brain/drafts/<topic-id>.md`다. 초안은 정식 Brain 객체·raw 원문·query 엔진·snapshot 입력이 아니다. 조회 스킬과 개발 재료 session-ingest는 색인과 독립적인 metadata 목록을 먼저 확인하고 관련 초안을 별도의 미검수 작업 기억으로 읽는다. 세션 시작 훅이나 search의 새 채널은 두지 않는다. 따라서 CLI의 직접 search/query 결과에 초안이 섞이지 않는다.
 
 첫 버전은 생성·발견·읽기·재개·갱신·기본 lint까지만 제공한다. 정식 Brain 객체 변환, close와 종료 경로, backlog·pending 자동 라우팅, append-only history, 별도 receipt, 공통 verification과 migration 연결은 실제 초안 하나를 사용한 뒤 필요가 확인될 때 설계한다.
 
@@ -18,7 +22,11 @@ superseded_by: null
 
 작은 엔진 draft 모듈과 CLI가 `brain/drafts/`의 경로 해석·template 생성·읽기·갱신·lint를 소유한다. 설치되는 model-invoked `<project>-brain-draft` 스킬은 언제 초안을 만들고 어떤 내용을 기록할지를 안내하며 이 인터페이스를 호출한다. session-ingest는 현재 세션과 과거 세션에서 지식 또는 초안 재료를 추출하고, 진행 중이거나 미결인 내용은 brain-draft에 넘기며 충분히 확인된 내용은 ingest의 정식 적재 경로로 넘긴다. session-ingest가 초안의 발견·재개·갱신 수명주기를 중복 소유하지 않는다. 템플릿은 엔진이 생성하고 검사하는 단일 정본으로 두며 스킬 reference에 복사하지 않는다. 첫 스킬은 `SKILL.md` 하나로 시작하고, 실제 사례와 분기가 본문을 흐릴 만큼 늘어날 때에만 별도 content guide를 추가한다.
 
-draft 모듈은 초안의 `topic_id`·제목·범위·갱신 시각 목록을 반환하고, 스킬이 현재 작업과의 의미상 관련성을 판단한다. 명확한 초안 하나는 읽어 재개하고 여러 개가 맞을 수 있으면 본문을 모두 읽지 않은 채 목록을 보여 선택받는다. 맞는 초안이 없을 때는 명시적인 생성 요청이나 여러 작업 구간으로 이어질 필요가 분명한 경우에만 만들며, 모든 초안을 색인하거나 세션 시작마다 읽는 훅은 두지 않는다.
+draft 모듈은 `topic_id`·제목·최대 240자의 범위 미리보기·잘림 표시·갱신 시각·format을 반환하고 스킬이 관련성을 판단한다. 개별 손상 파일은 diagnostics로 격리하고 partial로 불완전한 목록을 알린다. 루트 경로·접근 오류는 빈 성공으로 바꾸지 않는다. 아직 생성하지 않은 drafts 영역은 정상적인 빈 목록이다. 원본과 v1 show/update 응답은 유지한다.
+
+읽기 전용 조회는 metadata로 후보를 좁히고 필요한 본문만 읽으며 사용자 선택 대기로 멈추지 않는다. 갱신할 topic이 여러 개라 모호한 재개·쓰기에서는 목록으로 선택받는다. 초안 내용은 “초안(미검수 작업 기억)”으로 표시하고 Brain 객체 부재와 초안 존재, 조회 실패를 구분한다. reviewed 객체와 충돌하면 주장·시각·근거를 병기하며 최신 시각만으로 우선하지 않는다. 에이전트의 원문 대조 판단은 허용하지만 조회만으로 수정·승격하지 않는다. topic metadata에 없는 개별 지식의 전수 발견은 보장하지 않는다. 이 구분은 검색이 실패해도 초안은 발견할 수 있게 하면서 초안을 정식 지식으로 오인하지 않기 위한 선택이다.
+
+맞는 초안이 없을 때는 명시적인 생성 요청이나 여러 작업 구간으로 이어질 필요가 분명한 경우에만 만든다. 모든 초안을 색인하거나 세션 시작마다 읽는 훅은 두지 않는다.
 
 한 초안에는 한 번에 한 writer만 둔다. 읽기는 현재 파일 SHA를 함께 반환하고 갱신은 `expected_sha`가 일치할 때만 같은 디렉터리의 임시 파일을 원자 교체하며, 불일치하면 아무것도 쓰지 않고 최신 내용을 다시 읽어 병합하게 한다. 첫 버전에는 장기 lock·journal·transaction receipt를 추가하지 않는다.
 

@@ -18,6 +18,10 @@ description: |
 `{{PROJECT}}-brain-ingest` 절차로 넘긴다. 지식 초안의 생성·재개·갱신 수명주기는
 `{{PROJECT}}-brain-draft`가 맡고 이 스킬은 재료 추출에서 멈춘다.
 
+개발 재료나 현재·과거 세션의 주제를 다루기 전에
+`../{{PROJECT}}-brain-draft/references/discovery.md`를 읽고 관련 초안 목록을 먼저 확인한다.
+선택한 topic과 미결 재료를 draft 스킬에 넘기며, 아래 절차에서 같은 목록을 반복 조회하지 않는다.
+
 ## 어느 시나리오인가
 
 | 상황 | 절차 |

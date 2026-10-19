@@ -171,7 +171,7 @@ def test_draft_skill_owns_lifecycle_and_session_ingest_only_routes_material():
         "선택받기 전에는 본문 전체를 읽지 않는다",
         "draft_stale_sha",
         "한 초안에는 한 번에 한",
-        "정식 Brain 객체나 raw 원문, 일반 query의 근거가 아니다",
+        "정식 Brain 객체나 raw 원문이 아니다",
         "소비 프로젝트 정책과 사용자가 준 권한",
     ):
         assert boundary in draft
@@ -185,6 +185,31 @@ def test_draft_skill_owns_lifecycle_and_session_ingest_only_routes_material():
     assert "진행 중·미결 재료" in session
     assert "정식 적재 가능한 지식" in session
     assert "지식 초안의 생성·재개·갱신 수명주기" in session
+
+
+def test_query_and_session_share_installed_draft_discovery_before_their_routes():
+    with TemporaryDirectory() as td:
+        target = Path(td)
+        first = install(target, project="demo", brain_root="brain", default_branch="trunk", repo="demo")
+        skills = target / ".agents/skills"
+        reference = skills / "demo-brain-draft/references/discovery.md"
+        assert reference.relative_to(target).as_posix() in first["created"]
+        discovery = reference.read_text(encoding="utf-8")
+        pointer = "../demo-brain-draft/references/discovery.md"
+        for skill, route in (("query", 'project-brain search "<질문>"'), ("session-ingest", "## 어느 시나리오인가")):
+            root = skills / f"demo-brain-{skill}"
+            content = (root / "SKILL.md").read_text(encoding="utf-8")
+            assert content.index(pointer) < content.index(route)
+            assert (root / pointer).resolve() == reference.resolve()
+        for contract in (
+            "project-brain draft list", "diagnostics", "partial", "scope_truncated",
+            "초안(미검수 작업 기억)", "Brain 객체로는 회수되지 않았고 초안 기록은 있음",
+            "조회 실패", "최신 시각만으로", "topic 단위", "수정·승격하지 않는다",
+        ):
+            assert contract in discovery
+        second = install(target, project="demo", brain_root="brain", default_branch="trunk", repo="demo")
+        for key in ("created", "updated", "removed", "adopted", "skipped"):
+            assert second[key] == []
 
 
 def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():

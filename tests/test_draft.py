@@ -116,18 +116,25 @@ def test_list_returns_only_selection_metadata_sorted_by_topic_id(tmp_path):
         updated_at=UPDATED,
     )
 
-    assert list_drafts(tmp_path) == [
+    listed = list_drafts(tmp_path)
+    assert listed["diagnostics"] == []
+    assert listed["partial"] is False
+    assert listed["drafts"] == [
         {
             "topic_id": "alpha-topic",
             "title": "첫 번째 초안",
             "scope": "첫 번째 범위",
             "updated": UPDATED,
+            "format": "markdown-v1",
+            "scope_truncated": False,
         },
         {
             "topic_id": "zulu-topic",
             "title": "두 번째 초안",
             "scope": "두 번째 범위",
             "updated": "2026-08-28T19:00:00+09:00",
+            "format": "markdown-v1",
+            "scope_truncated": False,
         },
     ]
 
@@ -323,10 +330,13 @@ def test_show_and_list_never_follow_a_draft_symlink(tmp_path):
         outside_root / outside["path"]
     )
 
-    for read in (lambda: show(brain_root, "linked-topic"), lambda: list_drafts(brain_root)):
-        with pytest.raises(DraftError) as exc:
-            read()
-        assert exc.value.code == "draft_path_invalid"
+    with pytest.raises(DraftError) as exc:
+        show(brain_root, "linked-topic")
+    assert exc.value.code == "draft_path_invalid"
+    listed = list_drafts(brain_root)
+    assert listed["drafts"] == []
+    assert listed["partial"] is True
+    assert listed["diagnostics"][0]["code"] == "draft_path_invalid"
 
 
 def test_create_rejects_invalid_updated_before_any_write(tmp_path):
