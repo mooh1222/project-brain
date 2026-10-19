@@ -62,3 +62,14 @@ source를 삭제할 때 남은 항목에서 그 key를 참조하면 함께 거�
 사용자 발화 보존은 근거 승인이 아니다. 정식 적재에서는 발췌 문장의 문맥·적용 범위·현재 유효성을
 확인받고 기존 source_type=session / reviewer=user-statement 경로를 쓴다.
 미확인 발췌는 draft에 남긴다. 코드 사실은 사용자 확인만으로 reviewed로 만들지 않는다.
+
+## prepare의 발췌
+
+첫 발췌는 저장 quote와 brain root 상대 raw/sources/**/*.md의 유일한 절이다.
+문서 locator.section은 제목 문자열 또는 ATX 제목 전체다. 같은 제목이 반복되면 임의 선택하지 않는다.
+Setext 제목이 있는 문서는 경계를 잘못 합치지 않도록 발췌를 보류하고 원문 절의 직접 확인을 안내한다.
+원문 bytes와 byte 범위를 보존하고 SHA-256을 붙인다. 발췌가 64 KiB를 넘으면 진단하고
+통째로 파일을 넣거나 조용히 절단하지 않는다. 코드 symbol 본문 추출과 외부 fetch는 수행하지 않는다.
+code는 목표 full revision의 일반 blob 상태·hash 차이·quote 존재 상태를 보고한다.
+문서는 로컬 raw의 bytes임을 표시하며 코드 목표 revision의 blob이라고 주장하지 않는다.
+다른 근거는 locator·보존된 사용자 quote·미확보 상태를 넘긴다. packet의 bytes 점검은 의미 검증이 아니다.

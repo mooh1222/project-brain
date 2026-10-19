@@ -510,6 +510,14 @@ def _reject_json_constant(value: str):
     raise ValueError(f"JSON에 허용되지 않는 상수: {value}")
 
 
+def _quote_status(payload: bytes, quote: str) -> str:
+    encoded = quote.encode("utf-8")
+    first = payload.find(encoded)
+    if first < 0:
+        return "absent"
+    return "multiple" if payload.find(encoded, first + 1) >= 0 else "present"
+
+
 def _check_v2(document: dict, topic_id: str):
     expected = {"version", "topic_id", "title", "scope", "resume_summary", "updated", "items", "sources"}
     if (
@@ -590,6 +598,7 @@ def _parse_v2(path: Path, payload: bytes) -> dict:
     try:
         document = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json, parse_constant=_reject_json_constant)
         _check_v2(document, path.stem)
+        _json_bytes(document)  # JSON escape에 숨은 고립 surrogate도 UTF-8 출력 전에 거부한다.
         return document
     except (ValueError, TypeError, UnicodeDecodeError) as exc:
         raise DraftError("draft_json_invalid", str(exc)) from exc
@@ -835,8 +844,7 @@ def _observe_code(source: dict, repo_root: Path | None) -> dict:
             "sha256": hashlib.sha256(payload).hexdigest(),
         }
         if "quote" in source:
-            count = payload.count(source["quote"].encode("utf-8"))
-            observation["quote_status"] = "present" if count == 1 else "absent" if count == 0 else "multiple"
+            observation["quote_status"] = _quote_status(payload, source["quote"])
         return observation
     except (DraftError, RepoVerificationError, OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError) as exc:
         return {"status": "unavailable", "detail": str(exc)}

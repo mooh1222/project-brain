@@ -118,6 +118,8 @@ project-brain draft show <topic-id> --full        # v2 전체 JSON
 project-brain draft update <topic-id> --expected-sha ... --patch-file ...  # v2
 project-brain draft update <topic-id> --expected-sha ... --content-file ... # 기존 v1
 project-brain draft lint [topic-id]      # 초안 구조·UTF-8·실제 경로 검사
+project-brain draft prepare <topic-id> --item <key> --repo-root ... --target-revision ... --out ...
+                                       # 외부 신규/빈 디렉터리에 읽기 전용 적재 재료
 project-brain doctor [--download]         # 환경 진단. --download는 모델 cache를 채움
 project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (코퍼스 불변)
 project-brain graph export out.html      # 코퍼스 불변, 지정한 HTML 파일은 씀

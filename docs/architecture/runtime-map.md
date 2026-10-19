@@ -16,7 +16,7 @@
   ],
   "subcommand_paths": [
     "context-replace apply", "context-replace plan", "draft create", "draft lint",
-    "draft list", "draft show", "draft update", "graph export", "graph isolated",
+    "draft list", "draft prepare", "draft show", "draft update", "graph export", "graph isolated",
     "index rebuild", "migration canonical-repair apply", "migration canonical-repair plan",
     "migration display apply", "migration display binding-create",
     "migration display binding-verify", "migration display closure-create",
@@ -36,7 +36,7 @@
     "src/project_brain/assembly.py", "src/project_brain/audit.py",
     "src/project_brain/capabilities.py", "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
-    "src/project_brain/draft.py",
+    "src/project_brain/draft.py", "src/project_brain/draft_prepare.py",
     "src/project_brain/evidence_plan.py", "src/project_brain/evidence_preparation.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
@@ -53,7 +53,7 @@
     "tests/test_architecture_docs.py", "tests/test_assembly.py", "tests/test_audit.py",
     "tests/test_capabilities.py", "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
     "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_id_grammar.py",
-    "tests/test_draft.py", "tests/test_draft_cli.py",
+    "tests/test_draft.py", "tests/test_draft_cli.py", "tests/test_draft_v2_cli.py", "tests/test_draft_prepare_cli.py",
     "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
@@ -113,8 +113,9 @@ flowchart LR
     Search --> Channels[results · candidates · raw_excerpts · advisories · projection_reuse]
     Channels --> Agent
 
-    Config --> Draft[draft create · list · show · update · lint]
+    Config --> Draft[draft create · list · show · update · lint · prepare]
     Draft --> DraftFiles[brain/drafts: 비색인 JSON v2 · 기존 Markdown v1]
+    Draft --> Materials[prepare: 외부 출력의 재생성 가능한 materials.json]
 
     Config --> Inspect[show · lint · graph · eval]
     Objects --> Inspect
@@ -320,6 +321,7 @@ QueryRouter는 principal을 받지 않으며 **principal별 ACL을 집행하지 
 | 명령 | 쓰는 것 | 코퍼스 객체 영향 |
 |---|---|---|
 | `build` | 지정한 objects JSON | 없음 |
+| `draft prepare` | brain root 밖 신규/빈 디렉터리의 materials.json | 없음. 선택 v2 항목·source와 목표 revision을 읽어 재료만 준비 |
 | `index rebuild` | 검증 후 원자 교체하는 index DB, `<db>.lock`, 같은 디렉터리의 임시 DB | 없음. 객체·raw를 읽음 |
 | `stale-check --write-cache` | `.brain-local/stale-set.json` | 없음 |
 | `audit` | 기본 실행은 쓰지 않음. `--write-stale-cache`일 때 stale-set cache | 없음. `--no-stale`이면 stale·quote 검사를 생략 |
@@ -372,7 +374,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 |---|---|---|
 | 조립·적재·검수 | `build`, `ingest`, `promote`, `promote-auto`, `mark-checked` | build 출력과 실제 mutation을 분리 |
 | 조회·회상 | `query`, `search`, `show` | bare/search 일반 회수, show 본문·이웃·mapping stale, query 네 결정론 조회 축을 분리 |
-| 지식 초안 | `draft` | 정식 코퍼스 밖 JSON v2·기존 Markdown v1의 create/list/show/update/lint만 소유 |
+| 지식 초안 | `draft` | 정식 코퍼스 밖 JSON v2·기존 Markdown v1 관리와 읽기 전용 재료 준비 |
 | 색인·평가·projection | `index`, `eval`, `projection` | index는 파생물, projection write는 mutation |
 | 점검·감사 | `lint`, `audit`, `stale-check`, `graph` | 코퍼스 불변 점검과 별도 cache/export 쓰기를 구분 |
 | 세션·복구·대규모 변경 | `session`, `snapshot`, `context-replace`, `migration` | marker·snapshot·plan과 apply를 구분 |
@@ -384,7 +386,7 @@ transaction을 열거나 index/cache를 무효화하지 않는다. 반면 `mark-
 |---|---|
 | `index` | `index rebuild` |
 | `session` | `session list`, `session complete`, `session mark-processed` |
-| `draft` | `draft create`, `draft list`, `draft show`, `draft update`, `draft lint` |
+| `draft` | `draft create`, `draft list`, `draft show`, `draft update`, `draft lint`, `draft prepare` |
 | `projection` | `projection build-reuse`, `projection refresh` |
 | `graph` | `graph isolated`, `graph export` |
 | `snapshot` | `snapshot create`, `snapshot verify`, `snapshot restore` |
@@ -423,6 +425,12 @@ query/session-ingest 스킬은 분기 전에 draft의 공통 발견 reference를
 source의 observe:true는 cwd/--repo-root의 실제 checkout에서 현재 기준점을 확보하며,
 과거 관찰이나 요약 patch를 현재 관찰로 덮지 않는다. 현재 관찰의 Git/원문 읽기는 write lock 밖에서,
 SHA 재확인과 파일 교체는 모든 v1/v2 writer 공통의 짧은 배타 구간에서 수행한다.
-실제 에이전트 사용 관찰과 prepare는 #111~#112 후속으로 구분한다.
+`draft prepare`는 선택 key·초안 SHA·목표 full revision과 재료를 materials.json 하나로 출력한다.
+저장 quote와 유일한 로컬 raw Markdown 절만 bytes/hash/범위와 함께 발췌한다. 코드 blob의
+확보·hash 차이·quote 존재/부재/다중 일치, 문서의 절 부재/중복/과대, 미확보 근거를 각각 보고한다.
+hypothesis/question은 미결 항목으로 분리하며, 잘못된 입력·위험한 출력은 무변경 거부한다.
+출력은 재생성 가능하고 원문·코퍼스·색인·초안을 바꾸지 않는다. 설치 ingest 스킬의 draft-materials
+reference가 기존 원문 대조·개념/진술 확인·coverage·MutationService·receipt·최종화로 연결한다.
+prepare 성공은 적재 완료나 의미 검증 통과가 아니다. 실제 에이전트 사용 관찰은 #112 후속이다.
 
 변경별 정확한 검증 범위는 [변경 지도](change-map.md)를 따른다.

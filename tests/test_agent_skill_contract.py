@@ -212,6 +212,24 @@ def test_query_and_session_share_installed_draft_discovery_before_their_routes()
             assert second[key] == []
 
 
+def test_prepared_materials_reference_is_shared_by_installed_draft_and_ingest():
+    with TemporaryDirectory() as td:
+        target = Path(td)
+        install(target, project="demo", brain_root="brain", default_branch="trunk", repo="demo")
+        skills = target / ".agents/skills"
+        draft = skills / "demo-brain-draft"
+        ingest = skills / "demo-brain-ingest"
+        reference = ingest / "references/draft-materials.md"
+        pointer = "../demo-brain-ingest/references/draft-materials.md"
+        assert pointer in (draft / "SKILL.md").read_text()
+        assert (draft / pointer).resolve() == reference.resolve()
+        assert "references/draft-materials.md" in (ingest / "SKILL.md").read_text()
+        assert reference.is_file()
+        second = install(target, project="demo", brain_root="brain", default_branch="trunk", repo="demo")
+        for key in ("created", "updated", "removed", "adopted", "skipped"):
+            assert second[key] == []
+
+
 def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():
     ingest = _installed_skill("ingest")
     session = _installed_skill("session-ingest")

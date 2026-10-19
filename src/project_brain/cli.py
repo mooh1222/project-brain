@@ -1548,6 +1548,13 @@ def _run_draft(argv) -> int:
         "--brain-root",
         help="초안이 있는 Brain root (기본: config .project-brain.json)",
     )
+    prepare_parser = sub.add_parser("prepare", help="선택 v2 항목의 읽기 전용 적재 재료 준비")
+    prepare_parser.add_argument("topic_id")
+    prepare_parser.add_argument("--item", action="append", required=True)
+    prepare_parser.add_argument("--repo-root", required=True)
+    prepare_parser.add_argument("--target-revision", required=True)
+    prepare_parser.add_argument("--out", required=True)
+    prepare_parser.add_argument("--brain-root")
     args = parser.parse_args(argv)
 
     from project_brain.draft import (
@@ -1594,6 +1601,14 @@ def _run_draft(argv) -> int:
                     raise DraftError("draft_format_mismatch", "--repo-root는 v2 source patch에만 사용합니다")
                 updated = update(brain_root, args.topic_id, expected_sha=args.expected_sha, content=content)
             payload = {"ok": True, "draft": updated}
+        elif args.action == "prepare":
+            from project_brain.draft_prepare import prepare
+
+            payload = {"ok": True, **prepare(
+                brain_root, args.topic_id, item_keys=args.item,
+                repo_root=Path(args.repo_root).absolute(), target_revision=args.target_revision,
+                out=Path(args.out).absolute(),
+            )}
         else:
             problems = lint_drafts(brain_root, topic_id=args.topic_id)
             payload = {"ok": not problems, "problems": problems}

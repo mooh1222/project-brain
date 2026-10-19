@@ -85,8 +85,24 @@ project-brain draft lint
   개발 중 기본 기록은 draft이며 명시적인 즉시 정식 적재 요청은 기존 ingest로 간다.
 - lint·quote 존재·hash 일치는 형식/bytes 점검이다. 의미 검증이나 검수 승인이 아니다.
   정식화는 `{{PROJECT}}-brain-ingest`가 원문 대조·개념 승인·객체 설계·coverage·최종화를 소유한다.
-  prepare는 후속 구현이다. 현재는 v1/v2 본문과 원문 위치를 기존 ingest에 넘긴다.
+  v2 작업 완료 후 아래 prepare로 선택 재료를 모으고
+  `../{{PROJECT}}-brain-ingest/references/draft-materials.md`를 읽어 기존 ingest로 넘긴다.
+  v1은 기존 본문 추출과 원문 위치로 ingest에 넘기며 prepare를 쓰지 않는다.
 - 기존 v1을 강제 변환하지 않는다. 별도 전환 요청 시 미커밋 원문까지 drafts·BrainStore·raw·색인
   입력 밖의 사용자 승인 위치에 보존한 뒤 단일 활성 파일로 바꾼다. 선커밋을 강제하지 않는다.
 - 엔진은 초안 파일만 쓴다. Git stage·commit은 소비 프로젝트 정책과 사용자가 준 권한 안에서
   해당 초안 경로만 수행한다. 기존 사용자 변경과 겹치면 자동 commit·stash로 정리하지 않는다.
+
+## 완료 시 재료 준비
+
+```bash
+project-brain draft prepare <topic-id> --item <key> --item <다른 key> \
+  --repo-root <목표 checkout> --target-revision <검증할 revision> --out <출력 디렉터리>
+```
+
+항목 선택은 명시적이다. 출력은 brain root 밖의 신규/빈 디렉터리이며 기존 파일을 덮어쓰지 않는다.
+materials.json의 SHA·목표 full revision·선택 key·diagnostics·미결 key가 짧게 반환된다.
+같은 입력은 같은 packet bytes를 만든다. 초안·정식 corpus·raw·index는 바꾸지 않는다.
+잘못된 선택 key·문서 구조·목표 revision·출력 경로는 생성 전 오류다. 원문 미확보는 packet의
+진단과 partial로 남긴다. partial이거나 준비가 성공했다는 이유로 적재나 검수를 완료 처리하지 않는다.
+`references/v2-format.md`의 source locator와 발췌 범위를 함께 확인한다.

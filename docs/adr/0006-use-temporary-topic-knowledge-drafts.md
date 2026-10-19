@@ -1,8 +1,8 @@
 ---
 status: accepted
 decision_date: 2026-08-14
-implementation: implemented_issues_50_109_110
-contract_status: records_extended_issue_110
+implementation: implemented_issues_50_109_110_111
+contract_status: preparation_extended_issue_111
 superseded_by: null
 ---
 
@@ -10,7 +10,8 @@ superseded_by: null
 
 조회 발견 계약은 [#109](https://github.com/mooh1222/project-brain/issues/109)에서 아래와 같이
 확장했다. 전체 v2 설계는 [#108](https://github.com/mooh1222/project-brain/issues/108)이며,
-JSON v2 기록은 #110에서 구현했다. prepare·실사용 검증은 #111~#112의 후속이다.
+JSON v2 기록은 #110, 읽기 전용 prepare와 기존 적재 연결은 #111에서 구현했다.
+실사용 검증은 #112의 후속이다.
 
 여러 세션에 걸쳐 바뀌는 개발 지식을 성급하게 Brain 객체로 확정하지 않으면서도 다음 작업 구간에서 잃지 않기 위해, 소비 프로젝트에 기능·도메인 주제별 지식 초안을 Git 추적·비색인 작업물로 둔다. 개발 전 기획서·문서에서 시작할 수도 있고 작업 중 사용자 대화와 현재 코드에서 시작할 수도 있으며, 모든 작은 작업에 의무화하거나 고정된 크기 문턱을 두지 않는다. 초안은 확인된 사실·가설·충돌·열린 질문·근거 위치를 구분하고, 발견한 표현에는 공통 어휘 기준을 잠정 적용하되 표현을 버리거나 `GlossaryTerm`으로 확정하지 않는다.
 
@@ -31,6 +32,8 @@ draft 모듈은 `topic_id`·제목·최대 240자의 범위 미리보기·잘림
 한 초안에는 한 번에 한 writer만 둔다. 읽기는 현재 파일 SHA를 함께 반환하고 갱신은 `expected_sha`가 일치할 때만 같은 디렉터리의 임시 파일을 원자 교체하며, 불일치하면 아무것도 쓰지 않고 최신 내용을 다시 읽어 병합하게 한다. #110은 실제 경쟁 writer의 유실을 막기 위해 v1/v2 공통의 drafts 디렉터리 fd에 짧은 배타 lock을 건다. 원문 관찰·모델 판단은 lock 밖에서 수행한다. 장기 lock·journal·transaction receipt는 추가하지 않는다.
 
 JSON v2는 에이전트의 선택 읽기·작은 patch와 key/근거 참조 검사를 단일 문법으로 다루기 위한 선택이다. Markdown+JSON 두 정본은 두지 않는다. 신규 CLI 생성은 v2, 기존 Python create는 v1 호환을 유지한다. v2 기본 show는 짧은 재개 요약·목차이며 선택 항목·source만 읽을 수 있다. 항목/source의 add·replace·delete 전제와 참조를 검사하고 updated는 엔진이 찍는다. 최종 객체 필드나 검수 verdict를 작업 중 강제하지 않는다. v1 기본 show와 전체 갱신·응답은 보존하고 자동 변환하지 않는다.
+
+prepare는 v2 선택 항목과 근거 위치·제한된 발췌·목표 full revision·기계적 bytes 상태를 정식 코퍼스 밖에 준비한다. 문서·사용자 진술을 code 중심 자동 조립에 억지로 맞추지 않고 기존 ingest의 direct/extra_objects 등 지원 경로를 선택한다. 초안이나 packet은 raw 근거가 아니며 의미 검증·누락 점검·개념/진술 확인과 실제 mutation/receipt/finalization은 기존 적재가 맡는다. prepare 성공이나 같은 객체 ID의 존재는 완료 근거가 아니다. 새 적재 장부·close·후보 자동 생성은 추가하지 않는다.
 
 현재 코드 source는 명시적 observe:true에서 실제 작업 checkout 기준으로 관찰한다. 과거 anchor는 보존하거나 미확보로 남기고, 요약 patch에서 갱신하지 않는다. 사용자 결정은 발화 원문·위치·시각을 보존하되 정식 적재에서 이번 세션의 문장별 확인과 기존 session 근거 경로를 쓴다. quote/hash 상태는 의미 검증과 구분한다. JSON이라는 이유로 비용 절감이 입증되지는 않으며 #112의 실제 기록·재개·적재 총비용과 품질로 판단한다.
 

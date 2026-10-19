@@ -78,7 +78,7 @@ Markdown 원문과 JSON 객체의 역할을 왜 분리했는지는
 | mutation·migration을 바꾸기 | [런타임 쓰기 경로](runtime-map.md#코퍼스-객체-쓰기)와 [변경 지도](change-map.md) | `mutation.py`, `corpus_io.py`, migration 관련 모듈과 테스트 |
 | 설치 스킬이나 runtime을 바꾸기 | [변경 지도의 CLI·config·installer 행](change-map.md#변경별-검증-표) | `tests/test_installer.py`와 설치되는 runtime의 unittest |
 | #4·#41~#43의 현재 상태 확인 | [런타임 지도의 실행 흐름 밖 내부 기반](runtime-map.md#현재-실행-흐름-밖의-내부-기반) | `capabilities.py`, `evidence_plan.py`, `evidence_preparation.py`와 직접 테스트. public caller가 없음을 별도로 확인 |
-| 어휘 기준·지식 초안 변경 | [ROADMAP의 현재 replacement 범위](../../ROADMAP.md#현재-기준-재설정과-작은-replacement-spec-2026-08-28), [변경 지도](change-map.md) | `draft.py`, draft CLI·설치 스킬과 표적 테스트. 실제 BB2 파일럿은 #51에 대조 |
+| 어휘 기준·지식 초안 변경 | [ROADMAP의 지식 초안 v2](../../ROADMAP.md#지식-초안-v2--발견작은-기록재개기존-적재-연결-108), [변경 지도](change-map.md) | `draft.py`, draft CLI·설치 스킬과 표적 테스트. 현재 v2 파일럿은 #112, 과거 v1 파일럿은 #51에 대조 |
 | 지금 끝난 일과 다음 후보 확인 | [ROADMAP](../../ROADMAP.md) | 연결된 완료 보고서와 현재 checkout 재검증 |
 
 ## 현재 경계에서 주의할 점
