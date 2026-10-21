@@ -30,7 +30,7 @@
 | L3 라우터·회상 | ✅ 회수 전담 (#71 프로그램, 2026-09-04) | bare/explicit `search` 5채널 일반 회수 + `show` 본문·이웃·mapping stale + `query` 네 결정론 조회 축(#61). 다신호 답변 게이트·점수 바닥·`needs_clarification`을 폐지해 채널을 검수 상태·객체 종류로만 가르고(#77, ADR 0008), 그 자리에 회수 사실을 실었다 — `query_tokens`(토큰별 `object_df`·`raw_df`)·적중별 `matched_query_tokens`·`scope`(#73). `search`에 `--context-id`·`--all-contexts`·`--top-k`(#74), 평가 하네스는 `no_answer` 대신 부재 토큰 보고를 단언한다(#76). 답변 판정은 조회 스킬을 따르는 에이전트 몫(#78) |
 | L4 적재 | ✅ 공개 경로 운영 | 소급 / 개발 중 / 현재·과거 세션 추출 + `build` 조립 자동화 + 재개 가능한 batch·semantic finalization + coverage·단일 쓰기·receipt. `session complete`는 성공한 batch receipt와 transcript를 결속 |
 | 검수·쓰기 정책 확장 | ⏸️ 재판단 중 | #4 capability registry와 #41~#43 evidence plan/preparation은 main의 내부 기반이지만 공개 caller가 없다. #44~#46과 공통 verification 프로그램은 보류 |
-| 어휘 기준·지식 초안 | v2·prepare 구현 · 실사용 검증 후속 | #48~#51 기존 범위 완료. #109 발견, #110 기록·재개, #111 prepare·기존 적재 연결 구현. #112 실사용 검증 후속 |
+| 어휘 기준·지식 초안 | v2·prepare·랭킹보드 실사용 검증 완료 | #48~#51 기존 범위 완료. #109 발견, #110 기록·재개, #111 prepare·기존 적재 연결 구현. #112 실제 랭킹보드 v2 전환·재개·적재·회상 검증 완료. 비용 절감 미입증 |
 | 재사용층(projection) | ✅ 구현·검증·push (2026-06-17) | 착수 브리핑 `projection_reuse` 재회수 + 해시 시각필드 제외·`projection refresh` (2026-06-24) |
 | 코드 변경 안전망 | ✅ stale-check / mark-checked (2026-06-15) · 미머지 앵커 라벨 + show 노출 | 읽기 전용 후보 제시 · 갱신 대상은 commit_sha/verified_at(줄번호는 저장 안 함) · `--write-cache`→show advisory |
 | 그래프 무결성·고립 | ✅ `graph isolated` + build 경고 + `graph export` (2026-06-24) | 인바운드 0 잎 탐지·vis-network 시각화 HTML·엣지 정본 단일 출처 |
@@ -49,9 +49,14 @@
    파일별 diagnostics/partial, 짧은 scope, query/session-ingest의 공통 발견과 미검수 답변 구분 — 구현.
 2. [#110](https://github.com/mooh1222/project-brain/issues/110): JSON v2 항목·근거의 선택 읽기/갱신과 v1 공존 — 구현.
 3. [#111](https://github.com/mooh1222/project-brain/issues/111): 읽기 전용 prepare와 기존 ingest/finalization 연결 — 구현.
-4. [#112](https://github.com/mooh1222/project-brain/issues/112): BB2 설치·별도 세션의 발견/재개·prepare 확인.
-   기존 reviewed mapping의 범위 설명 정정 승인 대기로 실제 적재·최종화는 미완료.
-   [파일럿 관찰](docs/reports/2026-10-19-knowledge-draft-v2-bb2-pilot.md)에 기능 결과와 비용 미측정을 구분했다.
+4. [#112](https://github.com/mooh1222/project-brain/issues/112): 실제 사용 중인 랭킹보드 v1 초안의
+   원문 보존·v2 전환·다른 문맥 재개·실적재·최종화·회상을 검증한다. 승인된 위치에 미커밋
+   원문을 보존하고 단일 활성 v2로 전환했다. 사용자 승인에 따라 이번에는 미머지 기능 브랜치를
+   기준으로 검증했다. 실제 선택 재개·갱신과 21개 사실의 적재·최종화·회상(21/21)이 완료됐다.
+   기존 eval 18/18과 실코퍼스 검사도 통과했으며 총 토큰/비용 절감은 미입증이다.
+   [랭킹보드 checkpoint](docs/reports/2026-10-21-knowledge-draft-v2-ranking-board.md)에 현재 경계를 기록했다.
+   [샐리 카누 관찰](docs/reports/2026-10-19-knowledge-draft-v2-bb2-pilot.md)은 사전 기능 확인이며
+   랭킹보드 실사용 성공을 대신하지 않는다. 샐리 mapping 문장 승인은 #112의 진행 조건이 아니다.
 
 신규 CLI create는 JSON v2이며 기본 show는 요약·목차, --item은 항목/근거, --patch-file은
 항목/source의 add·replace·delete와 metadata 교체다. 기존 Python create API는 v1 호환을 유지한다.

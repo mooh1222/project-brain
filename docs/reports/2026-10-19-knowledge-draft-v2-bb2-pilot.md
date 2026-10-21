@@ -1,5 +1,10 @@
 # 지식 초안 v2 BB2 파일럿 — 적재 문장 확인 대기
 
+> 2026-10-21 범위 정정: 아래는 샐리 카누에서의 사전 기능 관찰 기록이다. #112의 실제 검증
+> 대상은 작업하며 사용한 랭킹보드 초안으로 고정했다. 이 재현이나 샐리 mapping 정정 승인을
+> 랭킹보드 실사용 검증의 성공 또는 진행 조건으로 삼지 않는다.
+> 현재 상태는 [랭킹보드 checkpoint](2026-10-21-knowledge-draft-v2-ranking-board.md)를 따른다.
+
 실행 이슈: [#112](https://github.com/mooh1222/project-brain/issues/112), 상위 스펙
 [#108](https://github.com/mooh1222/project-brain/issues/108).
 
