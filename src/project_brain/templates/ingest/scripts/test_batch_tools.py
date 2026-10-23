@@ -769,6 +769,32 @@ class BatchRunnerApiTest(unittest.TestCase):
         }
         return {**state, **changes}
 
+    def test_release_identity_survives_receipt_resume_and_rejects_changed_engine(self):
+        identity = {"scheme": "release-v1", "version": "0.2.0",
+                    "source_commit": ENGINE_SHA, "content_sha256": "a" * 64}
+        payload = json.loads(self.manifest.read_text())
+        payload["engine_identity"] = identity
+        self.manifest.write_text(json.dumps(payload))
+        module = self._module()
+        module._resolve_execution_state = lambda _: self._execution_state(engine_identity=identity)
+        output = self.root / "release.json"
+        first = module.run_batch(self.manifest, output,
+                                 item_runner=lambda _: transaction_result(),
+                                 finalizer=lambda _c, _b, records: finalization_result(records))
+        self.assertTrue(first["finalized"])
+        self.assertEqual(first["item_records"][0]["binding"]["engine_identity"], identity)
+        second = module.run_batch(self.manifest, output, resume_path=output,
+                                  item_runner=lambda _: self.fail("completed item rerun"),
+                                  finalizer=lambda _c, _b, records: finalization_result(records))
+        self.assertEqual(first["transactions"], second["transactions"])
+        self.assertTrue(second["finalized"])
+        module._resolve_execution_state = lambda _: self._execution_state(
+            engine_identity={**identity, "content_sha256": "b" * 64})
+        before = output.read_bytes()
+        with self.assertRaisesRegex(ValueError, "resume_contract_mismatch: engine_identity"):
+            module.run_batch(self.manifest, output, resume_path=output)
+        self.assertEqual(output.read_bytes(), before)
+
     def test_report_has_exact_resume_contract_and_transaction_evidence(self):
         module = self._module()
         observed = []

@@ -921,11 +921,19 @@ def _run_ingest(argv) -> int:
     if batch_binding is not None:
         from project_brain.config import load_config
         from project_brain.repo_context import resolve_git_checkout
+        from project_brain.transaction_receipt import ReleaseBatchBinding
 
         try:
             if args.brain_root is None:
                 raise ValueError("batch ingest requires explicit --brain-root")
-            engine_state = resolve_git_checkout(Path(__file__))
+            if isinstance(batch_binding, ReleaseBatchBinding):
+                from project_brain.engine_identity import verify_release_binding
+
+                verify_release_binding(batch_binding)
+                engine_root, engine_sha = batch_binding.engine_root, batch_binding.engine_sha
+            else:
+                engine_state = resolve_git_checkout(Path(__file__))
+                engine_root, engine_sha = str(engine_state.root), engine_state.head_sha
             if repo_context is None:
                 raise ValueError("batch ingest requires repo context")
             configured = load_config(start=repo_context.repo_root)
@@ -945,8 +953,8 @@ def _run_ingest(argv) -> int:
                 "expected_repo_id": repo_context.expected_repo_id,
                 "expected_revision_ref": repo_context.expected_revision_ref,
                 "target_revision_sha": repo_context.target_revision_sha,
-                "engine_root": str(engine_state.root),
-                "engine_sha": engine_state.head_sha,
+                "engine_root": engine_root,
+                "engine_sha": engine_sha,
             }
             for field_name, expected_value in expected_state.items():
                 if getattr(batch_binding, field_name) != expected_value:
@@ -3325,6 +3333,8 @@ def _run_top_level_help(argv) -> int:
         help="설치된 project-brain 버전을 출력하고 종료",
     )
     parser.add_argument("query", nargs="?")
+    parser.add_argument("--engine-identity", action="store_true",
+                        help="실제 설치 release의 내용 신원을 검증해 JSON 출력")
     parser.parse_args(argv)
     return 0
 
@@ -3336,6 +3346,16 @@ def main() -> int:
             return _run_top_level_help(argv)
         if argv == ["--version"]:
             return _run_version()
+        if argv == ["--engine-identity"]:
+            from project_brain.engine_identity import capture_release_engine
+
+            try:
+                state = capture_release_engine()
+            except (OSError, ValueError) as exc:
+                print(json.dumps({"ok": False, "error": str(exc)}))
+                return 1
+            print(json.dumps({"ok": True, **state}))
+            return 0
         # 첫 인자가 서브커맨드면 해당 경로, 아니면 일반 자유질의를 search로 처리한다.
         if argv and argv[0] == "build":
             return _run_build(argv[1:])

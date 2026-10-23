@@ -335,6 +335,20 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    scripts/run_ingest_batch.py batch.json --report batch-report.json --resume batch-report.json
    ```
 
+   **release 설치**에서는 먼저 `project-brain --engine-identity`를 실행한다. 반환된
+   `engine_sha`는 위 manifest의 `engine_sha`로, `engine_identity` 객체는 같은 이름의
+   top-level 필드로 복사한다. version만 선언하거나 Git SHA를 version으로 바꾸지 않는다.
+   엔진 설치의 실제 파일 bytes·실행 비트·원본 commit과 로드 위치를 확인한 값이다.
+   content 신원이 없는 v0.1.0은 batch를 지원하지 않는다. checkout 사용자는 기존 형식을
+   유지한다. legacy manifest/receipt를 release 신원으로 수기 변환해 재개하지 않는다.
+
+   새 release binding은 신원과 엔진 root device/inode도 durable intent/journal에 묶는다.
+   runner 시작·각 item·finalizer 전후, CLI preflight와 MutationService의 쓰기 직전에
+   재검증한다. 설치된 실행 scripts가 다른 버전이거나 수정됐으면 쓰기 전 거부한다.
+   같은 엔진으로 `project-brain install`을 다시 실행하고 skipped 파일은 diff를 검토한다.
+   사용자 파일을 `--force`로 밀어붙이지 않는다. 실행에 쓰지 않는 프로젝트 overlay는
+   검증·관리 대상으로 추가하지 않는다.
+
    `repo_root`는 symbolic link가 없는 absolute canonical path이자 실제 Git toplevel이어야 한다.
    각 item 입력은 manifest 아래 상대경로만 허용하며 absolute path, `..` 탈출, symbolic link는
    거부한다. runner는 시작 때 no-follow FD로 읽은 verify/spec 바이트를 run 전용 read-only
@@ -351,7 +365,7 @@ project-brain promote-auto --ids <pass 판정 용어 id...> [--reviewed-at <ISO8
    출력이며 독립 resume/finalization 근거가 아니다.
 
    재개는 같은 report의 최초 baseline을 재사용하되 실제 Git toplevel/repo identity, ref가 가리키는
-   exact `target_revision_sha`, 실제 engine Git root/HEAD, repo/brain root inode, manifest와 입력 hash 가운데
+   exact `target_revision_sha`, 실제 engine Git root/HEAD 또는 release 내용 신원, repo/brain/engine root inode, manifest와 입력 hash 가운데
    하나라도 다르면 `resume_contract_mismatch`로 종료한다. 각 item 전과 finalization 직전에도 같은
    resolved state를 재검증한다. malformed prior report도 fail-closed 처리한다.
 

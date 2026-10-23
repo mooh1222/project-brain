@@ -20,11 +20,21 @@ import os
 import shlex
 import shutil
 import sys
+from pathlib import Path
+from types import ModuleType
 from collections.abc import Callable, Mapping, MutableMapping
 
 OVERRIDE = "PROJECT_BRAIN_PYTHON"
 GUARD = "PROJECT_BRAIN_ENGINE_REEXEC"
 _HINT = f"{OVERRIDE}를 엔진이 깔린 Python의 절대 경로로 지정하세요."
+
+
+def load_source(path: Path, name: str) -> ModuleType:
+    """Execute pinned runtime source, never a timestamp-based bytecode cache."""
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    exec(compile(path.read_bytes(), str(path), "exec", dont_inherit=True), module.__dict__)
+    return module
 
 
 def _env_program(args: list[str], which: Callable[[str], str | None]) -> str | None:

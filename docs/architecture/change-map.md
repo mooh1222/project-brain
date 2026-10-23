@@ -28,6 +28,11 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 문서의 과거 통과 수치나 다른 checkout의 bare `project-brain` 실행은 현재 변경의 영수증이 아니다.
 검증할 checkout의 `PYTHONPATH`와 `.venv/bin/python`을 같이 고정한다.
 
+#113의 release 내용 신원·binding/replay 변경은 `engine_identity.py`·`test_engine_identity.py`,
+기존 CLI/receipt/runtime 표적 회귀와 `tools/release_consumer.py`의 격리 공개 경로를 함께 본다.
+이 변경은 저장 객체·검색 입력을 바꾸지 않으므로 실제 코퍼스 재적재/rebuild/eval은 요구하지
+않는다. 합성 release smoke에서만 StubEmbedder/정규식 주입으로 finalizer까지 확인한다.
+
 ## 변경별 검증 표
 
 | 변경 축 | 주요 production 파일 | 엔진 표적 테스트 | 설치 runtime·installer | 소비 데이터 회귀 | `eval` | 실모델 rebuild 조건 | 함께 확인할 계약 |

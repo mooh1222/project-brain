@@ -11,6 +11,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import engine_python  # noqa: E402
 
+
+class SourceLoadingTest(unittest.TestCase):
+    def test_runtime_loader_ignores_stale_bytecode(self):
+        import py_compile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "helper.py"
+            path.write_text("VALUE = 'OLD'\n")
+            py_compile.compile(str(path), doraise=True)
+            stamp = path.stat()
+            path.write_text("VALUE = 'NEW'\n")
+            os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            self.assertEqual(engine_python.load_source(path, "helper_under_test").VALUE, "NEW")
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -179,7 +193,7 @@ class ScriptEntryTest(unittest.TestCase):
         for name in self.ENGINE_SCRIPTS:
             with self.subTest(script=name):
                 text = (HERE / name).read_text(encoding="utf-8")
-                bootstrap = text.find("engine_python.ensure()")
+                bootstrap = text.find('["ensure"]()')
                 self.assertNotEqual(bootstrap, -1)
                 first_import = min(
                     (index for index in (text.find("from project_brain"),

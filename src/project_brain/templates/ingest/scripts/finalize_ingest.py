@@ -13,9 +13,9 @@ if __name__ == "__main__":
     # 시스템 python3로 실행돼도 엔진(project_brain)이 깔린 Python으로 넘어간다.
     # -P/PYTHONSAFEPATH에서도 찾도록 스크립트 디렉토리를 직접 넣는다.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import engine_python
+    import runpy
 
-    engine_python.ensure()
+    runpy.run_path(str(Path(__file__).resolve().with_name("engine_python.py")))["ensure"]()
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
@@ -531,11 +531,20 @@ def run_finalization(
             raise ValueError(
                 "item records에는 repo_root가 필요하며 transaction results와 함께 쓸 수 없습니다"
             )
+        from project_brain.transaction_receipt import ReleaseBatchBinding, normalize_batch_binding
+
+        # Release callers can repeat finalization after index/audit were generated.
+        # Every object/journal/receipt is still checked; semantic commands run again.
+        release_records = isinstance(item_records, list) and bool(item_records) and all(
+            isinstance(record, dict) and isinstance(
+                normalize_batch_binding(record.get("binding")), ReleaseBatchBinding)
+            for record in item_records)
         transactions = recover_item_record_transactions(
             item_records,
             repo_root=repo_root,
             receipt_recoverer=receipt_recoverer,
             config_loader=config_loader,
+            verification_mode="post_gate_object_tail" if release_records else "strict_commit",
         )
     else:
         transactions = validate_transaction_results(transaction_results)

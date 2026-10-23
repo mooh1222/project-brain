@@ -482,6 +482,10 @@ class MutationService:
         if pre_store_error is not None:
             return pre_store_error
 
+        identity_error = _release_binding_error(request)
+        if identity_error is not None:
+            return identity_error
+
         with corpus_lock(request.brain_root, exclusive=True):
             recover_unfinished_transaction_unlocked(request.brain_root)
             try:
@@ -580,6 +584,9 @@ class MutationService:
         result: MutationPlanResult,
         failure_injector: Callable[[str], None] | None,
     ) -> MutationPlanResult:
+        identity_error = _release_binding_error(request)
+        if identity_error is not None:
+            return identity_error
         writable_actions = result.manifest.creates + result.manifest.updates
         actions = (
             writable_actions
@@ -1510,6 +1517,18 @@ class MutationService:
             bound_state,
             preview_only=_preview_only,
         )
+
+
+def _release_binding_error(request: MutationRequest) -> MutationPlanResult | None:
+    if request.batch_binding is None:
+        return None
+    from project_brain.engine_identity import verify_release_binding
+
+    try:
+        verify_release_binding(request.batch_binding)
+    except (OSError, ValueError) as exc:
+        return _failure("engine_identity_mismatch", str(exc))
+    return None
 
 
 def _failure(

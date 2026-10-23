@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -133,7 +134,35 @@ def inspect_wheel(wheel: Path, expected_templates: dict[str, bool], version: str
         if shipped[path] != expected_templates[path]:
             expected = "executable" if expected_templates[path] else "non-executable"
             problems.append(f"executable bit mismatch: {path} (expected {expected})")
+    if version != "0.1.0":
+        problems += release_identity_problems(wheel, version)
     return problems
+
+
+def release_identity_problems(wheel: Path, version: str) -> list[str]:
+    """Verify build identity against actual wheel bytes and executable modes."""
+    verifier = runpy.run_path(str(REPO_ROOT / "src/project_brain/engine_identity.py"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="project-brain-identity-") as tmp:
+            package = Path(tmp) / "project_brain"
+            package.mkdir()
+            with zipfile.ZipFile(wheel) as archive:
+                for info in archive.infolist():
+                    if not info.filename.startswith("project_brain/") or info.is_dir():
+                        continue
+                    relative = Path(info.filename).relative_to("project_brain")
+                    if ".." in relative.parts or stat.S_ISLNK(info.external_attr >> 16):
+                        raise ValueError("unsafe wheel package member")
+                    path = package / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(archive.read(info))
+                    path.chmod(0o755 if (info.external_attr >> 16) & _EXECUTABLE else 0o644)
+            identity = verifier["read_release_identity"](package)
+            if identity["version"] != version:
+                raise ValueError("release identity version mismatch")
+    except (OSError, ValueError) as exc:
+        return [f"wheel release identity invalid: {exc}"]
+    return []
 
 
 def constraint_problems(text: str) -> list[str]:
@@ -272,15 +301,17 @@ def _pyproject_version(root: Path) -> str:
         return tomllib.load(handle)["project"]["version"]
 
 
-def _produce_artifacts(repo_root: Path, staging: Path, version: str) -> None:
+def _produce_artifacts(repo_root: Path, staging: Path, version: str, commit: str) -> None:
     """커밋된 HEAD만 떠서 wheel과 runtime constraints를 staging에 만든다."""
     with tempfile.TemporaryDirectory(prefix="project-brain-source-") as tmp:
         source = Path(tmp)
         archive = subprocess.run(
-            ["git", "-C", str(repo_root), "archive", "--format=tar", "HEAD"],
+            ["git", "-C", str(repo_root), "archive", "--format=tar", commit],
             check=True, capture_output=True,
         ).stdout
         subprocess.run(["tar", "-x", "-C", str(source)], input=archive, check=True)
+        identity = runpy.run_path(str(source / "src/project_brain/engine_identity.py"))
+        identity["write_release_identity"](source / "src/project_brain", commit, version)
         _run(["uv", "build", "--wheel", "--out-dir", str(staging), str(source)])
         # --locked: pyproject와 어긋난 lock이면 조용히 옛 pin을 내보내지 않고 실패한다.
         _run([
@@ -306,12 +337,12 @@ def build(tag: str, out_root: Path, repo_root: Path = REPO_ROOT) -> dict:
     # 검사를 모두 통과한 산출물만 out_dir로 옮긴다 — 실패해도 반쪽 artifact가 남지 않는다.
     with tempfile.TemporaryDirectory(prefix="project-brain-release-") as tmp:
         staging = Path(tmp)
-        _produce_artifacts(repo_root, staging, version)
+        _produce_artifacts(repo_root, staging, version, commit)
         wheel = staging / wheel_name(version)
         constraints = staging / constraints_name(version)
         if not wheel.is_file():
             raise ReleaseError(f"expected wheel was not built: {wheel.name}")
-        problems = inspect_wheel(wheel, tracked_template_modes(repo_root, "HEAD"), version)
+        problems = inspect_wheel(wheel, tracked_template_modes(repo_root, commit), version)
         problems += constraint_problems(constraints.read_text(encoding="utf-8"))
         if problems:
             raise ReleaseError("release artifact check failed:\n" + "\n".join(problems))
@@ -342,7 +373,8 @@ def _download(url: str, destination: Path) -> Path:
 
 def _isolated_env(tmp: Path) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items()
-           if key not in {"PYTHONPATH", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"}}
+           if key not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT",
+                          "PROJECT_BRAIN_PYTHON"}}
     env["UV_TOOL_DIR"] = str(tmp / "tools")
     env["UV_TOOL_BIN_DIR"] = str(tmp / "bin")
     return env
@@ -391,7 +423,7 @@ def smoke(tag: str, out_root: Path, from_release: bool, repo_root: Path = REPO_R
     version = version_from_tag(tag)
     problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="project-brain-smoke-") as tmp_name:
-        tmp = Path(tmp_name)
+        tmp = Path(tmp_name).resolve()
         if from_release:
             base = f"{RELEASE_BASE_URL}/{tag}"
             artifacts = tmp / "artifacts"
@@ -459,6 +491,10 @@ def smoke(tag: str, out_root: Path, from_release: bool, repo_root: Path = REPO_R
         second = json.loads(_run(install, env=env, cwd=workdir).stdout)
         problems += idempotent_install_problems(second)
         problems += installed_mode_problems(tool_env["desired_modes"], project)
+        consumer = None
+        if version != "0.1.0" and not problems:
+            exercise = runpy.run_path(str(REPO_ROOT / "tools/release_consumer.py"))["exercise_release"]
+            consumer = exercise(executable, tool_python, tmp / "consumer", env)
 
     if problems:
         raise ReleaseError("smoke failed:\n" + "\n".join(problems))
@@ -472,6 +508,7 @@ def smoke(tag: str, out_root: Path, from_release: bool, repo_root: Path = REPO_R
         "constrained_packages_match": True,
         "installed_files": len(tool_env["desired_modes"]),
         "second_install_changes": {key: second[key] for key in _INSTALL_REPORT_KEYS},
+        "public_consumer": consumer,
     }
 
 

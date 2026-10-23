@@ -37,6 +37,7 @@
     "src/project_brain/capabilities.py", "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
     "src/project_brain/draft.py", "src/project_brain/draft_prepare.py",
+    "src/project_brain/engine_identity.py",
     "src/project_brain/evidence_plan.py", "src/project_brain/evidence_preparation.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
@@ -54,7 +55,7 @@
     "tests/test_capabilities.py", "tests/test_cli.py", "tests/test_code_verify.py", "tests/test_context_projection.py",
     "tests/test_context_replace.py", "tests/test_corpus_io.py", "tests/test_id_grammar.py",
     "tests/test_draft.py", "tests/test_draft_cli.py", "tests/test_draft_v2_cli.py", "tests/test_draft_prepare_cli.py",
-    "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py",
+    "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py", "tests/test_engine_identity.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
     "tests/test_router.py",
@@ -215,6 +216,18 @@ Task 18 표시 제목 변경은 이 일반 규칙의 예외다. `MutationOperati
 
 coverage는 선언한 identity와 실제 산출물을 결속할 뿐 원문 의미가 완전하다고 추론하지 않는다.
 coverage가 없거나 mode/build binding이 맞지 않으면 objects/raw/index 쓰기 전에 실패한다.
+
+내용 신원이 있는 release는 `project-brain --engine-identity`의 `engine_sha`와
+`engine_identity`를 batch manifest에 함께 선언한다. `engine_identity.py`가 원본 commit·
+패키지 bytes·실행 비트·실제로 실행한 module code와 로드 위치를 검증한다. 설치 runtime은
+캐시 대신 source를 직접 로드하며 현재 엔진의 렌더 결과와 대조한다. PATH CLI도 baseline
+감사의 파생 파일 쓰기 전에 runner와 같은 신원/root인지 확인한다. CLI와 MutationService는
+item binding을 쓰기 직전에 다시 확인하고 canonical receipt의 기존 계산식을 유지한다.
+기존 checkout 형식은 Git 경로를 유지하고 release로의 증명 불가 재개를 거부한다.
+새 release의 모든 item이 terminal이면 재개 때 `post_gate_object_tail`로 이미 생성된 파생물을
+허용하되 객체·journal·receipt를 검증하고 semantic commands를 다시 실행한다. 부분 적재는
+기존 `strict_commit` 검증을 유지한다. 세션 완료의 신규 release binding도 현재 엔진/runtime을
+검증하며 marker의 정상 재실행에서도 같은 검증을 한다.
 
 ### 설치 가능한 별도 P0 최종 gate
 

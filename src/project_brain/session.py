@@ -207,6 +207,13 @@ def complete_session(
     manifest_bytes = _read_regular_bytes(Path(manifest), field="manifest")
     report_bytes = _read_regular_bytes(Path(report), field="report")
 
+    try:
+        report_payload = json.loads(report_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SessionCompletionError(
+            "session_completion_report_invalid", f"report JSON이 올바르지 않습니다: {exc}"
+        ) from exc
+
     transcript_sha256 = _sha256(transcript_bytes)
     manifest_sha256 = _sha256(manifest_bytes)
     report_sha256 = _sha256(report_bytes)
@@ -218,6 +225,8 @@ def complete_session(
             if _valid_v2_marker(existing_payload):
                 assert isinstance(existing_payload, dict)
                 if (
+                    not (isinstance(report_payload, dict) and "engine_identity" in report_payload)
+                    and
                     existing_payload["uuid"] == uuid
                     and existing_payload["transcript_sha256"] == transcript_sha256
                     and existing_payload["manifest_sha256"] == manifest_sha256
@@ -226,13 +235,6 @@ def complete_session(
                     receipt_ids = existing_payload["receipt_ids"]
                     assert isinstance(receipt_ids, list)
                     return _completion_result(uuid, marker, receipt_ids)
-
-    try:
-        report_payload = json.loads(report_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SessionCompletionError(
-            "session_completion_report_invalid", f"report JSON이 올바르지 않습니다: {exc}"
-        ) from exc
 
     receipt_ids = _validate_success_report(
         report_payload,
@@ -411,12 +413,19 @@ def _validate_success_report(
 
     try:
         from project_brain.corpus_io import recover_batch_receipts
+        from project_brain.transaction_receipt import ReleaseBatchBinding, normalize_batch_binding
+        from project_brain.engine_identity import verify_release_binding
+
+        for record in normalized_records:
+            verify_release_binding(record["binding"])
 
         recovered = recover_batch_receipts(
             brain_root,
             [record["binding"] for record in normalized_records],
             expected_receipts=receipts,
-            verification_mode="strict_commit",
+            verification_mode=("post_gate_object_tail" if all(
+                isinstance(normalize_batch_binding(record["binding"]), ReleaseBatchBinding)
+                for record in normalized_records) else "strict_commit"),
         )
     except Exception as exc:
         _report_invalid(f"durable receipt recovery가 실패했습니다: {exc}")

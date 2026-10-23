@@ -44,8 +44,10 @@ project-brain --version   # project-brain 0.1.0
   되돌릴 때도 같다. editable 설치에서 넘어올 때도 같은 명령이면 된다.
 - 설치 후 프로젝트에 붙이는 방법(`install`·`bootstrap`)은 아래 절과 같다. 이미 주입된 스킬은
   업그레이드 뒤 `project-brain install`을 다시 실행해 갱신한다(사용자 수정 파일은 건너뜀).
-- 엔진 git checkout을 요구하는 경로(batch ingest, `migration`, foundation 검증 스크립트)는
-  release 설치본에서 동작하지 않는다. 범위는 [v0.1.0 release notes](docs/releases/v0.1.0.md)의
+- 게시 v0.1.0은 batch ingest를 지원하지 않는다. 내용 신원을 결속하는 후속 버전은
+  [v0.2.0 검토용 release notes](docs/releases/v0.2.0.md)에 설명한다(아직 미게시).
+  `migration`과 foundation 검증 스크립트는 계속 엔진 checkout을 요구한다.
+  v0.1.0의 범위는 [release notes](docs/releases/v0.1.0.md)의
   제약 절을 본다. 설치 스킬의 스크립트는 시스템 `python3`로 시작해도 엔진이 깔린 Python으로
   스스로 넘어간다(`PROJECT_BRAIN_PYTHON`으로 지정 가능).
 
@@ -57,7 +59,7 @@ uv tool install -e ./project-brain
 ```
 
 편집 설치(-e)라 엔진 수정이 모든 프로젝트에 즉시 반영된다. pyproject 의존성이 바뀌면
-`uv tool install -e ./project-brain --force`. 적재 운영(batch ingest·migration)도 이 경로를 쓴다.
+`uv tool install -e ./project-brain --force`. 기존 checkout batch·migration 운영도 이 경로를 쓴다.
 
 ### 공통
 
@@ -121,6 +123,7 @@ project-brain draft lint [topic-id]      # 초안 구조·UTF-8·실제 경로 �
 project-brain draft prepare <topic-id> --item <key> --repo-root ... --target-revision ... --out ...
                                        # 외부 신규/빈 디렉터리에 읽기 전용 적재 재료
 project-brain doctor [--download]         # 환경 진단. --download는 모델 cache를 채움
+project-brain --engine-identity          # 내용 신원이 있는 release의 실제 설치 bytes 검증·JSON
 project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (코퍼스 불변)
 project-brain graph export out.html      # 코퍼스 불변, 지정한 HTML 파일은 씀
 project-brain lint                       # 끊긴 참조 등 무결성 점검 (코퍼스 불변)
@@ -209,6 +212,10 @@ pyproject와 어긋나면 실패한다. 검사를 모두 통과한 산출물만 
 smoke는 임시 `UV_TOOL_DIR`에 설치해 버전·도움말, import 위치(source checkout 아님), 설치 파일이
 검증한 wheel과 같은지(RECORD 해시), constraints 버전 일치, 임시 프로젝트 `install` 2회 무변경,
 주입 파일의 실행 비트를 확인한다. `--from-release`는 게시된 wheel을 tag 커밋의 템플릿과도 대조한다.
+v0.2.0부터 build는 커밋 archive의 출처·패키지 내용 신원도 포함한다. smoke는 합성 소비자에서
+공개 batch·감사·조회·JSON v2 초안·세션 완료, 잘못된 신원/입력/runtime의 무쓰기 거부와
+엔진 변경 후 부분 재개·정상 재실행까지 확인한다. 검색 검증에는 StubEmbedder와 정규식
+토크나이저를 주입한다. 게시된 실제 corpus 품질 측정과는 별개다.
 버전은 `pyproject.toml`의 `version`과 tag가 같아야 한다.
 검색·청킹·색인 계약을 바꿨다면 소비 프로젝트의 `brain/checks/`, lint, eval, graph와
 필요한 경우 실모델 rebuild까지 별도로 검증한다.

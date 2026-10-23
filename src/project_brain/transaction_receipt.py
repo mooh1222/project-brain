@@ -94,6 +94,15 @@ class BatchBinding(LegacyBatchBindingV1):
 
 
 @dataclass(frozen=True)
+class ReleaseBatchBinding(BatchBinding):
+    """Release-only addition; historical checkout binding bytes stay unchanged."""
+
+    engine_identity: dict[str, object]
+    engine_root_device: int
+    engine_root_inode: int
+
+
+@dataclass(frozen=True)
 class MutationReceipt:
     version: int
     receipt_id: str
@@ -390,9 +399,11 @@ def _normalize_binding_fields(
 ) -> BatchBinding | LegacyBatchBindingV1:
     expected_fields = (
         _BATCH_BINDING_FIELDS
-        if binding_type is BatchBinding
+        if issubclass(binding_type, BatchBinding)
         else _LEGACY_BATCH_BINDING_FIELDS
     )
+    if binding_type is ReleaseBatchBinding:
+        expected_fields = expected_fields | {"engine_identity", "engine_root_device", "engine_root_inode"}
     if set(raw) != expected_fields:
         raise ValueError("batch_binding fields do not match the contract")
     sha_fields = [
@@ -401,7 +412,7 @@ def _normalize_binding_fields(
         "verify_json_sha256",
         "domain_spec_py_sha256",
     ]
-    if binding_type is BatchBinding:
+    if issubclass(binding_type, BatchBinding):
         sha_fields.append("coverage_sha256")
     for field_name in sha_fields:
         value_ = raw.get(field_name)
@@ -431,7 +442,10 @@ def _normalize_binding_fields(
             or "\x00" in value_
         ):
             raise ValueError(f"batch_binding.{field_name} must be an absolute path")
-    for field_name in ("brain_root_device", "brain_root_inode"):
+    root_numbers = {"brain_root_device", "brain_root_inode"}
+    if binding_type is ReleaseBatchBinding:
+        root_numbers |= {"engine_root_device", "engine_root_inode"}
+    for field_name in root_numbers:
         value_ = raw.get(field_name)
         if (
             not isinstance(value_, int)
@@ -439,10 +453,17 @@ def _normalize_binding_fields(
             or value_ < 0
         ):
             raise ValueError(f"batch_binding.{field_name} must be a non-negative int")
+    identity = None
+    if binding_type is ReleaseBatchBinding:
+        from project_brain.engine_identity import normalize_release_identity
+
+        identity = normalize_release_identity(raw.get("engine_identity"))
+        if identity["source_commit"] != raw["engine_sha"]:
+            raise ValueError("batch_binding engine_sha/source_commit mismatch")
     return binding_type(**{
         field_name: (
-            raw[field_name]
-            if field_name in {"brain_root_device", "brain_root_inode"}
+            identity if field_name == "engine_identity" else raw[field_name]
+            if field_name in root_numbers
             else str(raw[field_name])
         )
         for field_name in binding_type.__dataclass_fields__
@@ -472,7 +493,10 @@ def normalize_batch_binding(
     """Return an exact binding; legacy is an explicit recovery-only mode."""
     if value is None:
         return None
-    if isinstance(value, BatchBinding):
+    if isinstance(value, ReleaseBatchBinding):
+        raw = asdict(value)
+        binding_type = ReleaseBatchBinding
+    elif isinstance(value, BatchBinding):
         raw: Mapping[str, object] = asdict(value)
         binding_type = BatchBinding
     elif isinstance(value, LegacyBatchBindingV1):
@@ -482,7 +506,9 @@ def normalize_batch_binding(
         binding_type = LegacyBatchBindingV1
     elif isinstance(value, Mapping):
         raw = value
-        if set(raw) == _BATCH_BINDING_FIELDS:
+        if set(raw) == _BATCH_BINDING_FIELDS | {"engine_identity", "engine_root_device", "engine_root_inode"}:
+            binding_type = ReleaseBatchBinding
+        elif set(raw) == _BATCH_BINDING_FIELDS:
             binding_type = BatchBinding
         elif set(raw) == _LEGACY_BATCH_BINDING_FIELDS:
             if not allow_legacy_v1:

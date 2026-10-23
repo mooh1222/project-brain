@@ -85,7 +85,7 @@ class TestTrackedTemplateModes(unittest.TestCase):
 
 class TestBuildFailureLeavesNoArtifacts(unittest.TestCase):
     def test_failed_artifact_check_does_not_create_output_directory(self):
-        def fake_produce(repo_root, staging, version):
+        def fake_produce(repo_root, staging, version, commit):
             _write_wheel(staging / release.wheel_name(version), {})  # 템플릿 없는 wheel
             (staging / release.constraints_name(version)).write_text("numpy==2.3.2\n")
 
@@ -103,7 +103,7 @@ class TestBuildFailureLeavesNoArtifacts(unittest.TestCase):
             self.assertFalse((out / "v0.1.0").exists())
 
     def test_successful_build_moves_checked_artifacts_with_checksums(self):
-        def fake_produce(repo_root, staging, version):
+        def fake_produce(repo_root, staging, version, commit):
             _write_wheel(staging / release.wheel_name(version), {
                 "project_brain/cli.py": 0o644,
                 "project_brain/templates/ingest/SKILL.md": 0o644,
@@ -154,6 +154,33 @@ class TestRecordMatch(unittest.TestCase):
             "installed file differs from verified wheel: "
             "project_brain/templates/ingest/SKILL.md",
         ])
+
+
+class TestReleaseContentIdentity(unittest.TestCase):
+    def test_missing_identity_is_not_a_new_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel = _write_wheel(Path(tmp) / "test.whl", {"project_brain/cli.py": 0o644}, version="0.2.0")
+            self.assertTrue(release.release_identity_problems(wheel, "0.2.0"))
+
+    def test_wheel_identity_checks_content_not_only_record_metadata(self):
+        from project_brain.engine_identity import write_release_identity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "package"
+            package.mkdir()
+            (package / "__init__.py").write_text("")
+            (package / "cli.py").write_text("VALUE = 1\n")
+            write_release_identity(package, "a" * 40, "0.2.0")
+            wheel = Path(tmp) / "test.whl"
+            def archive():
+                with zipfile.ZipFile(wheel, "w") as z:
+                    for path in package.iterdir():
+                        z.write(path, "project_brain/" + path.name)
+            archive()
+            self.assertEqual(release.release_identity_problems(wheel, "0.2.0"), [])
+            (package / "cli.py").write_text("VALUE = 2\n")
+            archive()
+            self.assertIn("content mismatch", " ".join(release.release_identity_problems(wheel, "0.2.0")))
 
 
 class TestInstalledModes(unittest.TestCase):

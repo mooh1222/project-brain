@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import errno
 import hashlib
-import importlib.util
 import json
 import os
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -22,9 +22,7 @@ if __name__ == "__main__":
     # 시스템 python3로 실행돼도 엔진(project_brain)이 깔린 Python으로 넘어간다.
     # -P/PYTHONSAFEPATH에서도 찾도록 스크립트 디렉토리를 직접 넣는다.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import engine_python
-
-    engine_python.ensure()
+    runpy.run_path(str(Path(__file__).resolve().with_name("engine_python.py")))["ensure"]()
 
 
 ItemRunner = Callable[[dict[str, Any]], Any]
@@ -107,25 +105,14 @@ def _write_report(path: Path, report: dict) -> None:
 
 def _finalizer_module():
     script = Path(__file__).resolve().with_name("finalize_ingest.py")
-    spec = importlib.util.spec_from_file_location("project_brain_semantic_finalizer", script)
-    if spec is None or spec.loader is None:
-        raise ValueError("semantic finalizer를 불러올 수 없습니다")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    loader = runpy.run_path(str(script.with_name("engine_python.py")))["load_source"]
+    return loader(script, "project_brain_semantic_finalizer")
 
 
 def _assemble_module():
     script = Path(__file__).resolve().with_name("assemble_notes.py")
-    spec = importlib.util.spec_from_file_location(
-        "project_brain_batch_assemble_notes",
-        script,
-    )
-    if spec is None or spec.loader is None:
-        raise ValueError("assemble_notes를 불러올 수 없습니다")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    loader = runpy.run_path(str(script.with_name("engine_python.py")))["load_source"]
+    return loader(script, "project_brain_batch_assemble_notes")
 
 
 def _has_symlink_component(path: Path) -> bool:
@@ -472,6 +459,14 @@ def _repo_contract(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("manifest.expected_revision_ref가 없습니다")
     if not isinstance(engine_sha, str) or _ENGINE_SHA.fullmatch(engine_sha) is None:
         raise ValueError("manifest.engine_sha는 exact lowercase Git SHA여야 합니다")
+    release = {}
+    if "engine_identity" in payload:
+        from project_brain.engine_identity import normalize_release_identity
+
+        identity = normalize_release_identity(payload["engine_identity"])
+        if identity["source_commit"] != engine_sha:
+            raise ValueError("manifest engine_sha/source_commit mismatch")
+        release["engine_identity"] = identity
     return {
         "repo_root": str(repo_root),
         "expected_repo_id": expected_repo_id,
@@ -479,6 +474,7 @@ def _repo_contract(payload: dict[str, Any]) -> dict[str, Any]:
         "engine_sha": engine_sha,
         "repo_root_device": repo_stat.st_dev,
         "repo_root_inode": repo_stat.st_ino,
+        **release,
     }
 
 
@@ -512,11 +508,21 @@ def _resolve_execution_state(
             configured_repo_id=configured.get("repo"),
             expected_revision_ref=declared["expected_revision_ref"],
         )
-        engine_module = Path(project_brain.__file__)
-        engine = resolve_git_checkout(engine_module)
+        if "engine_identity" in declared:
+            from project_brain.engine_identity import (
+                capture_release_engine, verify_release_cli, verify_release_runtime,
+            )
+
+            engine_state = capture_release_engine(declared["engine_identity"])
+            verify_release_runtime(Path(__file__).resolve().parent, repo_root)
+            verify_release_cli(engine_state, repo_root)
+        else:
+            engine = resolve_git_checkout(Path(project_brain.__file__))
+            engine_state = {"engine_root": str(engine.root), "engine_sha": engine.head_sha,
+                            "engine_root_device": engine.device, "engine_root_inode": engine.inode}
     except Exception as exc:
         raise ValueError(f"execution state를 확정할 수 없습니다: {exc}") from exc
-    if engine.head_sha != declared["engine_sha"]:
+    if engine_state["engine_sha"] != declared["engine_sha"]:
         raise ValueError(
             "declared engine_sha가 actual engine HEAD와 다릅니다"
         )
@@ -531,10 +537,7 @@ def _resolve_execution_state(
         "target_revision_sha": repo_context.target_revision_sha,
         "repo_root_device": repo_stat.st_dev,
         "repo_root_inode": repo_stat.st_ino,
-        "engine_root": str(engine.root),
-        "engine_sha": engine.head_sha,
-        "engine_root_device": engine.device,
-        "engine_root_inode": engine.inode,
+        **engine_state,
     }
 
 
@@ -578,6 +581,8 @@ def _load_manifest(
     }
     if not isinstance(payload, dict):
         raise ValueError("manifest 필드가 정확하지 않습니다")
+    if "engine_identity" in payload:
+        required_fields.add("engine_identity")
     if "finalization" not in payload:
         raise ValueError("manifest.finalization이 없습니다")
     if set(payload) != required_fields:
@@ -679,12 +684,17 @@ def _bind_items(
 ) -> list[dict[str, Any]]:
     from project_brain.transaction_receipt import (
         BatchBinding,
+        ReleaseBatchBinding,
         batch_binding_dict,
     )
 
     bound: list[dict[str, Any]] = []
     for item in items:
-        binding = BatchBinding(
+        release = ({key: execution_state[key] for key in
+                    ("engine_identity", "engine_root_device", "engine_root_inode")}
+                   if "engine_identity" in execution_state else {})
+        binding_type = ReleaseBatchBinding if release else BatchBinding
+        binding = binding_type(
             batch_manifest_sha256=manifest_sha256,
             item_key=item["key"],
             item_input_fingerprint=_item_input_fingerprint(item),
@@ -704,6 +714,7 @@ def _bind_items(
             ],
             engine_root=execution_state["engine_root"],
             engine_sha=execution_state["engine_sha"],
+            **release,
         )
         bound.append({
             **item,
@@ -1161,7 +1172,7 @@ def _load_resume_state(
     repo_contract: dict[str, Any],
     expected_unmerged_locator_ids: list[str],
     recoverer: ReceiptRecoverer,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
     try:
         resume_file = _canonical_input_file(path, field="resume report")
         with resume_file.open(encoding="utf-8") as f:
@@ -1194,6 +1205,8 @@ def _load_resume_state(
         "finalization",
         "finalize_failure",
     }
+    if "engine_identity" in repo_contract:
+        required.add("engine_identity")
     if not isinstance(previous, dict) or set(previous) != required:
         raise ValueError("resume_contract_mismatch: report fields")
     expected_contract = {
@@ -1343,11 +1356,19 @@ def _load_resume_state(
             )
     if not isinstance(previous["finalized"], bool):
         raise ValueError("resume_contract_mismatch: finalized")
+    post_gate_resume = "engine_identity" in repo_contract and not nonterminal_seen
+    if "engine_identity" in repo_contract and previous["finalized"]:
+        finalization, exit_code, _ = _finalization_details(previous["finalization"])
+        if (exit_code != 0 or finalization["transactions"] != compatibility["transactions"]
+                or finalization["errors"] or previous["finalize_failure"] is not None
+                or compatibility["failed"] or nonterminal_seen):
+            raise ValueError("resume_contract_mismatch: completed finalization")
     try:
         _recover_item_records(
             records,
             repo_root=Path(repo_contract["repo_root"]),
             recoverer=recoverer,
+            verification_mode="post_gate_object_tail" if post_gate_resume else "strict_commit",
         )
     except Exception as exc:
         raise ValueError(
@@ -1362,10 +1383,11 @@ def _load_resume_state(
         return (
             records,
             {"ok": True, "isolated_ids": normalized["isolated_ids"]},
+            post_gate_resume,
         )
     baseline = {key: normalized[key] for key in
                 ("ok", "isolated_ids", "target_head", "unmerged_locator_ids")}
-    return records, baseline
+    return records, baseline, post_gate_resume
 
 
 def run_batch(manifest_path, report_path, *, resume_path=None,
@@ -1415,8 +1437,9 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
 
     item_records: list[dict[str, Any]]
     isolation_baseline: dict[str, Any]
+    post_gate_resume = False
     if resume_path is not None:
-        item_records, isolation_baseline = _load_resume_state(
+        item_records, isolation_baseline, post_gate_resume = _load_resume_state(
             Path(resume_path),
             expected_items=items,
             manifest_fingerprint=manifest_fingerprint,
@@ -1572,6 +1595,7 @@ def run_batch(manifest_path, report_path, *, resume_path=None,
                 report["item_records"],
                 repo_root=Path(repo_contract["repo_root"]),
                 recoverer=recoverer,
+                verification_mode="post_gate_object_tail" if post_gate_resume else "strict_commit",
             )
             _sync_compatibility_fields(report)
             if any(

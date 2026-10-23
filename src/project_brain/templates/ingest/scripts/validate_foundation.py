@@ -12,9 +12,9 @@ if __name__ == "__main__":
     # 시스템 python3로 실행돼도 엔진(project_brain)이 깔린 Python으로 넘어간다.
     # -P/PYTHONSAFEPATH에서도 찾도록 스크립트 디렉토리를 직접 넣는다.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import engine_python
+    import runpy
 
-    engine_python.ensure()
+    runpy.run_path(str(Path(__file__).resolve().with_name("engine_python.py")))["ensure"]()
 
 from project_brain.foundation import (
     FoundationError,
