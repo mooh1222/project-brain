@@ -1,15 +1,16 @@
 # Release 팀 적재 #113 — 로컬 실행 및 인계
 
-상태(2026-10-23): **E1 완료, E2 완료, E3 committed local build verified; unpublished**.
-E3의 게시·다운로드 artifact 검증과 소비 프로젝트 최종 통합은 남아 있다.
+상태(2026-10-23): **E1 완료, E2 완료, E3 게시·다운로드 artifact 검증 완료**.
+소비 프로젝트의 최종 통합은 별도 작업이다.
 
 ## 실행 경계
 
 E1/E2 기준 HEAD는 `7031619a02ce77d000a2d8c4c9dc189cc38b6eea`다. 기존 untracked
 문서·스펙·발표자료를 보존하고, E3에서는 별도 작업 트리에 #113 소유 25개 파일만 이관해
 승인된 로컬 commit과 정식 artifact build·격리 smoke를 수행했다. 원본 작업 트리는 수정하지
-않았다. push·tag·게시·이슈 변경·소비 프로젝트 수정은 승인 범위 밖이다. 실데이터를 사용하지
-않고 합성 Git 소비자만 검증한다.
+않았다. 처음에는 원격 작업을 보류했고, 후속 사용자 승인으로 작업 branch·main·tag·release를
+게시하고 다운로드 artifact를 검증했다. 이슈 종료는 해당 검증 뒤 기록한다. 소비 프로젝트는
+수정하지 않으며 실데이터 대신 합성 Git 소비자만 검증한다.
 
 ## E1 관측
 
@@ -135,7 +136,8 @@ checksums를 보관한다. 이 경로의 원시 로그는 로컬 점검용이며
 
 다음 minor 버전은 additive release binding과 JSON v2 기능을 담는 **v0.2.0**이다.
 [설치·runtime 갱신·호환표](../releases/v0.2.0.md)에 로컬 검증 artifact의 해시를 기록했다.
-상태는 **committed local build verified; unpublished**이며 E3 전체 완료는 아니다.
+로컬 단계의 상태는 **committed local build verified; unpublished**였으며, 아래 게시·다운로드
+검증을 마친 뒤 E3 완료로 전환했다.
 
 빌드 source commit: `c43c46f2e35b7a9b0ecf4d92c7e516d74319e994`.
 이 커밋의 25개 task-owned 파일은 E1/E2 최종 소스 manifest의 bytes·mode와 모두 일치한다.
@@ -183,9 +185,36 @@ checksums를 보관한다. 이 경로의 원시 로그는 로컬 점검용이며
 기록한다. 격리 소비자에서 editable·PYTHONPATH·PYTHONHOME 혼입은 없었고 StubEmbedder·정규식
 주입만 사용했다. 전역 설치·실모델·실코퍼스 실행은 하지 않았다.
 
-남은 순서: push/tag/release 게시 승인 → 기존 절차로 게시 → 다운로드 artifact smoke → 최종
-소비자 인계. 원격 게시와 이슈 종료, BB2 B4는 실행하지 않았다. 현재 로컬 wheel 검증을
-게시 artifact 검증이나 소비 프로젝트 최종 통합 완료로 해석하지 않는다.
+### E3 게시와 다운로드 검증
+
+후속 사용자 승인으로 integration branch를 push하고 원격 `main`에 fast-forward로 반영했다.
+원본 `main` checkout의 기존 36개 dirty/untracked 파일은 bytes·mode·심링크 종류가 모두
+시작 상태와 일치한다. 이를 보존하기 위해 원본 checkout의 로컬 `main`은 이동하지 않았다.
+
+빌드 원본 `c43c46f2e35b7a9b0ecf4d92c7e516d74319e994`를 가리키는 annotated tag
+`v0.2.0`과 [release](https://github.com/mooh1222/project-brain/releases/tag/v0.2.0)를 게시했다.
+후속 검증 문서 commit은 별도로 main에 반영하며 tag와 wheel의 source commit을 바꾸지 않는다.
+게시한 wheel·constraints·SHA256SUMS 세 파일을 다시 다운로드해 위 해시와 전부 일치함을 확인했다.
+
+```bash
+python tools/release.py smoke --tag v0.2.0 --from-release
+```
+
+위 명령을 개발 경로 환경이 없는 프로세스에서 실행했다. 결과는 `ok: true`다.
+실제 import는 별도 tool site-packages, 설치 내용과 wheel RECORD 및 constraints 일치,
+installer 65개 관리 파일의 두 번째 변경 배열은 전부 `[]`였다. 새 batch/canonical receipt,
+정상 재실행·부분 재개·finalizer 복구, JSON v2 create/list/show/update/prepare, audit,
+search→show, session list/complete/replay가 성공했다. 잘못된 identity/PATH CLI/runtime,
+legacy 증명 불가, 변경된 엔진·입력·소비 revision은 거부했고 Brain hash를 보존했다.
+합성 소비자·StubEmbedder·정규식 tokenizer만 사용했다.
+
+현재 근거는 ignored `dist/113-e3/published-artifact-checks.json`, `published-smoke.json`,
+`published-smoke.stderr.log`, `published-artifacts/`에 보존한다. 이전 c43c46f 고정 diff의
+독립 Standards/Spec 검수는 각각 0건이다. 이번 후속 단계의 제품 코드는 바꾸지 않았다.
+
+**E3 완료**다. 소비자에게 위 고정 버전·URL·해시 및 release 안내의 runtime 갱신법·호환표를
+인계할 수 있다. 운영 코퍼스·BB2 파일·전역 설치는 바꾸지 않았다. BB2 B4는 기존 #80 결과와
+이 E3를 함께 받는 별도 단계이며 이번 게시 검증으로 재개하거나 완료 처리하지 않았다.
 
 ## 변경 소유 범위
 
