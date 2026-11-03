@@ -21,6 +21,7 @@ from project_brain.config import (
     resolve_scenarios_path,
 )
 from project_brain.embedder import get_embedder
+from project_brain.embedding_service import EmbedderError
 from project_brain.eval_harness import (
     evaluate,
     load_recall_fn,
@@ -1798,6 +1799,17 @@ def _run_install(argv) -> int:
     return 0
 
 
+def _run_embedder(argv) -> int:
+    parser = argparse.ArgumentParser(prog="project-brain embedder")
+    parser.add_argument("action", choices=["status", "stop"])
+    args = parser.parse_args(argv)
+    from project_brain.embedding_service import service_status, service_stop
+    identity = get_embedder(stub=False).embedding_identity
+    report = service_status(identity) if args.action == "status" else service_stop(identity)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report.get("stopped", True) else 1
+
+
 def _run_doctor(argv) -> int:
     """의존성·백엔드·프로젝트 상태 진단 (doctor.py). required 실패 시 rc=1."""
     parser = argparse.ArgumentParser(prog="cli doctor")
@@ -3326,7 +3338,7 @@ def _run_top_level_help(argv) -> int:
             "  적재·검수   build  ingest  promote  promote-auto  session  draft\n"
             "  검색·색인   search  show  query  index  eval  projection\n"
             "  그래프      graph (isolated · export)\n"
-            "  점검·진단   lint  doctor  bootstrap  stale-check  mark-checked\n"
+            "  점검·진단   lint  doctor  embedder  bootstrap  stale-check  mark-checked\n"
             "  설치        install"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3389,6 +3401,8 @@ def main() -> int:
             return _run_promote(argv[1:])
         if argv and argv[0] == "install":
             return _run_install(argv[1:])
+        if argv and argv[0] == "embedder":
+            return _run_embedder(argv[1:])
         if argv and argv[0] == "doctor":
             return _run_doctor(argv[1:])
         if argv and argv[0] == "bootstrap":
@@ -3408,7 +3422,7 @@ def main() -> int:
         if argv and argv[0] == "migration":
             return _run_migration(argv[1:])
         return _run_search(argv)
-    except (ConfigError, RepoVerificationError) as exc:
+    except (ConfigError, RepoVerificationError, EmbedderError) as exc:
         # 경로 미지정 + config 부재 — traceback 대신 해결책이 담긴 메시지로 끝낸다.
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
               file=sys.stderr)

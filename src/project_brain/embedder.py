@@ -5,7 +5,10 @@ spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 표면 텍스트를 1024차원 L2 정규화 벡터로 만든다. 색인 빌드와 쿼리가 ★같은
 임베더 경로★를 써야 매칭이 성립하므로 get_embedder() 팩토리 하나로만 만든다.
 
-두 종류:
+실모델 계산은 사용자별 서비스가 공유하고, 서비스 불가 시 전역 슬롯으로 제한한다.
+get_embedder()의 실모델 경로는 ManagedEmbedder가 두 adapter를 선택한다.
+
+계산 구현 두 종류:
 1. RealEmbedder — bge-m3 로컬(sentence-transformers). ★lazy 로드★: import·생성
    시점·identity 조회에는 가중치를 안 올리고, 첫 임베딩에서 1회 로드 후 상주한다(§5·§11).
    로드 비용이 크므로(초회 수 초~수십 초) 색인 배치·세션 반복 질의에 분할 상환.
@@ -170,5 +173,30 @@ def get_embedder(stub: bool | None = None):
     if stub is None:
         stub = os.environ.get(STUB_ENV_FLAG, "").strip().lower() == "stub"
     if stub not in _EMBEDDER_CACHE:
-        _EMBEDDER_CACHE[stub] = StubEmbedder() if stub else RealEmbedder()
+        _EMBEDDER_CACHE[stub] = StubEmbedder() if stub else ManagedEmbedder()
     return _EMBEDDER_CACHE[stub]
+
+
+class ManagedEmbedder(RealEmbedder):
+    """실모델의 계산 계약을 유지하고 서비스/잠금 adapter를 선택한다."""
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self._request_lock = threading.Lock()
+        self._local_adapter = None
+
+    def embed_many(self, texts: list[str]) -> list[np.ndarray]:
+        from project_brain.embedding_service import LockedLocal, ServiceClient, ServiceUnavailable
+        if not texts:
+            return []
+        with self._request_lock:
+            if self._local_adapter is None:
+                enabled = os.environ.get('PROJECT_BRAIN_EMBED_SERVICE', '1').lower()
+                if enabled not in ('0', 'false', 'off'):
+                    try:
+                        return ServiceClient(self.embedding_identity).embed_many(texts)
+                    except ServiceUnavailable:
+                        pass
+                self._local_adapter = LockedLocal(RealEmbedder())
+            return self._local_adapter.embed_many(texts)

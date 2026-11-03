@@ -40,6 +40,14 @@
 
 ## 진행 중
 
+### 임베딩 서비스와 전역 잠금 (BB2 work-tracker #94)
+
+#93 위에 동일 신원 서비스를 자동 공유하는 adapter와 전역 슬롯 예비 경로를 구현했다.
+서비스 status/stop·doctor 진단·유휴 회수·비정상 종료 복구를 제공한다. 모델·벡터·신원·색인
+계약은 유지한다. 엔진 검증과 실측의 최종 상태는
+[완료 보고](docs/reports/2026-11-03-embedding-service-94.md)를 본다.
+release 게시와 BB2 `brain-release.json`·조회 스킬 갱신은 소비 프로젝트 통합 후속이다.
+
 ### 지식 초안 v2 — 발견·작은 기록·재개·기존 적재 연결 (#108)
 
 실행 정본은 [#108](https://github.com/mooh1222/project-brain/issues/108)이다. 이전 설계 리뷰의

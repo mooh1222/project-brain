@@ -119,6 +119,16 @@ def _project_checks(start) -> list[dict]:
     return checks
 
 
+def _embedding_service_check():
+    import json
+    from project_brain.embedder import get_embedder
+    from project_brain.embedding_service import service_status
+    report = service_status(get_embedder(stub=False).embedding_identity)
+    report['service_enabled'] = os.environ.get('PROJECT_BRAIN_EMBED_SERVICE', '1').lower() not in (
+        '0', 'false', 'off')
+    return True, json.dumps(report, ensure_ascii=False)
+
+
 def diagnose(start=None, *, download: bool = False) -> dict:
     """진단 실행. 반환: {ok, checks:[{name, ok, severity, detail}]} —
     ok는 required 체크가 전부 통과했는지(optional 실패는 안 들어간다)."""
@@ -131,6 +141,7 @@ def diagnose(start=None, *, download: bool = False) -> dict:
         _check("fts5", "required", _fts5_check),
         _check("sqlite-vec", "required", _sqlite_vec_check),
         _check("tokenizer-ko", "required", _tokenizer_check),
+        _check("embed-service", "optional", _embedding_service_check),
         _check("embed-model", "optional", _model_cache_check(download)),
     ]
     checks.extend(_project_checks(start))

@@ -9,7 +9,7 @@
 {
   "schema_version": 1,
   "top_level_commands": [
-    "audit", "bootstrap", "build", "context-replace", "doctor", "draft", "eval", "graph",
+    "audit", "bootstrap", "build", "context-replace", "doctor", "draft", "embedder", "eval", "graph",
     "index", "ingest", "install", "lint", "mark-checked", "migration", "projection",
     "promote", "promote-auto", "query", "search", "session", "show", "snapshot",
     "stale-check"
@@ -17,7 +17,7 @@
   "subcommand_paths": [
     "context-replace apply", "context-replace plan", "draft create", "draft lint",
     "draft list", "draft prepare", "draft show", "draft update", "graph export", "graph isolated",
-    "index rebuild", "migration canonical-repair apply", "migration canonical-repair plan",
+    "embedder status", "embedder stop", "index rebuild", "migration canonical-repair apply", "migration canonical-repair plan",
     "migration display apply", "migration display binding-create",
     "migration display binding-verify", "migration display closure-create",
     "migration display closure-verify", "migration display plan",
@@ -37,7 +37,7 @@
     "src/project_brain/capabilities.py", "src/project_brain/cli.py", "src/project_brain/config.py",
     "src/project_brain/context_projection.py", "src/project_brain/corpus_io.py",
     "src/project_brain/draft.py", "src/project_brain/draft_prepare.py",
-    "src/project_brain/engine_identity.py",
+    "src/project_brain/engine_identity.py", "src/project_brain/embedding_service.py",
     "src/project_brain/evidence_plan.py", "src/project_brain/evidence_preparation.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
@@ -58,7 +58,7 @@
     "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py", "tests/test_engine_identity.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
-    "tests/test_router.py",
+    "tests/test_router.py", "tests/test_embedding_service.py",
     "tests/test_schema.py", "tests/test_search.py", "tests/test_search_index.py",
     "tests/test_session.py", "tests/test_snapshot.py", "tests/test_stale_check.py",
     "tests/test_task18_binding.py", "tests/test_task18_binding_verify.py",
@@ -454,3 +454,24 @@ reference가 기존 원문 대조·개념/진술 확인·coverage·MutationServi
 prepare 성공은 적재 완료나 의미 검증 통과가 아니다. 실제 에이전트 사용 관찰은 #112 후속이다.
 
 변경별 정확한 검증 범위는 [변경 지도](change-map.md)를 따른다.
+
+## 임베딩 서비스와 전역 잠금 (#94)
+
+`get_embedder()`의 실모델 경로는 `ManagedEmbedder`가 서비스 클라이언트를 선택한다.
+`search`·`eval`·`index rebuild` miss가 같은 경로를 쓰며 계산은 기존 `RealEmbedder`가 맡는다.
+`embedding_service.py`는 embedding identity의 정확한 문자열 + protocol version으로 키를 만들고
+연결 직후 두 값이 일치할 때만 텍스트를 전송한다. 서비스는 계산을 직렬화하고 float32 bytes를
+전송하며, 큰 embed_many 입력은 32개씩 나눠 순서를 보존한다. stub 기본 경로는 직접 계산이다.
+
+사용자별 `/tmp/project-brain-embed-<uid>/`(0700)에 socket·start/owner lock·log와 전역 fallback
+slot lock을 둔다. TMPDIR·checkout·identity가 달라도 예비 경로 슬롯은 같은 디렉터리를 쓴다.
+기동 잠금과 프로세스 수명 잠금으로 서비스 중복 로드를 막고, owner 잠금이 풀린 소켓만
+정리한다. flock 파일은 삭제하지 않으며 사망/재부팅 뒤 OS가 잠금을 회수한다.
+서비스가 불가능하면 프로세스 내 adapter가 모델 로드 전 슬롯을 얻어 프로세스 종료까지
+보유한다. 잠금 자체가 불가능하면 로드를 거부하며, 대기 초과는 `embedder_busy`다.
+기본 한 신원당 서비스 1개 + 사용자 전체 예비 모델 1개가 상한이다.
+
+`embedder status`는 기동 없이 현재 신원의 PID·identity·RSS·유휴 시간·모델 적재 상태를
+조회한다. `embedder stop`은 종료 요청 뒤 수명 잠금 해제를 기다린다. doctor의 optional
+`embed-service`도 같은 상태를 보고한다. corpus/index 쓰기는 없고 runtime 디렉터리만 쓴다.
+환경 변수와 기본값은 [README](../../README.md#임베딩-서비스)를 본다.

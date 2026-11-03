@@ -123,6 +123,8 @@ project-brain draft update <topic-id> --expected-sha ... --content-file ... # �
 project-brain draft lint [topic-id]      # 초안 구조·UTF-8·실제 경로 검사
 project-brain draft prepare <topic-id> --item <key> --repo-root ... --target-revision ... --out ...
                                        # 외부 신규/빈 디렉터리에 읽기 전용 적재 재료
+project-brain embedder status              # 현재 신원의 서비스 상태 (기동 없음)
+project-brain embedder stop                # 현재 신원의 서비스 종료·메모리 회수
 project-brain doctor [--download]         # 환경 진단. --download는 모델 cache를 채움
 project-brain --engine-identity          # 내용 신원이 있는 release의 실제 설치 bytes 검증·JSON
 project-brain graph isolated             # 고립(아무도 안 가리킴) 잎 객체 탐지 (코퍼스 불변)
@@ -220,3 +222,24 @@ v0.2.0부터 build는 커밋 archive의 출처·패키지 내용 신원도 포�
 버전은 `pyproject.toml`의 `version`과 tag가 같아야 한다.
 검색·청킹·색인 계약을 바꿨다면 소비 프로젝트의 `brain/checks/`, lint, eval, graph와
 필요한 경우 실모델 rebuild까지 별도로 검증한다.
+
+## 임베딩 서비스
+
+실모델 `search`·`eval`·`index rebuild`는 동일 사용자·동일 embedding identity의 서비스를
+자동 공유한다. 첫 임베딩은 기동·모델 로드 비용이 들고 이후에는 적재된 모델을 재사용한다.
+기본 유휴 10분 뒤 종료하며 `project-brain embedder status`/`stop`으로 조회·종료할 수 있다.
+doctor는 서비스의 신원·PID·RSS를 보고한다. 다른 신원/프로토콜의 서비스는 사용하지 않는다.
+소켓·로그·잠금은 `/tmp/project-brain-embed-<uid>/`에 있고 코퍼스·색인에는 저장하지 않는다.
+
+| 환경 변수 | 기본값 | 의미 |
+|---|---|---|
+| `PROJECT_BRAIN_EMBED_SERVICE` | `1` | `0`/`false`/`off`면 서비스 없이 전역 잠금으로 직접 계산 |
+| `PROJECT_BRAIN_EMBED_SLOTS` | `1` | 사용자 전체 예비 경로의 동시 적재 슬롯 수 (양의 정수) |
+| `PROJECT_BRAIN_EMBED_IDLE_SECONDS` | `600` | 서비스를 새로 띄울 때 적용하는 유휴 종료 시간 |
+| `PROJECT_BRAIN_EMBED_WAIT_SECONDS` | `300` | 서비스 연결/기동 및 전역 슬롯 대기 한도 |
+
+서비스를 사용할 수 없으면 전역 슬롯을 얻은 뒤 직접 모델을 올린다. 이 슬롯은 캐시된 모델이
+살아 있는 프로세스 수명 동안 유지한다. 대기 초과는 원인·재시도 안내를 담은 `embedder_busy`
+오류다. 잠금도 사용할 수 없으면 임베딩을 거부한다. 같은 신원당 서비스 1개 + 사용자 전체
+예비 슬롯 수만큼 모델이 적재될 수 있으므로, 메모리 문제를 피하려면 기본 슬롯 1을 유지한다.
+기존 `PROJECT_BRAIN_EMBEDDER=stub`는 서비스나 전역 슬롯 없이 결정론 가짜 벡터를 만든다.

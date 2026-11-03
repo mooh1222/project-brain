@@ -46,7 +46,7 @@ P0 coverage·timestamp·receipt·installed runtime 변경은 가장 가까운 **
 | mutation·transaction | `mutation.py`, `corpus_io.py`, `transaction_receipt.py`, `ingest.py` | `test_mutation.py`, `test_corpus_io.py`, `test_ingest.py` | ingest 호출·영수증 계약이 바뀌면 runtime | `brain/checks` + `lint`/`audit`; 적용·rollback smoke | 검색 가능한 객체 결과가 바뀌면 필요 | 보통 실제 action은 DB를 무효화하므로 후속 search/eval 전 필요. 단 display migration의 파생물 보존 정책은 기존 DB를 그대로 검증하는 예외 | plan/apply 결속, lock, rollback, 파생물 무효화·보존 정책, batch receipt |
 | 한국어 tokenizer | `tokenize_ko.py` | `test_tokenize_ko.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | **필요** | index/query tokenizer 대칭, kiwipiepy 단일 백엔드·고정 버전, 어절 안 명사 결합형, 규칙 버전 상향 시 옛 색인 StaleIndexError, 정규식은 테스트 주입 전용 결정론 |
 | surface·raw chunk·index schema | `surface.py`, `raw_chunks.py`, `search_index.py` | `test_surface.py`, `test_raw_chunks.py`, `test_search_index.py`, `test_search.py` | 적재 finalizer의 기대 행·결과가 바뀌면 runtime | `brain/checks` + `eval` | 필요 | **필요** | 객체 lane과 raw lane 분리, corpus fingerprint, 원자 DB 교체 |
-| embedder | `embedder.py`, `search_index.py` | `test_embedder.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | 모델·차원·벡터 생성 계약 변경 시 **필요** | index/query 모델 이름·차원 대칭, 테스트는 StubEmbedder |
+| embedder | `embedder.py`, `embedding_service.py`, `search_index.py` | `test_embedder.py`, `test_embedding_service.py`, `test_search_index.py`, `test_search.py` | 보통 불필요 | `brain/checks` + `eval` | 필요 | 모델·차원·벡터 생성 계약 변경 시 **필요** | index/query 모델 이름·차원 대칭, 테스트는 StubEmbedder |
 | checkout 간 벡터 seed (BB2 work-tracker #93) | `index_seeds.py`, `config.py`, `cli.py`, `search_index.py`, `embedder.py` | CLI `test_index_seeds.py` + `test_vector_reuse.py`, `test_embedder.py`, 기존 CLI/config/search index 회귀 | 설치 파일 변경 없음; 엔진 완료 시 runtime unittest | 원본을 수정하지 않는 임시 corpus 복사에서 확인 | seed/cold 회수 동등성 | 호환 실모델 seed를 이용한 첫 rebuild 실측. 동시 임베딩·메모리 위험이 있으면 생략 사유와 미검증 범위를 보고 | 자기 이전 DB 우선, CLI > config > 동일 clone 자동 탐색(원본 우선), 공통 읽기 전용 검증, 전량 재사용 시 모델 미로딩, seeded/computed·경로·폴백 통계 |
 | router·intent·회수·ranking | `intent.py`, `router.py`, `search.py`, `status.py`, `eval_harness.py` | `test_router.py`, `test_search.py`, `test_status.py`, `test_eval_harness.py`, bare/search CLI 회귀 | 설치 조회 스킬이나 query 출력 계약이 바뀌면 runtime + installer 2회 | `brain/checks` + `eval`; 일반 조회 변경이면 표적 search/show | 필요 | 색인 입력과 저장 DB가 그대로면 불필요 | bare/search 동일 회수·동일 freshness 실패, five channels, query 네 결정론 조회 축, reviewed 이름 표면의 결정·scope 일관성, CurrentView source 유효성, mapping stale은 show·Insight는 search 소유 |
 | 공통 어휘 기준(#48·#50 구현)·대표어/동의어/별칭 회수(#49 구현) | `templates/ingest/references/glossary-criteria.md`, 관련 설치 스킬, `router.py`, `surface.py` | #48·#50은 `test_agent_skill_contract.py`, `test_ingest_skill_contract.py`, `test_installer.py`; #49는 `test_router.py`, `test_surface.py`와 회수 표적 테스트 | ingest·session-ingest·draft·audit 조건부 pointer와 installer 첫/두 번째 install | 설치 산출물 합성 검증. #49는 실제 BB2 대표어·동의어·별칭 표적 search + `brain/checks`. 전체 어휘 기계 현황 + 샐리 카누 의미 판정은 #51에서 자동 수정 없이 읽기 전용 보고부터 | #48·#50 연결은 검색 결과를 바꾸지 않아 불필요. #49는 실제 BB2 eval·표적 회상 필요 | #48·#50은 색인 입력을 바꾸지 않아 불필요. #49는 reviewed mapping surface에 aliases를 추가하고 extractor v4로 올렸으므로 실모델 rebuild 필요 | 실제 프로젝트 이름·독립 개념·근거, 코드 토큰 제외, reviewed term+synonyms+aliases 동등 회수, candidate alias 권한·이번 범위의 GCR·공통 verification 제외 |
@@ -104,3 +104,10 @@ PYTHONPATH=<engine-root>/src <engine-root>/.venv/bin/python \
 
 문서만 바꿨다면 architecture 표적 테스트와 엔진 suite로 드리프트를 확인한다. 설치 템플릿이나
 reference를 바꾼 경우에는 문서-only로 줄이지 말고 installer와 설치 runtime까지 확인한다.
+
+#94 서비스/잠금 변경은 벡터 생성·신원·DB 계약을 바꾸지 않으므로 실모델 rebuild는 하지 않는다.
+get_embedder/CLI 하위 프로세스에서 가짜 모델로 동시 첫 기동·정확한 바이트·신원/프로토콜
+거부·소켓 차단 fallback 슬롯/timeout·유휴 종료·kill 복구·stale 파일·rebuild 동등성을 확인한다.
+실코퍼스는 `/tmp` 복사본에서 checks/eval/회상을 확인한다. 실모델 수용 실측은 다른 임베딩
+프로세스·swap 여유를 확인한 뒤 한 번만, 서비스 경로에서 최대 동시 5개로 실행한다.
+위험하면 생략 사유를 보고하며 테스트나 측정으로 띄운 서비스는 반드시 종료한다.

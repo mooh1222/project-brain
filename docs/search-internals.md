@@ -31,24 +31,36 @@
   반드시 같아야 하는 약속이다(`search_index.py:100`).
 - **L2 정규화**된 벡터다 — `encode(..., normalize_embeddings=True)`로 받는다
   (`embedder.py:104-114`). 정규화돼 있어 이후 거리 비교가 깔끔하다.
-- **느긋한 로드(lazy load)**: 모델 객체는 첫 임베딩이 필요할 때 한 번만 올리고 계속
-  재사용한다(`embedder.py:74-100`).
-- **결정론 장치**: 모델 올리기 전 `torch.set_num_threads(1)`로 스레드를 1개로
-  고정한다(`embedder.py:80-87`). 같은 입력이면 항상 같은 벡터가 나오게 하려는 것
-  (torch import 실패 시 스레드 고정만 생략하고 진행).
-- **최대 시퀀스 2,048**: 모델을 올린 직후 `max_seq_length=2048`로 제한한다
-  (`embedder.py:90-99`). raw 청커의 근사는 실제 bge-m3 tokenizer와 같지 않으므로,
-  긴 한글·표 입력이 근사를 통과해도 Metal 어텐션 버퍼가 폭증하지 않게 하는 최종 방어선이다.
-- **모델 실행 배치 크기 1**: #58 실측에서 배치 8은 같은 텍스트도 다른 길이의 텍스트와
-  함께 계산하면 MPS에서 약 `1e-7` 차이를 냈다. 정확한 surface 재사용과 cold/warm
-  벡터 바이트 동치를 위해 모델 내부 실행은 1로 고정한다. 호출자는 miss 전체를 한 번의
-  `embed_many`로 전달하며 cold 중복 surface 계산을 생략하지 않는다.
-- **테스트용 가짜 임베더(`StubEmbedder`)**: 텍스트의 SHA-256 해시 앞 8바이트를 시드로
-  가우시안 난수 벡터를 만들어 L2 정규화한다(`embedder.py:56-60`, model_name
-  `stub:sha256-gaussian`). 모델 없이도 결정론이 보장돼 테스트에서 쓴다.
-  `PROJECT_BRAIN_EMBEDDER=stub`로 켠다(`embedder.py:33`).
-- **인스턴스 캐싱**: 실모델/스텁 여부를 키로 임베더를 1개씩 캐시한다 — 평가에서
-  시나리오마다 실모델(~8초)을 새로 올리던 낭비를 없애려는 것(`embedder.py:117-132`).
+- **느긋한 로드(lazy load)**: `RealEmbedder`는 계산 전용 adapter로 첫 임베딩 때
+  가중치를 올린다. `get_embedder()`는 실모델에 `ManagedEmbedder`를 반환해, 기본으로
+  사용자별 상주 서비스에 텍스트를 보낸다. public 인터페이스와 기존 embedding identity는
+  그대로다(`embedder.py`의 `RealEmbedder`, `ManagedEmbedder`, `get_embedder`).
+- **결정론 장치**: 기존 `torch.set_num_threads(1)`·float32·정규화·최대 시퀀스 2,048·
+  모델 실행 batch_size=1을 서비스와 직접 경로에서 공유한다. 서비스는 계산한 float32
+  bytes를 base64로 전달하고 클라이언트는 숫자 재계산 없이 복원한다.
+  #58에서 확인한 MPS의 혼합 배치 하위 비트 차이를 피하는 설정을 유지한다
+  (`embedder.py`의 `_ensure_model`, `embed_many`; `embedding_service.py`의 `serve`, `ServiceClient`).
+- **서비스의 키·수명**: embedding identity 문자열과 protocol version을 키로 한다.
+  연결 직후 version·identity를 정확히 대조하고, 다르면 텍스트를 보내지 않는다.
+  기동/수명 flock으로 동시에 첫 요청을 보내도 신원당 모델 하나만 올린다.
+  임베딩 요청 없이 기본 600초가 지나면 종료한다. status는 유휴 시간을 연장하지 않는다.
+  소켓·로그·잠금은 사용자별 `/tmp/project-brain-embed-<uid>/`(0700)에 둔다
+  (`embedding_service.py`의 `_paths`, `_connect`, `_ensure_service`, `serve`).
+- **예비 경로**: 소켓 차단·서비스 기동 실패 때 `LockedLocal`이 전역 슬롯(기본 1)을
+  얻은 뒤 모델을 올린다. 프로세스 종료까지 슬롯을 보유해 캐시된 모델도 제한 안에 둔다.
+  기본 300초 대기 뒤 `embedder_busy` 오류로 끝내며 잠금이 불가능해도 로드를 거부한다.
+  flock 파일은 삭제하지 않고 OS가 죽은 소유자의 잠금을 회수한다. stale 소켓은 수명
+  잠금을 얻은 서비스만 제거한다(`embedding_service.py`의 `acquire_slot`, `LockedLocal`).
+- **큰 입력·운영**: `embed_many`는 32개씩 나누어 보내고 순서를 보존한다.
+  `embedder status`/`stop`과 doctor의 `embed-service`가 현재 신원의 PID·identity·RSS를
+  보고하며 status가 새 서비스를 띄우지는 않는다. 설정은 [README](../README.md#임베딩-서비스)
+  (`cli.py`의 `_run_embedder`, `doctor.py`의 `_embedding_service_check`).
+- **테스트용 가짜 임베더(`StubEmbedder`)**: 텍스트 SHA-256 시드의 정규화된 가짜 벡터를
+  만든다. `PROJECT_BRAIN_EMBEDDER=stub`는 서비스/잠금 없이 직접 계산한다. 서비스 회귀는
+  외부 모델 경계에 이 stub을 쓰는 fake를 주입해 실모델을 실행하지 않는다
+  (`embedder.py`의 `StubEmbedder`; `tests/test_embedding_service.py`).
+- **인스턴스 캐싱**: 프로세스 내에서는 실모델/스텁 여부를 키로 임베더 하나씩 캐시하고,
+  프로세스 간에는 동일 신원의 서비스가 가중치를 공유한다(`embedder.py`의 `_EMBEDDER_CACHE`).
 
 ## 2. 토큰화 (`tokenize_ko.py`)
 
