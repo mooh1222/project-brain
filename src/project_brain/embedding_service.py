@@ -11,12 +11,15 @@ import hashlib
 import json
 import math
 import os
+import queue
+import signal
 from pathlib import Path
 import socket
 import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -233,13 +236,17 @@ class ServiceClient:
 class LockedLocal:
     def __init__(self, model):
         self.model = model
+        self.identity = model.embedding_identity
         self.slot = None
 
     def embed_many(self, texts: list[str]) -> list[np.ndarray]:
         if self.slot is None:
             self.slot = acquire_slot()
         # 실패해도 모델이 일부 적재됐을 수 있다. FD를 모델과 함께 프로세스 종료까지 유지한다.
-        return self.model.embed_many(texts)
+        vectors = self.model.embed_many(texts)
+        if self.model.embedding_identity != self.identity:
+            raise EmbedderError('embedding_identity_changed: 실제 임베딩 신원이 사전 신원과 다릅니다')
+        return vectors
 
 
 def _rss_bytes() -> int | None:
@@ -286,64 +293,88 @@ def serve() -> None:
     lock = _try_lock(owner)
     if lock is None:
         return
+
+    # 모델 계산은 단일 worker에서 직렬화한다. listener는 계산 중에도 status/stop을 받는다.
+    work = queue.Queue()
+    state_lock = threading.Lock()
+    pending = 0
+    last_request = time.monotonic()
+
+    def embed_worker():
+        nonlocal pending, last_request
+        while True:
+            conn, texts = work.get()
+            with conn:
+                try:
+                    rows = model.embed_many(texts)
+                    if model.embedding_identity != identity:
+                        raise EmbedderError('embedding_identity_changed: 모델 실행 신원 변경')
+                    _send(conn, {'vectors': base64.b64encode(
+                        b''.join(row.astype('<f4', copy=False).tobytes() for row in rows)
+                    ).decode('ascii')})
+                except Exception as exc:
+                    try:
+                        _send(conn, {'error': f'{type(exc).__name__}: {exc}'})
+                    except OSError:
+                        pass
+                finally:
+                    with state_lock:
+                        pending -= 1
+                        last_request = time.monotonic()
+
+    threading.Thread(target=embed_worker, daemon=True).start()
     try:
-        sock.unlink(missing_ok=True)  # owner lock 확보: 살아 있는 서비스의 소켓은 제거하지 않음.
+        sock.unlink(missing_ok=True)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             server.bind(str(sock))
             os.chmod(sock, 0o600)
             server.listen(64)
             idle = setting('IDLE_SECONDS', 600)
-            last_request = time.monotonic()
-            stopping = False
-            while not stopping:
-                remaining = idle - (time.monotonic() - last_request)
-                if remaining <= 0:
-                    break
-                server.settimeout(remaining)
+            while True:
+                with state_lock:
+                    if pending == 0 and time.monotonic() - last_request >= idle:
+                        break
+                server.settimeout(min(0.2, idle))
                 try:
                     conn, _ = server.accept()
                 except socket.timeout:
-                    break
-                with conn:
+                    continue
+                transferred = False
+                try:
                     conn.settimeout(setting('WAIT_SECONDS', 300))
-                    try:
-                        _send(conn, {'version': PROTOCOL_VERSION, 'identity': identity})
-                        request = _receive(conn)
-                    except (OSError, ValueError, ServiceUnavailable):
-                        continue
-                    try:
-                        op = request.get('op')
-                        if op == 'embed':
-                            texts = request.get('texts')
-                            if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
-                                raise ValueError('texts는 문자열 배열이어야 합니다')
-                            rows = model.embed_many(texts)
-                            if model.embedding_identity != identity:
-                                raise ValueError('모델 로드 후 embedding_identity 변경')
-                            payload = {'vectors': base64.b64encode(
-                                b''.join(row.astype('<f4', copy=False).tobytes() for row in rows)
-                            ).decode('ascii')}
-                        elif op == 'status':
-                            payload = {'pid': os.getpid(), 'identity': identity,
-                                       'version': PROTOCOL_VERSION, 'rss_bytes': _rss_bytes(),
-                                       'idle_seconds': idle, 'model_loaded': model._model is not None}
-                        elif op == 'stop':
-                            stopping = True
-                            payload = {'stopped': True}
-                        else:
-                            raise ValueError('알 수 없는 임베딩 서비스 명령')
-                        if op == 'embed':
-                            last_request = time.monotonic()
-                        _send(conn, payload)
-                    except Exception as exc:
-                        try:
-                            _send(conn, {'error': f'{type(exc).__name__}: {exc}'})
-                        except OSError:
-                            pass
+                    _send(conn, {'version': PROTOCOL_VERSION, 'identity': identity})
+                    request = _receive(conn)
+                    op = request.get('op')
+                    if op == 'embed':
+                        texts = request.get('texts')
+                        if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+                            raise ValueError('texts는 문자열 배열이어야 합니다')
+                        with state_lock:
+                            pending += 1
+                        work.put((conn, texts))
+                        transferred = True
+                    elif op == 'status':
+                        with state_lock:
+                            busy = pending > 0
+                        _send(conn, {'pid': os.getpid(), 'identity': identity,
+                                     'version': PROTOCOL_VERSION, 'rss_bytes': _rss_bytes(),
+                                     'idle_seconds': idle, 'busy': busy,
+                                     'model_loaded': model._model is not None})
+                    elif op == 'stop':
+                        _send(conn, {'stopped': True})
+                        # native encode 도중에도 메모리를 반환한다. OS가 모델과 수명 FD를
+                        # 함께 회수한다. 남은 소켓은 다음 owner가 안전하게 정리한다.
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    else:
+                        _send(conn, {'error': '알 수 없는 임베딩 서비스 명령'})
+                except (OSError, ValueError, ServiceUnavailable):
+                    pass  # handshake probe/클라이언트 이탈은 서비스 종료 이유가 아니다.
+                finally:
+                    if not transferred:
+                        conn.close()
     finally:
         sock.unlink(missing_ok=True)
-        # 모델 native 메모리가 회수되기 전에 잠금을 풀지 않는다. 프로세스 종료가 FD를 회수한다.
-        # lock을 지역으로 유지해 실행 중 재수집되지 않게 한다 (int FD는 GC가 닫지 않음).
+        # native 메모리 회수 전에 owner FD를 풀지 않는다. 프로세스 종료가 회수한다.
 
 
 if __name__ == '__main__':

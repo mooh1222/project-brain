@@ -186,6 +186,12 @@ class ManagedEmbedder(RealEmbedder):
         self._request_lock = threading.Lock()
         self._local_adapter = None
 
+    @property
+    def embedding_identity(self) -> str:
+        if self._local_adapter is not None:
+            return self._local_adapter.model.embedding_identity
+        return super().embedding_identity
+
     def embed_many(self, texts: list[str]) -> list[np.ndarray]:
         from project_brain.embedding_service import LockedLocal, ServiceClient, ServiceUnavailable
         if not texts:

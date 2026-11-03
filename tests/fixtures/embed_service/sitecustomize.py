@@ -17,6 +17,7 @@ if os.environ.get('PB_TEST_DIR'):
         dtype = 'torch.float32'
 
         def __init__(self, *args, **kwargs):
+            self.dtype = os.environ.get('PB_TEST_DTYPE', 'torch.float32')
             event('load')
             import atexit
             atexit.register(lambda: event('unload'))

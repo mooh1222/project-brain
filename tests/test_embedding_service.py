@@ -232,3 +232,40 @@ def test_doctor_reports_service_without_starting_model(env):
     after = cli(env, 'doctor')
     state = json.loads(next(c for c in after['checks'] if c['name'] == 'embed-service')['detail'])
     assert state['running'] and state['rss_bytes'] > 0 and state['identity']
+
+
+def test_fallback_rejects_model_identity_change_before_publishing_index(env, tmp_path):
+    from tests.test_index_seeds import corpus
+    brain = corpus(tmp_path / 'brain')
+    target = tmp_path / 'index.db'
+    result = subprocess.run(
+        [sys.executable, '-m', 'project_brain.cli', 'index', 'rebuild',
+         '--brain-root', str(brain), '--db', str(target), '--seed', str(tmp_path / 'absent')],
+        env={**env, 'PROJECT_BRAIN_EMBED_SERVICE': '0', 'PB_TEST_DTYPE': 'torch.float16'},
+        capture_output=True, text=True, timeout=25)
+    assert result.returncode != 0
+    assert 'identity' in result.stdout + result.stderr
+    assert not target.exists()
+
+
+def test_busy_service_still_reports_status_and_stops(env):
+    import time
+    delayed = {**env, 'PB_TEST_DELAY': '4'}
+    child = subprocess.Popen([sys.executable, '-c', EMBED], env=delayed,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not any(e[0] == 'begin' for e in events(env)) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # 대기 중 클라이언트가 stop 뒤 자동 복구로 서비스를 다시 띄우지 않게 종료한다.
+        # 서비스는 여전히 4초 fake encode를 수행 중이다.
+        child.terminate()
+        child.communicate(timeout=5)
+        state = cli(env, 'embedder', 'status')
+        assert state['running'] and state['busy']
+        assert cli(env, 'embedder', 'stop')['stopped']
+        assert not cli(env, 'embedder', 'status')['running']
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
