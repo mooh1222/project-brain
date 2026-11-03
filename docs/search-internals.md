@@ -139,6 +139,8 @@ seed 선택은 반복 가능한 `index rebuild --seed <DB>` > `.project-brain.js
 `index_seeds.py`는 대상 코퍼스가 속한 Git 공용 디렉터리의 다른 checkout만 탐색한다.
 Git worktree 목록의 원본 checkout을 우선하고 각 checkout의 config에서 DB 위치를 읽는다.
 config가 없으면 대상 DB의 checkout 상대 위치를 대응시킨다. 임시 rebuild DB는 후보가 아니다.
+config의 DB 실경로가 별도 Git clone에 속하면 자동 후보에서 제외한다. 비-Git 외부 cache는
+config가 지정한 경로를 허용하며, CLI/config의 명시 seed 목록에는 자동 탐색 제한을 적용하지 않는다.
 다른 checkout의 corpus 경로·지문을 현재 corpus와 같다고 가정하지 않고 벡터만 가져온다.
 
 자기 이전 DB와 seed 모두 URI `mode=ro`로 열어 schema·identity·tokenizer·extractor의 현재값 일치,
@@ -166,6 +168,7 @@ identity가 없으므로 첫 실행은 전체 계산이다. 기존 lock·임시 
 `conflicting_surface_vectors`, `unreadable_previous_index`다.
 FTS 전용 API 호출은 `embedding_disabled`와 벡터 통계 0을 반환한다.
 자동 탐색 실패는 `seed_discovery_failed`, 타 checkout의 잘못된 config는 `invalid_seed_config`다.
+자동 후보 DB가 별도 clone에 속하면 `seed_clone_mismatch`다.
 전체 = 자기 재사용 + seed 재사용 + 새 계산이며, 이 통계는 DB metadata에 저장하지 않아
 cold/warm 결과가 같다. seed가 있다는 사실만으로 computed=0이나 짧은 실행 시간이 보장되지는 않는다.
 

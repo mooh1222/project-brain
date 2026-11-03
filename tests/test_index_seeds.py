@@ -206,12 +206,21 @@ def test_auto_does_not_search_other_clones(tmp_path, monkeypatch):
     git(tmp_path, 'clone', '-q', str(original), str(other))
     other_brain = corpus(other / 'brain')
     rebuild(other_brain, other_brain / '.brain-local/index.db')
-    brain = corpus(original / 'brain')
-    monkeypatch.chdir(original)
+    target = tmp_path / 'target'
+    git(original, 'worktree', 'add', '-qb', 'target', str(target))
+    corpus(target / 'brain')
+    # 같은 clone의 config가 별도 clone DB를 가리켜도 자동 seed로 채택하지 않는다.
+    (original / '.project-brain.json').write_text(json.dumps({
+        'db': str(other_brain / '.brain-local/index.db'),
+    }))
+    monkeypatch.chdir(target)
     result = run_cli('index', 'rebuild', '--stub-embedder')
     assert result['vectors_seeded'] == 0
     assert result['vectors_computed'] == 3
     assert result['seed_paths'] == []
+    assert result['seed_fallbacks'] == [{
+        'path': str(other_brain / '.brain-local/index.db'), 'reason': 'seed_clone_mismatch',
+    }]
 
 
 def git(root, *args):
@@ -251,6 +260,13 @@ def test_auto_discovers_same_clone_original_first_and_config_can_disable(tmp_pat
     assert result['seed_paths'] == [str(sibling_db)]
     assert result['seed_fallbacks'] == [
         {'path': str(original_db), 'reason': 'unreadable_previous_index'},
+    ]
+    (original / '.project-brain.json').write_text('[]')
+    invalid_config = rebuild(target / 'data/knowledge', target / 'invalid-config.db')
+    assert invalid_config['vectors_seeded'] == 3
+    assert invalid_config['seed_paths'] == [str(sibling_db)]
+    assert invalid_config['seed_fallbacks'] == [
+        {'path': str(original / '.project-brain.json'), 'reason': 'invalid_seed_config'},
     ]
     config['index_seeds'] = []
     (target / '.project-brain.json').write_text(json.dumps(config))

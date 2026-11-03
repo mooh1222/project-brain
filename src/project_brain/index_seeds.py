@@ -47,8 +47,15 @@ def resolve_index_seeds(explicit, *, brain_root: Path, db_path: Path) -> tuple[l
                 # config가 없으면 현재 DB의 checkout 상대 위치만 대응시킨다.
                 candidate = checkout / db_path.resolve().relative_to(current_path)
             if candidate.is_file():
-                candidates.append(candidate.resolve())
-        except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+                candidate = candidate.resolve()
+                # config의 절대 경로/심링크가 다른 clone으로 연결될 수 있다.
+                # 비-Git 외부 cache는 기존 config 계약대로 허용한다.
+                source_common = _git(candidate.parent, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+                if source_common and Path(source_common).resolve() != common_path:
+                    failures.append({'path': str(candidate), 'reason': 'seed_clone_mismatch'})
+                    continue
+                candidates.append(candidate)
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
             failures.append({'path': str(checkout / CONFIG_FILENAME),
                              'reason': 'invalid_seed_config'})
     return candidates, failures
