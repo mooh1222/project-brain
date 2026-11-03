@@ -117,6 +117,14 @@ replacement spec #47의 활성 결과는 네 개로 제한한다.
 
 ## 완료 단계
 
+### checkout 간 벡터 seed (BB2 work-tracker #93)
+
+자기 이전 색인 → 읽기 전용 seed의 exact surface 벡터를 재사용한다. 반복 `--seed` > config
+`index_seeds` > 같은 Git 공용 디렉터리의 다른 checkout 자동 탐색(원본 우선)을 지원한다.
+전량 재사용 시 실모델 가중치를 로드하지 않는다. 엔진 CLI 합성 검증과 메모리 사고 조사는
+[결과 보고](docs/reports/2026-11-03-index-seeds-93.md)에 기록한다. 사용자의 안전 지시에 따라
+실모델 실측은 생략했다. release·BB2 prepare/TEAM_SETUP 통합·실코퍼스 수용은 후속이다.
+
 ### 반복 색인의 자동 벡터 재사용 (#57·#58)
 
 기존 `index rebuild`에서 마지막 정상 색인의 exact surface 벡터를 자동 재사용하고,

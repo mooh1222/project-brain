@@ -9,6 +9,7 @@
   db:         색인 DB (기본 <brain_root>/.brain-local/index.db)
   scenarios:  골든셋 시나리오 (기본 <brain_root>/eval_scenarios.json)
   project:    스킬 주입 시 표시할 프로젝트 이름 (install이 사용)
+  index_seeds: 벡터 재사용 원천 DB 경로 배열 (없으면 같은 clone 자동 탐색)
 
 우선순위는 항상 명시 인자 > config > ConfigError — 침묵 기본값으로 엉뚱한
 코퍼스를 읽는 사고를 막는다.
@@ -135,6 +136,24 @@ def resolve_db_path(explicit=None, start=None) -> Path:
 
 def resolve_scenarios_path(explicit=None, start=None) -> Path:
     return _resolve(explicit, "scenarios", "골든셋 시나리오", start=start)
+
+
+def configured_index_seeds(explicit=None, *, start=None) -> list[Path] | None:
+    """명시값 > config. None은 자동 탐색, 빈 배열은 자동 탐색을 끈다."""
+    if explicit is not None:
+        return [Path(path).absolute() for path in explicit]
+    document = _config_document(start=start)
+    if document is None:
+        return None
+    cfg_path, raw = document
+    if "index_seeds" not in raw:
+        return None
+    seeds = raw["index_seeds"]
+    if not isinstance(seeds, list) or any(
+        not isinstance(path, str) or not path.strip() for path in seeds
+    ):
+        raise ConfigError("index_seeds는 비어 있지 않은 DB 경로 문자열의 배열이어야 한다.")
+    return [(cfg_path.parent / path).absolute() for path in seeds]
 
 
 def resolve_default_branch(explicit=None, *, start=None) -> str:

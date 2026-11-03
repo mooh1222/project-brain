@@ -110,12 +110,17 @@ class RealEmbedderLazyTest(unittest.TestCase):
 
     def test_lazy_load_sets_max_sequence_length(self):
         class FakeModel:
-            def __init__(self, name, *, revision):
+            def __init__(self, name, *, revision, device, model_kwargs):
                 self.name = name
                 self.revision = revision
+                self.device = device
+                self.model_kwargs = model_kwargs
                 self.max_seq_length = None
 
-        fake_module = types.SimpleNamespace(SentenceTransformer=FakeModel)
+        fake_module = types.SimpleNamespace(
+            SentenceTransformer=FakeModel,
+            util=types.SimpleNamespace(get_device_name=lambda: "cpu"),
+        )
         with patch.dict(sys.modules, {"sentence_transformers": fake_module,
                                      "torch": types.SimpleNamespace(set_num_threads=lambda n: None)}):
             e = RealEmbedder()
@@ -123,6 +128,8 @@ class RealEmbedderLazyTest(unittest.TestCase):
         self.assertEqual(e._model.max_seq_length, 2048)
         from project_brain.embedder import REAL_MODEL_REVISION
         self.assertEqual(e._model.revision, REAL_MODEL_REVISION)
+        self.assertEqual(e._model.device, "cpu")
+        self.assertEqual(e._model.model_kwargs, {"dtype": "float32"})
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ from pathlib import Path
 
 from project_brain.config import resolve_brain_root, resolve_db_path
 from project_brain.embedder import EMBED_DIM
+from project_brain.index_seeds import resolve_index_seeds
 from project_brain.lint import projection_is_fresh
 from project_brain.raw_chunks import RAW_KIND, RAW_STATUS, iter_raw_sources
 from project_brain.store import BrainStore
@@ -241,6 +242,7 @@ def _previous_vectors(db_path: Path, identity: str) -> tuple[dict[str, bytes], s
         if not db_path.exists():
             return {}, "no_previous_index"
         conn = _vec_connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn.execute("PRAGMA busy_timeout=0")
         conn.execute("BEGIN")
         if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             return {}, "invalid_previous_index"
@@ -265,6 +267,10 @@ def _previous_vectors(db_path: Path, identity: str) -> tuple[dict[str, bytes], s
                 or not isinstance(fingerprint, str) or len(fingerprint) != 64
                 or any(c not in "0123456789abcdef" for c in fingerprint)):
             return {}, "invalid_previous_index"
+        if tokenizer != tokenizer_signature():
+            return {}, "tokenizer_mismatch"
+        if extractor != EXTRACTOR_VERSION:
+            return {}, "extractor_version_mismatch"
         # Resolve every required column, even fields not used as reuse keys.
         conn.execute(
             "SELECT kind, status, context_id, content_hash FROM documents LIMIT 0"
@@ -298,7 +304,7 @@ def _previous_vectors(db_path: Path, identity: str) -> tuple[dict[str, bytes], s
             conn.close()
 
 
-def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
+def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict:
     """brain/ 전 객체에서 FTS(+벡터) 색인을 전체 재구축한다(§4).
 
     새 DB를 같은 디렉터리에 완성·검증한 뒤에만 원자 교체한다. os.replace 전 실패는
@@ -310,9 +316,11 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
 
     embedder: 주면 표면 원문(토큰화 전 §3.3)을 임베딩해 documents_vec에 저장한다.
     None이면 FTS만 색인(벡터 테이블은 비어 있음) — 무회귀 FTS 테스트·CI용. embedder가
-    있으면 이전 정상 색인의 exact surface 벡터를 재사용하고 miss만 batch 임베딩한다.
+    있으면 자기 이전 정상 색인 → seeds의 exact surface 벡터를 재사용하고 miss만 batch
+    임베딩한다. seeds=None은 config > 동일 clone 자동 탐색, []는 자동 탐색을 끈다.
 
-    반환: 기존 색인 통계 + vectors_total/reused/computed, fallback 사유, 총 소요 시간.
+    반환: 기존 통계 + vectors_total/reused/seeded/computed, seed_paths/seed_fallbacks,
+    자기 이전 색인의 fallback 사유, 총 소요 시간.
     """
     started = time.perf_counter()
     db_path = resolve_db_path(db_path)
@@ -334,6 +342,31 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                 _previous_vectors(db_path, identity) if embedder is not None
                 else ({}, "embedding_disabled")
             )
+            seeded = {}
+            seed_sources = {}
+            seed_fallbacks = []
+            if embedder is not None:
+                candidates, seed_fallbacks = resolve_index_seeds(
+                    seeds, brain_root=brain_root, db_path=db_path,
+                )
+                seen_seeds = {db_path.resolve()}
+                for seed in candidates:
+                    try:
+                        seed_path = Path(seed).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        seed_fallbacks.append({"path": str(seed), "reason": "unreadable_previous_index"})
+                        continue
+                    if seed_path in seen_seeds:
+                        continue
+                    seen_seeds.add(seed_path)
+                    vectors, reason = _previous_vectors(seed_path, identity)
+                    if reason:
+                        seed_fallbacks.append({"path": str(seed_path), "reason": reason})
+                        continue
+                    for surface, vector in vectors.items():
+                        if surface not in previous and surface not in seeded:
+                            seeded[surface] = vector
+                            seed_sources[surface] = seed_path
 
             conn = _connect(temp_path)
             try:
@@ -404,13 +437,21 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
                 # the freshly assembled corpus, including raw chunks.
                 hits = [(row_id, previous[surface]) for row_id, surface in pending_vectors
                         if surface in previous]
+                seed_hits = [(row_id, seeded[surface]) for row_id, surface in pending_vectors
+                             if surface not in previous and surface in seeded]
+                seed_paths = list(dict.fromkeys(
+                    str(seed_sources[surface]) for _, surface in pending_vectors
+                    if surface not in previous and surface in seeded
+                ))
                 misses = [(row_id, surface) for row_id, surface in pending_vectors
-                          if surface not in previous]
+                          if surface not in previous and surface not in seeded]
                 conn.executemany(
-                    "INSERT INTO documents_vec (rowid, embedding) VALUES (?, ?)", hits,
+                    "INSERT INTO documents_vec (rowid, embedding) VALUES (?, ?)", hits + seed_hits,
                 )
                 if misses:
                     vectors = embedder.embed_many([surface for _, surface in misses])
+                    if getattr(embedder, "embedding_identity", "") != identity:
+                        raise RuntimeError("임베딩 실행 신원이 사전 신원과 다릅니다. 색인을 교체하지 않습니다.")
                     if len(vectors) != len(misses):
                         raise RuntimeError("임베딩 결과 수가 요청한 surface 수와 다릅니다.")
                     conn.executemany(
@@ -460,6 +501,9 @@ def rebuild(brain_root=None, db_path=None, embedder=None) -> dict:
         "db": str(db_path),
         "vectors_total": len(pending_vectors),
         "vectors_reused": len(hits),
+        "vectors_seeded": len(seed_hits),
+        "seed_paths": seed_paths,
+        "seed_fallbacks": seed_fallbacks,
         "vectors_computed": len(misses),
         "vector_reuse_fallback": fallback,
         "elapsed_seconds": time.perf_counter() - started,

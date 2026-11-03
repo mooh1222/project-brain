@@ -174,6 +174,13 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 | `.project-brain.json`, 설치 스킬, 설치 manifest | `install`, `bootstrap` | 프로젝트 연결 설정과 에이전트 사용면 | installer 소유권·보존 규칙에 따라 재실행 |
 | 모델 cache | `doctor --download`, 실모델 색인 | 외부 모델 로컬 cache | 다시 download/load |
 
+`index rebuild`는 자기 이전 DB → seed의 exact surface 벡터를 읽기 전용으로 재사용한다.
+`--seed`(반복) > config `index_seeds` > 같은 Git 공용 디렉터리의 다른 checkout 자동 탐색이며
+원본 checkout을 먼저 본다. `index_seeds.py`가 후보 선택, `search_index.py`의 공통 reader가
+호환성·무결성 검증을 맡는다. 색인 DB와 corpus는 계속 checkout별로 두고 대상 DB만 원자
+교체한다. 전량 재사용이면 `RealEmbedder` 가중치를 로드하지 않는다. 통계와 폴백 사유는
+[검색 내부 구조](../search-internals.md#자동-벡터-재사용-5758-bb2-work-tracker-93)를 본다.
+
 raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르다. 일반 코퍼스 mutation은
 `index.db*`와 stale cache를 무효화하지만 자동으로 rebuild하지 않는다.
 

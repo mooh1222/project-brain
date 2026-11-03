@@ -119,20 +119,33 @@ SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_ind
   임베딩한 뒤, `sqlite_vec.serialize_float32`로 직렬화해 넣는다
   (`search_index.py:199-210,234-238`).
 
-### 자동 벡터 재사용 (#57·#58)
+### 자동 벡터 재사용 (#57·#58, BB2 work-tracker #93)
 
-새 DB와 FTS는 매번 전체를 다시 만든다. 벡터만 마지막 정상 완료 live index에서
+새 DB와 FTS는 매번 전체를 다시 만든다. 벡터만 자기 마지막 정상 완료 live index → seed 순서로
 **정확히 같은 `surface_text`**를 키로 복사하며, miss만 한 번의 `embed_many`로 계산한다.
 객체·raw가 같은 규칙을 쓰며 ID·status·content hash·corpus fingerprint는 벡터 재사용 키가 아니다.
 
 Embedder가 `embedding_identity`를 소유한다. 실모델은 불변 Hugging Face revision
 `5617a9f61b028005a4858fdac845db406aefb181`에 고정하고 최대 길이, 정규화, 출력 차원·dtype,
 실행 device·모델 dtype, 라이브러리 버전을 identity에 포함한다. 배치 크기를 사용자가 조절하지 않으며, 실행 의미 버전 2로 배치 독립 계산을 구분한다.
-가중치 로드는 전량 재사용에서도 수행할 수 있다.
+신원 조회는 가중치를 로드하지 않는다. 로더에도 동일한 device·float32를 명시하며 실제
+임베딩 뒤 신원이 사전 신원과 달라지면 교체를 거부한다. 전량 재사용이면 모델을 로드하지 않는다.
 
-이전 DB를 읽기 전용으로 열어 schema·identity, SQLite 무결성, 단일 metadata, 문서/FTS 일치,
+seed 선택은 반복 가능한 `index rebuild --seed <DB>` > `.project-brain.json`의
+`index_seeds` 경로 배열 > 자동 탐색이다. CLI 상대 경로는 cwd, config 상대 경로는 config
+위치 기준이다. `index_seeds: []`(Python API는 `seeds=[]`)로 자동 탐색을 끌 수 있다.
+명시 목록은 하위 우선순위 목록과 합치지 않는다.
+
+`index_seeds.py`는 대상 코퍼스가 속한 Git 공용 디렉터리의 다른 checkout만 탐색한다.
+Git worktree 목록의 원본 checkout을 우선하고 각 checkout의 config에서 DB 위치를 읽는다.
+config가 없으면 대상 DB의 checkout 상대 위치를 대응시킨다. 임시 rebuild DB는 후보가 아니다.
+다른 checkout의 corpus 경로·지문을 현재 corpus와 같다고 가정하지 않고 벡터만 가져온다.
+
+자기 이전 DB와 seed 모두 URI `mode=ro`로 열어 schema·identity·tokenizer·extractor의 현재값 일치,
+SQLite 무결성, 단일 metadata, 문서/FTS 일치,
 문서/벡터 row ID 일치, 벡터 길이·유한값, 동일 surface의 벡터 충돌을 검사한다. 하나라도
-실패하면 이전 DB **전체**를 포기한다. 중단된 임시 DB는 읽지 않는다. 기능 도입 전 색인은
+실패하면 해당 DB **전체**를 포기한다. seed 실패는 사유를 기록하고 다음 seed로 진행하며,
+SQLite 잠금은 기다리지 않고 fallback한다. 중단된 임시 DB는 읽지 않는다. 기능 도입 전 색인은
 identity가 없으므로 첫 실행은 전체 계산이다. 기존 lock·임시 DB 검사·fsync·원자 교체는 유지한다.
 
 `index rebuild` 완료 JSON의 추가 필드:
@@ -141,15 +154,20 @@ identity가 없으므로 첫 실행은 전체 계산이다. 기존 lock·임시 
 |---|---|
 | `vectors_total` | 현재 벡터 대상 행 수 |
 | `vectors_reused` | 이전 정상 색인에서 복사한 행 수 |
+| `vectors_seeded` | seed에서 복사한 행 수 |
+| `seed_paths` | 실제 벡터를 제공한 seed의 절대 DB 경로 배열 |
+| `seed_fallbacks` | 사용할 수 없던 seed의 `{path, reason}` 배열 |
 | `vectors_computed` | 새로 계산한 행 수 |
-| `vector_reuse_fallback` | 정상 재사용 원천이면 `null`, 아니면 전체 계산 사유 |
+| `vector_reuse_fallback` | 자기 이전 색인이 정상이면 `null`, 아니면 자기 이전 색인 폴백 사유(seed 사용과 독립) |
 | `elapsed_seconds` | 경로 해석부터 교체·동기화까지 총 시간(초) |
 
 사유는 `no_previous_index`, `legacy_index`, `fts_only_index`,
-`embedding_identity_mismatch`, `invalid_previous_index`,
+`embedding_identity_mismatch`, `tokenizer_mismatch`, `extractor_version_mismatch`, `invalid_previous_index`,
 `conflicting_surface_vectors`, `unreadable_previous_index`다.
 FTS 전용 API 호출은 `embedding_disabled`와 벡터 통계 0을 반환한다.
-전체 = 재사용 + 새 계산이며, 이 통계는 DB metadata에 저장하지 않아 cold/warm 결과가 같다.
+자동 탐색 실패는 `seed_discovery_failed`, 타 checkout의 잘못된 config는 `invalid_seed_config`다.
+전체 = 자기 재사용 + seed 재사용 + 새 계산이며, 이 통계는 DB metadata에 저장하지 않아
+cold/warm 결과가 같다. seed가 있다는 사실만으로 computed=0이나 짧은 실행 시간이 보장되지는 않는다.
 
 특징 몇 가지:
 

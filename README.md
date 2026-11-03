@@ -108,6 +108,7 @@ project-brain search "<질문>"            # fresh index 기반 5채널 의미 �
 project-brain show <id>                  # 선택한 객체 본문 + 1-hop 이웃 + mapping stale 정보
 project-brain query "<질문>"             # 변경 이유·현재·과거·근거 사슬만 결정론 계산
 project-brain index rebuild              # 코퍼스에서 색인 전체 재구축 (파생물)
+project-brain index rebuild --seed /path/to/index.db  # 벡터 원천 DB (반복 가능)
 project-brain ingest --objects-file f    # 객체 묶음 적재 (스키마+lint 원자적)
 project-brain promote --ids ...          # candidate → reviewed 승격 (검토 기록 동반)
 project-brain eval                       # 골든셋 회귀 (실모델)

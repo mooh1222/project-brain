@@ -1211,7 +1211,7 @@ def _run_promote_auto(argv) -> int:
 def _run_index(argv) -> int:
     """FTS + 벡터 색인 빌드 (스펙 §3.3·§4·§6, 슬라이스 2·3). 현재 하위명령은 rebuild만.
 
-    `index rebuild [--brain-root <path>] [--db <path>] [--stub-embedder]` — brain/ 전
+    `index rebuild [--brain-root <path>] [--db <path>] [--seed <DB>] [--stub-embedder]` — brain/ 전
     객체에서 전체 재구축(검증한 새 DB로 원자 교체). 미지정 경로는 config에서 해석.
 
     임베딩: 기본은 실모델(bge-m3) — 수백 개 배치 임베딩이라 시간이 걸리는 게 정상(§11).
@@ -1221,6 +1221,7 @@ def _run_index(argv) -> int:
     parser.add_argument("subcommand", choices=["rebuild"])
     parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
     parser.add_argument("--db", help="색인 DB 경로 (기본: config)")
+    parser.add_argument("--seed", action="append", help="벡터 재사용 원천 DB (반복 가능)")
     parser.add_argument("--stub-embedder", action="store_true",
                         help="실모델 대신 stub 임베더 사용(테스트·CI 결정론, §5)")
     args = parser.parse_args(argv)
@@ -1228,7 +1229,7 @@ def _run_index(argv) -> int:
     try:
         # --stub-embedder 플래그면 강제 stub, 아니면 환경 플래그로 판정(get_embedder 기본).
         embedder = get_embedder(stub=True) if args.stub_embedder else get_embedder()
-        stats = index_rebuild(args.brain_root, args.db, embedder=embedder)
+        stats = index_rebuild(args.brain_root, args.db, embedder=embedder, seeds=args.seed)
     except Exception as exc:
         print(json.dumps(_index_rebuild_error_report(exc), ensure_ascii=False, indent=2))
         return 1
@@ -1240,6 +1241,9 @@ def _run_index(argv) -> int:
          "embed_model": stats["embed_model"], "db": stats["db"],
          "vectors_total": stats["vectors_total"],
          "vectors_reused": stats["vectors_reused"],
+         "vectors_seeded": stats["vectors_seeded"],
+         "seed_paths": stats["seed_paths"],
+         "seed_fallbacks": stats["seed_fallbacks"],
          "vectors_computed": stats["vectors_computed"],
          "vector_reuse_fallback": stats["vector_reuse_fallback"],
          "elapsed_seconds": stats["elapsed_seconds"]},

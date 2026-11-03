@@ -7,7 +7,7 @@ spec: docs/superpowers/specs/2026-06-10-project-brain-search-layer-design.md
 
 두 종류:
 1. RealEmbedder — bge-m3 로컬(sentence-transformers). ★lazy 로드★: import·생성
-   시점에는 모델을 안 올리고, 첫 임베딩 또는 identity 조회에서 1회 로드 후 상주한다(§5·§11).
+   시점·identity 조회에는 가중치를 안 올리고, 첫 임베딩에서 1회 로드 후 상주한다(§5·§11).
    로드 비용이 크므로(초회 수 초~수십 초) 색인 배치·세션 반복 질의에 분할 상환.
 2. StubEmbedder — 텍스트 SHA-256 시드 가짜 벡터(결정론). 모델·네트워크 없이
    테스트가 결정론으로 돈다(§5). 같은 텍스트→같은 벡터, L2 노름≈1 유지.
@@ -75,14 +75,24 @@ class StubEmbedder:
 class RealEmbedder:
     """bge-m3 로컬 임베더 (sentence-transformers, lazy 로드 §5).
 
-    생성 시점엔 모델을 안 올린다. 첫 embed/embed_many 또는 embedding_identity 조회에서
-    1회 로드 후 상주한다.
+    생성·embedding_identity 조회에는 가중치를 올리지 않는다. 첫 embed/embed_many에서
+    1회 로드 후 상주한다. 실행 device와 float32를 로더에도 명시해 사전 신원과 일치시킨다.
     """
 
     model_name = REAL_MODEL_NAME
 
     def __init__(self):
         self._model = None  # lazy — 첫 호출에서 로드
+        self._device = None
+
+    def _execution_device(self) -> str:
+        if self._device is None:
+            from sentence_transformers import util
+
+            device = util.get_device_name()
+            # parameter.device는 MPS 등 index 생략 장치도 ':0'으로 보고한다.
+            self._device = device if device == "cpu" or ":" in device else f"{device}:0"
+        return self._device
 
     def _ensure_model(self):
         if self._model is not None:
@@ -97,7 +107,10 @@ class RealEmbedder:
             pass
         from sentence_transformers import SentenceTransformer  # type: ignore
 
-        self._model = SentenceTransformer(self.model_name, revision=REAL_MODEL_REVISION)
+        self._model = SentenceTransformer(
+            self.model_name, revision=REAL_MODEL_REVISION,
+            device=self._execution_device(), model_kwargs={"dtype": "float32"},
+        )
         # ★메모리 방어선★: 청커의 approx_tokens는 ASCII 단어, 한글 글자 하나씩, 나머지
         # 비공백 기호 두 글자당 하나를 보수적으로 센다. 그래도 이 근사식은 실제 BAAI/bge-m3
         # tokenizer와 같지 않아 일부 입력은 실토큰 수가 더 클 수 있으므로, 2048 상한이 MPS
@@ -110,18 +123,17 @@ class RealEmbedder:
 
     @property
     def embedding_identity(self) -> str:
-        # Load is permitted on a full hit: the identity describes the actual execution
-        # configuration as well as the pinned model/tokenizer/pooling artifact.
-        self._ensure_model()
+        # Artifact/output settings and the selected execution device are known before
+        # loading weights. Preserve v2 identity bytes for existing compatible indexes.
         return json.dumps({
             "model": self.model_name,
             "revision": REAL_MODEL_REVISION,
-            "max_seq_length": self._model.max_seq_length,
+            "max_seq_length": self._model.max_seq_length if self._model is not None else MAX_SEQUENCE_LENGTH,
             "normalize_embeddings": True,
             "output_dtype": "float32",
             "dimension": EMBED_DIM,
-            "device": str(self._model.device),
-            "model_dtype": str(self._model.dtype),
+            "device": str(self._model.device) if self._model is not None else self._execution_device(),
+            "model_dtype": str(self._model.dtype) if self._model is not None else "torch.float32",
             "implementation": 2,
             "packages": {name: version(name) for name in (
                 "sentence-transformers", "transformers", "torch", "numpy",
