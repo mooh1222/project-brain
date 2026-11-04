@@ -17,6 +17,7 @@ if os.environ.get('PB_TEST_DIR'):
         dtype = 'torch.float32'
 
         def __init__(self, *args, **kwargs):
+            self.device = kwargs['device']
             self.dtype = os.environ.get('PB_TEST_DTYPE', 'torch.float32')
             event('load')
             import atexit
@@ -30,9 +31,21 @@ if os.environ.get('PB_TEST_DIR'):
             event('end')
             return result
 
-    sys.modules['torch'] = types.SimpleNamespace(set_num_threads=lambda n: None)
-    sys.modules['sentence_transformers'] = types.SimpleNamespace(
-        SentenceTransformer=Model, util=types.SimpleNamespace(get_device_name=lambda: 'cpu'))
+    if os.environ.get('PB_TEST_NO_ML'):
+        import importlib.abc
+
+        class NoML(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('torch', 'sentence_transformers'):
+                    raise AssertionError(f'ML import forbidden: {fullname}')
+        sys.meta_path.insert(0, NoML())
+    else:
+        def get_device_name():
+            return os.environ.get('PB_TEST_DEVICE', 'cpu')
+
+        sys.modules['torch'] = types.SimpleNamespace(set_num_threads=lambda n: None)
+        sys.modules['sentence_transformers'] = types.SimpleNamespace(
+            SentenceTransformer=Model, util=types.SimpleNamespace(get_device_name=get_device_name))
     import project_brain.embedding_service as service
     service.runtime_dir = lambda: Path(os.environ['PB_TEST_DIR'])
     if os.environ.get('PB_TEST_SOCKET_BLOCK'):

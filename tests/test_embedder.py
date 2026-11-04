@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from project_brain.embedder import (
     EMBED_DIM,
@@ -24,6 +25,11 @@ from project_brain.embedder import (
     StubEmbedder,
     get_embedder,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_device_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr('project_brain.embedding_service.runtime_dir', lambda: tmp_path)
 
 
 class StubEmbedderTest(unittest.TestCase):

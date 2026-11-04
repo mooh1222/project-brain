@@ -90,11 +90,18 @@ class RealEmbedder:
 
     def _execution_device(self) -> str:
         if self._device is None:
-            from sentence_transformers import util
+            from project_brain.device_cache import read_device
+            self._device = read_device() or self._detect_execution_device()
+        return self._device
 
-            device = util.get_device_name()
-            # parameter.device는 MPS 등 index 생략 장치도 ':0'으로 보고한다.
-            self._device = device if device == "cpu" or ":" in device else f"{device}:0"
+    def _detect_execution_device(self) -> str:
+        from sentence_transformers import util
+        from project_brain.device_cache import write_device
+
+        device = util.get_device_name()
+        # parameter.device는 MPS 등 index 생략 장치도 ':0'으로 보고한다.
+        self._device = device if device == "cpu" or ":" in device else f"{device}:0"
+        write_device(self._device)
         return self._device
 
     def _ensure_model(self):
@@ -112,7 +119,7 @@ class RealEmbedder:
 
         self._model = SentenceTransformer(
             self.model_name, revision=REAL_MODEL_REVISION,
-            device=self._execution_device(), model_kwargs={"dtype": "float32"},
+            device=self._detect_execution_device(), model_kwargs={"dtype": "float32"},
         )
         # ★메모리 방어선★: 청커의 approx_tokens는 ASCII 단어, 한글 글자 하나씩, 나머지
         # 비공백 기호 두 글자당 하나를 보수적으로 센다. 그래도 이 근사식은 실제 BAAI/bge-m3
@@ -193,16 +200,32 @@ class ManagedEmbedder(RealEmbedder):
         return super().embedding_identity
 
     def embed_many(self, texts: list[str]) -> list[np.ndarray]:
-        from project_brain.embedding_service import LockedLocal, ServiceClient, ServiceUnavailable
+        from project_brain.embedding_service import (
+            EmbedderError, LockedLocal, ServiceClient, ServiceUnavailable, service_stop,
+        )
         if not texts:
             return []
         with self._request_lock:
-            if self._local_adapter is None:
-                enabled = os.environ.get('PROJECT_BRAIN_EMBED_SERVICE', '1').lower()
-                if enabled not in ('0', 'false', 'off'):
-                    try:
-                        return ServiceClient(self.embedding_identity).embed_many(texts)
-                    except ServiceUnavailable:
-                        pass
-                self._local_adapter = LockedLocal(RealEmbedder())
-            return self._local_adapter.embed_many(texts)
+            for attempt in range(2):
+                identity = super().embedding_identity
+                try:
+                    if self._local_adapter is None:
+                        enabled = os.environ.get('PROJECT_BRAIN_EMBED_SERVICE', '1').lower()
+                        if enabled not in ('0', 'false', 'off'):
+                            try:
+                                return ServiceClient(identity).embed_many(texts)
+                            except ServiceUnavailable:
+                                pass
+                        self._local_adapter = LockedLocal(RealEmbedder())
+                    return self._local_adapter.embed_many(texts)
+                except EmbedderError as exc:
+                    if attempt or 'embedding_identity_changed:' not in str(exc):
+                        raise
+                    # 오래된 key의 모델을 먼저 회수한다. 예비 모델/slot은 재사용한다.
+                    if self._local_adapter is None and not service_stop(identity)['stopped']:
+                        raise
+                    from project_brain.device_cache import invalidate_device
+                    invalidate_device()
+                    self._detect_execution_device()
+                    if self._local_adapter is not None:
+                        self._local_adapter.identity = super().embedding_identity

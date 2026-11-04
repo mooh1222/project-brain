@@ -15,7 +15,8 @@ from tests.test_search_index import build_store_dir, glossary_term
 
 
 @pytest.fixture(autouse=True)
-def regex_tokenizer():
+def regex_tokenizer(tmp_path, monkeypatch):
+    monkeypatch.setattr('project_brain.embedding_service.runtime_dir', lambda: tmp_path)
     with patch('project_brain.search_index.tokenize',
                side_effect=lambda text: tokenize_ko.tokenize(text, backend='regex')):
         yield
