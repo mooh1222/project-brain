@@ -2,9 +2,10 @@
 
 발동: 기획서 기반 기능 개발 착수, 또는 개발 중 "이거 저장해두자".
 
-개발 착수와 진행 중 새 이해·가설·결정은 기본적으로 `{{PROJECT}}-brain-draft`에 기록한다.
-공통 발견 reference로 관련 topic을 찾고 원문 locator와 작은 항목·재개 요약을 넘긴다.
-개발 개선 제안/backlog와 미검증 교차 분석/pending은 기존 위치를 유지하며 자동 이동하지 않는다.
+먼저 [공통 기록·회상 판단](../../{{PROJECT}}-brain-draft/references/knowledge-workflow.md)을 읽는다.
+개발 착수와 진행 중 지식 재료는 공통 발견 reference로 관련 topic을 찾고
+원문 locator와 작은 항목·재개 요약을 `{{PROJECT}}-brain-draft`에 넘긴다.
+개선 행동이 함께 있으면 공통 판단에 따라 나누어 보존한다.
 순수 조회는 기록 트리거가 아니다.
 
 사용자가 **즉시 정식 적재를 명시적으로 요청한 경우에만** 아래 기존 경로를 쓴다.

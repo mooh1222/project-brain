@@ -5,7 +5,7 @@ description: |
   시작·개발 중 "이거 저장해두자"·저장된 객체 값 갱신), 과거 세션 기록에서 지식을 추출할 때
   (시나리오 다 — "이 세션에서 추출", "과거 세션에서 뽑아줘", "백필", "세션 지식 추출").
   "개발하면서 brain에", "기획서 후보 선점", "이 결정 저장해줘", "세션 백필", "나중에 고치자",
-  "백로그에 남겨", "검증 대기로 보관"처럼 진행 중 적재·대기 기록·세션 추출이 {{PROJECT}}
+  "백로그에 남겨", "조사하던 이해·가설을 이어가자"처럼 진행 중 기록·개선 제안·세션 추출이 {{PROJECT}}
   맥락에서 나오면 스킬 이름 없이도 이 스킬을 쓴다.
   완료된 기능의 소급 적재는 {{PROJECT}}-brain-ingest 몫이고, 조회(읽기)는 {{PROJECT}}-brain-query 몫이다.
 ---
@@ -18,9 +18,12 @@ description: |
 `{{PROJECT}}-brain-ingest` 절차로 넘긴다. 지식 초안의 생성·재개·갱신 수명주기는
 `{{PROJECT}}-brain-draft`가 맡고 이 스킬은 재료 추출에서 멈춘다.
 
-개발 재료나 현재·과거 세션의 주제를 다루기 전에
+기록 경로를 판단할 때 먼저
+`../{{PROJECT}}-brain-draft/references/knowledge-workflow.md`를 읽는다.
+개발 재료나 현재·과거 세션의 지식 주제를 다루기 전에
 `../{{PROJECT}}-brain-draft/references/discovery.md`를 읽고 관련 초안 목록을 먼저 확인한다.
 선택한 topic과 미결 재료를 draft 스킬에 넘기며, 아래 절차에서 같은 목록을 반복 조회하지 않는다.
+개선 제안만 기록하는 요청에는 전체 초안 발견을 선행하지 않는다.
 
 ## 어느 시나리오인가
 
@@ -42,24 +45,7 @@ description: |
   올리지 않는다. 코드에 없는 의도·결정에 관한 사용자 본인 진술은 `reviewer=user-statement`로
   reviewed가 될 수 있고, 작업자 판단은 candidate다. reviewed 의미 변경은
   `{{PROJECT}}-brain-ingest/references/update-rules.md`를 따른다.
-- 분류: 검증된 팀 지식은 정식 객체로 적재한다. 개인 메모리(주어가 사용자·어시스턴트·
-  작업 방식)는 Brain에 넣지 않고 auto-memory·handoff에만 표시한다. **실제 원문**만
-  `{{BRAIN_ROOT}}/raw/sources/`에 둔다. 에이전트가 세션을 해석해 만든 요약·제안은 raw 원문에
-  섞지 않는다.
-- Insight(인사이트): 2개 이상 객체·구현·결정을 가로지르는 **검증된** 관찰·위험·교훈만
-  정식 Insight로 적재한다(candidate 거부·reviewed 직접·source 개수·사용자 진술 근거 — 절차는
-  `{{PROJECT}}-brain-ingest/references/object-model.md` "Insight 적재 규칙").
-
-## 대기 기록 경계
-
-정식 객체로 만들 수 없는 합성 내용은 성격에 따라 다음 한 곳에만 기록한다.
-
-| 내용 | 기록 위치 | 기본 상태 |
-|---|---|---|
-| **미검증 합성 분석** | `{{BRAIN_ROOT}}/pending/insights.md` | 검증 대기 |
-| **개발 개선 제안** | `{{BRAIN_ROOT}}/backlog/development.md` | 제안, 확정 아님 |
-
-두 파일은 **비색인** 대기 영역이며 Project Brain snapshot 대상도 아니다. 변경해도 색인을 다시
-만들 필요가 없다. 쓰기 전에 Git 추적 상태를 확인해 보존한다. 각 항목에 날짜·요약·확정 여부·
-진행 상태·검증 상태·출처를 남긴다. `{{BRAIN_ROOT}}`가 상대 경로면 `.project-brain.json`이 있는
-프로젝트 루트를 기준으로 쓰고, 부모 디렉터리가 없으면 만든다.
+- 개인 메모리(주어가 사용자·어시스턴트·작업 방식)는 Brain에 넣지 않고 auto-memory·handoff에만
+  표시한다. 원문과 합성 지식의 구분·기록 위치·기존 검증 대기 자료 보존은 공통 판단 reference를 따른다.
+- Insight의 상세 적재 조건(candidate 거부·reviewed 직접·source 개수·사용자 진술 근거)은
+  `../{{PROJECT}}-brain-ingest/references/object-model.md`의 "Insight 적재 규칙"을 따른다.

@@ -30,5 +30,7 @@
 모든 적재 후보는 처음의 의미 검증이 필요하다. 완전성 점검은 최종 소스 구조를 초안과 독립적으로
 대조해 미기록·미결·충돌을 찾는다. packet의 선택 목록을 의미 완전성의 증거로 쓰지 않는다.
 쓰기 인자·coverage·receipt·최종화는 `ingest-tools.md`, 의미 완전성은
-`completeness-checklist.md`가 정본이다. 보완이 필요하면 재료를 draft 스킬로 넘기며
-ingest가 초안을 직접 갱신하거나 실패 때문에 삭제/완료 표시하지 않는다.
+`completeness-checklist.md`가 정본이다. 적재 후 초안의 객체 참조·미결 갱신과 갱신 충돌 처리는
+[공통 기록·회상 판단](../../{{PROJECT}}-brain-draft/references/knowledge-workflow.md)을 따른다.
+재료와 실제 적재 결과를 draft 스킬로 넘기며 ingest가 초안을 직접 갱신하거나 실패 때문에
+삭제/완료 표시하지 않는다.

@@ -13,12 +13,12 @@
 1. transcript Read — 세션 경로는 `session list` 출력의 path. cwd는 CLI가 payload 기준으로
    판별해 줌(디렉토리명은 정본 아님 — 워크트리 세션 포함).
 2. kind별 후보 추출: DecisionRecord·GlossaryTerm·DomainMapping·TemporalFact(값 변경이면
-   `{{PROJECT}}-brain-ingest/references/update-rules.md`). 정식 객체가 아닌 내용은 SKILL.md의
-   `대기 기록 경계`로 분류한다. 미검증 합성 분석과 개발 개선 제안은 지정된 비색인 파일에 두고,
+   `{{PROJECT}}-brain-ingest/references/update-rules.md`). 기록 목적은
+   [공통 기록·회상 판단](../../{{PROJECT}}-brain-draft/references/knowledge-workflow.md)을 따른다.
    에이전트 요약을 실제 원문에 섞지 않는다. 개인 메모리는 적재 안 하고 표시만 한다.
 3. **검토 라운드** (최대 3): 후보를 표로 일괄 제시 → 사용자 자연어 일괄 응답 → 반영.
    중복 의심은 경고 표시만(자동 제외 금지). **3라운드 소진 후 미합의 후보는 적재하지 않고**
-   대기 기록에 남기며 `session complete`를 호출하지 않는다 — 사용자가 결정하지 않은 것은 코퍼스에
+   공통 판단에 따라 출처·미결로 남기며 `session complete`를 호출하지 않는다 — 사용자가 결정하지 않은 것은 코퍼스에
    넣지 않는다.
 4. ingest → `{{PROJECT}}-brain-ingest/references/completeness-checklist.md` 최종화. canonical receipt가
    exact이고 실패가 0이며 `finalization.ok=true`일 때만 아래처럼 완료한다. 적재나 최종화가

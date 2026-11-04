@@ -8,7 +8,7 @@ description: |
 # {{PROJECT}} Brain 적재
 
 완료된 기능 또는 확정된 도메인 지식을 근거와 코드 앵커에 연결해 Brain에 적재한다.
-이 문서는 실행 순서만 정한다. 객체 모양, 판정 기준, 명령과 저장 규약은 해당 reference가 정본이다.
+기록·정식화 경로는 먼저 `../{{PROJECT}}-brain-draft/references/knowledge-workflow.md`를 읽어 판단한다. 객체 모양·명령·저장 규약은 각 reference가 정본이다.
 
 ## 적용 범위
 

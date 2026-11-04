@@ -1,7 +1,7 @@
 # project-brain 스킬 템플릿 변경 이력
 
 엔진(`project-brain`)이 install로 주입하는 스킬 템플릿(`templates/<skill>/`, skill∈{ingest,query,
-session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉토리 통째 walk로 주입
+session-ingest,draft,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉토리 통째 walk로 주입
 → 데이터레포 `.agents/skills/<project>-<suffix>/`; SKILL.md 한 장이 아니라 하위 파일 전부)의
 구조·도구 주요 변경만 1줄로 남긴다.
 
@@ -9,6 +9,15 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 그 개선분이 여기로 **역수입돼 누적**된다(스킬은 엔진 소유, 데이터레포는 소비·개선처). 사용법
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
+
+## 2026-11-04 — 공통 기록·회상 판단과 개선 제안 직접 읽기 (#115)
+
+`draft/references/knowledge-workflow.md` 하나에 목적별 기록·회상, 근거 부족 처리, 백로그 형식·
+채택 링크와 기존 pending 보존을 모으고 query·draft·session-ingest·ingest 및 관련 reference가
+같은 파일을 읽게 했다. pending 신규 기록 유도와 근거 부족 Insight의 backlog 우회를 제거하고,
+query의 개선 제안 트리거·직접 본문 읽기와 접근 가능한 루트의 파일 부재=정상 빈 결과를 명시했다.
+기존 pending의 명시적 조회, 초안 형식·검수 상태·설치 사용자 수정·overlay 보존은 유지한다.
+새 kind·schema·CLI·검색 채널·Python Module은 없으며 색인 rebuild는 필요 없다.
 
 ## 2026-09-29 — 적재 스크립트가 엔진 Python으로 스스로 넘어감 (#107)
 

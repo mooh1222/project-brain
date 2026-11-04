@@ -212,6 +212,35 @@ def test_query_and_session_share_installed_draft_discovery_before_their_routes()
             assert second[key] == []
 
 
+def test_recording_and_recall_share_one_installed_workflow_reference():
+    with TemporaryDirectory() as td:
+        target = Path(td)
+        first = install(target, project="demo", brain_root="knowledge", default_branch="trunk", repo="demo")
+        skills = target / ".agents/skills"
+        reference = skills / "demo-brain-draft/references/knowledge-workflow.md"
+        assert reference.relative_to(target).as_posix() in first["created"]
+        assert list(skills.rglob("knowledge-workflow.md")) == [reference]
+        workflow = reference.read_text(encoding="utf-8")
+        for name in ("query", "draft", "session-ingest", "ingest"):
+            root = skills / f"demo-brain-{name}"
+            pointer = (
+                "references/knowledge-workflow.md" if name == "draft"
+                else "../demo-brain-draft/references/knowledge-workflow.md"
+            )
+            assert pointer in (root / "SKILL.md").read_text(encoding="utf-8")
+            assert (root / pointer).resolve(strict=True) == reference.resolve()
+        for contract in (
+            "지식 초안", "적재 지식", "개선 제안",
+            "candidate", "reviewed", "근거 부족", "열린 질문",
+            "knowledge/backlog/development.md", "이슈·작업 링크 한 줄",
+            "진행 상태", "정상 빈 결과", "skipped",
+        ):
+            assert contract in workflow
+        second = install(target, project="demo", brain_root="knowledge", default_branch="trunk", repo="demo")
+        for key in ("created", "updated", "removed", "adopted", "skipped"):
+            assert second[key] == []
+
+
 def test_prepared_materials_reference_is_shared_by_installed_draft_and_ingest():
     with TemporaryDirectory() as td:
         target = Path(td)
@@ -234,6 +263,7 @@ def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():
     ingest = _installed_skill("ingest")
     session = _installed_skill("session-ingest")
     session_extract = _installed_reference("session-ingest", "references/session-extract.md")
+    workflow = _installed_reference("draft", "references/knowledge-workflow.md")
 
     for safe_git_rule in (
         "git add -A",
@@ -251,8 +281,23 @@ def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():
         "Project Brain snapshot",
         "실제 원문",
     ):
-        assert boundary in session + session_extract
-    assert "raw/sources/insights/backlog.md" not in session + session_extract
+        assert boundary in workflow
+    for boundary in (
+        "기존 검증 대기 기록", "기본 신규 기록 경로에서", "기존 파일·항목·이력은 보존",
+        "명시적 과거 기록 조회", "미검증", "다른 기능의 pending 상태",
+    ):
+        assert boundary in workflow
+    for skill, relative, retired in (
+        ("draft", "SKILL.md", "미검증 합성 분석은 기존 pending에 둔다"),
+        ("session-ingest", "SKILL.md", "| **미검증 합성 분석** |"),
+        ("session-ingest", "references/dev-ingest.md", "미검증 교차 분석/pending은 기존 위치"),
+        ("session-ingest", "references/session-extract.md", "미검증 합성 분석과 개발 개선 제안은 지정된 비색인 파일에"),
+        ("ingest", "references/object-model.md", "먼저 근거 객체를 적재하지 못하면 backlog에 둔다"),
+    ):
+        content = _installed_reference(skill, relative)
+        assert retired not in content
+        assert "knowledge-workflow.md" in content
+    assert "raw/sources/insights/backlog.md" not in workflow + session + session_extract
 
 
 def test_session_completion_uses_the_receipt_bound_cli_not_mark_processed():
@@ -289,6 +334,26 @@ def test_query_skill_keeps_default_use_read_only():
         "project-brain index rebuild",
     ):
         assert automatic_write not in query
+
+
+def test_query_routes_improvement_and_legacy_pending_recall_before_general_search():
+    query = _installed_skill("query")
+    description = query.split("---", 2)[1]
+    for trigger in ("전에 ~하자던 거", "남은 개선", "과거 검증 대기"):
+        assert trigger in description
+    direct_route = query[query.index("## 0."):query.index("## 1.")]
+    for contract in (
+        "knowledge-workflow.md", "brain/backlog/development.md", "실제 본문",
+        "초안 목록·일반 지식 검색을 선행하지 않는다", "정상 빈 결과", "권한 오류",
+        "과거 검증 대기", "brain/pending/insights.md", "미검증",
+    ):
+        assert contract in direct_route
+    assert direct_route.index("backlog/development.md") < direct_route.index("references/discovery.md")
+    session_description = _installed_skill("session-ingest").split("---", 2)[1]
+    assert "검증 대기로 보관" not in session_description
+    assert "개선 제안" in session_description
+    discovery = _installed_reference("draft", "references/discovery.md")
+    assert "knowledge-workflow.md" in discovery
 
 
 def test_query_skill_separates_general_recall_from_deterministic_query_axes():

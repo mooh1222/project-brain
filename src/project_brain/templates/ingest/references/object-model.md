@@ -138,7 +138,8 @@ Insight는 단일 객체의 재진술이 아니라 여러 객체·구현·결정
 - `scope`는 적용 범위이며, `code_locator_ids`는 선택 코드 앵커다.
 - `source_object_ids`는 내용을 뒷받침하는 기존 객체이고 `evidence_refs`는 진술 출처다. 둘을 바꾸어 쓰지 않는다.
 - 사용자 진술이 출처면 approved session EvidenceManifest와 session_turn EvidenceRef를 연결한다.
-- source 또는 code locator dangling은 lint가 막는다. 먼저 근거 객체를 적재하지 못하면 backlog에 둔다.
+- source 또는 code locator dangling은 lint가 막는다. 근거 부족 처리는
+  [공통 기록·회상 판단](../../{{PROJECT}}-brain-draft/references/knowledge-workflow.md)을 따른다.
 - 저장 뒤 Insight는 일반 results가 아니라 `advisories` 회상 통로에 나온다.
 
 ## 논리 key

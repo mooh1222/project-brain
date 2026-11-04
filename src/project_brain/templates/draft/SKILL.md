@@ -1,7 +1,7 @@
 ---
 name: {{PROJECT}}-brain-draft
 description: |
-  Use when {{PROJECT}} 기능·도메인 주제의 진행 중 이해, 어휘 관찰, 가설·충돌,
+  Use when {{PROJECT}} 기능·도메인·조사 주제의 진행 중 이해, 어휘 관찰, 가설·충돌,
   열린 질문을 여러 세션·티켓에 걸쳐 이어갈 지식 초안을 만들거나 찾고, 읽고,
   재개하고, 갱신하고, 형식을 점검할 때. 완료된 지식의 정식 적재는
   {{PROJECT}}-brain-ingest, 현재·과거 세션의 재료 추출은
@@ -15,6 +15,8 @@ description: |
 일반 조회에서는 초안(미검수 작업 기억)으로 구분해 참고한다.
 
 ## 찾기와 재개
+
+기록·회상 경로를 판단할 때 먼저 `references/knowledge-workflow.md`를 읽는다.
 
 `references/discovery.md`를 먼저 읽고 metadata로 관련 topic을 찾는다.
 
@@ -79,8 +81,7 @@ project-brain draft lint
 
 - 의미 있는 새 이해·결정이 생겼거나 작업 구간을 끝낼 때 항목과 재개 요약을 갱신한다.
   순수 조회와 모든 도구 호출을 기록하지 않는다. 이해가 바뀌면 같은 key를 replace한다.
-- 기능·도메인의 이해·가설·미결은 draft, 개발 개선 제안은 기존 backlog, 여러 대상을 가로지르는
-  미검증 합성 분석은 기존 pending에 둔다. 자동 이동·이중 기록을 하지 않는다.
+- 기록 위치와 근거 부족 처리는 `references/knowledge-workflow.md`를 따른다.
 - `{{PROJECT}}-brain-session-ingest`는 현재·과거 세션 재료를 추출해 draft/ingest로 넘긴다.
   개발 중 기본 기록은 draft이며 명시적인 즉시 정식 적재 요청은 기존 ingest로 간다.
 - lint·quote 존재·hash 일치는 형식/bytes 점검이다. 의미 검증이나 검수 승인이 아니다.
