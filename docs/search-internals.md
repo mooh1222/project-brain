@@ -113,8 +113,8 @@
 live DB를 제자리에서 증분 갱신하지 않는다. `content_hash`는 문서 metadata로 저장하고,
 벡터 재사용에는 `surface_text`를 쓴다.
 
-SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_index.py:102-132`,
-`SCHEMA_VERSION=5`):
+SQLite DB는 핵심 v5 테이블과 선택적인 신선도 캐시를 함께 만든다(`_create_schema`,
+`SCHEMA_VERSION=5`, `FRESHNESS_CACHE_VERSION=1`):
 
 | 테이블 | 역할 |
 |--------|------|
@@ -122,6 +122,14 @@ SQLite DB 안에 테이블이 4개 만들어진다(`_create_schema`, `search_ind
 | `documents_fts` | FTS5 가상 테이블(`tokenize='unicode61'`). BM25 키워드 검색용 |
 | `documents_vec` | sqlite-vec의 `vec0` 가상 테이블(`embedding FLOAT[1024]`). 벡터 저장 |
 | `meta` | 스키마 버전·임베딩 모델명·embedding identity·토크나이저(`이름@규칙 버전`)·코퍼스 지문 한 줄 |
+| `freshness_surfaces` | 표면 SHA-256별 토큰 존재 여부. 빈 토큰으로 제외한 객체·raw 표면도 기록 |
+| `freshness_meta` | 선택 캐시 버전과 생성 시 코퍼스 지문 |
+| `scope_surfaces` | DomainContext의 정확한 scope 표면별 토큰. display_name·접미 제거 title·하이픈 분리 context_key |
+
+선택 캐시는 핵심 v5·벡터·seed 계약을 바꾸지 않는다. 캐시 없는 기존 v5 DB도 rebuild
+없이 전체 지문 계산으로 판정한다. 캐시 버전·코퍼스 지문·토크나이저 신원·추출기 버전이
+일치할 때만 빠른 경로를 사용하며 누락·손상된 캐시는 전체 계산으로 돌아간다. 캐시 규칙이
+바뀌면 `FRESHNESS_CACHE_VERSION`을 올린다.
 
 빌드할 때 **같은 텍스트를 두 갈래로** 넣는 게 핵심이다:
 
@@ -209,6 +217,16 @@ cold/warm 결과가 같다. seed가 있다는 사실만으로 computed=0이나 �
   자리에 있다 — `meta.tokenizer`의 백엔드 이름이나 규칙 버전이 질의 시점과 다르면
   `StaleIndexError`로 거부한다(`_guard_tokenizer`, BM25 두 레인 진입). 예전처럼 경고만
   달고 검색을 계속하지 않는다.
+- **해시 우선 신선도 판정(BB2 #95)**: 현재 store의 projection freshness와 표면을 매번
+  계산하고 raw도 현재 파일에서 청킹한다. 표면 해시가 캐시에 있으면 저장된 토큰 존재
+  여부를 재사용하고, 새 표면만 토큰화한다. 포함된 행의 `(kind, id, status, surface)`를
+  기존과 똑같이 정렬·직렬화하므로 전체 계산과 같은 지문이다. 빈 토큰 표면의 추가·삭제·
+  변경은 제외 규칙을 그대로 따른다. scope 추론도 현재 표면의 정확 일치로만 캐시를 읽고,
+  바뀐 title처럼 색인 표면에 없는 변경은 즉시 새 토큰을 계산한다.
+- **eval snapshot**: `load_recall_fn()`은 호출마다 새 `SearchSession`을 만든다. 한 eval
+  동안 corpus와 index가 바뀌지 않는다는 전제로 store·scope 캐시와 성공한 freshness 판정을
+  한 번만 계산한다. mutation/rebuild 뒤에는 세션을 폐기하고 새로 만들어야 한다.
+  일반 `search`·`recall`·`eval_recall`은 호출마다 판정하며 전역적인 freshness 면제는 없다.
 - `DomainMapping` 표면은 자체 의미·경계뿐 아니라 reviewed 참조 `GlossaryTerm`의
   `term`·`synonyms`·`aliases`를 함께 받고, candidate 참조에서는 기존 `term`·`synonyms`만
   유지한다(`surface.py:59-68,84-101`). 별칭 위임을 추가한 추출기 버전은 4다

@@ -21,6 +21,8 @@ content_hash는 객체 JSON 전체가 아니라 추출 표면 + status의 SHA-25
   title도 실재한다. caveats는 history_coverage 같은 한계 표기라 표면에 넣지 않는다.
 """
 
+import re
+
 from project_brain.hash_utils import sha256_text
 
 # 추출 로직이 바뀌면 올린다(§4 meta의 rebuild 트리거). v2: Insight 추출기 추가(2026-06-15).
@@ -33,6 +35,19 @@ EXTRACTOR_VERSION = 4
 EXCLUDED_KINDS = frozenset({
     "EvidenceManifest", "EvidenceRef", "ReviewRecord",
 })
+
+
+def context_scope_surfaces(obj: dict) -> list[str]:
+    """Exact DomainContext surfaces used for automatic scope inference."""
+    surfaces = []
+    if obj.get("display_name"):
+        surfaces.append(obj["display_name"])
+    title = re.sub(r"\s*도메인.*$", "", obj.get("title") or "").strip()
+    if title:
+        surfaces.append(title)
+    if obj.get("context_key"):
+        surfaces.append(obj["context_key"].replace("-", " "))
+    return surfaces
 
 
 def _norm_str(value) -> str | None:

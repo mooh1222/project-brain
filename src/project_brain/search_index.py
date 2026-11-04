@@ -33,7 +33,9 @@ from project_brain.index_seeds import resolve_index_seeds
 from project_brain.lint import projection_is_fresh
 from project_brain.raw_chunks import RAW_KIND, RAW_STATUS, iter_raw_sources
 from project_brain.store import BrainStore
-from project_brain.surface import EXTRACTOR_VERSION, content_hash, extract_surface
+from project_brain.surface import (
+    EXTRACTOR_VERSION, content_hash, context_scope_surfaces, extract_surface,
+)
 from project_brain.tokenize_ko import (
     TOKENIZER_RULES_VERSION,
     active_backend,
@@ -69,6 +71,9 @@ class IndexRebuildDurabilityError(RuntimeError):
 # (EMBED_DIM은 embedder.py와 일치해야 한다 — vec0 FLOAT[1024].)
 # v5: embedder-owned embedding identity for safe live-index vector reuse.
 SCHEMA_VERSION = 5
+
+# Optional derived cache, additive to v5: old DBs and vector seeds stay compatible.
+FRESHNESS_CACHE_VERSION = 1
 
 # 벡터 거리값 반올림 자릿수(§5 결정론 가드 — top-K 경계 흔들림 완화).
 _DISTANCE_ROUND = 6
@@ -133,6 +138,16 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         "CREATE TABLE meta ("
         "schema_version INTEGER, embed_model TEXT, tokenizer TEXT, "
         "extractor_version INTEGER, corpus_fingerprint TEXT, embedding_identity TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE freshness_surfaces (surface_hash TEXT PRIMARY KEY, "
+        "has_tokens INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE freshness_meta (version INTEGER, corpus_fingerprint TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE scope_surfaces (surface TEXT PRIMARY KEY, tokenized_text TEXT NOT NULL)"
     )
 
 
@@ -377,8 +392,14 @@ def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict
                 indexed = 0
                 total = 0
                 pending_vectors: list[tuple[int, str]] = []  # (row_id, 표면 원문)
+                surface_cache: dict[str, bool] = {}
+                scope_surfaces = {}
                 for obj in store.all():
                     total += 1
+                    if obj.get("kind") == "DomainContext":
+                        for scope_surface in context_scope_surfaces(obj):
+                            if scope_surface not in scope_surfaces:
+                                scope_surfaces[scope_surface] = " ".join(tokenize(scope_surface))
                     # 낡은 ContextProjection(구성 객체가 바뀌어 source_content_hash 불일치)은
                     # 색인 제외 — 이전 착수 브리핑이 더는 정확하지 않다. fingerprint도 동일.
                     if obj.get("kind") == "ContextProjection" and not projection_is_fresh(store, obj):
@@ -387,6 +408,7 @@ def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict
                     if surface is None:
                         continue
                     tokens = tokenize(surface)
+                    surface_cache[_surface_hash(surface)] = bool(tokens)
                     if not tokens:
                         continue
                     tokenized_text = " ".join(tokens)
@@ -412,6 +434,7 @@ def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict
                 raw_chunks = 0
                 for ch in iter_raw_sources(Path(brain_root)):
                     tokens = tokenize(ch["text"])
+                    surface_cache[_surface_hash(ch["text"])] = bool(tokens)
                     if not tokens:
                         continue
                     tokenized_text = " ".join(tokens)
@@ -460,7 +483,19 @@ def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict
                          for (row_id, _), v in zip(misses, vectors)],
                     )
                 # 지문은 색인 대상을 모두 INSERT한 뒤 계산해 meta 단일 행에 기록한다(§7).
-                fingerprint = compute_corpus_fingerprint(store, Path(brain_root))
+                fingerprint = compute_corpus_fingerprint(
+                    store, Path(brain_root), surface_cache=surface_cache,
+                )
+                conn.executemany(
+                    "INSERT INTO freshness_surfaces VALUES (?, ?)", surface_cache.items(),
+                )
+                conn.execute(
+                    "INSERT INTO freshness_meta VALUES (?, ?)",
+                    (FRESHNESS_CACHE_VERSION, fingerprint),
+                )
+                conn.executemany(
+                    "INSERT INTO scope_surfaces VALUES (?, ?)", scope_surfaces.items(),
+                )
                 conn.execute(
                     "INSERT INTO meta (schema_version, embed_model, tokenizer, "
                     "extractor_version, corpus_fingerprint, embedding_identity) VALUES (?, ?, ?, ?, ?, ?)",
@@ -554,7 +589,62 @@ def _read_meta(conn: sqlite3.Connection) -> dict | None:
             "corpus_fingerprint": row[4]}
 
 
-def compute_corpus_fingerprint(store, brain_root) -> str:
+def _surface_hash(surface: str) -> str:
+    return hashlib.sha256(surface.encode("utf-8")).hexdigest()
+
+
+def _cache_matches(conn):
+    meta = _read_meta(conn)
+    marker = conn.execute("SELECT version, corpus_fingerprint FROM freshness_meta").fetchall()
+    return (meta is not None and meta["schema_version"] == SCHEMA_VERSION
+            and marker == [(FRESHNESS_CACHE_VERSION, meta["corpus_fingerprint"])]
+            and meta["tokenizer"] == tokenizer_signature()
+            and meta["extractor_version"] == EXTRACTOR_VERSION)
+
+
+def read_scope_cache(db_path) -> dict[str, list[str]] | None:
+    """Exact scope surfaces, tokenized with the same rules as the current engine."""
+    conn = None
+    try:
+        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
+        if not _cache_matches(conn):
+            return None
+        rows = conn.execute("SELECT surface, tokenized_text FROM scope_surfaces").fetchall()
+        if any(not isinstance(s, str) or not isinstance(t, str) for s, t in rows):
+            return None
+        return {surface: tokens.split() for surface, tokens in rows}
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def read_surface_cache(db_path) -> dict[str, bool] | None:
+    """Read optional v5 cache only under matching fingerprint/tokenizer/extractor.
+
+    Missing, incompatible or invalid cache falls back to full tokenization. A cache
+    miss is never an exclusion: the current surface is tokenized before deciding.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
+        if not _cache_matches(conn):
+            return None
+        rows = conn.execute("SELECT surface_hash, has_tokens FROM freshness_surfaces").fetchall()
+        if any(not isinstance(h, str) or len(h) != 64
+               or any(c not in "0123456789abcdef" for c in h)
+               or flag not in (0, 1) for h, flag in rows):
+            return None
+        return {h: bool(flag) for h, flag in rows}
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def compute_corpus_fingerprint(store, brain_root, *, surface_cache=None) -> str:
     """색인 대상 전체(객체 표면 + raw 청크)의 결정론 지문 — 신선도 가드(§7)용.
 
     rebuild가 색인하는 것과 같은 입력(extract_surface 표면 + iter_raw_sources
@@ -567,6 +657,16 @@ def compute_corpus_fingerprint(store, brain_root) -> str:
     변경이 지문만 바꿔 가드가 거짓 양성을 낸다). 지문은 이제 토큰화 비용을
     포함한다(rebuild와 같은 필터 — 색인 집합과 동치 보장).
     """
+    # The default is the original full computation (also the equivalence oracle).
+    # Cache only token eligibility; kind/id/status/surface are always current.
+    def has_tokens(surface):
+        if surface_cache is None:
+            return bool(tokenize(surface))
+        key = _surface_hash(surface)
+        if key not in surface_cache:
+            surface_cache[key] = bool(tokenize(surface))
+        return surface_cache[key]
+
     rows = []
     for obj in store.all():
         # rebuild와 동일하게 낡은 ContextProjection을 지문 입력에서도 뺀다 — 두 곳이
@@ -574,11 +674,11 @@ def compute_corpus_fingerprint(store, brain_root) -> str:
         if obj.get("kind") == "ContextProjection" and not projection_is_fresh(store, obj):
             continue
         surface = extract_surface(obj, store)
-        if surface is None or not tokenize(surface):
+        if surface is None or not has_tokens(surface):
             continue
         rows.append(f"{obj['kind']}\t{obj['id']}\t{obj.get('status', '')}\t{surface}")
     for ch in iter_raw_sources(Path(brain_root)):
-        if not tokenize(ch["text"]):
+        if not has_tokens(ch["text"]):
             continue
         rows.append(f"{RAW_KIND}\t{ch['chunk_id']}\t{RAW_STATUS}\t{ch['text']}")
     payload = "\n".join(sorted(rows))

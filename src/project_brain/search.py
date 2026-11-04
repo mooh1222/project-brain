@@ -35,7 +35,6 @@ LLM이 아니라 "이 객체가 이 질문의 답인가"를 판단할 수 없고
 않는다(등재 어휘가 걸리면 GlossaryTerm 객체 자체가 results에 오른다).
 """
 
-import re
 import sqlite3
 from pathlib import Path
 
@@ -48,7 +47,7 @@ from project_brain.search_index import (
     search_vector,
 )
 from project_brain.store import BrainStore
-from project_brain.surface import extract_surface
+from project_brain.surface import context_scope_surfaces, extract_surface
 from project_brain.tokenize_ko import tokenize
 
 
@@ -264,29 +263,24 @@ def _rerank_by_support(ranked_ids, support_by_id, cap: int = _GRAPH_SUPPORT_CAP)
 _SCOPE_SURFACE_MIN_TOKEN_LEN = 2
 
 
-def _context_surface_token_sets(ctx_obj: dict) -> list[set[str]]:
+def _context_surface_token_sets(ctx_obj: dict, scope_cache=None) -> list[set[str]]:
     """DomainContext의 표면 후보를 토큰 집합 목록으로 만든다(infer_scope 입력).
 
     표면 = display_name / title(공통 접미 '도메인' 이후 제거) / context_key(하이픈 분리).
     각 표면을 tokenize한 뒤 2자 미만 토큰을 버린다 — 남는 토큰이 없으면 그 표면은 제외.
     """
-    surfaces = []
-    if ctx_obj.get("display_name"):
-        surfaces.append(ctx_obj["display_name"])
-    title = re.sub(r"\s*도메인.*$", "", ctx_obj.get("title") or "").strip()
-    if title:
-        surfaces.append(title)
-    if ctx_obj.get("context_key"):
-        surfaces.append(ctx_obj["context_key"].replace("-", " "))
     token_sets = []
-    for s in surfaces:
-        toks = {t for t in tokenize(s) if len(t) >= _SCOPE_SURFACE_MIN_TOKEN_LEN}
+    for s in context_scope_surfaces(ctx_obj):
+        tokens = scope_cache.get(s) if scope_cache is not None else None
+        if tokens is None:
+            tokens = tokenize(s)
+        toks = {t for t in tokens if len(t) >= _SCOPE_SURFACE_MIN_TOKEN_LEN}
         if toks:
             token_sets.append(toks)
     return token_sets
 
 
-def infer_scope(query: str, store: BrainStore):
+def infer_scope(query: str, store: BrainStore, *, scope_cache=None):
     """질의 표면에서 DomainContext를 정확히 1개 특정할 수 있으면 그 id를 돌려준다.
 
     P2 3번 scope 자동 라우팅(2026-06-10): 다기능 코퍼스에서 질의가 기능명을 명시하면
@@ -313,7 +307,7 @@ def infer_scope(query: str, store: BrainStore):
         if obj.get("kind") != "DomainContext":
             continue
         best = None
-        for token_set in _context_surface_token_sets(obj):
+        for token_set in _context_surface_token_sets(obj, scope_cache):
             if token_set <= query_tokens and (best is None or len(token_set) > len(best)):
                 best = token_set
         if best is not None:
@@ -336,12 +330,15 @@ def _guard_index_freshness(db_path, store, brain_root) -> None:
         StaleIndexError,
         compute_corpus_fingerprint,
         read_meta_fingerprint,
+        read_surface_cache,
     )
 
     indexed = read_meta_fingerprint(db_path)
     if indexed is None:
         return  # 지문 없는 구버전 색인은 schema_version 가드가 이미 거부한다
-    current = compute_corpus_fingerprint(store, brain_root)
+    current = compute_corpus_fingerprint(
+        store, brain_root, surface_cache=read_surface_cache(db_path),
+    )
     if indexed != current:
         raise StaleIndexError(
             "색인이 코퍼스보다 오래됨(stale) — 객체 변경이 색인에 반영되지 않았다. "
@@ -409,8 +406,45 @@ def _guard_scope_exists(scope, db_path, store) -> None:
     )
 
 
+class SearchSession:
+    """Read-only batch snapshot: corpus AND index must stay unchanged until discarded.
+
+    Own one loaded store and one successful freshness check. CLI eval creates a
+    session per run; ordinary search/recall keep checking on every call. Callers
+    doing mutations or rebuilds must create a new session afterwards.
+    """
+
+    def __init__(self, *, db_path=None, brain_root=None, embedder=None):
+        self.db_path = db_path
+        self.brain_root = brain_root
+        self.embedder = embedder
+        self.store = None
+        self._checked = False
+        self._scope_cache = None
+
+    def __call__(self, query):
+        if self.store is None:
+            self.db_path = resolve_db_path(self.db_path)
+            self.brain_root = resolve_brain_root(self.brain_root)
+            self.store = BrainStore.load(self.brain_root)
+        return eval_recall(
+            query, db_path=self.db_path, brain_root=self.brain_root,
+            embedder=self.embedder, store=self.store, _session=self,
+        )
+
+    def _check(self, db_path, store, brain_root):
+        if (Path(db_path) != self.db_path or Path(brain_root) != self.brain_root
+                or store is not self.store):
+            raise ValueError("SearchSession은 동일 corpus/index/store snapshot에만 재사용할 수 있다")
+        if not self._checked:
+            _guard_index_freshness(db_path, store, brain_root)
+            from project_brain.search_index import read_scope_cache
+            self._scope_cache = read_scope_cache(db_path)
+            self._checked = True
+
+
 def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
-           store=None, auto_scope=True) -> list[dict]:
+           store=None, auto_scope=True, _session=None) -> list[dict]:
     """BM25 + 벡터를 RRF로 융합해 §3 결과 계약 리스트를 돌려준다(슬라이스 3·4).
 
     BM25 top50(search_bm25) + 벡터 top50(search_vector) → RRF 융합(k=60) → top30 →
@@ -454,11 +488,15 @@ def recall(query: str, scope=None, db_path=None, embedder=None, brain_root=None,
     # 신선도 가드(§7): 색인 meta의 코퍼스 지문 vs 현재 store 지문. stale 색인은
     # superseded 객체를 옛 status로 회상하는 침묵 오답을 만든다 — 스키마 버전
     # 가드와 같은 철학으로 시끄럽게 거부하고 해결책(rebuild)을 안내한다.
-    _guard_index_freshness(db_path, store, resolved_root)
+    if _session is None:
+        _guard_index_freshness(db_path, store, resolved_root)
+    else:
+        _session._check(db_path, store, resolved_root)
     if scope is not None:
         _guard_scope_exists(scope, db_path, store)
     elif auto_scope:
-        scope = infer_scope(query, store)
+        from project_brain.search_index import read_scope_cache
+        scope = infer_scope(query, store, scope_cache=read_scope_cache(db_path))
 
     # raw 별도 레인(§2.2): 채널 검색을 과대 적재한 뒤 kind로 갈라 객체 레인은 기존
     # 상한(CHANNEL_TOP_N)으로 자른다 — 객체 파이프라인(융합·그래프·재정렬)은 raw가
@@ -769,7 +807,7 @@ def _matched_query_tokens_by_id(db_path, object_ids, tokens) -> dict[str, list[s
 # ★"disabled"와 "none"을 가른다★(#74): 하드 필터가 없다는 결과는 같지만 이유가 다르다.
 # 에이전트는 "내가 끈 것"과 "엔진이 컨텍스트를 못 좁힌 것"을 응답만 보고 구분해야
 # 다음 수(다시 좁힐지, 질의를 바꿀지)를 고른다 — 사실 보고이지 판정이 아니다(ADR 0008).
-def _resolve_scope(query, scope, auto_scope, store):
+def _resolve_scope(query, scope, auto_scope, store, scope_cache=None):
     """(적용할 scope, 신고할 origin)을 한 자리에서 정한다.
 
     ★한 자리★인 것이 계약이다 — 응답에 신고하는 값과 recall에 넘겨 실제로 걸리는
@@ -779,13 +817,13 @@ def _resolve_scope(query, scope, auto_scope, store):
         return scope, "explicit"
     if not auto_scope:
         return None, "disabled"
-    inferred = infer_scope(query, store)
+    inferred = infer_scope(query, store, scope_cache=scope_cache)
     return inferred, ("inferred" if inferred is not None else "none")
 
 
 def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
                 store=None, scope=None, auto_scope=True,
-                channel_top_k=EVAL_CHANNEL_TOP_K) -> dict:
+                channel_top_k=EVAL_CHANNEL_TOP_K, _session=None) -> dict:
     """평가 하네스 진입점 — recall을 검수 상태·객체 종류만으로 채널로 가른다(#77).
 
     ADR 0008: 엔진은 회수만 하고 답변 판정은 에이전트가 한다. 회수한 객체를 엔진
@@ -836,12 +874,18 @@ def eval_recall(query: str, db_path=None, embedder=None, brain_root=None,
     if store is None:
         store = BrainStore.load(resolved_root)
 
+    if _session is not None:
+        _session._check(db_path, store, resolved_root)
+
     # scope는 여기서 한 번 풀어 recall에 넘긴다 — 응답에 신고하는 값과 실제로 적용된
     # 하드 필터가 같은 값임을 배관으로 보장하기 위해서다(#73). 세 갈래를 여기서 다
     # 정하고 recall에는 auto_scope=False로 넘겨(#74) recall이 다시 추론하지 않게 한다.
-    scope, scope_origin = _resolve_scope(query, scope, auto_scope, store)
+    from project_brain.search_index import read_scope_cache
+    scope_cache = (_session._scope_cache if _session is not None else
+                   read_scope_cache(db_path) if scope is None and auto_scope else None)
+    scope, scope_origin = _resolve_scope(query, scope, auto_scope, store, scope_cache)
     hits = recall(query, scope=scope, db_path=db_path, embedder=embedder,
-                  brain_root=resolved_root, store=store, auto_scope=False)
+                  brain_root=resolved_root, store=store, auto_scope=False, _session=_session)
     # 회수 사실(#73): 질의 토큰 분해·토큰별 df·적중별 겹친 질의 토큰. 채널을 가르기
     # ★전에★ 적중에 붙여 다섯 채널이 같은 사실을 그대로 들고 나가게 한다.
     query_tokens = compute_query_token_facts(query, db_path)

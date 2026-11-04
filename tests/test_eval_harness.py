@@ -193,10 +193,10 @@ class TestCliEval(unittest.TestCase):
         # 슬라이스 3에서 project_brain.search.eval_recall이 생겼으므로 베이스라인이
         # "미구현"→"구현됨"으로 전이한다(과업 요구사항 2). load_recall_fn이 더는
         # empty_recall을 돌려주지 않는다.
-        from project_brain.search import eval_recall
+        from project_brain.search import SearchSession
         recall_fn, implemented = load_recall_fn()
         self.assertTrue(implemented)
-        self.assertIs(recall_fn, eval_recall)
+        self.assertIsInstance(recall_fn, SearchSession)
         self.assertIsNot(recall_fn, empty_recall)
 
     def _write_scenarios(self, scenarios):

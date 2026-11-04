@@ -97,12 +97,12 @@ def empty_recall(query) -> dict:
 def load_recall_fn():
     """평가 진입점 회상 함수를 찾는다 → (recall_fn, implemented).
 
-    슬라이스 3이 project_brain.search 모듈에 eval_recall(query)를 신설하면
-    그쪽을 쓰고, 미구현이면 empty_recall로 빨간 베이스라인을 측정한다.
+    한 eval 실행 동안 corpus와 index가 바뀌지 않는 snapshot을 공유한다.
+    새 호출은 새 세션이므로 다음 eval은 반드시 다시 검사한다.
     """
     try:
-        from project_brain.search import eval_recall  # 슬라이스 3 신설 예정
-        return eval_recall, True
+        from project_brain.search import SearchSession
+        return SearchSession(), True
     except ImportError:
         return empty_recall, False
 
