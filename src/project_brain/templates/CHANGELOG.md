@@ -10,6 +10,11 @@ session-ingest,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 디렉�
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-11-04 — 임베딩 서비스 안내 이관 (#116)
+
+조회 스킬과 적재 도구 reference에 공유 서비스, 첫 로드, 동시 요청, 예비 슬롯 대기와
+상태 확인·종료 안내를 추가했다.
+
 ## 2026-09-29 — 적재 스크립트가 엔진 Python으로 스스로 넘어감 (#107)
 
 release wheel 설치본은 엔진이 uv tool 환경에만 있어 wrapper의 시스템 `python3`로는 import되지 않았다.
