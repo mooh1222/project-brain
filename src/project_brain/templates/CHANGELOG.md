@@ -10,6 +10,12 @@ session-ingest,draft,audit} — 각 `SKILL.md` + `references/` + `scripts/`을 �
 상세는 각 템플릿(`templates/<skill>/SKILL.md`)·`references/`. 엔진 코어(스키마·검색·
 적재 엔진) 변경 이력은 [ROADMAP.md](../../../ROADMAP.md). 적재된 데이터 이력은 각 데이터레포의 `brain/`.
 
+## 2026-11-04 — 통합 검수 보완 (#115·#117)
+
+검증 대기 인사이트(기존 기록) 용어를 맞추고, 세션 추출 3라운드 뒤 미합의 후보의
+초안 미결·세션 보고 경계를 공통 판단에 명시했다. 임베딩 서비스 안내는
+`ingest/references/ingest-tools.md`를 정본으로 두고 query는 설치 후 유효한 상대 링크로 읽는다.
+
 ## 2026-11-04 — 공통 기록·회상 판단과 개선 제안 직접 읽기 (#115)
 
 `draft/references/knowledge-workflow.md` 하나에 목적별 기록·회상, 근거 부족 처리, 백로그 형식·

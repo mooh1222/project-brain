@@ -283,7 +283,7 @@ def test_installed_ingest_skills_preserve_user_work_and_pending_boundaries():
     ):
         assert boundary in workflow
     for boundary in (
-        "기존 검증 대기 기록", "기본 신규 기록 경로에서", "기존 파일·항목·이력은 보존",
+        "검증 대기 인사이트(기존 기록)", "기본 신규 기록 경로에서", "기존 파일·항목·이력은 보존",
         "명시적 과거 기록 조회", "미검증", "다른 기능의 pending 상태",
     ):
         assert boundary in workflow
@@ -339,13 +339,13 @@ def test_query_skill_keeps_default_use_read_only():
 def test_query_routes_improvement_and_legacy_pending_recall_before_general_search():
     query = _installed_skill("query")
     description = query.split("---", 2)[1]
-    for trigger in ("전에 ~하자던 거", "남은 개선", "과거 검증 대기"):
+    for trigger in ("전에 ~하자던 거", "남은 개선", "검증 대기 인사이트(기존 기록)"):
         assert trigger in description
     direct_route = query[query.index("## 0."):query.index("## 1.")]
     for contract in (
         "knowledge-workflow.md", "brain/backlog/development.md", "실제 본문",
         "초안 목록·일반 지식 검색을 선행하지 않는다", "정상 빈 결과", "권한 오류",
-        "과거 검증 대기", "brain/pending/insights.md", "미검증",
+        "검증 대기 인사이트(기존 기록)", "brain/pending/insights.md", "미검증",
     ):
         assert contract in direct_route
     assert direct_route.index("backlog/development.md") < direct_route.index("references/discovery.md")

@@ -8,6 +8,9 @@ superseded_by: null
 
 # 주제별 지식 초안은 정식 코퍼스 밖에서 이어서 다듬는다
 
+주제 범위·초안 발견 선행의 예외·backlog 및 pending 라우팅 보류는
+[ADR 0010](0010-align-knowledge-recording-and-recall.md)에서 부분 재검토했다.
+
 조회 발견 계약은 [#109](https://github.com/mooh1222/project-brain/issues/109)에서 아래와 같이
 확장했다. 전체 v2 설계는 [#108](https://github.com/mooh1222/project-brain/issues/108)이며,
 JSON v2 기록은 #110, 읽기 전용 prepare와 기존 적재 연결은 #111에서 구현했다.
