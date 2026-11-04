@@ -19,6 +19,11 @@ query의 개선 제안 트리거·직접 본문 읽기와 접근 가능한 루�
 기존 pending의 명시적 조회, 초안 형식·검수 상태·설치 사용자 수정·overlay 보존은 유지한다.
 새 kind·schema·CLI·검색 채널·Python Module은 없으며 색인 rebuild는 필요 없다.
 
+## 2026-11-04 — 임베딩 서비스 안내 이관 (#116)
+
+조회 스킬과 적재 도구 reference에 공유 서비스, 첫 로드, 동시 요청, 예비 슬롯 대기와
+상태 확인·종료 안내를 추가했다.
+
 ## 2026-09-29 — 적재 스크립트가 엔진 Python으로 스스로 넘어감 (#107)
 
 release wheel 설치본은 엔진이 uv tool 환경에만 있어 wrapper의 시스템 `python3`로는 import되지 않았다.

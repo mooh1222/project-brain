@@ -42,6 +42,14 @@ Brain은 {{PROJECT}} 프로젝트 지식의 단일 저장소다(검수 상태·�
 project-brain search "<질문>"
 ```
 
+> 실모델 `search`·`eval`·`index rebuild`는 동일 사용자·동일 embedding identity의 임베딩 서비스를 공유한다.
+> 첫 임베딩은 서비스 기동과 모델 로드로 지연될 수 있고, 이후 적재된 모델을 재사용한다.
+> 여러 세션에서 요청할 수 있으며 서비스의 임베딩 계산은 순서대로 처리된다. 서비스를 사용할 수 없거나
+> 비활성화되면 전역 슬롯을 얻어 직접 계산한다. 슬롯 대기 시간이 초과되어 `embedder_busy`가
+> 나오면 진행 중인 작업이 끝난 뒤 재시도하거나 `PROJECT_BRAIN_EMBED_WAIT_SECONDS`를 늘린다.
+> 서비스는 기본적으로 유휴 10분 뒤 종료한다. `project-brain embedder status`로 확인하고
+> `project-brain embedder stop`으로 종료한다. 종료하면 진행 중인 임베딩도 중단될 수 있다.
+
 `results`와 `candidates`에서 실제 답에 필요한 **핵심 객체**를 고른 뒤 각 객체를 연다:
 
 ```bash
