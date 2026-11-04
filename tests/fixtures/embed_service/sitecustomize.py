@@ -41,6 +41,15 @@ if os.environ.get('PB_TEST_DIR'):
         sys.meta_path.insert(0, NoML())
     else:
         def get_device_name():
+            count = int(os.environ.get('PB_TEST_DEVICE_WRITERS', '0'))
+            if count:
+                root = Path(os.environ['PB_TEST_DIR'])
+                (root / f'detect-{os.getpid()}').touch()
+                deadline = time.monotonic() + 5
+                while len(list(root.glob('detect-*'))) < count:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError('fake device writer barrier timeout')
+                    time.sleep(0.01)
             return os.environ.get('PB_TEST_DEVICE', 'cpu')
 
         sys.modules['torch'] = types.SimpleNamespace(set_num_threads=lambda n: None)

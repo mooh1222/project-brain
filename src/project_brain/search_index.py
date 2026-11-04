@@ -319,6 +319,10 @@ def _previous_vectors(db_path: Path, identity: str) -> tuple[dict[str, bytes], s
             conn.close()
 
 
+class _DeviceCacheRecovery(RuntimeError):
+    """장치 힌트 교정 뒤, 기존 신원으로 고른 재사용 벡터를 버리고 다시 시작한다."""
+
+
 def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict:
     """brain/ 전 객체에서 FTS(+벡터) 색인을 전체 재구축한다(§4).
 
@@ -337,6 +341,18 @@ def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict
     반환: 기존 통계 + vectors_total/reused/seeded/computed, seed_paths/seed_fallbacks,
     자기 이전 색인의 fallback 사유, 총 소요 시간.
     """
+    started = time.perf_counter()
+    for attempt in range(2):
+        try:
+            result = _rebuild_once(brain_root, db_path, embedder, seeds=seeds)
+            result['elapsed_seconds'] = time.perf_counter() - started
+            return result
+        except _DeviceCacheRecovery:
+            if attempt:
+                raise
+
+
+def _rebuild_once(brain_root, db_path, embedder, *, seeds):
     started = time.perf_counter()
     db_path = resolve_db_path(db_path)
     brain_root = resolve_brain_root(brain_root)
@@ -473,7 +489,10 @@ def rebuild(brain_root=None, db_path=None, embedder=None, *, seeds=None) -> dict
                 )
                 if misses:
                     vectors = embedder.embed_many([surface for _, surface in misses])
-                    if getattr(embedder, "embedding_identity", "") != identity:
+                    actual_identity = getattr(embedder, "embedding_identity", "")
+                    if actual_identity != identity:
+                        if getattr(embedder, '_device_cache_recovery', None) == (identity, actual_identity):
+                            raise _DeviceCacheRecovery('장치 캐시 교정: 임시 색인을 폐기하고 재시도합니다')
                         raise RuntimeError("임베딩 실행 신원이 사전 신원과 다릅니다. 색인을 교체하지 않습니다.")
                     if len(vectors) != len(misses):
                         raise RuntimeError("임베딩 결과 수가 요청한 surface 수와 다릅니다.")

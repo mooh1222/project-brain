@@ -192,6 +192,7 @@ class ManagedEmbedder(RealEmbedder):
         import threading
         self._request_lock = threading.Lock()
         self._local_adapter = None
+        self._device_cache_recovery = None
 
     @property
     def embedding_identity(self) -> str:
@@ -206,6 +207,7 @@ class ManagedEmbedder(RealEmbedder):
         if not texts:
             return []
         with self._request_lock:
+            self._device_cache_recovery = None
             for attempt in range(2):
                 identity = super().embedding_identity
                 try:
@@ -227,5 +229,11 @@ class ManagedEmbedder(RealEmbedder):
                     from project_brain.device_cache import invalidate_device
                     invalidate_device()
                     self._detect_execution_device()
+                    corrected = super().embedding_identity
+                    before, after = json.loads(identity), json.loads(corrected)
+                    before.pop('device')
+                    after.pop('device')
+                    if identity != corrected and before == after:
+                        self._device_cache_recovery = (identity, corrected)
                     if self._local_adapter is not None:
-                        self._local_adapter.identity = super().embedding_identity
+                        self._local_adapter.identity = corrected

@@ -59,7 +59,8 @@ def test_device_environment_change_is_a_cache_miss(env, name):
 
 
 def test_concurrent_writers_leave_a_readable_identity_without_ml(env):
-    children = [subprocess.Popen([sys.executable, '-c', IDENTITY], env=env,
+    writers = {**env, 'PB_TEST_DEVICE_WRITERS': '5'}
+    children = [subprocess.Popen([sys.executable, '-c', IDENTITY], env=writers,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 for _ in range(5)]
     identities = []
@@ -131,3 +132,25 @@ def test_execution_environment_change_does_not_reuse_cache(env, change):
     code = 'import sys, platform, importlib.metadata\n' + change + '\n' + IDENTITY
     run(env, code)
     assert len(list(Path(env['PB_TEST_DIR']).glob('device-*.json'))) == 2
+
+
+@pytest.mark.parametrize('service', ['1', '0'])
+def test_rebuild_reselects_seed_vectors_after_device_cache_recovery(env, tmp_path, service):
+    from tests.test_index_seeds import corpus
+    brain = corpus(tmp_path / 'brain')
+    seed = tmp_path / 'seed.db'
+    cli({**env, 'PROJECT_BRAIN_EMBED_SERVICE': '0', 'PB_TEST_DEVICE': 'cuda:99'},
+        'index', 'rebuild', '--brain-root', brain, '--db', seed, '--seed', tmp_path / 'absent')
+    # 일부 seed hit와 miss를 섞는다. 교정 전 신원의 hit를 최종 DB에 남기면 안 된다.
+    from project_brain.store import BrainStore
+    store = BrainStore.load(brain)
+    obj = store.by_kind('GlossaryTerm')[0]
+    obj['definition'] += ' 새 표면'
+    BrainStore.save_object(brain, obj)
+    target = tmp_path / 'index.db'
+    result = cli({**env, 'PROJECT_BRAIN_EMBED_SERVICE': service},
+                 'index', 'rebuild', '--brain-root', brain, '--db', target, '--seed', seed)
+    assert result['vectors_seeded'] == 0
+    assert result['vectors_computed'] == result['vectors_total'] == 3
+    assert any(f['reason'] == 'embedding_identity_mismatch' for f in result['seed_fallbacks'])
+    assert not list(tmp_path.glob('.index.db.rebuild-*'))

@@ -153,12 +153,15 @@ Embedder가 `embedding_identity`를 소유한다. 실모델은 불변 Hugging Fa
 
 장치 판정은 `device_cache.py`의 사용자별 `/tmp/project-brain-embed-<uid>/device-*.json`
 힌트를 먼저 읽는다(#96). 캐시 히트에서는 torch·sentence_transformers를 import하지 않으며
-v2 신원 바이트는 그대로다. Python realpath·venv·패키지 버전·CPU/OS·장치 선택 환경을 키로
+v2 신원 바이트는 그대로다(`embedder.py:91,135`; `tests/test_device_cache.py:107`). Python realpath·venv·패키지 버전·CPU/OS·장치 선택 환경을 키로
 삼고 0600 파일을 원자 교체한다. 손상·형식·권한 불일치는 미스다. 이미 초기화된 분산
-runtime의 프로세스 내부 rank는 공유하지 않는다. 실제 모델 로더는 캐시를 우회해 판정한다.
+runtime의 프로세스 내부 rank는 공유하지 않는다(`device_cache.py:14,42,50,70`). 실제 모델 로더는 캐시를 우회해 판정한다(`embedder.py:118`).
 서비스/예비 경로가 `embedding_identity_changed`를 반환하면 캐시 삭제·실제 판정·1회 재시도를
 수행한다. 이전 서비스는 새 모델 기동 전에 회수하고, 예비 모델과 슬롯은 재사용한다.
-두 번째 불일치는 오류로 남는다. #94 프로토콜·소켓 키·응답 검증은 바뀌지 않는다.
+두 번째 불일치는 오류로 남는다(`embedder.py:203`). rebuild는 장치만 교정된 신원 쌍을 확인해
+임시 DB를 폐기하고 seed/이전 벡터 선택부터 한 번 다시 시작한다. 다른 신원 변경은 계속
+거부한다(`search_index.py:322,344,490`; `embedder.py:233`). #94 프로토콜·소켓 키·응답 검증은
+바뀌지 않는다(`embedding_service.py:26,62,141`).
 
 seed 선택은 반복 가능한 `index rebuild --seed <DB>` > `.project-brain.json`의
 `index_seeds` 경로 배열 > 자동 탐색이다. CLI 상대 경로는 cwd, config 상대 경로는 config
