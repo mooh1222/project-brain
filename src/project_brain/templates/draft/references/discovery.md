@@ -11,6 +11,7 @@ project-brain draft list
 
 ## 목록 해석과 선택
 
+- 기본 목록은 active만 보이며 완료 초안의 명시 조회·재개는 `project-brain draft list --all`을 사용한다. 빈 기본 목록이 파일 부재를 뜻하지는 않는다.
 - `drafts`의 topic ID·제목·scope·갱신 시각·format으로 관련성을 판단한다.
   `scope`는 최대 240자 미리보기이며 `scope_truncated=true`면 뒤가 생략됐다.
 - `diagnostics`는 읽을 수 없거나 형식이 잘못된 파일의 경로·문제 코드다.

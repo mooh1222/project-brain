@@ -1,6 +1,7 @@
 # JSON v2 항목과 patch
 
 문서는 version=2, topic_id, title, scope, resume_summary, updated, items, sources다.
+선택 root 필드 `ingested: {"at": <timezone 포함 ISO8601>}`는 적재 완료 표시이며 일반 갱신 때 제거된다. 기록·해제는 `--state ingested|active`만 사용한다.
 scope는 240자, resume_summary는 2000자 이내다. updated는 엔진이 찍는다.
 항목·source key는 topic 안에서 유일한 ASCII kebab-case이며 안정적으로 유지한다.
 

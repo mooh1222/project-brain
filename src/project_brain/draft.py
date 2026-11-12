@@ -521,7 +521,8 @@ def _quote_status(payload: bytes, quote: str) -> str:
 def _check_v2(document: dict, topic_id: str):
     expected = {"version", "topic_id", "title", "scope", "resume_summary", "updated", "items", "sources"}
     if (
-        type(document) is not dict or set(document) != expected
+        type(document) is not dict or not expected <= set(document)
+        or set(document) - expected - {"ingested"}
         or type(document["version"]) is not int or document["version"] != 2
         or document["topic_id"] != topic_id or not _valid_updated(document["updated"])
         or any(type(document[key]) is not str for key in ("title", "scope", "resume_summary"))
@@ -529,6 +530,10 @@ def _check_v2(document: dict, topic_id: str):
         or len(document["scope"]) > 240 or len(document["resume_summary"]) > 2000
     ):
         raise ValueError("v2 metadata가 잘못됐습니다 (scope 최대 240자, resume_summary 최대 2000자)")
+    if "ingested" in document:
+        ingested = document["ingested"]
+        if type(ingested) is not dict or set(ingested) != {"at"} or not _valid_updated(ingested["at"]):
+            raise ValueError("ingested는 timezone을 포함한 ISO 8601 at만 가져야 합니다")
     for field in ("items", "sources"):
         values = document[field]
         if type(values) is not list:
@@ -617,6 +622,8 @@ def _v2_view(path: Path, payload: bytes, *, item: str | None = None, full: bool 
         key: document[key] for key in ("topic_id", "title", "scope", "updated", "resume_summary")
     }
     result.update(format="json-v2", path=f"drafts/{path.name}", sha256=hashlib.sha256(payload).hexdigest())
+    if "ingested" in document:
+        result["ingested"] = document["ingested"]
     if full:
         result["document"] = document
     elif item is not None:
@@ -693,13 +700,16 @@ def _metadata(name: str, payload: bytes) -> dict:
         raise DraftError("draft_path_invalid", "초안 파일명은 ASCII-kebab-topic-id여야 합니다")
     if path.suffix == ".json":
         document = _parse_v2(path, payload)
-        return {key: document[key] for key in ("topic_id", "title", "scope", "updated")} | {"format": "json-v2"}
+        metadata = {key: document[key] for key in ("topic_id", "title", "scope", "updated")} | {"format": "json-v2"}
+        if "ingested" in document:
+            metadata["ingested"] = document["ingested"]
+        return metadata
     document = _document(path, payload)
     return {key: document[key] for key in ("topic_id", "title", "scope", "updated")} | {"format": "markdown-v1"}
 
 
-def list_drafts(brain_root: Path) -> dict[str, object]:
-    """정상 v1/v2 metadata와 파일별 진단을 반환한다."""
+def list_drafts(brain_root: Path, *, include_ingested: bool = False) -> dict[str, object]:
+    """기본 active 목록과 전체 파일 진단을 반환하고 완료 v2는 명시적으로 포함한다."""
     drafts, diagnostics = [], []
     try:
         with _directory(brain_root) as fd:
@@ -711,6 +721,8 @@ def list_drafts(brain_root: Path) -> dict[str, object]:
                     if Path(name).stem in conflicts:
                         raise DraftError("draft_topic_conflict", "동일 topic의 v1/v2가 함께 있습니다")
                     metadata = _metadata(name, _read_regular(fd, name))
+                    if "ingested" in metadata and not include_ingested:
+                        continue
                     scope = metadata["scope"]
                     drafts.append({**metadata, "scope": scope[:_SCOPE_PREVIEW_LIMIT], "scope_truncated": len(scope) > _SCOPE_PREVIEW_LIMIT})
                 except (DraftError, OSError, UnicodeDecodeError) as exc:
@@ -748,6 +760,34 @@ def update(brain_root: Path, topic_id: str, *, expected_sha: str, content: str) 
         mode = stat.S_IMODE(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
         _replace_file(brain_root, fd, name, new_payload, mode)
         return _document(Path(name), new_payload)
+
+
+def update_state(brain_root: Path, topic_id: str, *, expected_sha: str, state: str) -> dict:
+    """v2 완료 표시·해제를 기존 SHA와 원자 교체 경로로 기록한다."""
+    _validate_topic_id(topic_id)
+    if state not in ("ingested", "active"):
+        raise DraftError("draft_state_invalid", "state는 ingested 또는 active여야 합니다")
+    if show(brain_root, topic_id).get("format") != "json-v2":
+        raise DraftError("draft_format_mismatch", "상태 변경은 JSON v2 초안에만 사용합니다")
+    with _directory(brain_root, write=True) as fd:
+        name, payload = _read_topic(fd, topic_id)
+        if not name.endswith(".json"):
+            raise DraftError("draft_format_mismatch", "상태 변경은 JSON v2 초안에만 사용합니다")
+        _expected_sha(expected_sha, payload, topic_id)
+        document = _parse_v2(Path(name), payload)
+        document["updated"] = now_kst()
+        if state == "ingested":
+            document["ingested"] = {"at": document["updated"]}
+        else:
+            document.pop("ingested", None)
+        new_payload = _json_bytes(document)
+        _parse_v2(Path(name), new_payload)
+        mode = stat.S_IMODE(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+        _replace_file(brain_root, fd, name, new_payload, mode)
+        result = {"topic_id": topic_id, "format": "json-v2", "sha256": hashlib.sha256(new_payload).hexdigest(), "updated": document["updated"]}
+        if "ingested" in document:
+            result["ingested"] = document["ingested"]
+        return result
 
 
 def _patch_entries(entries: list[dict], operations: object) -> tuple[list[dict], list[str]]:
@@ -796,6 +836,7 @@ def update_patch(brain_root: Path, topic_id: str, *, expected_sha: str, patch: o
         changes = {}
         for field in ("items", "sources"):
             document[field], changes[field] = _patch_entries(document[field], patch.get(field, []))
+        document.pop("ingested", None)
         document["updated"] = now_kst()
         new_payload = _json_bytes(document)
         _parse_v2(Path(name), new_payload)

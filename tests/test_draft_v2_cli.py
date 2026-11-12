@@ -20,6 +20,65 @@ def run_cli(*args):
     return rc, json.loads(output.getvalue())
 
 
+def test_cli_ingested_state_list_all_and_same_value_patch_reopens_topic(tmp_path):
+    root = tmp_path / "brain"
+    _, created = run_cli("draft", "create", "topic", "--title", "지식", "--scope", "범위", "--brain-root", root)
+    rc, marked = run_cli("draft", "update", "topic", "--brain-root", root,
+                         "--expected-sha", created["draft"]["sha256"], "--state", "ingested")
+    assert rc == 0 and marked["draft"]["ingested"]["at"]
+    assert run_cli("draft", "list", "--brain-root", root)[1]["drafts"] == []
+    rc, listed = run_cli("draft", "list", "--all", "--brain-root", root)
+    assert rc == 0 and listed["partial"] is False
+    assert listed["drafts"][0]["ingested"] == marked["draft"]["ingested"]
+    rc, shown = run_cli("draft", "show", "topic", "--brain-root", root)
+    assert rc == 0 and shown["draft"]["ingested"] == marked["draft"]["ingested"]
+    patch = tmp_path / "patch.json"
+    patch.write_text(json.dumps({"title": "지식"}), encoding="utf-8")
+    rc, updated = run_cli("draft", "update", "topic", "--brain-root", root,
+                          "--expected-sha", marked["draft"]["sha256"], "--patch-file", patch)
+    assert rc == 0
+    assert "ingested" not in json.loads((root / "drafts/topic.json").read_text())
+    assert [entry["topic_id"] for entry in run_cli("draft", "list", "--brain-root", root)[1]["drafts"]] == ["topic"]
+    rc, active = run_cli("draft", "update", "topic", "--brain-root", root,
+                         "--expected-sha", updated["draft"]["sha256"], "--state", "active")
+    assert rc == 0 and "ingested" not in active["draft"]
+
+
+@pytest.mark.parametrize("extra", [["--patch-file", "missing.json"], ["--content-file", "missing.md"], ["--repo-root", "."]])
+def test_cli_state_rejects_mixed_inputs_without_writing(tmp_path, extra):
+    root = tmp_path / "brain"
+    _, created = run_cli("draft", "create", "topic", "--title", "지식", "--scope", "범위", "--brain-root", root)
+    path = root / "drafts/topic.json"
+    original = path.read_bytes()
+    args = ("draft", "update", "topic", "--brain-root", root, "--expected-sha", created["draft"]["sha256"], "--state", "ingested", *extra)
+    if extra[0] == "--repo-root":
+        rc, error = run_cli(*args)
+        assert rc == 1 and error["error_code"] == "draft_format_mismatch"
+    else:
+        with pytest.raises(SystemExit) as exc:
+            run_cli(*args)
+        assert exc.value.code == 2
+    assert path.read_bytes() == original
+
+
+def test_cli_state_rejects_stale_sha_and_direct_ingested_patch_without_writing(tmp_path):
+    root = tmp_path / "brain"
+    _, created = run_cli("draft", "create", "topic", "--title", "지식", "--scope", "범위", "--brain-root", root)
+    _, marked = run_cli("draft", "update", "topic", "--brain-root", root,
+                        "--expected-sha", created["draft"]["sha256"], "--state", "ingested")
+    path = root / "drafts/topic.json"
+    original = path.read_bytes()
+    rc, stale = run_cli("draft", "update", "topic", "--brain-root", root,
+                       "--expected-sha", created["draft"]["sha256"], "--state", "active")
+    assert rc == 1 and stale["error_code"] == "draft_stale_sha"
+    patch = tmp_path / "patch.json"
+    patch.write_text(json.dumps({"ingested": {"at": "2026-11-12T12:00:00+09:00"}}))
+    rc, error = run_cli("draft", "update", "topic", "--brain-root", root,
+                       "--expected-sha", marked["draft"]["sha256"], "--patch-file", patch)
+    assert rc == 1 and error["error_code"] == "draft_patch_invalid"
+    assert path.read_bytes() == original
+
+
 def test_new_topic_is_json_and_default_show_is_a_small_resume_view(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = tmp_path / "brain"

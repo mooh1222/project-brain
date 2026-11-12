@@ -1525,6 +1525,7 @@ def _run_draft(argv) -> int:
     )
 
     list_parser = sub.add_parser("list")
+    list_parser.add_argument("--all", dest="include_ingested", action="store_true", help="적재 완료 v2 초안도 포함")
     list_parser.add_argument(
         "--brain-root",
         help="초안이 있는 Brain root (기본: config .project-brain.json)",
@@ -1549,6 +1550,7 @@ def _run_draft(argv) -> int:
         help="교체할 완전한 v1 Markdown UTF-8 파일",
     )
     update_input.add_argument("--patch-file", help="v2 항목·source·metadata patch JSON")
+    update_input.add_argument("--state", choices=("ingested", "active"), help="v2 적재 완료 표시 또는 해제")
     update_parser.add_argument("--repo-root", help="현재 코드 source를 관찰할 작업 checkout")
     update_parser.add_argument(
         "--brain-root",
@@ -1578,6 +1580,7 @@ def _run_draft(argv) -> int:
         show,
         update,
         update_patch,
+        update_state,
         parse_patch,
     )
 
@@ -1594,25 +1597,30 @@ def _run_draft(argv) -> int:
             )
             payload = {"ok": True, "draft": draft}
         elif args.action == "list":
-            payload = {"ok": True, **list_drafts(brain_root)}
+            payload = {"ok": True, **list_drafts(brain_root, include_ingested=args.include_ingested)}
         elif args.action == "show":
             payload = {"ok": True, "draft": show(brain_root, args.topic_id, item=args.item, full=args.full)}
         elif args.action == "update":
-            try:
-                content = Path(args.content_file or args.patch_file).read_text(encoding="utf-8")
-                patch = parse_patch(content) if args.patch_file else None
-            except (OSError, UnicodeError, ValueError) as exc:
-                raise DraftError(
-                    "draft_content_read_failed",
-                    f"갱신 content 파일을 읽을 수 없습니다: {exc}",
-                ) from exc
-            if args.patch_file:
-                updated = update_patch(brain_root, args.topic_id, expected_sha=args.expected_sha,
-                                       patch=patch, repo_root=Path(args.repo_root).absolute() if args.repo_root else None)
-            else:
+            if args.state:
                 if args.repo_root:
                     raise DraftError("draft_format_mismatch", "--repo-root는 v2 source patch에만 사용합니다")
-                updated = update(brain_root, args.topic_id, expected_sha=args.expected_sha, content=content)
+                updated = update_state(brain_root, args.topic_id, expected_sha=args.expected_sha, state=args.state)
+            else:
+                try:
+                    content = Path(args.content_file or args.patch_file).read_text(encoding="utf-8")
+                    patch = parse_patch(content) if args.patch_file else None
+                except (OSError, UnicodeError, ValueError) as exc:
+                    raise DraftError(
+                        "draft_content_read_failed",
+                        f"갱신 content 파일을 읽을 수 없습니다: {exc}",
+                    ) from exc
+                if args.patch_file:
+                    updated = update_patch(brain_root, args.topic_id, expected_sha=args.expected_sha,
+                                           patch=patch, repo_root=Path(args.repo_root).absolute() if args.repo_root else None)
+                else:
+                    if args.repo_root:
+                        raise DraftError("draft_format_mismatch", "--repo-root는 v2 source patch에만 사용합니다")
+                    updated = update(brain_root, args.topic_id, expected_sha=args.expected_sha, content=content)
             payload = {"ok": True, "draft": updated}
         elif args.action == "prepare":
             from project_brain.draft_prepare import prepare

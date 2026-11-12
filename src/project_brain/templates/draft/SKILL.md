@@ -79,6 +79,7 @@ project-brain draft lint
 
 ## 내용과 완료 경계
 
+- v2 완료 표시·해제: `project-brain draft update <topic-id> --expected-sha <최신 SHA> --state ingested|active`.
 - 의미 있는 새 이해·결정이 생겼거나 작업 구간을 끝낼 때 항목과 재개 요약을 갱신한다.
   순수 조회와 모든 도구 호출을 기록하지 않는다. 이해가 바뀌면 같은 key를 replace한다.
 - 기록 위치와 근거 부족 처리는 `references/knowledge-workflow.md`를 따른다.

@@ -5,10 +5,64 @@ from unittest import mock
 
 import pytest
 
-from project_brain.draft import DraftError, create, lint, list_drafts, show, update
+from project_brain import draft as draft_module
+from project_brain.draft import DraftError, create, create_v2, lint, list_drafts, show, update
 
 
 UPDATED = "2026-08-28T18:30:00+09:00"
+
+
+def test_ingested_topic_is_hidden_but_readable_and_can_be_reactivated(tmp_path):
+    created = create_v2(tmp_path, topic_id="topic", title="지식", scope="범위")
+    with mock.patch("project_brain.draft.now_kst", return_value=UPDATED):
+        marked = draft_module.update_state(tmp_path, "topic", expected_sha=created["sha256"], state="ingested")
+    assert marked["ingested"] == {"at": UPDATED}
+    assert list_drafts(tmp_path) == {"drafts": [], "diagnostics": [], "partial": False}
+    assert list_drafts(tmp_path, include_ingested=True)["drafts"][0]["ingested"] == {"at": UPDATED}
+    assert show(tmp_path, "topic")["ingested"] == {"at": UPDATED}
+    assert lint(tmp_path) == []
+    active = draft_module.update_state(tmp_path, "topic", expected_sha=marked["sha256"], state="active")
+    assert "ingested" not in active
+    assert [entry["topic_id"] for entry in list_drafts(tmp_path)["drafts"]] == ["topic"]
+
+
+@pytest.mark.parametrize("ingested", [None, True, {}, {"at": "yesterday"}, {"at": "2026-11-12T12:00:00"}, {"at": UPDATED, "objects": []}])
+def test_invalid_ingested_metadata_is_reported_before_filtering(tmp_path, ingested):
+    create_v2(tmp_path, topic_id="broken", title="손상", scope="범위")
+    create_v2(tmp_path, topic_id="healthy", title="정상", scope="범위")
+    path = tmp_path / "drafts/broken.json"
+    document = json.loads(path.read_text())
+    document["ingested"] = ingested
+    path.write_text(json.dumps(document), encoding="utf-8")
+    original = path.read_bytes()
+    for include_ingested in (False, True):
+        listed = list_drafts(tmp_path, include_ingested=include_ingested)
+        assert [entry["topic_id"] for entry in listed["drafts"]] == ["healthy"]
+        assert listed["partial"] is True
+        assert listed["diagnostics"][0]["code"] == "draft_json_invalid"
+    assert lint(tmp_path)[0]["code"] == "draft_json_invalid"
+    assert path.read_bytes() == original
+
+
+def test_state_update_rejects_stale_sha_invalid_state_and_v1_without_writing(tmp_path):
+    created = create_v2(tmp_path, topic_id="topic", title="지식", scope="범위")
+    marked = draft_module.update_state(tmp_path, "topic", expected_sha=created["sha256"], state="ingested")
+    path = tmp_path / "drafts/topic.json"
+    original = path.read_bytes()
+    for sha, state, code in [(created["sha256"], "active", "draft_stale_sha"), (marked["sha256"], "archived", "draft_state_invalid")]:
+        with pytest.raises(DraftError) as exc:
+            draft_module.update_state(tmp_path, "topic", expected_sha=sha, state=state)
+        assert exc.value.code == code
+        assert path.read_bytes() == original
+    legacy = create(tmp_path, topic_id="legacy", title="v1", scope="범위")
+    legacy_path = tmp_path / "drafts/legacy.md"
+    original = legacy_path.read_bytes()
+    for state in ("ingested", "active"):
+        with pytest.raises(DraftError) as exc:
+            draft_module.update_state(tmp_path, "legacy", expected_sha=legacy["sha256"], state=state)
+        assert exc.value.code == "draft_format_mismatch"
+        assert legacy_path.read_bytes() == original
+    assert [entry["topic_id"] for entry in list_drafts(tmp_path)["drafts"]] == ["legacy"]
 
 
 def test_create_and_show_round_trip_v1_draft(tmp_path):

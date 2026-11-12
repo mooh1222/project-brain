@@ -34,3 +34,4 @@
 [공통 기록·회상 판단](../../{{PROJECT}}-brain-draft/references/knowledge-workflow.md)을 따른다.
 재료와 실제 적재 결과를 draft 스킬로 넘기며 ingest가 초안을 직접 갱신하거나 실패 때문에
 삭제/완료 표시하지 않는다.
+실제 적재 또는 기존 객체와의 동일성 확인·최종화 후 미적재 지식·의미 미결이 없으면 draft에 완료 표시를 넘긴다.
