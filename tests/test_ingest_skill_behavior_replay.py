@@ -261,6 +261,7 @@ class CoverageWriteBoundaryReplayTest(unittest.TestCase):
                 os.environ,
                 PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                 PYTHONPATH=str(ROOT / "src"),
+                PROJECT_BRAIN_PYTHON=sys.executable,
                 TMPDIR=str(tmp_dir),
                 CALL_LOG=str(calls),
             )

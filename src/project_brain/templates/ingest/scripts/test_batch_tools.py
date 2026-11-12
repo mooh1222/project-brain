@@ -165,6 +165,11 @@ def load_script(path: Path, module_name: str):
 
 class BatchRunnerCliTest(unittest.TestCase):
     def setUp(self):
+        # 소스 runtime fixture는 프로젝트 release 설치가 없으므로 검증 엔진을 명시한다.
+        from unittest.mock import patch
+        engine_env = patch.dict(os.environ, {"PROJECT_BRAIN_PYTHON": sys.executable})
+        engine_env.start()
+        self.addCleanup(engine_env.stop)
         self._td = TemporaryDirectory()
         self.root = Path(self._td.name)
         (self.root / "brain").mkdir()
@@ -1942,6 +1947,11 @@ class BatchRunnerApiTest(unittest.TestCase):
 
 class RunIngestCleanupTest(unittest.TestCase):
     def setUp(self):
+        # 소스 runtime fixture는 프로젝트 release 설치가 없으므로 검증 엔진을 명시한다.
+        from unittest.mock import patch
+        engine_env = patch.dict(os.environ, {"PROJECT_BRAIN_PYTHON": sys.executable})
+        engine_env.start()
+        self.addCleanup(engine_env.stop)
         self._td = TemporaryDirectory()
         self.root = Path(self._td.name)
         self.brain_root = self.root / "brain"

@@ -466,7 +466,11 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
    ```
    checks는 `project_brain`을 import하므로 시스템 `python3`가 아니라 엔진 Python으로 돌린다.
    `scripts/*.py`는 시스템 `python3`로 실행돼도 `engine_python.py`가 엔진 Python으로 넘긴다
-   (`PROJECT_BRAIN_PYTHON`으로 직접 지정 가능).
+   (명시 `PROJECT_BRAIN_PYTHON` > 스크립트 소속 `.project-brain.json` checkout의
+   `.local/brain-tools/project-brain/bin/python`). 자동 선택은 현재 인터프리터나 PATH의
+   전역 엔진으로 폴백하지 않는다. 고정 release가 없으면 프로젝트 prepare/설치 안내로
+   종료한다. 명시 Python을 쓸 때는 CLI PATH도 같은 엔진으로 맞춘다. 자동 선택 시에는
+   Python 환경변수를 정리하고 자식 CLI PATH도 고정 release로 맞춘다.
 4. **계약 회상** — `recall_checks`의 각 query가 모든 `expected_object_ids`를 회수하고,
    `require_code_locators=true`면 각 기대 객체의 `linked.code_locators`가 비어 있지 않은지 확인한다.
    ```bash

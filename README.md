@@ -49,7 +49,11 @@ project-brain --version   # project-brain 0.1.0
   `migration`과 foundation 검증 스크립트는 계속 엔진 checkout을 요구한다.
   v0.1.0의 범위는 [release notes](docs/releases/v0.1.0.md)의
   제약 절을 본다. 설치 스킬의 스크립트는 시스템 `python3`로 시작해도 엔진이 깔린 Python으로
-  스스로 넘어간다(`PROJECT_BRAIN_PYTHON`으로 지정 가능).
+  스스로 넘어간다. v0.3.3부터 명시 `PROJECT_BRAIN_PYTHON`이 없으면 스크립트 소속
+  `.project-brain.json` checkout의 `.local/brain-tools/project-brain/bin/python`을 사용한다.
+  해당 release가 없으면 프로젝트 prepare/설치를 안내하고 종료한다. 전역 엔진은 자동
+  선택하지 않는다. 전역 release나 editable 도구를 의도적으로 쓸 때는
+  `PROJECT_BRAIN_PYTHON`을 절대경로로 지정하고 CLI PATH도 같은 엔진으로 맞춘다.
 
 ### 엔진 개발자 설치 (editable)
 
