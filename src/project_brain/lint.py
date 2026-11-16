@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 
 from project_brain.hash_utils import sha256_text as _sha256_text
 from project_brain.hash_utils import source_content_hash as _source_content_hash
@@ -212,7 +213,12 @@ def _lint_store_report(
                 path = root / locator
                 if ".." in path.parts or not path.resolve().is_relative_to(root):
                     raise ValueError("locator must stay inside brain root without '..'")
-                is_file = path.is_file()
+                try:
+                    # is_file()는 ELOOP를 False로 숨긴다. 3.13부터 non-strict
+                    # resolve()도 순환 링크를 허용하므로 stat()의 오류를 보존한다.
+                    is_file = S_ISREG(path.stat().st_mode)
+                except (FileNotFoundError, NotADirectoryError):
+                    is_file = False
             except (OSError, ValueError, RuntimeError) as exc:
                 add(
                     "manifest_local_path_invalid",
