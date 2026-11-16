@@ -274,7 +274,7 @@ keyword-only 필수다.
 붙일 뿐 `expected_updated_at` 잠금이나 diff를 만들지 않는다 — 개정 적재에서는 바뀐 EvidenceRef를 검토 목록에 직접 적는다.
 
 ★이 파일은 `raw/sources/` 아래라 raw 색인 대상이다★ — 저장·개정마다 raw 청크와 corpus fingerprint가 바뀌므로 그 적재는
-실모델 `project-brain index rebuild`와 실코퍼스 가드 `EXPECTED_RAW_CHUNKS` 갱신을 함께 요구한다. 이번 적재에서
+실모델 `project-brain index rebuild`와 아래 골든셋 회귀·실코퍼스 가드의 raw 행 수 검증을 함께 요구한다. 이번 적재에서
 `source_type=user_statement`를 처음 쓰면 SKILL의 고위험 규칙(새 `source_type` 첫 사용)이 그대로 적용된다.
 
 ## promote-auto — 매핑 보증 용어 일괄 승격
@@ -457,8 +457,15 @@ action object 변경이나 알 수 없는 object 추가는 fingerprint 불일치
 3. **골든셋 회귀 + 실코퍼스 가드** — 새 적재가 기존 회상을 깨뜨리지 않았는지(기능마다
    골든셋 시나리오를 늘려가는 게 P2 방침). 객체 색인 행은 가드가 디스크의 색인 대상 kind
    `.json` 수를 세서 `indexed - raw_chunks`와 자동 대조하니 손으로 갱신하지 않는다
-   (`test_real_corpus.py`의 `INDEXED_OBJECT_DIRS`, 색인 제외 kind는 아래 표). raw 청크 수
-   (`EXPECTED_RAW_CHUNKS`)만 기획서 원문·개념 선언 문서·청커가 바뀔 때 의식적으로 갱신:
+   (`test_real_corpus.py`의 `INDEXED_OBJECT_DIRS`, 색인 제외 kind는 아래 표).
+   raw 예상 행 수는 `project-brain raw chunk-preview --json`의 `raw_chunks`와 실제
+   `index rebuild`의 `raw_chunks`를 같은 원문·tokenizer에서 대조한다. 미리보기는 DB와
+   임베더 없이 원문별·합계를 계산하며 `sources[].path`는 brain root 상대 경로다.
+   원문 추적·manifest locator 존재 검사와 빈 원문 거부는 소비 가드에서 계속 수행한다.
+   이 CLI는 기능을 포함한 **새 엔진 release 채택 뒤** 사용할 수 있다. 기존 v0.3.3
+   고정 소비자의 독립 청커를 CLI 호출로 전환하는 일은 소비 프로젝트 후속이다.
+   아직 전환하지 않은 프로젝트에서는 현재 가드를 유지하고, 고정 청크 수 수동 갱신을
+   새 적재 절차로 추가하지 않는다.
    ```bash
    project-brain eval
    ENGINE_PY="$(python3 .agents/skills/{{PROJECT}}-brain-ingest/scripts/engine_python.py)"  # 엔진이 깔린 Python(PROJECT_BRAIN_PYTHON 우선)

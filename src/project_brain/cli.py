@@ -20,7 +20,6 @@ from project_brain.config import (
     resolve_default_branch,
     resolve_scenarios_path,
 )
-from project_brain.embedder import get_embedder
 from project_brain.embedding_service import EmbedderError
 from project_brain.eval_harness import (
     evaluate,
@@ -37,7 +36,6 @@ from project_brain.promote import (
 )
 from project_brain.router import QueryRouter
 from project_brain.schema import validate_object
-from project_brain.search_index import rebuild as index_rebuild
 from project_brain.store import BrainStore
 from project_brain.mutation import MutationOperation, corpus_fingerprint
 from project_brain.repo_context import (
@@ -45,6 +43,17 @@ from project_brain.repo_context import (
     RepoVerificationError,
     resolve_repo_context,
 )
+
+
+def get_embedder(*args, **kwargs):
+    # raw preview 같은 읽기 명령은 임베더 모듈도 import하지 않는다.
+    from project_brain.embedder import get_embedder as load_embedder
+    return load_embedder(*args, **kwargs)
+
+
+def index_rebuild(*args, **kwargs):
+    from project_brain.search_index import rebuild
+    return rebuild(*args, **kwargs)
 
 
 def _add_mutation_context_arguments(
@@ -1249,6 +1258,30 @@ def _run_index(argv) -> int:
          "vector_reuse_fallback": stats["vector_reuse_fallback"],
          "elapsed_seconds": stats["elapsed_seconds"]},
         ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_raw(argv) -> int:
+    parser = argparse.ArgumentParser(prog="project-brain raw")
+    parser.add_argument("subcommand", choices=["chunk-preview"])
+    parser.add_argument("--brain-root", help="코퍼스 루트 (기본: config .project-brain.json)")
+    parser.add_argument("--json", action="store_true", help="원문별·합계 예상 행 수 JSON")
+    parser.add_argument("paths", nargs="*", help="탐색 범위 안의 원문 파일 (cwd 상대/절대)")
+    args = parser.parse_intermixed_args(argv)
+    from project_brain.raw_chunks import preview_raw_chunks
+
+    brain_root = resolve_brain_root(args.brain_root)
+    try:
+        report = preview_raw_chunks(brain_root, args.paths)
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        return 1
+    if args.json:
+        print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
+    else:
+        for source in report["sources"]:
+            print(f"{source['raw_chunks']}\t{source['path']}")
+        print(f"raw_chunks: {report['raw_chunks']} ({report['tokenizer']})")
     return 0
 
 
@@ -3344,7 +3377,7 @@ def _run_top_level_help(argv) -> int:
         epilog=(
             "서브커맨드 (상세는 `project-brain <명령> --help`):\n"
             "  적재·검수   build  ingest  promote  promote-auto  session  draft\n"
-            "  검색·색인   search  show  query  index  eval  projection\n"
+            "  검색·색인   search  show  query  index  raw  eval  projection\n"
             "  그래프      graph (isolated · export)\n"
             "  점검·진단   lint  doctor  embedder  bootstrap  stale-check  mark-checked\n"
             "  설치        install"
@@ -3389,6 +3422,8 @@ def main() -> int:
             return _run_ingest(argv[1:])
         if argv and argv[0] == "index":
             return _run_index(argv[1:])
+        if argv and argv[0] == "raw":
+            return _run_raw(argv[1:])
         if argv and argv[0] == "session":
             return _run_session(argv[1:])
         if argv and argv[0] == "search":

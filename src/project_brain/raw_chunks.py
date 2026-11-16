@@ -12,6 +12,7 @@ ASCII·한글 이외 비공백 기호 2개당 1토큰)다. 난수·시각 없이
 "raw.<context디렉토리>.<파일stem>#<순번:03d>" — brain 객체 id와 네임스페이스 분리.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -129,23 +130,71 @@ def split_markdown(text: str, target_tokens: int = CHUNK_TARGET_TOKENS,
     return chunks
 
 
+def raw_source_paths(brain_root) -> list[Path]:
+    """색인이 발견하는 원문 파일. 순서·깊이·확장자는 기존 색인 규약 그대로다."""
+    root = Path(brain_root) / "raw" / "sources"
+    if not root.exists():
+        return []
+    return [
+        md
+        for ctx_dir in sorted(p for p in root.iterdir() if p.is_dir())
+        for md in sorted(ctx_dir.glob("*.md"))
+    ]
+
+
+def _source_chunks(md: Path) -> list[dict]:
+    text = md.read_text(encoding="utf-8")
+    return [
+        {"chunk_id": f"raw.{md.parent.name}.{md.stem}#{i:03d}",
+         "context_id": f"context.{md.parent.name}", "text": chunk}
+        for i, chunk in enumerate(split_markdown(text))
+    ]
+
+
+def indexable_raw_chunks(chunks, *, tokenize_fn=None):
+    """rebuild와 preview가 공유하는 검색 토큰 공백 제외 관문."""
+    if tokenize_fn is None:
+        from project_brain.tokenize_ko import tokenize
+        tokenize_fn = tokenize
+    for chunk in chunks:
+        tokens = tokenize_fn(chunk["text"])
+        if tokens:
+            yield chunk, tokens
+
+
+def preview_raw_chunks(brain_root, paths=None) -> dict:
+    """기존 DB·임베더 없이 원문별 실제 raw 색인 예상 행 수를 계산한다."""
+    from project_brain.tokenize_ko import tokenizer_signature
+
+    brain_root = Path(brain_root)
+    if not brain_root.is_dir():
+        raise ValueError(f"brain 코퍼스 디렉터리가 없음: {brain_root}")
+    discovered = raw_source_paths(brain_root)
+    if paths:
+        requested = {Path(os.path.abspath(path)) for path in paths}
+        available = {Path(os.path.abspath(path)): path for path in discovered}
+        invalid = requested - available.keys()
+        if invalid:
+            raise ValueError(
+                "색인 탐색 범위 raw/sources/<context>/*.md에 없는 원문: "
+                + ", ".join(str(path) for path in sorted(invalid))
+            )
+        discovered = [md for md in discovered if Path(os.path.abspath(md)) in requested]
+    sources = [
+        {"path": md.relative_to(brain_root).as_posix(),
+         "context_id": f"context.{md.parent.name}",
+         "raw_chunks": sum(1 for _ in indexable_raw_chunks(_source_chunks(md)))}
+        for md in discovered
+    ]
+    return {"brain_root": str(brain_root), "tokenizer": tokenizer_signature(),
+            "raw_chunks": sum(source["raw_chunks"] for source in sources),
+            "sources": sources}
+
+
 def iter_raw_sources(brain_root) -> list[dict]:
     """brain/raw/sources/<context>/*.md를 청크 행으로 펼친다(정렬 순회 — 결정론).
 
     반환 원소: {chunk_id, context_id, text}. 디렉토리가 없으면 빈 리스트.
     .md만 본다 — P1 규약이 텍스트 원문만 추적하고 현 코퍼스 전부 md.
     """
-    root = Path(brain_root) / "raw" / "sources"
-    if not root.exists():
-        return []
-    out: list[dict] = []
-    for ctx_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        for md in sorted(ctx_dir.glob("*.md")):
-            text = md.read_text(encoding="utf-8")
-            for i, chunk in enumerate(split_markdown(text)):
-                out.append({
-                    "chunk_id": f"raw.{ctx_dir.name}.{md.stem}#{i:03d}",
-                    "context_id": f"context.{ctx_dir.name}",
-                    "text": chunk,
-                })
-    return out
+    return [chunk for md in raw_source_paths(brain_root) for chunk in _source_chunks(md)]

@@ -19,6 +19,7 @@ REQUIRED_DOCS = {
 
 _SIMPLE_SUBCOMMAND_RUNNERS = {
     "index": cli._run_index,
+    "raw": cli._run_raw,
     "embedder": cli._run_embedder,
     "session": cli._run_session,
     "projection": cli._run_projection,

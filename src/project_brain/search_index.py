@@ -31,7 +31,9 @@ from project_brain.config import resolve_brain_root, resolve_db_path
 from project_brain.embedder import EMBED_DIM
 from project_brain.index_seeds import resolve_index_seeds
 from project_brain.lint import projection_is_fresh
-from project_brain.raw_chunks import RAW_KIND, RAW_STATUS, iter_raw_sources
+from project_brain.raw_chunks import (
+    RAW_KIND, RAW_STATUS, indexable_raw_chunks, iter_raw_sources,
+)
 from project_brain.store import BrainStore
 from project_brain.surface import (
     EXTRACTOR_VERSION, content_hash, context_scope_surfaces, extract_surface,
@@ -448,11 +450,14 @@ def _rebuild_once(brain_root, db_path, embedder, *, seeds):
                 # kind=raw_chunk, status=raw, 원문은 surface_text로 운반(store에 없는 행).
                 # content_hash는 객체 행의 공식(표면+status SHA-256)과 동형으로 텍스트에서 계산.
                 raw_chunks = 0
-                for ch in iter_raw_sources(Path(brain_root)):
-                    tokens = tokenize(ch["text"])
-                    surface_cache[_surface_hash(ch["text"])] = bool(tokens)
-                    if not tokens:
-                        continue
+                def raw_tokens(surface):
+                    tokens = tokenize(surface)
+                    surface_cache[_surface_hash(surface)] = bool(tokens)
+                    return tokens
+
+                for ch, tokens in indexable_raw_chunks(
+                    iter_raw_sources(Path(brain_root)), tokenize_fn=raw_tokens,
+                ):
                     tokenized_text = " ".join(tokens)
                     indexed += 1
                     raw_chunks += 1
