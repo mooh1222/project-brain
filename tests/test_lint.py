@@ -87,7 +87,9 @@ class TestLintStore(unittest.TestCase):
                 ("raw/source.md", None),
                 ("raw/alias.md", None),
                 ("raw/", "manifest_local_file_missing"),
+                ("raw/missing.md", "manifest_local_file_missing"),
                 ("raw/broken.md", "manifest_local_file_missing"),
+                ("raw/source.md/child.md", "manifest_local_file_missing"),
                 ("https://example.test/raw/missing.md", None),
                 ("JIRA-123", None),
                 ("slack://channel/message", None),
@@ -122,9 +124,13 @@ class TestLintStore(unittest.TestCase):
             outside = Path(tmp) / "outside.md"
             outside.write_text("outside", encoding="utf-8")
             (raw / "escape.md").symlink_to(outside)
+            (raw / "broken-escape.md").symlink_to(outside.with_name("missing.md"))
             (raw / "loop").symlink_to("loop")
+            (raw / "cycle-a").symlink_to("cycle-b")
+            (raw / "cycle-b").symlink_to("cycle-a")
             for locator in ("raw/../../outside.md", "raw/../raw/escape.md",
-                            "raw/escape.md", "raw/loop", "raw/invalid\x00.md"):
+                            "raw/escape.md", "raw/broken-escape.md", "raw/loop",
+                            "raw/loop/source.md", "raw/cycle-a", "raw/invalid\x00.md"):
                 with self.subTest(locator=locator):
                     obj = manifest()
                     obj["locator"] = locator
