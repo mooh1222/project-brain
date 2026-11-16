@@ -37,7 +37,7 @@ description: |
 
 - 현재 세션이나 과거 세션에서 어휘 후보를 추출할 때 `../{{PROJECT}}-brain-ingest/references/glossary-criteria.md`를 먼저 읽는다. 어휘 후보가 없는 세션 작업에서는 읽지 않으며 기준을 이 스킬에 복제하지 않는다.
 - 적재와 최종화는 `{{PROJECT}}-brain-ingest/references/ingest-tools.md` 및 `{{PROJECT}}-brain-ingest/references/completeness-checklist.md`를 직접 따른다. direct/assembled 모두 coverage 없는 쓰기를 허용하지 않고 단계 수는 여기 복제하지 않는다.
-- 적재로 raw 청크 수가 변하면 실코퍼스 가드의 `EXPECTED_RAW_CHUNKS`(`{{BRAIN_ROOT}}/checks/test_real_corpus.py`)를 **의식적으로 갱신**하고 같은 커밋에 포함한다(객체 색인 행은 디스크의 색인 대상 `.json` 수로 자동 대조되니 손갱신 불필요).
+- raw 색인 행 수 검증은 `{{PROJECT}}-brain-ingest/references/ingest-tools.md`의 골든셋 회귀·실코퍼스 가드 절차를 따른다. 공개 미리보기는 이를 포함한 엔진 release 채택 뒤 사용하며 소비 프로젝트 가드 전환은 그 프로젝트에서 수행한다.
 - 많은 객체를 바꾸기 전 복구 기준이 필요하면 승인된 작업 경로만 명시적으로 stage·commit한다.
   `git add -A`, `git add .`, `git commit -a`는 쓰지 않는다. 기존 사용자 변경과 겹치면
   자동 commit·stash하지 않고 겹친 범위를 보고한 뒤 멈춘다.

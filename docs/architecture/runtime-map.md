@@ -11,7 +11,7 @@
   "top_level_commands": [
     "audit", "bootstrap", "build", "context-replace", "doctor", "draft", "embedder", "eval", "graph",
     "index", "ingest", "install", "lint", "mark-checked", "migration", "projection",
-    "promote", "promote-auto", "query", "search", "session", "show", "snapshot",
+    "promote", "promote-auto", "query", "raw", "search", "session", "show", "snapshot",
     "stale-check"
   ],
   "subcommand_paths": [
@@ -23,7 +23,7 @@
     "migration display closure-verify", "migration display plan",
     "migration display post-verify", "migration display verify-plan",
     "migration id apply", "migration id plan", "migration quote-debt build",
-    "migration quote-debt verify", "projection build-reuse", "projection refresh",
+    "migration quote-debt verify", "projection build-reuse", "projection refresh", "raw chunk-preview",
     "session complete", "session list", "session mark-processed", "snapshot create", "snapshot restore",
     "snapshot verify"
   ],
@@ -41,7 +41,7 @@
     "src/project_brain/evidence_plan.py", "src/project_brain/evidence_preparation.py",
     "src/project_brain/id_grammar.py", "src/project_brain/installer.py",
     "src/project_brain/lint.py", "src/project_brain/migration.py",
-    "src/project_brain/mutation.py", "src/project_brain/quote_debt.py",
+    "src/project_brain/mutation.py", "src/project_brain/quote_debt.py", "src/project_brain/raw_chunks.py",
     "src/project_brain/reference_fields.py", "src/project_brain/router.py",
     "src/project_brain/schema.py", "src/project_brain/search.py",
     "src/project_brain/search_index.py", "src/project_brain/session.py",
@@ -58,7 +58,7 @@
     "tests/test_evidence_plan.py", "tests/test_evidence_preparation.py", "tests/test_engine_identity.py",
     "tests/test_ingest.py", "tests/test_installer.py", "tests/test_lint.py",
     "tests/test_migration.py", "tests/test_mutation.py", "tests/test_quote_debt.py",
-    "tests/test_router.py", "tests/test_embedding_service.py",
+    "tests/test_router.py", "tests/test_embedding_service.py", "tests/test_raw_preview_cli.py",
     "tests/test_schema.py", "tests/test_search.py", "tests/test_search_index.py",
     "tests/test_session.py", "tests/test_snapshot.py", "tests/test_stale_check.py",
     "tests/test_task18_binding.py", "tests/test_task18_binding_verify.py",
@@ -100,6 +100,7 @@ flowchart LR
     CorpusIO -. 무효화 .-> Derived[.brain-local index와 stale cache]
 
     Raw[데이터 레포 brain/raw/sources] --> Rebuild[index rebuild]
+    Raw --> RawPreview[raw chunk-preview: 원문별·합계 예상 raw 행 수]
     Objects --> Rebuild
     Rebuild --> Derived
 
@@ -180,6 +181,12 @@ binding 생성 출력은 `--binding`에 쓴다. 최종 closure 생성은 `--corp
 호환성·무결성 검증을 맡는다. 색인 DB와 corpus는 계속 checkout별로 두고 대상 DB만 원자
 교체한다. 전량 재사용이면 `RealEmbedder` 가중치를 로드하지 않는다. 통계와 폴백 사유는
 [검색 내부 구조](../search-internals.md#자동-벡터-재사용-5758-bb2-work-tracker-93)를 본다.
+
+`raw chunk-preview`는 `raw_chunks.py`에서 rebuild와 원문 발견·청크 분할·token-empty 제외
+관문을 공유한다. 빈 원문도 0개로 보고하며 기존 DB·임베더를 열거나 코퍼스·색인을 쓰지 않는다.
+기본 탐색과 명시 파일 선택, brain root 상대 JSON 경로와 실패 계약은
+[README](../../README.md#raw-색인-행-수-미리보기)를 본다. 청크 경계·ID·tokenizer·색인 집합은
+그대로이며 소비 프로젝트 독립 청커의 교체는 새 release 채택 뒤 그 프로젝트에서 수행한다.
 
 raw, 객체 코퍼스, index, stale cache는 권위와 수명이 서로 다르다. 일반 코퍼스 mutation은
 `index.db*`와 stale cache를 무효화하지만 자동으로 rebuild하지 않는다.

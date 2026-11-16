@@ -113,6 +113,7 @@ project-brain show <id>                  # 선택한 객체 본문 + 1-hop 이�
 project-brain query "<질문>"             # 변경 이유·현재·과거·근거 사슬만 결정론 계산
 project-brain index rebuild              # 코퍼스에서 색인 전체 재구축 (파생물)
 project-brain index rebuild --seed /path/to/index.db  # 벡터 원천 DB (반복 가능)
+project-brain raw chunk-preview --json   # DB·임베더 없이 원문별·합계 raw 색인 예상 행 수
 project-brain ingest --objects-file f    # 객체 묶음 적재 (스키마+lint 원자적)
 project-brain promote --ids ...          # candidate → reviewed 승격 (검토 기록 동반)
 project-brain eval                       # 골든셋 회귀 (실모델)
@@ -163,6 +164,48 @@ project-brain mark-checked --mappings .. # stale 해소: 의미 그대로인 매
 객체·raw 원문·일반 search 근거·색인·graph·snapshot 입력이 아니므로 초안 변경만으로 index를
 재구축하지 않는다. `draft update`는 `show`가 반환한 SHA가 같을 때만 같은 디렉터리에서 원자
 교체하며, 엔진은 Git stage·commit을 실행하지 않는다.
+
+### raw 색인 행 수 미리보기
+
+`project-brain raw chunk-preview [--brain-root <경로>] [--json] [paths…]`는 실제
+rebuild와 같은 원문 발견·청크 분할·검색 토큰 공백 제외를 사용한다. `raw_chunks`는
+분할 후보 수가 아니라 **같은 입력·tokenizer로 실제 색인될 raw 행 수**다. 기존 DB와
+임베더가 필요 없고 코퍼스·색인을 쓰지 않는다. tokenizer는 rebuild와 같은 것을 사용한다.
+
+- brain root는 기존 **명시 인자 > config > ConfigError** 해석을 그대로 따른다.
+- 파일을 생략하면 `<brain_root>/raw/sources/<context>/*.md`만 정렬 탐색한다.
+  context 바로 아래의 소문자 `.md`가 대상이며, 더 깊은 파일·다른 확장자는 제외한다.
+  brain root가 없으면 실패하고, 존재하는 brain root에 원문 디렉터리가 없으면 합계 0이다.
+- `paths`는 이 탐색 집합 중 선택할 **파일**이며 cwd 기준 상대 경로 또는 절대 경로다.
+  중복을 제거하고 기본 탐색 순서로 보고한다. 디렉터리, 없는 파일, 탐색 범위 밖 파일은
+  전체 요청을 실패시킨다. CLI 자체에서 glob을 확장하지 않는다.
+- 빈 원문과 검색 토큰이 없는 원문도 원문별 `raw_chunks: 0`으로 남긴다.
+  `--json`을 생략하면 원문별 `행 수<TAB>경로`와 합계·tokenizer를 텍스트로 출력한다.
+
+성공 시 exit 0, stdout JSON 스키마는 다음과 같다. `sources[].path`는 항상 **brain root 기준**
+상대 경로(`/` 구분), `context_id`는 실제 색인의 context이며, 최상위 `raw_chunks`는 원문별
+합계다. `tokenizer`는 백엔드와 규칙 버전이다.
+
+```json
+{
+  "ok": true,
+  "brain_root": "/project/brain",
+  "tokenizer": "kiwipiepy@4",
+  "raw_chunks": 2,
+  "sources": [
+    {"path": "raw/sources/demo/empty.md", "context_id": "context.demo", "raw_chunks": 0},
+    {"path": "raw/sources/demo/spec.md", "context_id": "context.demo", "raw_chunks": 2}
+  ]
+}
+```
+
+입력 파일·읽기·UTF-8·tokenizer 실패는 exit 1과 stdout `{"ok": false, "error": "…"}`로
+끝나며 부분 합계는 내보내지 않는다. config 경로 해석 실패는 기존 CLI처럼 exit 2와 stderr
+JSON, 인자 문법 오류는 exit 2와 stderr 사용법 안내다.
+
+이 기능을 포함한 새 엔진 release를 채택한 소비 프로젝트에서 사용할 수 있다. 기존 v0.3.3
+고정 소비자의 독립 청커를 CLI 호출로 바꾸는 작업은 소비 프로젝트 후속이며, 원문 추적·manifest
+locator 존재 검사와 빈 원문 거부는 그대로 유지한다.
 
 ## 적재 실행 경로
 
